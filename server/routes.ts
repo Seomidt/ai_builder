@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
+import { dbProvider } from "./db";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 
@@ -257,10 +258,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ─── Config (server-side env state) ────────────────────────────────────────
 
   app.get("/api/config/status", async (_req, res) => {
+    const projectRef = process.env.SUPABASE_URL
+      ? process.env.SUPABASE_URL.replace(/^https:\/\/([^.]+)\.supabase\.co.*$/, "$1")
+      : null;
     res.json({
+      database: {
+        provider: dbProvider,
+        label: dbProvider === "supabase" ? "Supabase Postgres" : "PostgreSQL (Replit)",
+        projectRef,
+      },
       supabase: {
         url: process.env.SUPABASE_URL ? process.env.SUPABASE_URL.replace(/^(https:\/\/[^.]+).*$/, "$1…") : null,
         connected: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
+        poolConnected: !!process.env.SUPABASE_DB_POOL_URL,
       },
       github: {
         connected: !!process.env.GITHUB_TOKEN,

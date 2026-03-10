@@ -1,7 +1,9 @@
 import { defineConfig } from "drizzle-kit";
 
-if (!process.env.DATABASE_URL) {
-  throw new Error("DATABASE_URL, ensure the database is provisioned");
+const url = process.env.SUPABASE_DB_POOL_URL || process.env.DATABASE_URL;
+
+if (!url) {
+  throw new Error("No database URL found. Set SUPABASE_DB_POOL_URL or DATABASE_URL.");
 }
 
 export default defineConfig({
@@ -9,6 +11,7 @@ export default defineConfig({
   schema: "./shared/schema.ts",
   dialect: "postgresql",
   dbCredentials: {
-    url: process.env.DATABASE_URL,
+    url,
+    ssl: process.env.SUPABASE_DB_POOL_URL ? "require" : undefined,
   },
 });

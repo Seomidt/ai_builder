@@ -6,7 +6,8 @@ import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 
 interface ConfigStatus {
-  supabase: { url: string | null; connected: boolean };
+  database: { provider: string; label: string; projectRef: string | null };
+  supabase: { url: string | null; connected: boolean; poolConnected: boolean };
   github: { connected: boolean; owner: string | null; repo: string | null };
   openai: { connected: boolean };
 }
@@ -114,9 +115,26 @@ export default function Settings() {
 
       <SettingsSection title="Infrastructure" icon={Database}>
         <div className="divide-y divide-border/50">
-          <SettingRow label="Database" value="PostgreSQL (Replit)" />
+          <SettingRow
+            label="Database"
+            value={
+              isLoading ? (
+                <Skeleton className="w-32 h-4" />
+              ) : (
+                configStatus?.database.label ?? "PostgreSQL"
+              )
+            }
+            badge={configStatus?.database.provider === "supabase" ? "Active" : undefined}
+          />
+          {!isLoading && configStatus?.database.projectRef && (
+            <SettingRow
+              label="Supabase project"
+              value={configStatus.database.projectRef}
+              mono
+            />
+          )}
           <SettingRow label="ORM" value="Drizzle ORM" />
-          <SettingRow label="Schema" value="17 tables" badge="V1" />
+          <SettingRow label="Schema" value="18 tables" badge="V1" />
           <SettingRow
             label="Supabase Auth"
             value={
@@ -126,6 +144,19 @@ export default function Settings() {
                 <StatusBadge
                   connected={configStatus?.supabase.connected ?? false}
                   label={configStatus?.supabase.url ?? "Connected"}
+                />
+              )
+            }
+          />
+          <SettingRow
+            label="Connection pooler"
+            value={
+              isLoading ? (
+                <Skeleton className="w-24 h-4" />
+              ) : (
+                <StatusBadge
+                  connected={configStatus?.supabase.poolConnected ?? false}
+                  label="Configured"
                 />
               )
             }

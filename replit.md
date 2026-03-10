@@ -7,7 +7,7 @@ Internal control plane for AI-driven software generation. Express + React + Driz
 - **Frontend**: React 19, Wouter (routing), TanStack Query, Shadcn UI, Tailwind CSS (dark navy/teal theme)
 - **Backend**: Express.js, TypeScript, Zod validation
 - **Auth**: Supabase Auth (JWT middleware wired, demo fallback for dev)
-- **Database**: PostgreSQL via Drizzle ORM (Replit managed)
+- **Database**: Supabase Postgres (PostgreSQL 17.6) via Drizzle ORM + connection pooler
 - **GitHub**: GITHUB_TOKEN available server-side for V1.1+ tools
 - **Architecture**: Repository → Service → Route handler (strict layer separation)
 
