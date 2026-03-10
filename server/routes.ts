@@ -4,6 +4,7 @@ import { storage } from "./storage";
 import { dbProvider } from "./db";
 import { previewCommit } from "./lib/github-commit-format";
 import { runExecutorService } from "./services/run-executor.service";
+import { summarize } from "./features/ai-summarize/summarize.service";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 
@@ -355,6 +356,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         connected: !!process.env.OPENAI_API_KEY,
       },
     });
+  });
+
+  // ─── AI Features ─────────────────────────────────────────────────────────────
+
+  app.post("/api/ai/summarize", async (req: Request, res: Response) => {
+    try {
+      const { text } = req.body as { text?: string };
+      if (!text || typeof text !== "string" || text.trim().length === 0) {
+        return res.status(400).json({ error: "text is required" });
+      }
+      const result = await summarize({
+        text,
+        tenantId: getOrgId(req),
+        userId: getUserId(req),
+        requestId: req.headers["x-request-id"] as string | undefined ?? null,
+      });
+      return res.json({ summary: result.summary });
+    } catch (err) {
+      handleError(res, err);
+    }
   });
 
   return httpServer;
