@@ -14,7 +14,7 @@
  */
 
 import OpenAI from "openai";
-import { AI_MODEL_ROUTES, AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS } from "./config";
+import { AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS } from "./config";
 import { resolveRoute } from "./router";
 import { getProvider } from "./providers/registry";
 import { logAiUsage } from "./usage";

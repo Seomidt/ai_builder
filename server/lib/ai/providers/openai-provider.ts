@@ -9,7 +9,6 @@
  * should import the OpenAI SDK directly for text generation.
  */
 
-import OpenAI from "openai";
 import { getOpenAIClient } from "../../openai-client";
 import type { AiProvider, AiProviderGenerateInput, AiProviderGenerateResult } from "./provider";
 
@@ -49,9 +48,6 @@ export class OpenAiProvider implements AiProvider {
       }
 
       return { text, usage, raw: response };
-    } catch (err) {
-      if (err instanceof OpenAI.APIError && err.status === 429) throw err;
-      throw err;
     } finally {
       if (timeoutId !== undefined) clearTimeout(timeoutId);
     }
