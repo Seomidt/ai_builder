@@ -11,6 +11,12 @@ Internal control plane for AI-driven software generation. Express + React + Driz
 - **GitHub**: GITHUB_TOKEN available server-side for V1.1+ tools
 - **Architecture**: Repository → Service → Route handler (strict layer separation)
 
+## User Preferences
+
+- **Sprog**: Kommuniker på dansk
+- **iPhone-bruger**: Kan ikke paste tekst i Replit shell fra iPhone — giv altid korte, trin-for-trin shell-kommandoer der kan skrives manuelt, én ad gangen
+- **GitHub**: Remote URL bruger `$GITHUB_PERSONAL_ACCESS_TOKEN` — repo: `github.com/Seomidt/ai_builder`
+
 ## Key Design Rules
 
 - **No hard delete**: `projects`, `architecture_profiles`, `ai_runs` use `status` field
