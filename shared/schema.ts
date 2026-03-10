@@ -147,6 +147,11 @@ export const projects = pgTable(
     description: text("description"),
     status: projectStatusEnum("status").notNull().default("active"),
     createdBy: varchar("created_by").notNull(), // auth.users.id
+    // GitHub repo binding
+    githubOwner: text("github_owner"),
+    githubRepo: text("github_repo"),
+    githubDefaultBranch: text("github_default_branch").default("main"),
+    githubRepoUrl: text("github_repo_url"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
@@ -305,6 +310,8 @@ export const aiRuns = pgTable(
       .notNull()
       .references(() => architectureVersions.id),
     status: runStatusEnum("status").notNull().default("pending"),
+    goal: text("goal"),
+    pipelineVersion: text("pipeline_version"),
     createdBy: varchar("created_by").notNull(), // auth.users.id
     startedAt: timestamp("started_at"),
     completedAt: timestamp("completed_at"),
@@ -329,6 +336,9 @@ export const aiSteps = pgTable(
       .notNull()
       .references(() => aiRuns.id),
     stepKey: text("step_key").notNull(),
+    title: text("title"),
+    description: text("description"),
+    tags: text("tags").array(),
     agentKey: text("agent_key").notNull(),
     status: stepStatusEnum("status").notNull().default("pending"),
     input: jsonb("input"),
@@ -353,8 +363,12 @@ export const aiArtifacts = pgTable(
     stepId: varchar("step_id").references(() => aiSteps.id),
     artifactType: text("artifact_type").notNull(), // e.g. "file", "plan", "spec"
     title: text("title").notNull(),
+    description: text("description"),
     content: text("content"),
-    metadata: jsonb("metadata"), // path, mimeType, githubRef, etc.
+    path: text("path"), // file path for code/file artifacts
+    version: text("version"),
+    tags: text("tags").array(),
+    metadata: jsonb("metadata"), // mimeType, githubRef, size, etc.
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [

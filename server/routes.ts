@@ -4,8 +4,6 @@ import { storage } from "./storage";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 
-const DEFAULT_ORG_ID = "demo-org";
-
 function handleError(res: Response, error: unknown) {
   if (error instanceof ZodError) {
     return res.status(400).json({ error: fromZodError(error).message });
@@ -18,7 +16,11 @@ function handleError(res: Response, error: unknown) {
 }
 
 function getOrgId(req: Request): string {
-  return (req.headers["x-organization-id"] as string) || DEFAULT_ORG_ID;
+  return req.user?.organizationId ?? "demo-org";
+}
+
+function getUserId(req: Request): string {
+  return req.user?.id ?? "system";
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
@@ -37,7 +39,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const project = await storage.createProject({
         ...req.body,
         organizationId: getOrgId(req),
-        createdBy: req.body.createdBy ?? "system",
+        createdBy: getUserId(req),
       });
       res.status(201).json(project);
     } catch (err) { handleError(res, err); }
@@ -165,7 +167,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const run = await storage.createRun({
         ...req.body,
         organizationId: getOrgId(req),
-        createdBy: req.body.createdBy ?? "system",
+        createdBy: getUserId(req),
       });
       res.status(201).json(run);
     } catch (err) { handleError(res, err); }
@@ -250,6 +252,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (!integration) return res.status(404).json({ error: "Integration not found" });
       res.json(integration);
     } catch (err) { handleError(res, err); }
+  });
+
+  // ─── Config (server-side env state) ────────────────────────────────────────
+
+  app.get("/api/config/status", async (_req, res) => {
+    res.json({
+      supabase: {
+        url: process.env.SUPABASE_URL ? process.env.SUPABASE_URL.replace(/^(https:\/\/[^.]+).*$/, "$1…") : null,
+        connected: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
+      },
+      github: {
+        connected: !!process.env.GITHUB_TOKEN,
+        owner: process.env.GITHUB_OWNER || null,
+        repo: process.env.GITHUB_REPO || null,
+      },
+      openai: {
+        connected: !!process.env.OPENAI_API_KEY,
+      },
+    });
   });
 
   return httpServer;
