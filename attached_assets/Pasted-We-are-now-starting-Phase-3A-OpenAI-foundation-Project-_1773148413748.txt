@@ -1,0 +1,261 @@
+We are now starting Phase 3A: OpenAI foundation.
+
+Project context:
+- This is a separate app/project.
+- Do not reference or reuse assumptions from any other app.
+- This phase is infrastructure only.
+- We are building the OpenAI foundation for a production-grade Next.js App Router + Supabase application.
+
+Primary objective for Phase 3A:
+Build a clean, reusable, server-only AI foundation that can support future features safely and consistently.
+
+Non-goals for Phase 3A:
+- Do not implement business/domain-specific logic
+- Do not add feature-specific prompts
+- Do not add AI API routes yet
+- Do not add UI
+- Do not refactor unrelated parts of the codebase
+- Do not create quick hacks
+
+Architecture requirements:
+- Keep everything domain-agnostic
+- Use clean modular architecture
+- Use strict typed TypeScript
+- OpenAI must only be called from the server
+- Never expose secrets to the client
+- Reuse existing Supabase helper patterns if they already exist
+- Keep the implementation production-oriented, not demo-oriented
+
+Git requirements:
+- Create and work only on a new branch named: feature/ai-foundation
+- Commit changes to GitHub in small logical commits
+- Do not merge to main
+
+Scope for Phase 3A:
+Implement only these parts:
+
+1) Database foundation for AI usage logging
+2) Server-only OpenAI client
+3) Central AI configuration
+4) Reusable AI service layer
+5) Server-only AI usage logger
+
+Do not go beyond this scope.
+
+==================================================
+TASK 1 — CREATE SUPABASE MIGRATION
+==================================================
+
+Create a SQL migration for an AI usage logging table.
+
+Use this exact path if it matches the project structure:
+- supabase/migrations/create_ai_usage_table.sql
+
+If the project uses timestamped migration filenames already, follow the existing migration naming convention instead of inventing a new one.
+
+Create this schema:
+
+create table public.ai_usage (
+  id uuid primary key default gen_random_uuid(),
+  tenant_id uuid,
+  user_id uuid,
+  feature text not null,
+  model text not null,
+  prompt_tokens integer not null default 0,
+  completion_tokens integer not null default 0,
+  total_tokens integer not null default 0,
+  input_preview text,
+  status text not null default 'success',
+  error_message text,
+  latency_ms integer,
+  created_at timestamptz not null default now()
+);
+
+create index ai_usage_tenant_id_idx on public.ai_usage (tenant_id);
+create index ai_usage_user_id_idx on public.ai_usage (user_id);
+create index ai_usage_feature_idx on public.ai_usage (feature);
+create index ai_usage_created_at_idx on public.ai_usage (created_at desc);
+
+Notes:
+- Keep the table generic and infrastructure-oriented
+- Do not introduce business-specific columns
+- Do not add RLS policies unless the existing project clearly requires it for this table right now
+- If the project already has SQL conventions for comments, constraints, or extensions, follow them consistently
+
+==================================================
+TASK 2 — CREATE SERVER-ONLY AI MODULES
+==================================================
+
+Create these files if they do not already exist:
+
+- lib/ai/client.ts
+- lib/ai/config.ts
+- lib/ai/service.ts
+- lib/ai/usage.ts
+
+Implementation requirements:
+
+A) lib/ai/client.ts
+- Must be server-only
+- Use import "server-only"
+- Initialize and export an OpenAI client using process.env.OPENAI_API_KEY
+- Do not add any client-side usage
+- Keep this file minimal and focused
+
+B) lib/ai/config.ts
+- Centralize AI configuration
+- Export:
+
+AI_MODELS = {
+  default: "gpt-4.1-mini"
+} as const
+
+AI_TIMEOUT_MS = 20000
+
+- Keep this as the central place for model defaults and timeout config
+- Do not hardcode model names elsewhere if avoidable
+
+C) lib/ai/service.ts
+- Must be server-only
+- Use import "server-only"
+- Implement a reusable function named generateText()
+
+Function requirements:
+- Typed input
+- Typed output
+- Accept:
+
+{
+  systemPrompt: string
+  userInput: string
+  model?: keyof typeof AI_MODELS
+}
+
+Implementation requirements:
+- Use the OpenAI Responses API
+- Use the configured model from AI_MODELS
+- Return an object shaped like:
+
+{
+  text: string
+  usage: {
+    input_tokens: number
+    output_tokens: number
+    total_tokens: number
+  } | null
+  raw: <raw OpenAI response>
+}
+
+- Keep code clean and production-oriented
+- Avoid feature-specific assumptions
+- Do not mix logging into this module unless clearly necessary
+- Keep responsibilities separated
+
+D) lib/ai/usage.ts
+- Must be server-only
+- Use import "server-only"
+- Implement a reusable function named logAiUsage()
+
+Function requirements:
+- Insert rows into public.ai_usage
+- Use existing Supabase admin/service-role helper utilities if the project already has them
+- If the project does not already have a server/admin Supabase helper, create the minimum consistent server-side pattern required, but do not refactor unrelated code
+
+Suggested payload shape for logAiUsage:
+{
+  tenantId?: string | null
+  userId?: string | null
+  feature: string
+  model: string
+  promptTokens?: number
+  completionTokens?: number
+  totalTokens?: number
+  inputPreview?: string | null
+  status: "success" | "error"
+  errorMessage?: string | null
+  latencyMs?: number | null
+}
+
+Behavior requirements:
+- Logging failures must not crash application flow
+- If insert fails, only console.error
+- Do not expose service-role logic outside server code
+
+==================================================
+TASK 3 — REUSE EXISTING PROJECT PATTERNS
+==================================================
+
+Before creating any new Supabase helper or utility:
+- Inspect the existing project structure
+- Reuse current Supabase server/admin client patterns if they already exist
+- Reuse path aliases and file naming conventions already used in the codebase
+- Match the project's TypeScript style and import style
+
+Do not:
+- create duplicate Supabase helper patterns
+- introduce inconsistent naming
+- refactor unrelated files “while here”
+
+==================================================
+TASK 4 — SECURITY REQUIREMENTS
+==================================================
+
+Security requirements for Phase 3A:
+- Never expose OPENAI_API_KEY to the client
+- Never expose SUPABASE_SERVICE_ROLE_KEY to the client
+- Keep all AI logic server-only
+- Do not use NEXT_PUBLIC for secrets
+- Do not create client components or browser code for OpenAI access
+
+==================================================
+TASK 5 — ENVIRONMENT VARIABLE EXPECTATIONS
+==================================================
+
+The implementation should expect these environment variables, but must reuse existing naming conventions if the project already uses equivalent names:
+
+Required minimum:
+- OPENAI_API_KEY
+- SUPABASE_SERVICE_ROLE_KEY
+
+Potentially already present in project:
+- SUPABASE_URL
+- NEXT_PUBLIC_SUPABASE_URL
+- NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+If the existing project uses different Supabase variable names, do not invent parallel naming unnecessarily.
+
+==================================================
+TASK 6 — STOP RULE
+==================================================
+
+Stop immediately after Phase 3A foundation is complete.
+
+Do not continue into:
+- prompts
+- business/domain features
+- routes
+- UI
+- streaming
+- background jobs
+- rate limiting
+- feature flags
+- billing
+- analytics dashboards
+
+Those come later.
+
+==================================================
+REQUIRED OUTPUT WHEN DONE
+==================================================
+
+When finished, output all of the following:
+
+1) Exact list of files created
+2) Exact list of files modified
+3) The final migration filename actually used
+4) Any environment variables required
+5) Any assumptions made based on existing project structure
+6) Suggested commit messages
+7) A short summary of how the implementation stays within Phase 3A scope
+
+Then stop.
