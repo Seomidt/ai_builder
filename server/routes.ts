@@ -362,9 +362,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/ai/summarize", async (req: Request, res: Response) => {
     try {
-      const { text } = req.body as { text?: string };
-      if (!text || typeof text !== "string" || text.trim().length === 0) {
+      const text = (req.body as { text?: string }).text?.trim() ?? "";
+      if (!text) {
         return res.status(400).json({ error: "text is required" });
+      }
+      if (text.length < 20) {
+        return res.status(400).json({ error: "Text too short to summarize" });
       }
       const result = await summarize({
         text,
