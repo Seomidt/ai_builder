@@ -1,0 +1,76 @@
+Before we continue to Phase 2, stop feature expansion and do a Phase 1.1 stabilization pass.
+
+I need these corrections and integrations completed first:
+
+1. Move the app from Replit PostgreSQL to Supabase Postgres.
+   - run migrations against Supabase
+   - replace Replit DB usage with Supabase-backed database access
+   - keep repository/service boundaries intact
+
+2. Implement real Supabase Auth wiring.
+   - use Supabase Auth as identity
+   - use profiles table for app-level user data
+   - use organization_members as the membership layer
+   - remove the current fake/demo organization context approach
+   - do not rely on x-organization-id header hacks for core app logic
+
+3. Prepare GitHub as source of truth for projects.
+   - add integration/config support for GitHub token usage server-side
+   - allow projects to store GitHub repo binding metadata
+   - add fields for owner, repo, default branch, repo URL
+
+4. Improve AI run lifecycle metadata.
+   I need richer metadata for future orchestration, retrieval and graph support.
+
+   For ai_steps include:
+   - step_key
+   - title
+   - description
+   - tags
+   - status
+   - started_at
+   - finished_at
+
+   For ai_artifacts include:
+   - artifact_type
+   - title
+   - description
+   - path
+   - version
+   - tags
+
+   For ai_runs include:
+   - architecture_profile_id
+   - architecture_version_id
+   - goal
+   - pipeline_version
+   - status
+   - started_at
+   - finished_at
+
+5. Keep all provider credentials server-side only.
+   Required env support:
+   - NEXT_PUBLIC_SUPABASE_URL
+   - NEXT_PUBLIC_SUPABASE_ANON_KEY
+   - SUPABASE_SERVICE_ROLE_KEY
+   - GITHUB_TOKEN
+   - GITHUB_OWNER
+   - GITHUB_REPO
+   - GITHUB_DEFAULT_BRANCH
+   - OPENAI_API_KEY (prepare only if not used yet)
+
+6. Update the Settings and Integrations UI to reflect the real state.
+   - no more Replit PostgreSQL as provider
+   - show Supabase as the DB/auth foundation
+   - clearly distinguish active integrations vs planned V2 integrations
+
+7. Do not start V2 features yet.
+   First complete the stabilization and integration pass.
+
+Build order:
+1. Supabase migration + DB wiring
+2. Supabase Auth wiring
+3. GitHub project binding metadata
+4. richer run/step/artifact metadata
+5. UI updates
+6. README and env setup notes
