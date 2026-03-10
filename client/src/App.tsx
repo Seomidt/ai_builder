@@ -8,6 +8,7 @@ import Dashboard from "@/pages/dashboard";
 import Projects from "@/pages/projects";
 import Architectures from "@/pages/architectures";
 import Runs from "@/pages/runs";
+import RunDetail from "@/pages/run-detail";
 import Integrations from "@/pages/integrations";
 import Settings from "@/pages/settings";
 import NotFound from "@/pages/not-found";
@@ -20,6 +21,7 @@ function Router() {
         <Route path="/projects" component={Projects} />
         <Route path="/architectures" component={Architectures} />
         <Route path="/runs" component={Runs} />
+        <Route path="/runs/:id" component={RunDetail} />
         <Route path="/integrations" component={Integrations} />
         <Route path="/settings" component={Settings} />
         <Route component={NotFound} />

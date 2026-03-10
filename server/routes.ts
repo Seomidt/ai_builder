@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { dbProvider } from "./db";
 import { previewCommit } from "./lib/github-commit-format";
+import { runExecutorService } from "./services/run-executor.service";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 
@@ -225,6 +226,28 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const approval = await storage.resolveApproval(req.params.approvalId, req.body);
       res.json(approval);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // ─── Run execution pipeline ─────────────────────────────────────────────────
+
+  app.post("/api/runs/:id/execute", async (req, res) => {
+    try {
+      const orgId = getOrgId(req);
+      // Fire execution — async (does not block response)
+      runExecutorService.executeRun(req.params.id, orgId).catch((err) => {
+        console.error(`[run-executor] run=${req.params.id} fatal:`, err);
+      });
+      // Return the run immediately (status will move to "running" within the executor)
+      const run = await storage.getRun(req.params.id, orgId);
+      res.status(202).json({ ...run, executing: true });
+    } catch (err) { handleError(res, err); }
+  });
+
+  app.get("/api/runs/:id/artifact-dependencies", async (req, res) => {
+    try {
+      const deps = await storage.listArtifactDependencies(req.params.id);
+      res.json(deps);
     } catch (err) { handleError(res, err); }
   });
 

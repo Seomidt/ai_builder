@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 1.1)
+# AI Builder Platform — V1 (Phase 2)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM.
 
@@ -44,10 +44,11 @@ client/src/
   lib/                 queryClient, utils
 
 server/
-  lib/                 supabase.ts (admin client), github.ts (token helpers)
+  lib/                 supabase.ts, github.ts, github-commit-format.ts
+  lib/agents/          types.ts, planner-agent.ts, ux-agent.ts, architect-agent.ts, review-agent.ts, registry.ts
   middleware/          auth.ts (JWT → req.user)
-  repositories/        projects, architectures, runs, integrations, knowledge
-  services/            projects, architectures, runs, integrations
+  repositories/        projects, architectures, runs (+ artifact deps), integrations, knowledge
+  services/            projects, architectures, runs, integrations, run-executor
   routes.ts            Thin API handlers
   storage.ts           IStorage + DatabaseStorage
   db.ts                Drizzle + pg pool
@@ -56,7 +57,39 @@ shared/
   schema.ts            All Drizzle tables + insert schemas + TypeScript types
 ```
 
-## Database Schema (18 tables)
+## Phase 2 — AI Run Pipeline (COMPLETE)
+
+### Agent Pipeline
+4 typed agents chained in execution order:
+1. `planner_agent` — Parses goal into structured plan (phases/tasks) → `plan` artifact
+2. `ux_agent` — Translates plan into UX spec (screens/components/flows) → `ux_spec` artifact
+3. `architect_agent` — Produces tech arch spec + file tree → `arch_spec` + `file_tree` artifacts
+4. `review_agent` — Reviews all artifacts, gate report with pass/warn/fail checks → `review` artifact
+
+### Run Executor
+- `POST /api/runs/:id/execute` — fires async pipeline, returns 202 immediately
+- Reads `architecture_agent_configs` to resolve pipeline; falls back to `DEFAULT_PIPELINE`
+- Creates steps (running → completed), persists artifacts, creates artifact_dependencies
+- Sets `finished_at` on completion, run status: `completed` | `failed`
+
+### Agent Registry
+- `server/lib/agents/registry.ts` — maps agentKey → AgentContract
+- Add new agents by implementing `AgentContract` and registering in registry
+- V1: deterministic output generators; V2: plug in OpenAI function-calling per agent
+
+### New Routes
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/runs/:id/execute` | Start pipeline (async, 202) |
+| GET | `/api/runs/:id/artifact-dependencies` | List artifact deps for a run |
+| GET | `/api/runs/:id/commit-preview` | GitHub commit preview (metadata only) |
+
+### UI
+- `/runs` — Run list with run_number, title, status, clickable rows
+- `/runs/:id` — Run detail: Steps timeline, Artifacts grid, Commit Preview panel
+- Auto-refresh every 2s while run is active
+
+## Database Schema (19 tables)
 
 | Domain | Tables |
 |--------|--------|
@@ -64,7 +97,8 @@ shared/
 | Multi-tenancy | `organizations`, `organization_members` |
 | Projects | `projects` (+ github_owner, github_repo, github_default_branch, github_repo_url) |
 | Architectures | `architecture_profiles`, `architecture_versions` (+ version_label, description, changelog), `architecture_agent_configs`, `architecture_capability_configs`, `architecture_template_bindings`, `architecture_policy_bindings` |
-| AI Runs | `ai_runs` (+ run_number, title, description, tags, finished_at, github_branch, github_commit_sha, github_pr_number, github_tags), `ai_steps` (+ title, description, tags), `ai_artifacts` (+ description, path, version, tags), `ai_tool_calls`, `ai_approvals` |
+| AI Runs | `ai_runs` (+ run_number, title, description, tags, finished_at, github_*), `ai_steps` (+ title, description, tags, startedAt, completedAt), `ai_artifacts` (+ description, path, version, tags), `ai_tool_calls`, `ai_approvals` |
+| Artifact Graph | `artifact_dependencies` (from_artifact_id, to_artifact_id, dependency_type) |
 | Integrations | `integrations`, `organization_secrets` |
 | Knowledge (RAG prep) | `knowledge_documents` |
 

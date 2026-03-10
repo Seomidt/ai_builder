@@ -516,6 +516,33 @@ export const knowledgeDocuments = pgTable(
   ],
 );
 
+// ─── Artifact Dependencies ───────────────────────────────────────────────────
+
+export const artifactDependencies = pgTable(
+  "artifact_dependencies",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    organizationId: varchar("organization_id")
+      .notNull()
+      .references(() => organizations.id),
+    fromArtifactId: varchar("from_artifact_id")
+      .notNull()
+      .references(() => aiArtifacts.id),
+    toArtifactId: varchar("to_artifact_id")
+      .notNull()
+      .references(() => aiArtifacts.id),
+    dependencyType: text("dependency_type").notNull().default("uses"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("artifact_deps_from_idx").on(t.fromArtifactId),
+    index("artifact_deps_to_idx").on(t.toArtifactId),
+    index("artifact_deps_org_idx").on(t.organizationId),
+  ],
+);
+
 // ─── Insert Schemas ───────────────────────────────────────────────────────────
 
 export const insertOrganizationSchema = createInsertSchema(organizations).omit({
@@ -571,8 +598,6 @@ export const insertAiRunSchema = createInsertSchema(aiRuns).omit({
 export const insertAiStepSchema = createInsertSchema(aiSteps).omit({
   id: true,
   createdAt: true,
-  startedAt: true,
-  completedAt: true,
 });
 
 export const insertAiArtifactSchema = createInsertSchema(aiArtifacts).omit({
@@ -600,6 +625,10 @@ export const insertIntegrationSchema = createInsertSchema(integrations).omit({
 export const insertKnowledgeDocumentSchema = createInsertSchema(
   knowledgeDocuments,
 ).omit({ id: true, createdAt: true, updatedAt: true });
+
+export const insertArtifactDependencySchema = createInsertSchema(
+  artifactDependencies,
+).omit({ id: true, createdAt: true });
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -641,6 +670,9 @@ export type Integration = typeof integrations.$inferSelect;
 
 export type InsertKnowledgeDocument = z.infer<typeof insertKnowledgeDocumentSchema>;
 export type KnowledgeDocument = typeof knowledgeDocuments.$inferSelect;
+
+export type InsertArtifactDependency = z.infer<typeof insertArtifactDependencySchema>;
+export type ArtifactDependency = typeof artifactDependencies.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;

@@ -1,4 +1,4 @@
-import { eq, and, desc, max } from "drizzle-orm";
+import { eq, and, desc, max, or } from "drizzle-orm";
 import { db } from "../db";
 import {
   aiRuns,
@@ -6,6 +6,7 @@ import {
   aiArtifacts,
   aiToolCalls,
   aiApprovals,
+  artifactDependencies,
   type AiRun,
   type InsertAiRun,
   type AiStep,
@@ -16,6 +17,8 @@ import {
   type InsertAiToolCall,
   type AiApproval,
   type InsertAiApproval,
+  type ArtifactDependency,
+  type InsertArtifactDependency,
 } from "@shared/schema";
 
 export const runsRepository = {
@@ -188,5 +191,32 @@ export const runsRepository = {
       .where(eq(aiApprovals.id, id))
       .returning();
     return updated;
+  },
+
+  // ─── Artifact Dependencies ─────────────────────────────────────────────────
+
+  async createArtifactDependency(data: InsertArtifactDependency): Promise<ArtifactDependency> {
+    const [dep] = await db.insert(artifactDependencies).values(data).returning();
+    return dep;
+  },
+
+  async listArtifactDependenciesForRun(runId: string): Promise<ArtifactDependency[]> {
+    const artifacts = await db
+      .select({ id: aiArtifacts.id })
+      .from(aiArtifacts)
+      .where(eq(aiArtifacts.runId, runId));
+
+    if (artifacts.length === 0) return [];
+    const artifactIds = artifacts.map((a) => a.id);
+
+    return db
+      .select()
+      .from(artifactDependencies)
+      .where(
+        or(
+          ...artifactIds.map((id) => eq(artifactDependencies.fromArtifactId, id)),
+        ),
+      )
+      .orderBy(artifactDependencies.createdAt);
   },
 };

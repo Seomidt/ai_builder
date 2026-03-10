@@ -1,7 +1,8 @@
-import type { Project, AiRun, AiStep, AiArtifact, AiToolCall, AiApproval, ArchitectureProfile, ArchitectureVersion, Integration } from "@shared/schema";
+import type { Project, AiRun, AiStep, AiArtifact, AiToolCall, AiApproval, ArchitectureProfile, ArchitectureVersion, Integration, ArtifactDependency } from "@shared/schema";
 import { projectsService, type CreateProjectInput, type UpdateProjectInput } from "./services/projects.service";
 import { architecturesService, type CreateProfileInput, type UpdateProfileInput, type CreateVersionInput, type UpsertAgentConfigInput, type UpsertCapabilityConfigInput } from "./services/architectures.service";
 import { runsService, type CreateRunInput, type UpdateRunStatusInput, type AppendStepInput, type AppendArtifactInput, type AppendToolCallInput, type AppendApprovalInput, type ResolveApprovalInput } from "./services/runs.service";
+import { runsRepository } from "./repositories/runs.repository";
 import { integrationsService, type UpsertIntegrationInput } from "./services/integrations.service";
 
 export interface IStorage {
@@ -33,6 +34,9 @@ export interface IStorage {
   appendToolCall(input: AppendToolCallInput): Promise<AiToolCall>;
   appendApproval(input: AppendApprovalInput): Promise<AiApproval>;
   resolveApproval(id: string, input: ResolveApprovalInput): Promise<AiApproval>;
+
+  // Artifact Dependencies
+  listArtifactDependencies(runId: string): Promise<ArtifactDependency[]>;
 
   // Integrations
   listIntegrations(organizationId: string): Promise<Integration[]>;
@@ -68,6 +72,9 @@ export class DatabaseStorage implements IStorage {
   appendToolCall(input: AppendToolCallInput) { return runsService.appendToolCall(input); }
   appendApproval(input: AppendApprovalInput) { return runsService.appendApproval(input); }
   resolveApproval(id: string, input: ResolveApprovalInput) { return runsService.resolveApproval(id, input); }
+
+  // Artifact Dependencies
+  listArtifactDependencies(runId: string) { return runsRepository.listArtifactDependenciesForRun(runId); }
 
   // Integrations
   listIntegrations(organizationId: string) { return integrationsService.list(organizationId); }
