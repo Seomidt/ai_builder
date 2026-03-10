@@ -1,5 +1,6 @@
 import type { AgentContract, RunContext, AgentOutput } from "./types";
 import { chatJSON, isOpenAIAvailable } from "../openai-client";
+import { getModelForAgent } from "./model-config";
 
 /**
  * Planner Agent
@@ -80,8 +81,9 @@ export const plannerAgent: AgentContract = {
 
     if (isOpenAIAvailable()) {
       try {
+        const model = getModelForAgent("planner_agent", ctx.agentModelOverrides?.["planner_agent"]);
         const userPrompt = `Goal: ${goal}\nTags: ${tags.join(", ") || "none"}\nArchitecture pipeline version: ${ctx.pipelineVersion ?? "v2"}`;
-        const raw = await chatJSON<Partial<PlanOutput>>(SYSTEM_PROMPT, userPrompt);
+        const raw = await chatJSON<Partial<PlanOutput>>(SYSTEM_PROMPT, userPrompt, model, { agentKey: "planner_agent" });
 
         plan = {
           goal,

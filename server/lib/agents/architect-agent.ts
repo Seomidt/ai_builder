@@ -1,5 +1,6 @@
 import type { AgentContract, RunContext, AgentOutput } from "./types";
 import { chatJSON, isOpenAIAvailable } from "../openai-client";
+import { getModelForAgent } from "./model-config";
 
 /**
  * Architect Agent
@@ -176,6 +177,7 @@ export const architectAgent: AgentContract = {
 
     if (isOpenAIAvailable()) {
       try {
+        const model = getModelForAgent("architect_agent", ctx.agentModelOverrides?.["architect_agent"]);
         const userPrompt = [
           `Goal: ${goal}`,
           `Tags: ${tags.join(", ") || "none"}`,
@@ -183,7 +185,7 @@ export const architectAgent: AgentContract = {
           uxSummary ? `UX spec: ${uxSummary}` : "",
         ].filter(Boolean).join("\n");
 
-        const rawArch = await chatJSON<Partial<ArchSpecOutput>>(SYSTEM_PROMPT, userPrompt);
+        const rawArch = await chatJSON<Partial<ArchSpecOutput>>(SYSTEM_PROMPT, userPrompt, model, { agentKey: "architect_agent" });
 
         archSpec = {
           goal,
@@ -205,7 +207,7 @@ export const architectAgent: AgentContract = {
         // Generate file tree based on arch spec
         try {
           const ftPrompt = `Architecture spec:\n${JSON.stringify({ components: archSpec.components, apiEndpoints: archSpec.apiEndpoints }, null, 2).slice(0, 1500)}`;
-          const rawFt = await chatJSON<Partial<FileTreeOutput>>(FILE_TREE_PROMPT, ftPrompt);
+          const rawFt = await chatJSON<Partial<FileTreeOutput>>(FILE_TREE_PROMPT, ftPrompt, model, { agentKey: "architect_agent" });
           fileTree = {
             root: rawFt.root ?? "src/",
             structure: rawFt.structure ?? {},

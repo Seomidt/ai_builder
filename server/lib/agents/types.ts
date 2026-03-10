@@ -25,6 +25,14 @@ export interface RunContext {
   previousArtifacts: AiArtifact[];
   /** Steps completed before this one */
   previousSteps: AiStep[];
+  /**
+   * Optional per-agent model overrides for this specific run.
+   * Key = agentKey, Value = OpenAI model identifier.
+   * Takes priority over AGENT_MODEL_REGISTRY in model-config.ts.
+   *
+   * Example: { architect_agent: "gpt-4.1", review_agent: "gpt-4.1" }
+   */
+  agentModelOverrides?: Record<string, string> | null;
 }
 
 export interface AgentOutput {

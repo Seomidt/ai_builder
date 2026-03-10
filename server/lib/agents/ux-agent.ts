@@ -1,5 +1,6 @@
 import type { AgentContract, RunContext, AgentOutput } from "./types";
 import { chatJSON, isOpenAIAvailable } from "../openai-client";
+import { getModelForAgent } from "./model-config";
 
 /**
  * UX Agent
@@ -91,13 +92,14 @@ export const uxAgent: AgentContract = {
 
     if (isOpenAIAvailable()) {
       try {
+        const model = getModelForAgent("ux_agent", ctx.agentModelOverrides?.["ux_agent"]);
         const userPrompt = [
           `Goal: ${goal}`,
           `Tags: ${tags.join(", ") || "none"}`,
           planSummary ? `\n${planSummary}` : "",
         ].filter(Boolean).join("\n");
 
-        const raw = await chatJSON<Partial<UxSpecOutput>>(SYSTEM_PROMPT, userPrompt);
+        const raw = await chatJSON<Partial<UxSpecOutput>>(SYSTEM_PROMPT, userPrompt, model, { agentKey: "ux_agent" });
 
         uxSpec = {
           goal,

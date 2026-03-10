@@ -1,5 +1,6 @@
 import type { AgentContract, RunContext, AgentOutput } from "./types";
 import { chatJSON, isOpenAIAvailable } from "../openai-client";
+import { getModelForAgent } from "./model-config";
 
 /**
  * Review Agent
@@ -75,6 +76,7 @@ export const reviewAgent: AgentContract = {
 
     if (isOpenAIAvailable() && artifacts.length > 0) {
       try {
+        const model = getModelForAgent("review_agent", ctx.agentModelOverrides?.["review_agent"]);
         // Build a compact summary of artifact contents for the LLM to review
         const artifactSummaries = artifacts.map((a) => {
           let contentPreview = "";
@@ -102,7 +104,7 @@ export const reviewAgent: AgentContract = {
           recommendations?: string[];
           overallAssessment?: string;
           qualityScore?: number;
-        }>(SYSTEM_PROMPT, userPrompt);
+        }>(SYSTEM_PROMPT, userPrompt, model, { agentKey: "review_agent" });
 
         const llmChecks: ReviewCheck[] = (raw.checks ?? []).map((c, i) => ({
           id: c.id ?? `CHK-LLM-${i + 1}`,
