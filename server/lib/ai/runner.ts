@@ -4,22 +4,26 @@
  * SERVER-ONLY: This module must never be imported from client/ code.
  *
  * runAiCall() is the single function all future AI features should call.
- * It handles model resolution, provider invocation, usage logging, and
- * error normalisation in one place so callers never need to touch
- * generateText() or logAiUsage() directly.
+ * It resolves provider + model via the router, invokes the provider adapter,
+ * logs usage, normalises errors, and measures latency.
  *
+ * Features never need to know which provider or model is used.
  * No business logic, no prompts, no retries, no streaming.
+ *
+ * Phase 3C: routes through router.ts → providers/registry.ts → provider adapter
  */
 
 import OpenAI from "openai";
-import { AI_MODELS } from "./config";
-import { generateText } from "./service";
+import { AI_MODEL_ROUTES, AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS } from "./config";
+import { resolveRoute } from "./router";
+import { getProvider } from "./providers/registry";
 import { logAiUsage } from "./usage";
 import {
   AiUnavailableError,
   AiTimeoutError,
   AiQuotaError,
   AiServiceError,
+  type AiErrorMeta,
 } from "./errors";
 import type { AiCallContext, AiCallResult } from "./types";
 
@@ -31,7 +35,10 @@ export interface AiCallInput {
 /**
  * Execute a single AI call with full lifecycle management.
  *
- * @param context  Identity and routing metadata from the caller
+ * Resolves provider + model through the router, delegates to the provider
+ * adapter, logs usage to ai_usage, and returns a normalised AiCallResult.
+ *
+ * @param context  Identity, routing, and tracing metadata from the caller
  * @param input    System prompt and user input for the model
  * @returns        Normalised AiCallResult on success
  * @throws         Typed AiError subclass on failure — always after logging
@@ -41,48 +48,57 @@ export async function runAiCall(
   input: AiCallInput,
 ): Promise<AiCallResult> {
   const { feature, tenantId, userId, model: modelKey = "default" } = context;
-  const resolvedModel = AI_MODELS[modelKey];
   const startMs = Date.now();
 
-  if (!process.env.OPENAI_API_KEY) {
+  const route = resolveRoute(modelKey);
+  const inputPreview = input.userInput.slice(0, AI_INPUT_PREVIEW_MAX_CHARS);
+
+  let provider;
+  try {
+    provider = getProvider(route.provider);
+  } catch (err) {
     const latencyMs = Date.now() - startMs;
-    const err = new AiUnavailableError({ feature, model: resolvedModel, latencyMs });
+    const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
+    const aiErr = normalizeError(err, meta);
     void logAiUsage({
       feature,
       tenantId: tenantId ?? null,
       userId: userId ?? null,
       requestId: context.requestId ?? null,
-      model: resolvedModel,
+      model: route.model,
       status: "error",
-      errorMessage: err.message,
+      errorMessage: aiErr.message,
       latencyMs,
     });
-    emitRunnerLog({ feature, model: resolvedModel, latencyMs, success: false, error: err.message });
-    throw err;
+    emitRunnerLog({ feature, model: route.model, latencyMs, success: false, error: aiErr.message });
+    throw aiErr;
   }
 
   try {
-    const result = await generateText({
+    const result = await provider.generateText({
+      model: route.model,
       systemPrompt: input.systemPrompt,
       userInput: input.userInput,
-      model: modelKey,
+      timeoutMs: AI_TIMEOUT_MS,
     });
+
+    const latencyMs = Date.now() - startMs;
 
     void logAiUsage({
       feature,
       tenantId: tenantId ?? null,
       userId: userId ?? null,
       requestId: context.requestId ?? null,
-      model: result.model,
+      model: route.model,
       promptTokens: result.usage?.input_tokens ?? null,
       completionTokens: result.usage?.output_tokens ?? null,
       totalTokens: result.usage?.total_tokens ?? null,
-      inputPreview: result.inputPreview,
+      inputPreview,
       status: "success",
-      latencyMs: result.latencyMs,
+      latencyMs,
     });
 
-    emitRunnerLog({ feature, model: result.model, latencyMs: result.latencyMs, success: true });
+    emitRunnerLog({ feature, model: route.model, latencyMs, success: true });
 
     return {
       text: result.text,
@@ -93,13 +109,13 @@ export async function runAiCall(
             total_tokens: result.usage.total_tokens,
           }
         : null,
-      latencyMs: result.latencyMs,
-      model: result.model,
+      latencyMs,
+      model: route.model,
       feature,
     };
   } catch (err) {
     const latencyMs = Date.now() - startMs;
-    const meta = { feature, model: resolvedModel, latencyMs };
+    const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
 
     const aiErr = normalizeError(err, meta);
 
@@ -108,13 +124,13 @@ export async function runAiCall(
       tenantId: tenantId ?? null,
       userId: userId ?? null,
       requestId: context.requestId ?? null,
-      model: resolvedModel,
+      model: route.model,
       status: "error",
       errorMessage: aiErr.message,
       latencyMs,
     });
 
-    emitRunnerLog({ feature, model: resolvedModel, latencyMs, success: false, error: aiErr.message });
+    emitRunnerLog({ feature, model: route.model, latencyMs, success: false, error: aiErr.message });
 
     throw aiErr;
   }
@@ -124,7 +140,7 @@ export async function runAiCall(
 
 function normalizeError(
   err: unknown,
-  meta: { feature: string; model: string; latencyMs: number },
+  meta: AiErrorMeta,
 ) {
   if (err instanceof OpenAI.APIError) {
     if (err.status === 429) return new AiQuotaError(meta);
@@ -133,7 +149,13 @@ function normalizeError(
 
   if (err instanceof Error) {
     if (err.name === "AbortError") return new AiTimeoutError(meta);
-    if (err.message.includes("OPENAI_API_KEY")) return new AiUnavailableError(meta);
+    if (
+      err.message.includes("OPENAI_API_KEY") ||
+      err.message.includes("not yet implemented") ||
+      err.message.includes("not configured")
+    ) {
+      return new AiUnavailableError(meta);
+    }
     return new AiServiceError(err.message, meta);
   }
 
