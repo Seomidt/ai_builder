@@ -16,6 +16,8 @@ import { aiUsage } from "@shared/schema";
 export interface LogAiUsagePayload {
   tenantId?: string | null;
   userId?: string | null;
+  /** HTTP request ID — ties this AI call back to its origin request for tracing */
+  requestId?: string | null;
   /** Feature or agent key that made the call (e.g. "planner_agent", "summarize") */
   feature: string;
   /** OpenAI model identifier (e.g. "gpt-4.1-mini") */
@@ -41,6 +43,7 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
     await db.insert(aiUsage).values({
       tenantId: payload.tenantId ?? null,
       userId: payload.userId ?? null,
+      requestId: payload.requestId ?? null,
       feature: payload.feature,
       model: payload.model,
       promptTokens: payload.promptTokens ?? 0,

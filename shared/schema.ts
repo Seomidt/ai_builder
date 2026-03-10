@@ -690,6 +690,8 @@ export const aiUsage = pgTable(
     tenantId: varchar("tenant_id"),
     /** Optional: which user triggered this call */
     userId: varchar("user_id"),
+    /** Optional: HTTP request ID for tracing AI calls back to their origin request */
+    requestId: text("request_id"),
     /** Feature or agent key that made the call (e.g. "planner_agent", "summarize") */
     feature: text("feature").notNull(),
     /** OpenAI model used (e.g. "gpt-4.1-mini") */
@@ -709,6 +711,7 @@ export const aiUsage = pgTable(
     index("ai_usage_user_id_idx").on(t.userId),
     index("ai_usage_feature_idx").on(t.feature),
     index("ai_usage_created_at_idx").on(t.createdAt),
+    index("ai_usage_request_id_idx").on(t.requestId),
   ],
 );
 
