@@ -1,0 +1,514 @@
+Build a production-ready V1 of an internal AI Builder Platform.
+
+IMPORTANT:
+Do not build a toy demo.
+Do not build a generic chatbot.
+Do not hardcode flows around one fixed expert or one fixed provider.
+Do not use shortcuts that make the architecture difficult to extend later.
+Do not use JSON blobs where proper relational tables are required.
+Do not build vendor-specific logic directly into the core orchestration engine.
+
+The system must be built as a modular, extensible SaaS-style control plane using:
+
+- Next.js App Router
+- TypeScript
+- Tailwind CSS
+- Supabase (Postgres + Auth)
+- GitHub as source of truth for code generation output
+- Vercel as deployment target for this app
+- Cloudflare only as future DNS/edge layer, not primary V1 runtime
+- OpenAI integration must be abstracted behind provider interfaces, even if only one provider is implemented initially
+
+==================================================
+PRODUCT GOAL
+==================================================
+
+Build an internal web app where a logged-in user can:
+
+1. create and manage projects
+2. create and manage "Architectures / Experts"
+3. version those Architectures
+4. run an AI workflow against a project using a selected Architecture version
+5. generate and save structured artifacts
+6. write generated artifacts/files to a GitHub branch
+7. create a GitHub pull request
+
+This V1 is the foundation for a larger AI Builder Platform that will later support:
+- more AI providers
+- more tools
+- RAG
+- vectors
+- knowledge graph
+- expert teams
+- Vercel preview deploys
+- Supabase environment branching
+- Cloudflare integrations
+- design tools like Canva or image-based UI tools
+- SEO, website builder, SaaS builder, and many other Expert types
+
+So the architecture must be extensible from day 1.
+
+==================================================
+V1 SCOPE ONLY
+==================================================
+
+Implement V1 only.
+
+V1 includes:
+
+- authentication
+- organizations / multi-tenant structure
+- projects
+- architecture profiles ("Experts")
+- architecture versions
+- architecture agent configs
+- architecture capability configs
+- architecture template bindings
+- architecture policy bindings
+- AI runs
+- AI steps
+- AI artifacts
+- AI tool calls
+- AI approvals
+- integrations
+- organization secrets
+- GitHub branch/file/PR tools
+- planner + UX + architect + review agent stubs
+- artifact persistence
+- basic orchestration runtime
+- dashboard + projects + runs + architectures + integrations UI
+
+V1 does NOT need:
+- Vercel deployment automation
+- Supabase branch automation
+- Cloudflare automation
+- vector search
+- embeddings
+- RAG runtime
+- knowledge graph runtime
+- expert teams runtime
+- full production AI autonomy
+- background queue infrastructure beyond simple async-safe service design
+
+However, the code structure must clearly prepare for V2/V3.
+
+==================================================
+ARCHITECTURE REQUIREMENTS
+==================================================
+
+This must be a monorepo-style codebase structure or equivalent modular structure.
+
+Preferred structure:
+
+/apps/web
+/packages/ai-core
+/packages/db
+/packages/shared
+/packages/tool-github
+/packages/ui
+/supabase/migrations
+/templates
+/docs
+
+Use clear module boundaries.
+
+The core orchestration layer must know only:
+- agent interfaces
+- tool interfaces
+- workflow definitions
+- policy engine
+- artifact system
+
+It must NOT directly depend on GitHub-specific implementation details.
+
+GitHub integration must live behind a tool/provider layer.
+
+==================================================
+MULTI-TENANT REQUIREMENTS
+==================================================
+
+The system is multi-tenant from day 1.
+
+Use organization/workspace as tenant root.
+
+All tenant-owned records must use organization_id.
+
+Use proper relational design in Supabase/Postgres.
+Do not use document-style storage for structured business entities.
+
+==================================================
+DATABASE REQUIREMENTS
+==================================================
+
+Create a proper SQL schema and Supabase migration files for V1.
+
+Required tables:
+
+Core:
+- organizations
+- users
+- organization_members
+- projects
+- integrations
+- organization_secrets
+
+Architectures / Experts:
+- architecture_profiles
+- architecture_versions
+- architecture_agent_configs
+- architecture_capability_configs
+- architecture_template_bindings
+- architecture_policy_bindings
+
+AI runtime:
+- ai_runs
+- ai_steps
+- ai_artifacts
+- ai_tool_calls
+- ai_approvals
+
+Knowledge prep:
+- knowledge_documents
+
+Use explicit foreign keys, indexes, constraints, created_at / updated_at fields where appropriate.
+
+Add sensible enums or constrained text fields for statuses and roles.
+
+Do NOT skip migration files.
+
+==================================================
+RLS / SECURITY REQUIREMENTS
+==================================================
+
+Use Supabase Auth.
+
+Implement row-level security strategy or at minimum structure the schema to support it cleanly.
+If full RLS implementation is too much for one pass, still structure tables for organization-based access and add TODO markers for missing policies.
+
+Never expose secrets client-side.
+All provider tokens and sensitive integration logic must stay server-side only.
+
+Do not place GitHub or OpenAI secrets in the browser.
+Use server-only environment variables and secure storage patterns.
+
+==================================================
+UI REQUIREMENTS
+==================================================
+
+Build a clean admin-style internal control plane UI.
+
+Required screens:
+
+Authenticated app area:
+- Dashboard
+- Projects list
+- Project detail
+- Runs list
+- Run detail
+- Architectures list
+- Architecture detail/edit
+- Create Architecture flow
+- Integrations page
+- Approvals page
+- Settings page
+
+Auth:
+- login
+- signup
+- auth callback
+
+The UI should be functional, not just placeholder text.
+
+Use reusable UI components and layout primitives.
+
+Do not over-design the visuals.
+Focus on information architecture and production-ready maintainable UI.
+
+==================================================
+ARCHITECTURES / EXPERTS FEATURE
+==================================================
+
+This is a core feature, not an afterthought.
+
+Users must be able to:
+- create an Architecture / Expert
+- give it a name, slug, description, category
+- create versions
+- configure enabled agents
+- configure capabilities
+- bind templates
+- bind policies
+- save as draft
+- mark a version as published
+
+Architecture should be designed as a saved expert system profile.
+
+This is NOT a ChatGPT Custom GPT clone.
+It is an internal builder architecture profile.
+
+Model concept:
+
+Architecture Profile
+- identity
+- status
+- current version pointer
+
+Architecture Version
+- version number
+- workflow key
+- config
+- publish status
+
+Agent Config
+- agent key
+- execution order
+- model key
+- prompt version
+- enabled/disabled
+
+Capability Config
+- capability key
+- enabled
+- requires approval
+
+==================================================
+WORKFLOW / ORCHESTRATION REQUIREMENTS
+==================================================
+
+Implement a V1 orchestration system.
+
+V1 workflow:
+Create project
+-> choose architecture
+-> run planner agent
+-> run UX agent
+-> optionally run architect agent
+-> persist artifacts
+-> write files/artifacts to GitHub branch
+-> open PR
+-> persist run details and tool call logs
+
+Implement at least these agent profiles in code:
+- planner_agent
+- ux_agent
+- architect_agent
+- review_agent
+
+Even if the AI behavior is initially minimal or mocked behind service boundaries, the architecture must support real model calls later.
+
+Use structured outputs and typed schemas where possible.
+
+==================================================
+TOOLS / CAPABILITIES REQUIREMENTS
+==================================================
+
+Implement tools as typed definitions.
+
+Each tool must have:
+- name
+- version
+- capabilities
+- risk level
+- input schema
+- output schema
+- execute function
+
+Implement GitHub tools for V1:
+- github_create_branch
+- github_upsert_file
+- github_create_pr
+
+Implement internal artifact tools:
+- artifact_read
+- artifact_write
+
+Use a tool registry pattern.
+
+Use capability-based routing.
+Do not hardcode direct GitHub calls inside the orchestrator.
+
+Example capabilities:
+- repo.branch.create
+- repo.file.write
+- repo.pr.create
+- artifact.read
+- artifact.write
+
+==================================================
+INTEGRATIONS REQUIREMENTS
+==================================================
+
+Build an Integrations area in the app where provider configuration can be represented.
+
+For V1, implement at least:
+- GitHub integration config
+- OpenAI integration config placeholder
+- Vercel integration placeholder
+- Supabase integration placeholder
+- Cloudflare integration placeholder
+
+Important:
+Only GitHub needs working V1 execution tools.
+The others can be saved/configured as stubs/placeholders for future V2/V3 use.
+
+Store integration metadata in DB.
+Store sensitive values securely server-side.
+
+==================================================
+GITHUB FLOW REQUIREMENTS
+==================================================
+
+This is a required V1 end-to-end slice.
+
+User should be able to:
+1. create project
+2. select architecture version
+3. run workflow
+4. artifacts are generated and stored
+5. system creates a GitHub branch
+6. system writes one or more files to the branch
+7. system opens a pull request
+
+Persist:
+- tool calls
+- run status
+- artifact references
+- PR URL if available
+
+Handle failure states cleanly.
+
+==================================================
+CODE QUALITY REQUIREMENTS
+==================================================
+
+Use production-grade TypeScript.
+Use Zod for schemas/contracts.
+Use clear service/repository boundaries.
+Do not create a giant God file.
+Use explicit types.
+Prefer server components where appropriate.
+Use route handlers only where it makes architectural sense.
+Use server-only modules for secrets and provider clients.
+
+No spaghetti code.
+No copy-paste duplication.
+No mixing UI logic with orchestration logic.
+
+==================================================
+FILE STRUCTURE REQUIREMENTS
+==================================================
+
+Create a clean structure aligned with this direction:
+
+apps/web/
+- app/
+- components/
+- lib/
+
+packages/ai-core/
+- agents/
+- orchestrator/
+- registry/
+- policy/
+- artifacts/
+- schemas/
+- types/
+
+packages/db/
+- repositories/
+- queries/
+- mutations/
+- clients/
+
+packages/tool-github/
+- tools/
+- vendor/
+- schemas/
+
+packages/shared/
+- constants/
+- schemas/
+- utils/
+
+supabase/
+- migrations/
+
+If you must adapt, keep the same modular intent.
+
+==================================================
+PREPARE FOR V2 / V3
+==================================================
+
+Even though V1 does not implement full RAG/vector/graph runtime, the codebase must include clear extension points for:
+
+Future V2:
+- knowledge_documents versioning
+- knowledge_chunks
+- knowledge_vectors
+- memory_entries
+- project_decisions
+- deployment targets
+- Vercel preview flow
+- Supabase migration flow
+
+Future V3:
+- expert_teams
+- expert_team_versions
+- expert_team_members
+- graph_edges
+- graph-aware retrieval
+- reusable decisions
+- inferred relations
+
+Do not implement all of this now, but leave obvious extension seams.
+
+==================================================
+DELIVERABLES
+==================================================
+
+Generate the full codebase for V1 including:
+
+1. Next.js app structure
+2. Supabase SQL migrations
+3. typed database access layer
+4. core orchestration modules
+5. architecture/expert CRUD
+6. run creation and run detail handling
+7. artifact persistence
+8. GitHub tool package
+9. basic dashboard and admin UI
+10. environment variable template
+11. README with setup instructions
+12. clear TODO list for V2/V3
+
+==================================================
+SETUP / OUTPUT EXPECTATIONS
+==================================================
+
+Output should include:
+
+- all relevant files
+- migration SQL
+- package structure
+- example environment variables
+- notes on how to connect to Supabase, GitHub, and Vercel
+- instructions for running locally
+- instructions for deployment to Vercel
+
+If a piece cannot be fully completed, do not skip it silently.
+Instead:
+- create the correct placeholder
+- type it properly
+- mark it with a clear TODO
+
+==================================================
+IMPORTANT FINAL RULES
+==================================================
+
+- Think like a senior SaaS architect, not a demo builder
+- Build for long-term extensibility
+- Prefer explicit relational structure
+- Prefer organization_id multi-tenancy
+- Keep provider-specific logic behind adapters/tools
+- Build V1 correctly rather than V1.5 badly
+- Focus on the first vertical slice working cleanly
