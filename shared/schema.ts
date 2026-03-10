@@ -199,6 +199,11 @@ export const architectureVersions = pgTable(
       .notNull()
       .references(() => architectureProfiles.id),
     versionNumber: text("version_number").notNull(), // e.g. "1.0.0"
+    // ── GitHub versioning metadata ─────────────────────────────────────────
+    versionLabel: text("version_label"),             // human label e.g. "Initial Release"
+    description: text("description"),               // what changed in this version
+    changelog: text("changelog"),                   // markdown changelog — used in commit body
+    // ── Pipeline ─────────────────────────────────────────────────────────
     workflowKey: text("workflow_key"),
     config: jsonb("config"),
     isPublished: boolean("is_published").notNull().default(false),
@@ -309,12 +314,26 @@ export const aiRuns = pgTable(
     architectureVersionId: varchar("architecture_version_id")
       .notNull()
       .references(() => architectureVersions.id),
+    // ── Identity & versioning ────────────────────────────────────────────────
+    runNumber: integer("run_number").notNull().default(0),   // sequential per org: 1, 2, 3 …
+    title: text("title"),                                     // e.g. "Implement auth module"
+    description: text("description"),                         // longer goal description
+    tags: text("tags").array(),                               // e.g. ["auth", "backend"]
+    // ── Pipeline ─────────────────────────────────────────────────────────────
     status: runStatusEnum("status").notNull().default("pending"),
-    goal: text("goal"),
-    pipelineVersion: text("pipeline_version"),
-    createdBy: varchar("created_by").notNull(), // auth.users.id
+    goal: text("goal"),                                       // original user prompt / intent
+    pipelineVersion: text("pipeline_version"),                // e.g. "v1.2"
+    // ── Timing ───────────────────────────────────────────────────────────────
+    createdBy: varchar("created_by").notNull(),               // auth.users.id
     startedAt: timestamp("started_at"),
-    completedAt: timestamp("completed_at"),
+    finishedAt: timestamp("finished_at"),                     // any terminal state
+    completedAt: timestamp("completed_at"),                   // only on successful completion
+    // ── GitHub (populated once GitHub write pipeline is enabled) ─────────────
+    githubBranch: text("github_branch"),                      // branch created for this run
+    githubCommitSha: text("github_commit_sha"),               // commit SHA of the final push
+    githubPrNumber: integer("github_pr_number"),              // PR opened for review
+    githubTags: text("github_tags").array(),                  // e.g. ["ai-run-v3"]
+    // ── Audit ─────────────────────────────────────────────────────────────────
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
@@ -323,6 +342,7 @@ export const aiRuns = pgTable(
     index("ai_runs_project_idx").on(t.projectId),
     index("ai_runs_status_idx").on(t.status),
     index("ai_runs_arch_profile_idx").on(t.architectureProfileId),
+    index("ai_runs_run_number_idx").on(t.organizationId, t.runNumber),
   ],
 );
 
@@ -361,14 +381,14 @@ export const aiArtifacts = pgTable(
       .notNull()
       .references(() => aiRuns.id),
     stepId: varchar("step_id").references(() => aiSteps.id),
-    artifactType: text("artifact_type").notNull(), // e.g. "file", "plan", "spec"
+    artifactType: text("artifact_type").notNull(), // e.g. "file", "plan", "spec", "pr_description"
     title: text("title").notNull(),
     description: text("description"),
     content: text("content"),
-    path: text("path"), // file path for code/file artifacts
-    version: text("version"),
+    path: text("path"),       // file path for code/file artifacts
+    version: text("version"), // artifact-level version e.g. "v2"
     tags: text("tags").array(),
-    metadata: jsonb("metadata"), // mimeType, githubRef, size, etc.
+    metadata: jsonb("metadata"), // mimeType, githubRef, size, encoding, etc.
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [
@@ -412,7 +432,7 @@ export const aiApprovals = pgTable(
       .references(() => aiRuns.id),
     stepId: varchar("step_id").references(() => aiSteps.id),
     requestedBy: varchar("requested_by").notNull(), // auth.users.id
-    approvedBy: varchar("approved_by"), // auth.users.id nullable
+    approvedBy: varchar("approved_by"),             // auth.users.id nullable
     status: approvalStatusEnum("status").notNull().default("pending"),
     notes: text("notes"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -536,10 +556,16 @@ export const insertArchitecturePolicyBindingSchema = createInsertSchema(
 
 export const insertAiRunSchema = createInsertSchema(aiRuns).omit({
   id: true,
+  runNumber: true,  // assigned by storage layer
   createdAt: true,
   updatedAt: true,
   startedAt: true,
+  finishedAt: true,
   completedAt: true,
+  githubBranch: true,
+  githubCommitSha: true,
+  githubPrNumber: true,
+  githubTags: true,
 });
 
 export const insertAiStepSchema = createInsertSchema(aiSteps).omit({

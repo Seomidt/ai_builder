@@ -56,17 +56,36 @@ shared/
   schema.ts            All Drizzle tables + insert schemas + TypeScript types
 ```
 
-## Database Schema (17 tables)
+## Database Schema (18 tables)
 
 | Domain | Tables |
 |--------|--------|
 | Identity | `profiles` |
 | Multi-tenancy | `organizations`, `organization_members` |
 | Projects | `projects` (+ github_owner, github_repo, github_default_branch, github_repo_url) |
-| Architectures | `architecture_profiles`, `architecture_versions`, `architecture_agent_configs`, `architecture_capability_configs`, `architecture_template_bindings`, `architecture_policy_bindings` |
-| AI Runs | `ai_runs` (+ goal, pipeline_version), `ai_steps` (+ title, description, tags), `ai_artifacts` (+ description, path, version, tags), `ai_tool_calls`, `ai_approvals` |
+| Architectures | `architecture_profiles`, `architecture_versions` (+ version_label, description, changelog), `architecture_agent_configs`, `architecture_capability_configs`, `architecture_template_bindings`, `architecture_policy_bindings` |
+| AI Runs | `ai_runs` (+ run_number, title, description, tags, finished_at, github_branch, github_commit_sha, github_pr_number, github_tags), `ai_steps` (+ title, description, tags), `ai_artifacts` (+ description, path, version, tags), `ai_tool_calls`, `ai_approvals` |
 | Integrations | `integrations`, `organization_secrets` |
 | Knowledge (RAG prep) | `knowledge_documents` |
+
+## GitHub Versioning (metadata layer — write pipeline NOT yet active)
+
+Commit format (Phase 2 ready):
+- Title: `[AI RUN {run_number}] {run_title}`
+- Body: Architecture / Version / Run ID / Steps / Tags / Changelog
+- Branch: `ai-run/{run_number}/{slugified-title}`
+- Tags: `ai-run-v{run_number}`, `architecture-{slug}-v{version}`
+
+Key files:
+- `server/lib/github-commit-format.ts` — commit/tag/branch formatters (read-only utility)
+- `GET /api/runs/:id/commit-preview` — returns preview of what commit will look like
+
+## Migrations
+
+| File | Description |
+|------|-------------|
+| `migrations/0000_calm_thunderbird.sql` | V1 baseline — all 18 tables |
+| `migrations/0001_premium_james_howlett.sql` | GitHub versioning metadata — run_number, title, description, tags, finished_at, github_*, version_label, changelog |
 
 ## V2 TODO
 

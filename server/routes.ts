@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { dbProvider } from "./db";
+import { previewCommit } from "./lib/github-commit-format";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 
@@ -252,6 +253,56 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const integration = integrations.find((i) => i.provider === req.params.provider);
       if (!integration) return res.status(404).json({ error: "Integration not found" });
       res.json(integration);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // ─── GitHub commit preview (metadata only — write pipeline NOT active) ────
+
+  app.get("/api/runs/:id/commit-preview", async (req, res) => {
+    try {
+      const run = await storage.getRun(req.params.id, getOrgId(req));
+      const [profile, version] = await Promise.all([
+        storage.getArchitectureProfile(run.architectureProfileId, getOrgId(req)),
+        (async () => {
+          const p = await storage.getArchitectureProfile(run.architectureProfileId, getOrgId(req));
+          return p.versions.find((v) => v.id === run.architectureVersionId) ?? p.versions[0];
+        })(),
+      ]);
+
+      if (!version) {
+        return res.status(404).json({ error: "Architecture version not found" });
+      }
+
+      const preview = previewCommit({
+        run: {
+          id: run.id,
+          runNumber: run.runNumber,
+          title: run.title ?? null,
+          goal: run.goal ?? null,
+          tags: run.tags ?? null,
+          pipelineVersion: run.pipelineVersion ?? null,
+        },
+        architecture: {
+          name: profile.name,
+          slug: profile.slug,
+        },
+        version: {
+          versionNumber: version.versionNumber,
+          versionLabel: (version as { versionLabel?: string | null }).versionLabel ?? null,
+          changelog: (version as { changelog?: string | null }).changelog ?? null,
+        },
+        steps: run.steps.map((s) => ({
+          stepKey: s.stepKey,
+          title: s.title ?? null,
+          status: s.status,
+        })),
+      });
+
+      res.json({
+        ...preview,
+        note: "GitHub write pipeline not yet active. This preview shows what the commit will look like when enabled.",
+        githubEnabled: !!process.env.GITHUB_TOKEN && false, // explicitly false until Phase 2
+      });
     } catch (err) { handleError(res, err); }
   });
 

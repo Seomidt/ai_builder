@@ -1,4 +1,4 @@
-import { eq, and, desc } from "drizzle-orm";
+import { eq, and, desc, max } from "drizzle-orm";
 import { db } from "../db";
 import {
   aiRuns,
@@ -30,7 +30,7 @@ export const runsRepository = {
       .select()
       .from(aiRuns)
       .where(and(...conditions))
-      .orderBy(desc(aiRuns.createdAt));
+      .orderBy(desc(aiRuns.runNumber));
   },
 
   async getById(id: string, organizationId: string): Promise<AiRun | undefined> {
@@ -41,9 +41,25 @@ export const runsRepository = {
     return run;
   },
 
-  async createRun(data: InsertAiRun): Promise<AiRun> {
-    const [run] = await db.insert(aiRuns).values(data).returning();
-    return run;
+  /**
+   * Assigns a sequential run_number per organization before inserting.
+   * Uses MAX(run_number) + 1 within a single transaction to prevent gaps/races.
+   */
+  async createRun(data: Omit<InsertAiRun, "runNumber"> & { organizationId: string }): Promise<AiRun> {
+    return db.transaction(async (tx) => {
+      const [{ maxNum }] = await tx
+        .select({ maxNum: max(aiRuns.runNumber) })
+        .from(aiRuns)
+        .where(eq(aiRuns.organizationId, data.organizationId));
+
+      const nextRunNumber = (maxNum ?? 0) + 1;
+
+      const [run] = await tx
+        .insert(aiRuns)
+        .values({ ...(data as InsertAiRun), runNumber: nextRunNumber })
+        .returning();
+      return run;
+    });
   },
 
   async updateStatus(
@@ -53,14 +69,38 @@ export const runsRepository = {
   ): Promise<AiRun | undefined> {
     const now = new Date();
     const timestamps: Partial<AiRun> = { status, updatedAt: now };
-    if (status === "running") timestamps.startedAt = now;
-    if (status === "completed" || status === "failed" || status === "cancelled") {
+    if (status === "running") {
+      timestamps.startedAt = now;
+    }
+    if (status === "completed") {
       timestamps.completedAt = now;
+      timestamps.finishedAt = now;
+    }
+    if (status === "failed" || status === "cancelled") {
+      timestamps.finishedAt = now;
     }
 
     const [updated] = await db
       .update(aiRuns)
       .set(timestamps)
+      .where(and(eq(aiRuns.id, id), eq(aiRuns.organizationId, organizationId)))
+      .returning();
+    return updated;
+  },
+
+  async updateGithubMetadata(
+    id: string,
+    organizationId: string,
+    data: {
+      githubBranch?: string;
+      githubCommitSha?: string;
+      githubPrNumber?: number;
+      githubTags?: string[];
+    },
+  ): Promise<AiRun | undefined> {
+    const [updated] = await db
+      .update(aiRuns)
+      .set({ ...data, updatedAt: new Date() })
       .where(and(eq(aiRuns.id, id), eq(aiRuns.organizationId, organizationId)))
       .returning();
     return updated;

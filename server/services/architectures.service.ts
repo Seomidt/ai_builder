@@ -25,6 +25,11 @@ export const updateProfileSchema = z.object({
 export const createVersionSchema = z.object({
   architectureProfileId: z.string().min(1),
   versionNumber: z.string().min(1).max(20),
+  // GitHub versioning metadata
+  versionLabel: z.string().max(100).optional(),    // e.g. "Initial Release"
+  description: z.string().optional(),             // what this version introduces
+  changelog: z.string().optional(),               // markdown changelog for commit body
+  // Pipeline
   workflowKey: z.string().max(100).optional(),
   config: z.record(z.unknown()).optional(),
 });

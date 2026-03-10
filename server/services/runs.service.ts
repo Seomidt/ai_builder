@@ -8,6 +8,13 @@ export const createRunSchema = z.object({
   architectureProfileId: z.string().min(1),
   architectureVersionId: z.string().min(1),
   createdBy: z.string().min(1),
+  // GitHub versioning metadata
+  title: z.string().max(200).optional(),
+  description: z.string().optional(),
+  tags: z.array(z.string().max(50)).max(20).optional(),
+  // Pipeline
+  goal: z.string().optional(),
+  pipelineVersion: z.string().max(50).optional(),
 });
 
 export const updateRunStatusSchema = z.object({
@@ -17,6 +24,9 @@ export const updateRunStatusSchema = z.object({
 export const appendStepSchema = z.object({
   runId: z.string().min(1),
   stepKey: z.string().min(1),
+  title: z.string().max(200).optional(),
+  description: z.string().optional(),
+  tags: z.array(z.string().max(50)).max(20).optional(),
   agentKey: z.string().min(1),
   status: z.enum(["pending", "running", "completed", "failed", "skipped"]).default("pending"),
   input: z.record(z.unknown()).optional(),
@@ -29,7 +39,11 @@ export const appendArtifactSchema = z.object({
   stepId: z.string().optional(),
   artifactType: z.string().min(1).max(50),
   title: z.string().min(1).max(200),
+  description: z.string().optional(),
   content: z.string().optional(),
+  path: z.string().optional(),
+  version: z.string().max(50).optional(),
+  tags: z.array(z.string().max(50)).max(20).optional(),
   metadata: z.record(z.unknown()).optional(),
 });
 
