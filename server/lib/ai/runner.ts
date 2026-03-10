@@ -50,7 +50,7 @@ export async function runAiCall(
   const { feature, tenantId, userId, model: modelKey = "default" } = context;
   const startMs = Date.now();
 
-  const route = resolveRoute(modelKey);
+  const route = await resolveRoute(modelKey, tenantId);
   const inputPreview = input.userInput.slice(0, AI_INPUT_PREVIEW_MAX_CHARS);
 
   let provider;

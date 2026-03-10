@@ -719,6 +719,57 @@ export const insertAiUsageSchema = createInsertSchema(aiUsage).omit({ id: true, 
 export type InsertAiUsage = z.infer<typeof insertAiUsageSchema>;
 export type AiUsage = typeof aiUsage.$inferSelect;
 
+// ─── AI Model Overrides ───────────────────────────────────────────────────────
+
+/**
+ * Stores DB-level overrides for AI model routing.
+ *
+ * Overrides are keyed by route_key (e.g. "default", "cheap", "coding"),
+ * not by feature. Features map to route keys; route keys map to overrides.
+ *
+ * Supported scopes:
+ *   - "global"  — applies to all tenants unless overridden at tenant level
+ *   - "tenant"  — applies to a specific organization
+ *
+ * Priority: tenant → global → code default (AI_MODEL_ROUTES in config.ts)
+ *
+ * The unique index uses coalesce(scope_id, 'global') to prevent duplicate
+ * active global rows despite NULL scope_id (NULLs do not collide in Postgres
+ * unique indexes without this workaround).
+ */
+export const aiModelOverrides = pgTable(
+  "ai_model_overrides",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** "global" | "tenant" */
+    scope: text("scope").notNull(),
+    /** NULL for global scope; organization id for tenant scope */
+    scopeId: text("scope_id"),
+    /** Logical route key: "default" | "heavy" | "coding" | "cheap" | "reasoning" | "nano" */
+    routeKey: text("route_key").notNull(),
+    /** Provider key: "openai" | "anthropic" | "google" */
+    provider: text("provider").notNull(),
+    /** Concrete model string e.g. "gpt-4.1", "claude-opus-4-5" */
+    model: text("model").notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_model_overrides_active_idx").on(t.isActive),
+    index("ai_model_overrides_route_key_idx").on(t.routeKey),
+  ],
+);
+
+export const insertAiModelOverrideSchema = createInsertSchema(aiModelOverrides).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertAiModelOverride = z.infer<typeof insertAiModelOverrideSchema>;
+export type AiModelOverride = typeof aiModelOverrides.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
