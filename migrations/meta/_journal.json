@@ -15,6 +15,13 @@
       "when": 1773142129878,
       "tag": "0001_premium_james_howlett",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1773148834490,
+      "tag": "0002_secret_corsair",
+      "breakpoints": true
     }
   ]
 }

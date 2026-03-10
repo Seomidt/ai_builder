@@ -674,6 +674,48 @@ export type KnowledgeDocument = typeof knowledgeDocuments.$inferSelect;
 export type InsertArtifactDependency = z.infer<typeof insertArtifactDependencySchema>;
 export type ArtifactDependency = typeof artifactDependencies.$inferSelect;
 
+// ─── AI Usage Log ─────────────────────────────────────────────────────────────
+// Infrastructure table — records every LLM call for cost, latency, and debugging.
+// Intentionally generic: no business-domain columns.
+
+export const aiUsageStatusEnum = pgEnum("ai_usage_status", ["success", "error"]);
+
+export const aiUsage = pgTable(
+  "ai_usage",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** Optional: which tenant (org) made this call */
+    tenantId: varchar("tenant_id"),
+    /** Optional: which user triggered this call */
+    userId: varchar("user_id"),
+    /** Feature or agent key that made the call (e.g. "planner_agent", "summarize") */
+    feature: text("feature").notNull(),
+    /** OpenAI model used (e.g. "gpt-4.1-mini") */
+    model: text("model").notNull(),
+    promptTokens: integer("prompt_tokens").notNull().default(0),
+    completionTokens: integer("completion_tokens").notNull().default(0),
+    totalTokens: integer("total_tokens").notNull().default(0),
+    /** First 500 chars of the user input, for debugging only */
+    inputPreview: text("input_preview"),
+    status: aiUsageStatusEnum("status").notNull().default("success"),
+    errorMessage: text("error_message"),
+    latencyMs: integer("latency_ms"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_usage_tenant_id_idx").on(t.tenantId),
+    index("ai_usage_user_id_idx").on(t.userId),
+    index("ai_usage_feature_idx").on(t.feature),
+    index("ai_usage_created_at_idx").on(t.createdAt),
+  ],
+);
+
+export const insertAiUsageSchema = createInsertSchema(aiUsage).omit({ id: true, createdAt: true });
+export type InsertAiUsage = z.infer<typeof insertAiUsageSchema>;
+export type AiUsage = typeof aiUsage.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });

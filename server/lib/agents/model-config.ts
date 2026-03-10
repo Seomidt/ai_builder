@@ -1,19 +1,16 @@
 /**
- * Model Configuration Registry
+ * Agent Model Configuration Registry
  *
- * Single source of truth for which model each agent uses.
- * Agents read their model from here — never hardcode inside runtime logic.
+ * Maps each agentKey to its preferred model tier.
+ * Model identifiers come from server/lib/ai/config.ts — never hardcoded here.
  *
- * To upgrade a specific agent to a heavier model (e.g. gpt-4.1 for architect),
- * change the value here. Runtime pipeline code is not touched.
- *
- * Tier reference:
- *   gpt-4.1-mini  — fast, cheap, great for structured JSON (default for all agents)
- *   gpt-4.1       — heavier analysis; use for architect/review when quality matters more than cost
- *   gpt-4.1-nano  — cheapest option for trivial/reformatting steps
+ * To upgrade a specific agent (e.g. architect to gpt-4.1):
+ *   Change the value to AI_MODELS.heavy — no runtime code changes needed.
  */
 
-export const DEFAULT_MODEL = "gpt-4.1-mini";
+import { AI_MODELS } from "../ai/config";
+
+export const DEFAULT_MODEL = AI_MODELS.default;
 
 /**
  * Per-agent model assignments.
