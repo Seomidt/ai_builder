@@ -791,6 +791,8 @@ export const aiUsage = pgTable(
     requestId: text("request_id"),
     /** Feature or agent key that made the call (e.g. "planner_agent", "summarize") */
     feature: text("feature").notNull(),
+    /** AI provider key — "openai" | "anthropic" | "google" */
+    provider: text("provider"),
     /** OpenAI model used (e.g. "gpt-4.1-mini") */
     model: text("model").notNull(),
     promptTokens: integer("prompt_tokens").notNull().default(0),
@@ -811,6 +813,10 @@ export const aiUsage = pgTable(
     index("ai_usage_feature_idx").on(t.feature),
     index("ai_usage_created_at_idx").on(t.createdAt),
     index("ai_usage_request_id_idx").on(t.requestId),
+    // Composite index for period range queries: WHERE tenant_id = ? AND created_at >= ? AND created_at < ?
+    index("ai_usage_tenant_created_at_idx").on(t.tenantId, t.createdAt),
+    // Composite index for status-filtered period queries (raw fallback path in guards)
+    index("ai_usage_tenant_status_created_at_idx").on(t.tenantId, t.status, t.createdAt),
   ],
 );
 
@@ -917,6 +923,57 @@ export const insertAiModelPricingSchema = createInsertSchema(aiModelPricing).omi
 });
 export type InsertAiModelPricing = z.infer<typeof insertAiModelPricingSchema>;
 export type AiModelPricing = typeof aiModelPricing.$inferSelect;
+
+// ─── Tenant AI Usage Periods ──────────────────────────────────────────────────
+// Fast runtime/admin/billing summary table.
+//
+// Layer 2 of the 2-layer usage architecture:
+//   Layer 1: ai_usage = raw append-only audit/event log
+//   Layer 2: tenant_ai_usage_periods = pre-aggregated period summary for fast reads
+//
+// One row per tenant + period. Updated synchronously when ai_usage is written.
+// Allows guardrails and future billing to avoid scanning raw ai_usage on every call.
+
+export const tenantAiUsagePeriods = pgTable(
+  "tenant_ai_usage_periods",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    /** Inclusive start of this billing/usage period (calendar month start for now) */
+    periodStart: timestamp("period_start").notNull(),
+    /** Exclusive end of this billing/usage period (calendar month start of next month) */
+    periodEnd: timestamp("period_end").notNull(),
+    /** Running sum of estimated_cost_usd for successful calls in this period */
+    totalCostUsd: numeric("total_cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** Count of successful AI calls in this period */
+    totalRequests: integer("total_requests").notNull().default(0),
+    totalInputTokens: integer("total_input_tokens").notNull().default(0),
+    totalOutputTokens: integer("total_output_tokens").notNull().default(0),
+    totalTokens: integer("total_tokens").notNull().default(0),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    // One aggregate row per tenant per period
+    uniqueIndex("tenant_ai_usage_periods_tenant_period_idx").on(
+      t.tenantId,
+      t.periodStart,
+      t.periodEnd,
+    ),
+    // Fast tenant period lookup for guardrails and admin
+    index("tenant_ai_usage_periods_tenant_idx").on(t.tenantId),
+  ],
+);
+
+export const insertTenantAiUsagePeriodSchema = createInsertSchema(tenantAiUsagePeriods).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertTenantAiUsagePeriod = z.infer<typeof insertTenantAiUsagePeriodSchema>;
+export type TenantAiUsagePeriod = typeof tenantAiUsagePeriods.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;

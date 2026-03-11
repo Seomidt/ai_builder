@@ -16,14 +16,16 @@
  * Phase 3G
  */
 
-import { and, eq, gte, isNull, sum } from "drizzle-orm";
+import { and, eq, gte, isNull, lt, sum } from "drizzle-orm";
 import { db } from "../../db";
 import {
   aiUsage,
   aiUsageLimits,
+  tenantAiUsagePeriods,
   usageThresholdEvents,
   type AiUsageLimit,
 } from "@shared/schema";
+import { getCurrentPeriod } from "./usage-periods";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -82,37 +84,67 @@ export async function loadUsageLimit(tenantId: string): Promise<AiUsageLimit | n
 
 // ── Period usage calculator ───────────────────────────────────────────────────
 
-function startOfCurrentMonth(): Date {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), 1);
-}
-
 /**
- * Sum the tenant's estimated AI cost (USD) for the current calendar month.
+ * Return the tenant's current-period AI cost (USD).
  *
- * Only counts successful calls with a non-null estimated_cost_usd.
- * Returns 0 on DB failure — conservative safe fallback (allows calls through).
+ * Aggregate-first: reads from tenant_ai_usage_periods for O(1) performance.
+ * Fallback: if no aggregate row exists yet (e.g. first call of the period),
+ *   computes from raw ai_usage — this is safe and self-healing because the
+ *   next successful call will create the aggregate row.
+ *
+ * Returns 0 on any DB failure — conservative safe fallback (allows calls through).
  * Never throws.
  */
 export async function getCurrentAiUsageForPeriod(tenantId: string): Promise<number> {
   if (!tenantId) return 0;
+  const { periodStart, periodEnd } = getCurrentPeriod();
+
+  // ── Aggregate-first path ────────────────────────────────────────────────────
   try {
-    const periodStart = startOfCurrentMonth();
     const rows = await db
+      .select({ totalCostUsd: tenantAiUsagePeriods.totalCostUsd })
+      .from(tenantAiUsagePeriods)
+      .where(
+        and(
+          eq(tenantAiUsagePeriods.tenantId, tenantId),
+          eq(tenantAiUsagePeriods.periodStart, periodStart),
+          eq(tenantAiUsagePeriods.periodEnd, periodEnd),
+        ),
+      )
+      .limit(1);
+
+    if (rows.length > 0 && rows[0].totalCostUsd != null) {
+      return Number(rows[0].totalCostUsd);
+    }
+  } catch (err) {
+    console.warn(
+      "[ai:guards] Aggregate period read failed for tenant",
+      tenantId,
+      "— falling back to raw sum:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  // ── Raw fallback path ───────────────────────────────────────────────────────
+  // Used when no aggregate row exists yet (first call of a period).
+  // Uses composite index: (tenant_id, status, created_at).
+  try {
+    const rawRows = await db
       .select({ total: sum(aiUsage.estimatedCostUsd) })
       .from(aiUsage)
       .where(
         and(
           eq(aiUsage.tenantId, tenantId),
-          gte(aiUsage.createdAt, periodStart),
           eq(aiUsage.status, "success"),
+          gte(aiUsage.createdAt, periodStart),
+          lt(aiUsage.createdAt, periodEnd),
         ),
       );
-    const raw = rows[0]?.total;
+    const raw = rawRows[0]?.total;
     return raw != null ? Number(raw) : 0;
   } catch (err) {
     console.warn(
-      "[ai:guards] Failed to get current AI usage for tenant",
+      "[ai:guards] Raw usage fallback also failed for tenant",
       tenantId,
       ":",
       err instanceof Error ? err.message : err,

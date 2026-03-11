@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 3G complete)
+# AI Builder Platform — V1 (Phase 3G.1 complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -57,10 +57,11 @@ server/
       overrides.ts       loadOverride() — DB override loader + TTL cache
       types.ts           AiCallContext, AiCallResult
       errors.ts          Typed error hierarchy
-      usage.ts           logAiUsage() → ai_usage table (with estimatedCostUsd)
+      usage.ts           logAiUsage() → ai_usage + aggregate upsert to tenant_ai_usage_periods
+      usage-periods.ts   getCurrentPeriod() — centralised period boundary helper
       pricing.ts         loadPricing() — DB first, code default fallback + TTL cache
       costs.ts           estimateAiCost() — token × rate calculation
-      guards.ts          AI usage guardrails — loadUsageLimit, evaluateAiUsageState, BUDGET_MODE_POLICY
+      guards.ts          AI usage guardrails — aggregate-first getCurrentAiUsageForPeriod, BUDGET_MODE_POLICY
       usage-summary.ts   getAiUsageSummary() — normalized tenant usage contract for future UI
       providers/         AiProvider interface, OpenAI adapter, registry
       prompts/           getSummarizePrompt()
@@ -91,6 +92,7 @@ shared/
 | 3E | `feature/ai-route-overrides` | Model routing overrides — ai_model_overrides, loadOverride(), async router |
 | 3F | `feature/ai-pricing-registry` | AI Pricing Registry — ai_model_pricing, loadPricing(), estimateAiCost(), estimated_cost_usd in ai_usage |
 | 3G | `feature/ai-usage-guardrails` | AI Usage Guardrails — ai_usage_limits, usage_threshold_events, guards.ts, BUDGET_MODE_POLICY, hard stop, usage-summary.ts |
+| 3G.1 | `feature/ai-usage-hardening` | Usage Data Hardening — provider field on ai_usage, composite indexes, tenant_ai_usage_periods aggregate table, getCurrentPeriod(), aggregate-first guardrails, synchronous aggregate upsert |
 
 ## AI Stack — Routing Flow
 
@@ -107,20 +109,21 @@ runAiCall(context, input)
   → provider.generateText(...)
   → loadPricing(provider, model) — DB active row → code default
   → estimateAiCost(usage, pricing)
-  → logAiUsage(..., estimatedCostUsd)
+  → logAiUsage(..., estimatedCostUsd)          ← writes ai_usage + upserts tenant_ai_usage_periods
   → [if non-normal] maybeRecordThresholdEvent()
 ```
 
 ## Key Files
 
-- `shared/schema.ts` — all tables including ai_usage, ai_model_overrides, ai_model_pricing, ai_usage_limits, usage_threshold_events
+- `shared/schema.ts` — all tables including ai_usage, ai_model_overrides, ai_model_pricing, ai_usage_limits, usage_threshold_events, tenant_ai_usage_periods
 - `server/lib/ai/config.ts` — AI_MODEL_ROUTES (6 routes), AiProviderKey
 - `server/lib/ai/runner.ts` — runAiCall() + guardrails + cost estimation
 - `server/lib/ai/router.ts` — resolveRoute() (async)
 - `server/lib/ai/overrides.ts` — loadOverride() + TTL cache
 - `server/lib/ai/pricing.ts` — loadPricing() + TTL cache
 - `server/lib/ai/costs.ts` — estimateAiCost() + code defaults
-- `server/lib/ai/guards.ts` — loadUsageLimit, evaluateAiUsageState, BUDGET_MODE_POLICY, maybeRecordThresholdEvent
+- `server/lib/ai/guards.ts` — loadUsageLimit, getCurrentAiUsageForPeriod (aggregate-first), evaluateAiUsageState, BUDGET_MODE_POLICY, maybeRecordThresholdEvent
+- `server/lib/ai/usage-periods.ts` — getCurrentPeriod() — single source of period boundaries
 - `server/lib/ai/usage-summary.ts` — getAiUsageSummary() — normalized usage contract
 - `server/lib/ai/errors.ts` — AiBudgetExceededError + typed error hierarchy
 - `server/lib/ai/providers/registry.ts` — ACTIVE_PROVIDERS
@@ -137,6 +140,10 @@ runAiCall(context, input)
 - `ai_usage_limits` has unique index on `tenant_id` — one row per tenant
 - `usage_threshold_events` — append-only foundation, deduplicated by 24h window per event_type
 - Budget mode: `BUDGET_MODE_POLICY` in guards.ts — `maxOutputTokens: 512`, concise system prompt prefix
+- `ai_usage.provider` — added in Phase 3G.1, nullable, written by runner.ts via logAiUsage()
+- `ai_usage` composite indexes: `(tenant_id, created_at)` and `(tenant_id, status, created_at)` — added Phase 3G.1
+- `tenant_ai_usage_periods` — aggregate summary table (Phase 3G.1). One row per tenant+period. Unique index on (tenant_id, period_start, period_end). Updated synchronously in logAiUsage() via ON CONFLICT DO UPDATE. Guards read from this table first, fall back to raw ai_usage if no aggregate row yet.
+- Period boundaries: `getCurrentPeriod()` in `server/lib/ai/usage-periods.ts` — calendar month, `created_at >= periodStart AND created_at < periodEnd`
 
 ## V2 / Next TODO
 
