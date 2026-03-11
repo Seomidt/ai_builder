@@ -1,6 +1,6 @@
-# AI Builder Platform — V1 (Phase 2)
+# AI Builder Platform — V1 (Phase 3E complete)
 
-Internal control plane for AI-driven software generation. Express + React + Drizzle ORM.
+Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
 ## Stack
 
@@ -8,8 +8,8 @@ Internal control plane for AI-driven software generation. Express + React + Driz
 - **Backend**: Express.js, TypeScript, Zod validation
 - **Auth**: Supabase Auth (JWT middleware wired, demo fallback for dev)
 - **Database**: Supabase Postgres (PostgreSQL 17.6) via Drizzle ORM + connection pooler
-- **GitHub**: GITHUB_TOKEN available server-side for V1.1+ tools
-- **Architecture**: Repository → Service → Route handler (strict layer separation)
+- **AI**: OpenAI (Responses API) — provider-abstracted via AiProvider interface
+- **GitHub**: `GITHUB_PERSONAL_ACCESS_TOKEN` available server-side
 
 ## User Preferences
 
@@ -22,24 +22,23 @@ Internal control plane for AI-driven software generation. Express + React + Driz
 - **No hard delete**: `projects`, `architecture_profiles`, `ai_runs` use `status` field
 - **Architecture versioning is first-class**: `current_version_id` + `is_published` on versions
 - **AI Runs as lifecycle**: dedicated append ops for steps, artifacts, tool calls, approvals
-- **Richer step/artifact metadata**: `title`, `description`, `tags`, `path`, `version` fields
+- **All AI calls go through `runAiCall()`** — never call generateText() or logAiUsage() directly
+- **Overrides are route_key-based** — features map to route keys; route keys map to DB overrides
+- **Feature pattern**: Features in `server/features/<name>/`, prompts in `server/lib/ai/prompts/`
 - **Multi-tenancy**: `organization_id` only on top-level entities; children inherit via FK
 - **Server-side secrets only**: GitHub/OpenAI/Supabase service role never reach the client
-- **Auth middleware**: `req.user` populated from Supabase JWT or demo fallback
 
 ## Environment Variables Required
 
 | Variable | Required | Notes |
 |----------|----------|-------|
-| `DATABASE_URL` | Yes | Auto-provisioned by Replit |
-| `SESSION_SECRET` | Yes | Random string 32+ chars |
+| `SUPABASE_DB_POOL_URL` | Yes | Supabase pooler connection string |
 | `SUPABASE_URL` | Yes | Project URL |
 | `SUPABASE_ANON_KEY` | Yes | Public anon key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Server-side only — never client |
-| `GITHUB_TOKEN` | Yes | PAT with repo scope |
-| `GITHUB_OWNER` | No | Default org/user for GitHub ops |
-| `GITHUB_REPO` | No | Default repo for GitHub ops |
-| `OPENAI_API_KEY` | Phase 2 | Server-side only |
+| `SESSION_SECRET` | Yes | Random string 32+ chars |
+| `OPENAI_API_KEY` | Yes | Server-side only |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | Yes | PAT with repo scope |
 
 ## Project Structure
 
@@ -50,91 +49,80 @@ client/src/
   lib/                 queryClient, utils
 
 server/
-  lib/                 supabase.ts, github.ts, github-commit-format.ts
-  lib/agents/          types.ts, planner-agent.ts, ux-agent.ts, architect-agent.ts, review-agent.ts, registry.ts
-  middleware/          auth.ts (JWT → req.user)
-  repositories/        projects, architectures, runs (+ artifact deps), integrations, knowledge
-  services/            projects, architectures, runs, integrations, run-executor
-  routes.ts            Thin API handlers
-  storage.ts           IStorage + DatabaseStorage
-  db.ts                Drizzle + pg pool
+  lib/
+    ai/
+      config.ts          AI_MODEL_ROUTES, AiProviderKey, runtime limits
+      runner.ts          runAiCall() — single entry point
+      router.ts          resolveRoute() — async, override-aware
+      overrides.ts       loadOverride() — DB override loader + TTL cache
+      types.ts           AiCallContext, AiCallResult
+      errors.ts          Typed error hierarchy
+      usage.ts           logAiUsage() → ai_usage table
+      providers/         AiProvider interface, OpenAI adapter, registry
+      prompts/           getSummarizePrompt()
+    supabase.ts, github.ts, github-commit-format.ts
+  features/
+    ai-summarize/        summarize.service.ts
+  middleware/            auth.ts (JWT → req.user)
+  repositories/          projects, architectures, runs, integrations, knowledge
+  services/              projects, architectures, runs, integrations, run-executor
+  routes.ts              Thin API handlers
+  storage.ts             IStorage + DatabaseStorage
+  db.ts                  Drizzle + pg pool
 
 shared/
-  schema.ts            All Drizzle tables + insert schemas + TypeScript types
+  schema.ts              All Drizzle tables + insert schemas + TypeScript types
 ```
 
-## Phase 2 — AI Run Pipeline (COMPLETE)
+## Phase History
 
-### Agent Pipeline
-4 typed agents chained in execution order:
-1. `planner_agent` — Parses goal into structured plan (phases/tasks) → `plan` artifact
-2. `ux_agent` — Translates plan into UX spec (screens/components/flows) → `ux_spec` artifact
-3. `architect_agent` — Produces tech arch spec + file tree → `arch_spec` + `file_tree` artifacts
-4. `review_agent` — Reviews all artifacts, gate report with pass/warn/fail checks → `review` artifact
+| Phase | Branch | Status |
+|-------|--------|--------|
+| 1 | `main` | Core platform — schema, repos, services, UI |
+| 2 | `main` | AI run pipeline — 4 agents, run executor, GitHub commit format |
+| 3A | `main` | AI foundation — config, ai_usage table, logAiUsage() |
+| 3B | `main` | AI orchestration — runAiCall(), AiCallContext, typed errors, requestId |
+| 3C | `feature/ai-router` | Provider abstraction — AiProvider, OpenAI adapter, registry, router |
+| 3D | `feature/ai-summarize` | First AI feature — summarize prompt, service, POST /api/ai/summarize |
+| 3E | `feature/ai-route-overrides` | Model routing overrides — ai_model_overrides, loadOverride(), async router |
 
-### Run Executor
-- `POST /api/runs/:id/execute` — fires async pipeline, returns 202 immediately
-- Reads `architecture_agent_configs` to resolve pipeline; falls back to `DEFAULT_PIPELINE`
-- Creates steps (running → completed), persists artifacts, creates artifact_dependencies
-- Sets `finished_at` on completion, run status: `completed` | `failed`
+## AI Stack — Routing Flow
 
-### Agent Registry
-- `server/lib/agents/registry.ts` — maps agentKey → AgentContract
-- Add new agents by implementing `AgentContract` and registering in registry
-- V1: deterministic output generators; V2: plug in OpenAI function-calling per agent
+```
+runAiCall(context, input)
+  → resolveRoute(routeKey, tenantId)
+      → loadOverride() — tenant → global → null
+      → fallback: AI_MODEL_ROUTES[routeKey]
+  → getProvider(provider)
+  → provider.generateText(...)
+  → logAiUsage(...)
+```
 
-### New Routes
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/runs/:id/execute` | Start pipeline (async, 202) |
-| GET | `/api/runs/:id/artifact-dependencies` | List artifact deps for a run |
-| GET | `/api/runs/:id/commit-preview` | GitHub commit preview (metadata only) |
+## Key Files
 
-### UI
-- `/runs` — Run list with run_number, title, status, clickable rows
-- `/runs/:id` — Run detail: Steps timeline, Artifacts grid, Commit Preview panel
-- Auto-refresh every 2s while run is active
+- `shared/schema.ts` — all tables including ai_usage, ai_model_overrides
+- `server/lib/ai/config.ts` — AI_MODEL_ROUTES (6 routes), AiProviderKey
+- `server/lib/ai/runner.ts` — runAiCall()
+- `server/lib/ai/router.ts` — resolveRoute() (async)
+- `server/lib/ai/overrides.ts` — loadOverride() + TTL cache
+- `server/lib/ai/providers/registry.ts` — ACTIVE_PROVIDERS
+- `server/features/ai-summarize/summarize.service.ts` — first feature
 
-## Database Schema (19 tables)
+## Database Notes
 
-| Domain | Tables |
-|--------|--------|
-| Identity | `profiles` |
-| Multi-tenancy | `organizations`, `organization_members` |
-| Projects | `projects` (+ github_owner, github_repo, github_default_branch, github_repo_url) |
-| Architectures | `architecture_profiles`, `architecture_versions` (+ version_label, description, changelog), `architecture_agent_configs`, `architecture_capability_configs`, `architecture_template_bindings`, `architecture_policy_bindings` |
-| AI Runs | `ai_runs` (+ run_number, title, description, tags, finished_at, github_*), `ai_steps` (+ title, description, tags, startedAt, completedAt), `ai_artifacts` (+ description, path, version, tags), `ai_tool_calls`, `ai_approvals` |
-| Artifact Graph | `artifact_dependencies` (from_artifact_id, to_artifact_id, dependency_type) |
-| Integrations | `integrations`, `organization_secrets` |
-| Knowledge (RAG prep) | `knowledge_documents` |
+- **Demo org**: `demo-org`, projectId `ebd30281-0f9c-43c8-bb06-c20e531e8fc4`
+- **DB push command**: `npm run db:push`
+- **Next migration index**: `0003_*`
+- `ai_model_overrides` has coalesce unique index applied directly via SQL (not in Drizzle schema)
 
-## GitHub Versioning (metadata layer — write pipeline NOT yet active)
+## V2 / Next TODO
 
-Commit format (Phase 2 ready):
-- Title: `[AI RUN {run_number}] {run_title}`
-- Body: Architecture / Version / Run ID / Steps / Tags / Changelog
-- Branch: `ai-run/{run_number}/{slugified-title}`
-- Tags: `ai-run-v{run_number}`, `architecture-{slug}-v{version}`
-
-Key files:
-- `server/lib/github-commit-format.ts` — commit/tag/branch formatters (read-only utility)
-- `GET /api/runs/:id/commit-preview` — returns preview of what commit will look like
-
-## Migrations
-
-| File | Description |
-|------|-------------|
-| `migrations/0000_calm_thunderbird.sql` | V1 baseline — all 18 tables |
-| `migrations/0001_premium_james_howlett.sql` | GitHub versioning metadata — run_number, title, description, tags, finished_at, github_*, version_label, changelog |
-
-## V2 TODO
-
-- [ ] Real Supabase Auth session (frontend login/signup pages)
-- [ ] GitHub tool execution (create branch, write file, open PR)
-- [ ] OpenAI provider behind `LLMProvider` interface
+- [ ] Phase 4: Admin UI for model routing overrides
+- [ ] Real Supabase Auth session (frontend login/signup)
+- [ ] GitHub tool execution (create branch, write files, open PR)
 - [ ] `knowledge_chunks` + `knowledge_vectors` tables
+- [ ] Full RLS policies on all tenant tables
 - [ ] Vercel deployment automation
-- [ ] Full RLS policies
 
 ## Running
 
