@@ -20,7 +20,7 @@
  *
  * Cache key construction:
  *   1. Hash raw content: SHA-256(systemPrompt + "|" + userInput) → contentHash
- *   2. Build fingerprint: "<version>:<tenantId>:<routeKey>:<provider>:<model>:<contentHash>"
+ *   2. Build fingerprint: "<version>:<tenantId>:<routeKey>:<provider>:<model>:<maxOutputTokens>:<contentHash>"
  *   3. Hash fingerprint: SHA-256(fingerprint) → final cacheKey stored in DB
  *
  * Phase 3I.
@@ -40,6 +40,8 @@ export interface CacheContext {
   routeKey: string;
   provider: string;
   model: string;
+  /** Resolved output token cap used for the provider call — included in cache fingerprint */
+  maxOutputTokens: number;
   systemPrompt: string;
   userInput: string;
   requestId?: string | null;
@@ -270,6 +272,7 @@ function buildCacheKey(
     ctx.routeKey,
     ctx.provider,
     ctx.model,
+    String(ctx.maxOutputTokens),
     contentHash,
   ].join(":");
   const cacheKey = sha256(fingerprint);
