@@ -134,8 +134,9 @@ runAiCall(context, input)
 - **Demo org**: `demo-org`, projectId `ebd30281-0f9c-43c8-bb06-c20e531e8fc4`
 - **DB push command**: `npm run db:push`
 - **Next migration index**: `0003_*`
-- `ai_model_overrides` has coalesce unique index applied directly via SQL (not in Drizzle schema)
-- `ai_model_pricing` has partial unique index `ON ai_model_pricing (provider, model) WHERE is_active = true` applied via SQL
+- `ai_model_overrides` — partial unique expression index applied directly via SQL (Drizzle does not support expression indexes): `CREATE UNIQUE INDEX ai_model_overrides_active_unique_idx ON ai_model_overrides (scope, COALESCE(scope_id, 'global'), route_key) WHERE is_active = true`
+- `ai_model_overrides` — CHECK constraint `scope IN ('global', 'tenant')` managed by Drizzle (`check()`)
+- `ai_model_pricing` — partial unique index `ON ai_model_pricing (provider, model) WHERE is_active = true` managed by Drizzle (index name: `ai_model_pricing_active_unique_idx`)
 - `ai_usage.estimated_cost_usd` is `numeric(12,8)` — Drizzle returns as string, convert with `Number()` when reading
 - `ai_usage_limits` has unique index on `tenant_id` — one row per tenant
 - `usage_threshold_events` — append-only foundation, deduplicated by 24h window per event_type

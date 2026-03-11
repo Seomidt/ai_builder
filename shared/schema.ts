@@ -11,6 +11,7 @@ import {
   pgEnum,
   index,
   uniqueIndex,
+  check,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -865,6 +866,12 @@ export const aiModelOverrides = pgTable(
   (t) => [
     index("ai_model_overrides_active_idx").on(t.isActive),
     index("ai_model_overrides_route_key_idx").on(t.routeKey),
+    // Enforces "global" | "tenant" only — prevents silent bad data
+    check("ai_model_overrides_scope_check", sql`scope IN ('global', 'tenant')`),
+    // Partial unique index for active rows is applied directly via SQL (see replit.md) because
+    // Drizzle does not support expression indexes (COALESCE). Index name:
+    //   ai_model_overrides_active_unique_idx
+    //   ON ai_model_overrides (scope, COALESCE(scope_id, 'global'), route_key) WHERE is_active = true
   ],
 );
 
@@ -914,6 +921,10 @@ export const aiModelPricing = pgTable(
   (t) => [
     index("ai_model_pricing_active_idx").on(t.isActive),
     index("ai_model_pricing_provider_model_idx").on(t.provider, t.model),
+    // Enforces at most one active pricing row per provider+model combination
+    uniqueIndex("ai_model_pricing_active_unique_idx")
+      .on(t.provider, t.model)
+      .where(sql`is_active = true`),
   ],
 );
 
