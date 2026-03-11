@@ -1499,6 +1499,161 @@ export const insertAiRequestStepStateSchema = createInsertSchema(aiRequestStepSt
 export type InsertAiRequestStepState = z.infer<typeof insertAiRequestStepStateSchema>;
 export type AiRequestStepState = typeof aiRequestStepStates.$inferSelect;
 
+// ─── AI Customer Pricing Configs ─────────────────────────────────────────────
+// Admin-configured customer-facing pricing for AI usage.
+// Determines how provider_cost_usd is marked up to produce customer_price_usd.
+//
+// Two scopes:
+//   "global"  — fallback for all tenants that have no tenant-specific config
+//   "tenant"  — per-tenant override; takes precedence over global row
+//
+// Only one active row per scope (enforced via partial unique indexes).
+// Pricing changes never mutate past ai_billing_usage rows — billing is immutable.
+//
+// Supported pricing modes:
+//   "cost_plus_multiplier" — customer_price = max(min_charge, provider_cost × multiplier)
+//   "fixed_markup"         — customer_price = max(min_charge, provider_cost + fixed_markup)
+//   "per_1k_tokens"        — customer_price = (input/1000 × rate) + (output/1000 × rate)
+
+export const aiCustomerPricingConfigs = pgTable(
+  "ai_customer_pricing_configs",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** Null for global scope; tenant/org id for tenant scope */
+    tenantId: text("tenant_id"),
+    /** "global" | "tenant" */
+    scope: text("scope").notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    /**
+     * How customer price is computed from provider cost.
+     * "cost_plus_multiplier" | "fixed_markup" | "per_1k_tokens"
+     */
+    pricingMode: text("pricing_mode").notNull(),
+    /** Used by cost_plus_multiplier: customer = provider_cost × multiplier */
+    multiplier: numeric("multiplier", { precision: 12, scale: 4 }),
+    /** Used by fixed_markup: customer = provider_cost + fixed_markup_usd */
+    fixedMarkupUsd: numeric("fixed_markup_usd", { precision: 14, scale: 8 }),
+    /** Used by per_1k_tokens: price per 1,000 input tokens */
+    pricePer1kInputTokensUsd: numeric("price_per_1k_input_tokens_usd", { precision: 14, scale: 8 }),
+    /** Used by per_1k_tokens: price per 1,000 output tokens */
+    pricePer1kOutputTokensUsd: numeric("price_per_1k_output_tokens_usd", { precision: 14, scale: 8 }),
+    /** Optional floor: customer_price is always >= minimum_charge_usd */
+    minimumChargeUsd: numeric("minimum_charge_usd", { precision: 14, scale: 8 }),
+    notes: text("notes"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("ai_customer_pricing_configs_scope_check", sql`scope IN ('global','tenant')`),
+    check(
+      "ai_customer_pricing_configs_mode_check",
+      sql`pricing_mode IN ('cost_plus_multiplier','fixed_markup','per_1k_tokens')`,
+    ),
+    // One active global config row at most
+    uniqueIndex("ai_customer_pricing_configs_active_global_idx")
+      .on(t.scope)
+      .where(sql`scope = 'global' AND is_active = true`),
+    // One active tenant config row per tenant_id at most
+    uniqueIndex("ai_customer_pricing_configs_active_tenant_idx")
+      .on(t.tenantId)
+      .where(sql`scope = 'tenant' AND is_active = true`),
+    index("ai_customer_pricing_configs_tenant_idx").on(t.tenantId),
+    index("ai_customer_pricing_configs_active_idx").on(t.isActive),
+  ],
+);
+
+export const insertAiCustomerPricingConfigSchema = createInsertSchema(aiCustomerPricingConfigs).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertAiCustomerPricingConfig = z.infer<typeof insertAiCustomerPricingConfigSchema>;
+export type AiCustomerPricingConfig = typeof aiCustomerPricingConfigs.$inferSelect;
+
+// ─── AI Billing Usage Ledger ──────────────────────────────────────────────────
+// Immutable billing ledger — one row per successful ai_usage row.
+// Records both provider cost and customer price at the moment of billing.
+//
+// Design rules:
+//   - One billing row per ai_usage row max (UNIQUE on usage_id)
+//   - Rows are never updated — pricing changes do not mutate past rows
+//   - Only created after a confirmed successful ai_usage insert
+//   - Blocked, error, cache-hit, and replay rows never create billing rows
+//   - margin_usd = customer_price_usd - provider_cost_usd (may be 0)
+//   - pricing_source records config resolution path for audit
+
+export const aiBillingUsage = pgTable(
+  "ai_billing_usage",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** Tenant that owns this billing row */
+    tenantId: text("tenant_id").notNull(),
+    /** Foreign key to ai_usage.id — one billing row per usage row */
+    usageId: text("usage_id").notNull(),
+    /** HTTP request ID for tracing */
+    requestId: text("request_id"),
+    /** Feature or agent key that made the AI call */
+    feature: text("feature"),
+    /** Logical route key */
+    routeKey: text("route_key"),
+    /** AI provider key */
+    provider: text("provider"),
+    /** Concrete model identifier */
+    model: text("model"),
+    /** Input tokens used as billable basis */
+    inputTokensBillable: integer("input_tokens_billable").notNull().default(0),
+    /** Output tokens used as billable basis */
+    outputTokensBillable: integer("output_tokens_billable").notNull().default(0),
+    /** Total tokens used as billable basis */
+    totalTokensBillable: integer("total_tokens_billable").notNull().default(0),
+    /** Provider cost at time of billing (from ai_usage.estimated_cost_usd) */
+    providerCostUsd: numeric("provider_cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** Customer-facing price calculated from pricing config */
+    customerPriceUsd: numeric("customer_price_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** margin_usd = customer_price_usd - provider_cost_usd */
+    marginUsd: numeric("margin_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /**
+     * How pricing was resolved for this billing row.
+     * "tenant_config"  — active tenant-specific row from ai_customer_pricing_configs
+     * "global_config"  — active global row from ai_customer_pricing_configs
+     * "code_default"   — no DB config found; hardcoded fallback used
+     */
+    pricingSource: text("pricing_source").notNull(),
+    /** Version: ai_customer_pricing_configs.id used, or null for code_default */
+    pricingVersion: text("pricing_version"),
+    /**
+     * Pricing mode applied to compute this row.
+     * "cost_plus_multiplier" | "fixed_markup" | "per_1k_tokens"
+     */
+    pricingMode: text("pricing_mode").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    // Core invariant: one billing row per ai_usage row
+    uniqueIndex("ai_billing_usage_usage_id_idx").on(t.usageId),
+    index("ai_billing_usage_tenant_idx").on(t.tenantId),
+    index("ai_billing_usage_created_at_idx").on(t.createdAt),
+    index("ai_billing_usage_request_id_idx").on(t.requestId),
+    index("ai_billing_usage_feature_idx").on(t.feature),
+    index("ai_billing_usage_route_key_idx").on(t.routeKey),
+    check("ai_billing_usage_provider_cost_check", sql`provider_cost_usd >= 0`),
+    check("ai_billing_usage_customer_price_check", sql`customer_price_usd >= 0`),
+    check("ai_billing_usage_input_tokens_check", sql`input_tokens_billable >= 0`),
+    check("ai_billing_usage_output_tokens_check", sql`output_tokens_billable >= 0`),
+    check("ai_billing_usage_total_tokens_check", sql`total_tokens_billable >= 0`),
+  ],
+);
+
+export const insertAiBillingUsageSchema = createInsertSchema(aiBillingUsage).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertAiBillingUsage = z.infer<typeof insertAiBillingUsageSchema>;
+export type AiBillingUsage = typeof aiBillingUsage.$inferSelect;
+
 // ─── AI Request Step Events ───────────────────────────────────────────────────
 // Append-only observability log for step budget lifecycle events.
 //

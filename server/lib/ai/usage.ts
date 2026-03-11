@@ -25,6 +25,7 @@ import { db } from "../../db";
 import { aiUsage, tenantAiUsagePeriods } from "@shared/schema";
 import { getCurrentPeriod } from "./usage-periods";
 import { runAnomalyDetection } from "./anomaly-detector";
+import { maybeRecordAiBillingUsage } from "./billing";
 
 export interface LogAiUsagePayload {
   tenantId?: string | null;
@@ -154,11 +155,32 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
     return;
   }
 
-  // Only aggregate successful calls with a known tenant.
+  // Only aggregate and bill successful calls with a known tenant.
   // "error" and "blocked" rows must not increment the aggregate — no provider usage occurred.
   if (payload.status !== "success" || !payload.tenantId) return;
 
   await upsertUsagePeriodAggregate(payload);
+
+  // Phase 4A: billing write after confirmed successful usage insert.
+  // Fire-and-forget — billing failure must never break AI runtime.
+  maybeRecordAiBillingUsage({
+    usageId: inserted[0].id,
+    tenantId: payload.tenantId,
+    requestId: payload.requestId ?? null,
+    feature: payload.feature,
+    routeKey: null,
+    provider: payload.provider ?? null,
+    model: payload.model,
+    inputTokensBillable: payload.inputTokensBillable ?? payload.promptTokens ?? 0,
+    outputTokensBillable: payload.outputTokensBillable ?? payload.completionTokens ?? 0,
+    totalTokensBillable: payload.totalTokens ?? 0,
+    providerCostUsd: payload.estimatedCostUsd ?? 0,
+  }).catch((err) => {
+    console.error(
+      "[ai/usage] Billing write error (suppressed):",
+      err instanceof Error ? err.message : err,
+    );
+  });
 
   // Phase 3K: anomaly detection after confirmed successful usage write.
   // Fire-and-forget — must never block or throw into the caller.
