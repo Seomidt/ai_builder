@@ -7,6 +7,10 @@
  * This is the only fully-wired provider in Phase 3C.
  * All OpenAI-specific logic is encapsulated here — no other module
  * should import the OpenAI SDK directly for text generation.
+ *
+ * Token extraction:
+ *   cached_input_tokens — usage.input_token_details.cached_tokens (0 if absent)
+ *   reasoning_tokens    — usage.output_token_details.reasoning_tokens (0 if absent)
  */
 
 import { getOpenAIClient } from "../../openai-client";
@@ -41,10 +45,20 @@ export class OpenAiProvider implements AiProvider {
 
       let usage: AiProviderGenerateResult["usage"] = null;
       if (response.usage) {
+        const raw = response.usage as {
+          input_tokens?: number;
+          output_tokens?: number;
+          total_tokens?: number;
+          input_token_details?: { cached_tokens?: number };
+          output_token_details?: { reasoning_tokens?: number };
+        };
+
         usage = {
-          input_tokens: response.usage.input_tokens ?? 0,
-          output_tokens: response.usage.output_tokens ?? 0,
-          total_tokens: response.usage.total_tokens ?? 0,
+          input_tokens: raw.input_tokens ?? 0,
+          output_tokens: raw.output_tokens ?? 0,
+          total_tokens: raw.total_tokens ?? 0,
+          cached_input_tokens: raw.input_token_details?.cached_tokens ?? 0,
+          reasoning_tokens: raw.output_token_details?.reasoning_tokens ?? 0,
         };
       }
 

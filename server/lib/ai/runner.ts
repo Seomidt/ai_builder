@@ -14,6 +14,10 @@
  * Phase 3E: async routing with tenant/global DB overrides
  * Phase 3F: cost estimation via loadPricing() + estimateAiCost()
  * Phase 3G: AI usage guardrails — budget_mode policy + hard stop via guards.ts
+ * Final hardening:
+ *   - Cost basis logging: pricing_source, pricing_version, billable token fields,
+ *     cached_input_tokens, reasoning_tokens written to ai_usage
+ *   - status="blocked" for guardrail hard-stop (distinct from provider errors)
  */
 
 import OpenAI from "openai";
@@ -54,10 +58,10 @@ export interface AiCallInput {
  *   1. Resolve provider + model (route overrides aware)
  *   2. Get provider adapter
  *   3. Evaluate tenant usage guardrail state (skipped if no tenantId)
- *   4. Hard stop if state === "blocked" → throw AiBudgetExceededError
+ *   4. Hard stop if state === "blocked" → log status="blocked", throw AiBudgetExceededError
  *   5. Apply budget mode policy if state === "budget_mode"
  *   6. Execute provider call
- *   7. Estimate cost, log usage, record threshold events
+ *   7. Estimate cost, log usage with full cost basis, record threshold events
  *
  * Guard failure safe behavior:
  *   DB errors inside guards.ts are caught internally and return null/0.
@@ -123,6 +127,8 @@ export async function runAiCall(
   }
 
   // ── Hard stop ────────────────────────────────────────────────────────────────
+  // Log status="blocked" — analytically distinct from provider errors.
+  // No aggregate increment: no provider call was made, no tokens consumed.
   if (guardState === "blocked") {
     const latencyMs = Date.now() - startMs;
     const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
@@ -134,7 +140,7 @@ export async function runAiCall(
       userId: userId ?? null,
       requestId: context.requestId ?? null,
       model: route.model,
-      status: "error",
+      status: "blocked",
       errorMessage: "AI budget exceeded: included usage exhausted",
       latencyMs,
       estimatedCostUsd: null,
@@ -176,8 +182,13 @@ export async function runAiCall(
 
     const latencyMs = Date.now() - startMs;
 
-    const pricing = await loadPricing(route.provider, route.model);
-    const estimatedCostUsd = estimateAiCost({ usage: result.usage ?? null, pricing });
+    const pricingResult = await loadPricing(route.provider, route.model);
+    const estimatedCostUsd = estimateAiCost({ usage: result.usage ?? null, pricing: pricingResult.pricing });
+
+    // Cost basis: billable tokens = same as raw tokens in current formula.
+    // Stored explicitly so future billing can reconstruct the cost calculation.
+    const inputTokensBillable = result.usage?.input_tokens ?? null;
+    const outputTokensBillable = result.usage?.output_tokens ?? null;
 
     void logAiUsage({
       feature,
@@ -193,6 +204,12 @@ export async function runAiCall(
       status: "success",
       latencyMs,
       estimatedCostUsd,
+      pricingSource: pricingResult.source,
+      pricingVersion: pricingResult.version,
+      inputTokensBillable,
+      outputTokensBillable,
+      cachedInputTokens: result.usage?.cached_input_tokens ?? 0,
+      reasoningTokens: result.usage?.reasoning_tokens ?? 0,
     });
 
     if (tenantId && guardLimit && guardState !== "normal") {

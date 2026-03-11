@@ -776,7 +776,7 @@ export type ArtifactDependency = typeof artifactDependencies.$inferSelect;
 // Infrastructure table — records every LLM call for cost, latency, and debugging.
 // Intentionally generic: no business-domain columns.
 
-export const aiUsageStatusEnum = pgEnum("ai_usage_status", ["success", "error"]);
+export const aiUsageStatusEnum = pgEnum("ai_usage_status", ["success", "error", "blocked"]);
 
 export const aiUsage = pgTable(
   "ai_usage",
@@ -806,6 +806,43 @@ export const aiUsage = pgTable(
     latencyMs: integer("latency_ms"),
     /** Estimated USD cost calculated from token usage × pricing — null if pricing unknown */
     estimatedCostUsd: numeric("estimated_cost_usd", { precision: 12, scale: 8 }),
+    /**
+     * Which pricing source resolved pricing for this call.
+     * "db_override" = active row from ai_model_pricing table
+     * "code_default" = fallback from AI_MODEL_PRICING_DEFAULTS in costs.ts
+     * null = no pricing found (estimated_cost_usd will also be null)
+     */
+    pricingSource: text("pricing_source"),
+    /**
+     * Version identifier for the pricing used.
+     * For "db_override": the ai_model_pricing row id
+     * For "code_default": null (code defaults have no version id)
+     * null when pricingSource is null
+     */
+    pricingVersion: text("pricing_version"),
+    /**
+     * Input tokens actually used as the billable basis for cost math.
+     * Equals prompt_tokens in current formula. Null means same as prompt_tokens.
+     * Stored explicitly so future billing can reconstruct the cost calculation.
+     */
+    inputTokensBillable: integer("input_tokens_billable"),
+    /**
+     * Output tokens actually used as the billable basis for cost math.
+     * Equals completion_tokens in current formula. Null means same as completion_tokens.
+     */
+    outputTokensBillable: integer("output_tokens_billable"),
+    /**
+     * Cached prompt/context tokens returned by the provider.
+     * OpenAI: usage.input_token_details.cached_tokens — 0 if not reported.
+     * Used for future cache-aware pricing and analytics.
+     */
+    cachedInputTokens: integer("cached_input_tokens").notNull().default(0),
+    /**
+     * Reasoning tokens (OpenAI o-series models) returned by the provider.
+     * OpenAI: usage.output_token_details.reasoning_tokens — 0 if not reported.
+     * Used for future model-specific pricing and analytics.
+     */
+    reasoningTokens: integer("reasoning_tokens").notNull().default(0),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [

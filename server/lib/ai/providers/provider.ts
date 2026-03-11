@@ -28,11 +28,21 @@ export interface AiProviderGenerateInput {
 export interface AiProviderGenerateResult {
   /** Generated text from the model */
   text: string;
-  /** Token usage reported by the provider — null if unavailable */
+  /**
+   * Token usage reported by the provider — null if unavailable.
+   *
+   * input_tokens / output_tokens / total_tokens — normalized usage values
+   * cached_input_tokens — prompt tokens served from cache (OpenAI: input_token_details.cached_tokens)
+   * reasoning_tokens    — reasoning tokens (OpenAI o-series: output_token_details.reasoning_tokens)
+   *
+   * Providers that do not support cached or reasoning tokens return 0 for those fields.
+   */
   usage: {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
+    cached_input_tokens: number;
+    reasoning_tokens: number;
   } | null;
   /** Raw provider response — for debugging only, never exposed to clients */
   raw: unknown;

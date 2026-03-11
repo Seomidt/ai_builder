@@ -15,6 +15,9 @@
  *
  * Phase 3G.1: added provider field, aggregate period upsert
  * Hardening: idempotency via partial unique index on (tenant_id, request_id)
+ * Final hardening: cost basis fields — pricing_source, pricing_version,
+ *   input_tokens_billable, output_tokens_billable, cached_input_tokens, reasoning_tokens.
+ *   Status "blocked" for guardrail hard-stop events (distinct from provider errors).
  */
 
 import { sql } from "drizzle-orm";
@@ -33,16 +36,57 @@ export interface LogAiUsagePayload {
   provider?: string | null;
   /** Concrete model identifier (e.g. "gpt-4.1-mini") */
   model: string;
+  /** Normalized input token count reported by provider */
   promptTokens?: number | null;
+  /** Normalized output token count reported by provider */
   completionTokens?: number | null;
+  /** Normalized total token count reported by provider */
   totalTokens?: number | null;
   /** First N chars of user input for debugging — never store full prompts */
   inputPreview?: string | null;
-  status: "success" | "error";
+  /**
+   * "success" — provider call completed and returned a result
+   * "error"   — provider call failed (network, timeout, quota, etc.)
+   * "blocked" — call was stopped by a guardrail before reaching the provider
+   */
+  status: "success" | "error" | "blocked";
   errorMessage?: string | null;
   latencyMs?: number | null;
   /** Estimated USD cost from token usage × pricing — null if pricing unknown */
   estimatedCostUsd?: number | null;
+  /**
+   * Pricing source used for cost calculation.
+   * "db_override"  — active row from ai_model_pricing table
+   * "code_default" — fallback from AI_MODEL_PRICING_DEFAULTS in costs.ts
+   * null           — no pricing found
+   */
+  pricingSource?: string | null;
+  /**
+   * Version identifier for the pricing used.
+   * For "db_override": the ai_model_pricing row id
+   * For "code_default" or not found: null
+   */
+  pricingVersion?: string | null;
+  /**
+   * Input tokens used as the billable basis for cost math.
+   * Equals promptTokens in current formula. Null means not tracked (same as promptTokens).
+   */
+  inputTokensBillable?: number | null;
+  /**
+   * Output tokens used as the billable basis for cost math.
+   * Equals completionTokens in current formula. Null means not tracked (same as completionTokens).
+   */
+  outputTokensBillable?: number | null;
+  /**
+   * Cached prompt/context tokens returned by the provider.
+   * OpenAI: usage.input_token_details.cached_tokens — 0 if not reported or provider unsupported.
+   */
+  cachedInputTokens?: number | null;
+  /**
+   * Reasoning tokens returned by the provider.
+   * OpenAI o-series: usage.output_token_details.reasoning_tokens — 0 if not reported.
+   */
+  reasoningTokens?: number | null;
 }
 
 /**
@@ -52,6 +96,11 @@ export interface LogAiUsagePayload {
  * (tenant_id, request_id) WHERE request_id IS NOT NULL. If a duplicate is
  * detected (empty returning), the aggregate upsert is also skipped so no
  * double-counting occurs. Calls without a request_id are not deduplicated.
+ *
+ * Status discipline:
+ *   "success" — provider call succeeded — aggregate is updated
+ *   "error"   — provider call failed — aggregate is NOT updated
+ *   "blocked" — guardrail hard-stop — aggregate is NOT updated (no provider usage occurred)
  *
  * Fire-and-forget: any database error is caught and logged to console only.
  * The calling code never sees a thrown error from this function.
@@ -79,6 +128,12 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
         estimatedCostUsd: payload.estimatedCostUsd != null
           ? String(payload.estimatedCostUsd)
           : null,
+        pricingSource: payload.pricingSource ?? null,
+        pricingVersion: payload.pricingVersion ?? null,
+        inputTokensBillable: payload.inputTokensBillable ?? null,
+        outputTokensBillable: payload.outputTokensBillable ?? null,
+        cachedInputTokens: payload.cachedInputTokens ?? 0,
+        reasoningTokens: payload.reasoningTokens ?? 0,
       })
       .onConflictDoNothing()
       .returning({ id: aiUsage.id });
@@ -98,7 +153,8 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
     return;
   }
 
-  // Only aggregate successful calls with a known tenant
+  // Only aggregate successful calls with a known tenant.
+  // "error" and "blocked" rows must not increment the aggregate — no provider usage occurred.
   if (payload.status !== "success" || !payload.tenantId) return;
 
   await upsertUsagePeriodAggregate(payload);
