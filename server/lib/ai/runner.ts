@@ -4,9 +4,10 @@
  * SERVER-ONLY: This module must never be imported from client/ code.
  *
  * runAiCall() is the single function all future AI features should call.
- * It resolves provider + model via the router, enforces request safety,
- * runs usage guardrails, checks the response cache, invokes the provider adapter,
- * estimates cost, logs usage, writes to cache, and normalises errors.
+ * It resolves provider + model via the router, enforces idempotency,
+ * enforces request safety, runs usage guardrails, checks the response cache,
+ * invokes the provider adapter, estimates cost, logs usage, writes to cache,
+ * and normalises errors.
  *
  * Phase 3C: routes through router.ts → providers/registry.ts → provider adapter
  * Phase 3E: async routing with tenant/global DB overrides
@@ -16,23 +17,34 @@
  * Phase 3H: request safety — token cap, rate limit, concurrency guard
  * Phase 3H.1: correct HTTP status codes + Retry-After support
  * Phase 3I: tenant-safe response cache — hit/miss/write observability
+ * Phase 3J: idempotency + retry-storm protection
  *
  * Request flow:
- *   1. Resolve route (provider + model)
- *   2. Get provider adapter
- *   3. Resolve effective safety config (tenant DB override → global defaults)
- *   4. Token cap precheck (blocks oversized input before provider call)
- *   5. Rate limit check (RPM + RPH)
- *   6. Concurrency guard acquire (process-local slot)
- *   7. Budget/usage guard (existing per-period cost guardrail)
- *   8. Budget mode policy (verbosity reduction)
- *   9. Cache policy resolve + lookup
- *      └─ HIT  → record cache_hit event → return cached result (no provider call)
- *      └─ MISS → record cache_miss event → continue to step 10
- *  10. Provider call with centrally enforced maxOutputTokens
- *  11. Usage logging + threshold events
- *  12. Cache write (success only, if route is cacheable)
- *  13. Concurrency slot release (in finally — always runs)
+ *   1.  Resolve route (provider + model)
+ *   2.  Get provider adapter
+ *   3.  Idempotency check (when request_id present):
+ *       └─ duplicate_inflight → 409 Conflict (no provider call)
+ *       └─ duplicate_replay   → return stored result (no provider call, no cost row)
+ *       └─ owned              → proceed; release in finally
+ *   4.  Resolve effective safety config (tenant DB override → global defaults)
+ *   5.  Token cap precheck (blocks oversized input before provider call)
+ *   6.  Rate limit check (RPM + RPH)
+ *   7.  Concurrency guard acquire (process-local slot)
+ *   8.  Budget/usage guard (existing per-period cost guardrail)
+ *   9.  Budget mode policy (verbosity reduction)
+ *  10.  Cache policy resolve + lookup
+ *       └─ HIT  → record cache_hit event → return cached result (no provider call)
+ *       └─ MISS → record cache_miss event → continue to step 11
+ *  11.  Provider call with centrally enforced maxOutputTokens
+ *  12.  Usage logging + threshold events
+ *  13.  Cache write (success only, if route is cacheable)
+ *  14.  Mark request completed (idempotency state update)
+ *  15.  Concurrency slot release + idempotency ownership release (in finally)
+ *
+ * Idempotency accounting (Phase 3J):
+ *   - duplicate_inflight:  no provider call, no ai_usage row, 409 returned
+ *   - duplicate_replay:    no provider call, no ai_usage row, stored result returned
+ *   - First execution:     normal ai_usage row written; idempotency state = completed
  *
  * Cache accounting decision (Phase 3I):
  *   - Cache HIT:  NO ai_usage row written (zero provider cost). Observable via ai_cache_events.
@@ -67,6 +79,12 @@ import {
   storeCachedResponse,
 } from "./response-cache";
 import {
+  beginAiRequest,
+  markAiRequestCompleted,
+  markAiRequestFailed,
+  releaseAiRequestOwnership,
+} from "./idempotency";
+import {
   AiUnavailableError,
   AiTimeoutError,
   AiQuotaError,
@@ -75,6 +93,7 @@ import {
   AiTokenCapError,
   AiRateLimitError,
   AiConcurrencyError,
+  AiDuplicateInflightError,
   type AiErrorMeta,
 } from "./errors";
 import type { AiCallContext, AiCallResult } from "./types";
@@ -89,17 +108,20 @@ export interface AiCallInput {
  * Execute a single AI call with full lifecycle management.
  *
  * Safety guarantees:
+ *   - No provider call is made if request is a known duplicate (inflight or completed)
  *   - No provider call is made if token cap, rate limit, or concurrency check fails
  *   - No provider call is made on a cache hit
  *   - Concurrency slot is always released (success, cache hit, error, or safety block)
- *   - Provider/model is NEVER switched by safety or cache logic — same route always used
+ *   - Idempotency ownership is always released (success, replay, error, safety block)
+ *   - Provider/model is NEVER switched by safety, cache, or idempotency logic
  *   - All safety blocks are recorded in request_safety_events for traceability
  *   - Cache hits are recorded in ai_cache_events — not in ai_usage (no cost row)
+ *   - Duplicate replays do NOT create new ai_usage provider-cost rows
  *   - Only successful, non-empty provider responses are written to cache
  *
  * @param context  Identity, routing, and tracing metadata from the caller
  * @param input    System prompt and user input for the model
- * @returns        Normalised AiCallResult on success (provider or cache)
+ * @returns        Normalised AiCallResult on success (provider, cache, or replay)
  * @throws         Typed AiError subclass on failure — always after logging
  */
 export async function runAiCall(
@@ -137,7 +159,50 @@ export async function runAiCall(
     throw aiErr;
   }
 
-  // ── Step 3: Resolve effective safety config ───────────────────────────────────
+  // ── Step 3: Idempotency check ─────────────────────────────────────────────────
+  // Only when tenantId + requestId are both present.
+  // No request_id → proceed normally (Case A in spec).
+  let idpOwned = false;
+  let idpStateId = "";
+  let idpInflightKey = "";
+
+  if (tenantId && context.requestId) {
+    const idpResult = await beginAiRequest({
+      tenantId,
+      requestId: context.requestId,
+      routeKey: modelKey,
+      provider: route.provider,
+      model: route.model,
+    });
+
+    if (idpResult.outcome === "duplicate_inflight") {
+      // Case C — another execution of this request_id is in progress
+      const latencyMs = Date.now() - startMs;
+      const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
+      emitRunnerLog({
+        feature, model: route.model, latencyMs, guardState: "normal",
+        success: false, error: "duplicate_inflight",
+      });
+      throw new AiDuplicateInflightError({ ...meta, requestId: context.requestId });
+    }
+
+    if (idpResult.outcome === "duplicate_replay") {
+      // Case D — prior completed result available; return it without any provider call
+      const latencyMs = Date.now() - startMs;
+      emitRunnerLog({
+        feature, model: route.model, latencyMs, guardState: "normal",
+        success: true, duplicateReplay: true,
+      });
+      return idpResult.payload;
+    }
+
+    // outcome = "owned" — we have exclusive execution rights
+    idpOwned = true;
+    idpStateId = idpResult.stateId;
+    idpInflightKey = idpResult.inflightKey;
+  }
+
+  // ── Step 4: Resolve effective safety config ───────────────────────────────────
   const safetyConfig = await resolveEffectiveSafetyConfig(tenantId);
 
   const safetyMeta: AiErrorMeta = { feature, model: route.model, latencyMs: Date.now() - startMs };
@@ -151,7 +216,7 @@ export async function runAiCall(
     meta: safetyMeta,
   };
 
-  // ── Step 4: Token cap precheck ───────────────────────────────────────────────
+  // ── Step 5: Token cap precheck ───────────────────────────────────────────────
   if (tenantId) {
     await checkTokenCap({
       userInput: input.userInput,
@@ -160,7 +225,7 @@ export async function runAiCall(
     });
   }
 
-  // ── Step 5: Rate limit check ─────────────────────────────────────────────────
+  // ── Step 6: Rate limit check ─────────────────────────────────────────────────
   if (tenantId) {
     await checkRateLimit({
       safetyConfig,
@@ -168,7 +233,7 @@ export async function runAiCall(
     });
   }
 
-  // ── Step 6: Concurrency guard acquire ────────────────────────────────────────
+  // ── Step 7: Concurrency guard acquire ────────────────────────────────────────
   let concurrencyAcquired = false;
   if (tenantId) {
     await acquireConcurrencySlot({
@@ -179,7 +244,7 @@ export async function runAiCall(
   }
 
   try {
-    // ── Step 7: Budget/usage guardrail ─────────────────────────────────────────
+    // ── Step 8: Budget/usage guardrail ─────────────────────────────────────────
     let guardState: AiUsageState = "normal";
     let guardLimit: AiUsageLimit | null = null;
     let guardCurrentUsageUsd = 0;
@@ -227,7 +292,7 @@ export async function runAiCall(
       throw new AiBudgetExceededError(meta);
     }
 
-    // ── Step 8: Budget mode policy ──────────────────────────────────────────────
+    // ── Step 9: Budget mode policy ──────────────────────────────────────────────
     const effectiveSystemPrompt =
       guardState === "budget_mode"
         ? `${BUDGET_MODE_POLICY.systemPromptPrefix}${input.systemPrompt}`
@@ -238,7 +303,7 @@ export async function runAiCall(
         ? Math.min(BUDGET_MODE_POLICY.maxOutputTokens, safetyConfig.maxOutputTokens)
         : safetyConfig.maxOutputTokens;
 
-    // ── Step 9: Cache policy resolve + lookup ───────────────────────────────────
+    // ── Step 10: Cache policy resolve + lookup ───────────────────────────────────
     // Only tenant-scoped calls use the cache. Anonymous calls skip caching entirely.
     // Cache lookup uses the effective system prompt (post-budget-mode adjustment)
     // so budget_mode and normal responses are keyed separately.
@@ -261,7 +326,7 @@ export async function runAiCall(
 
       if (lookup.hit) {
         // Cache HIT — return without any provider call or usage cost row.
-        // Concurrency slot released in finally block.
+        // Idempotency + concurrency slots released in finally block.
         emitRunnerLog({
           feature,
           model: route.model,
@@ -275,7 +340,7 @@ export async function runAiCall(
       // Cache MISS — cache_miss event already recorded inside lookupCachedResponse.
     }
 
-    // ── Step 10: Provider call ───────────────────────────────────────────────────
+    // ── Step 11: Provider call ───────────────────────────────────────────────────
     const result = await provider.generateText({
       model: route.model,
       systemPrompt: effectiveSystemPrompt,
@@ -292,7 +357,7 @@ export async function runAiCall(
     const inputTokensBillable = result.usage?.input_tokens ?? null;
     const outputTokensBillable = result.usage?.output_tokens ?? null;
 
-    // ── Step 11: Usage logging + threshold events ───────────────────────────────
+    // ── Step 12: Usage logging + threshold events ───────────────────────────────
     void logAiUsage({
       feature,
       provider: route.provider,
@@ -339,7 +404,7 @@ export async function runAiCall(
       feature,
     };
 
-    // ── Step 12: Cache write (success only, cacheable routes only) ───────────────
+    // ── Step 13: Cache write (success only, cacheable routes only) ───────────────
     // Only runs on cache miss + successful provider call + non-empty response.
     // Blocked/error outcomes never reach this point.
     // storeCachedResponse is fail-open — errors are swallowed internally.
@@ -360,6 +425,21 @@ export async function runAiCall(
       );
     }
 
+    // ── Step 14: Mark request completed (idempotency state → completed) ──────────
+    // Stores normalised response for future duplicate replay.
+    // No ai_usage row on replay — cost is zero for subsequent identical requests.
+    if (idpOwned && idpStateId && tenantId && context.requestId) {
+      void markAiRequestCompleted({
+        stateId: idpStateId,
+        tenantId,
+        requestId: context.requestId,
+        routeKey: modelKey,
+        provider: route.provider,
+        model: route.model,
+        responsePayload: finalResult,
+      });
+    }
+
     emitRunnerLog({ feature, model: route.model, latencyMs, guardState, success: true, estimatedCostUsd });
 
     return finalResult;
@@ -369,8 +449,21 @@ export async function runAiCall(
       err instanceof AiTokenCapError ||
       err instanceof AiRateLimitError ||
       err instanceof AiConcurrencyError ||
-      err instanceof AiBudgetExceededError
+      err instanceof AiBudgetExceededError ||
+      err instanceof AiDuplicateInflightError
     ) {
+      // Safety/idempotency blocks — mark failed if we own a state row
+      if (idpOwned && idpStateId && tenantId && context.requestId) {
+        void markAiRequestFailed({
+          stateId: idpStateId,
+          tenantId,
+          requestId: context.requestId,
+          routeKey: modelKey,
+          provider: route.provider,
+          model: route.model,
+          errorCode: (err as { errorCode?: string }).errorCode ?? "safety_block",
+        });
+      }
       throw err;
     }
 
@@ -391,14 +484,32 @@ export async function runAiCall(
       estimatedCostUsd: null,
     });
 
+    // Mark idempotency state as failed — allows safe retry
+    if (idpOwned && idpStateId && tenantId && context.requestId) {
+      void markAiRequestFailed({
+        stateId: idpStateId,
+        tenantId,
+        requestId: context.requestId,
+        routeKey: modelKey,
+        provider: route.provider,
+        model: route.model,
+        errorCode: aiErr.errorCode,
+      });
+    }
+
     emitRunnerLog({ feature, model: route.model, latencyMs, guardState: "normal", success: false, error: aiErr.message });
     throw aiErr;
 
   } finally {
-    // ── Step 13: Always release concurrency slot ────────────────────────────────
-    // Runs on success, cache hit, error, safety block, and budget block.
+    // ── Step 15: Always release slots ───────────────────────────────────────────
+    // Runs on success, cache hit, replay, error, safety block, and budget block.
     if (concurrencyAcquired && tenantId) {
       releaseConcurrencySlot(tenantId);
+    }
+    // Release idempotency inflight ownership.
+    // Must run even on throw — prevents stale in-process registry entries.
+    if (idpOwned && idpInflightKey) {
+      releaseAiRequestOwnership(idpInflightKey);
     }
   }
 }
@@ -435,16 +546,18 @@ function emitRunnerLog(entry: {
   error?: string;
   estimatedCostUsd?: number | null;
   cacheHit?: boolean;
+  duplicateReplay?: boolean;
 }): void {
   const status = entry.success ? "✓" : "✗";
   const guardSuffix = entry.guardState !== "normal" ? ` | guard=${entry.guardState}` : "";
   const cacheSuffix = entry.cacheHit ? " | cache=HIT" : "";
+  const replaySuffix = entry.duplicateReplay ? " | idp=REPLAY" : "";
   const errSuffix = entry.error ? ` | error="${entry.error.slice(0, 120)}"` : "";
   const costSuffix =
     entry.estimatedCostUsd != null
       ? ` | cost=$${entry.estimatedCostUsd.toFixed(8)}`
       : "";
   console.log(
-    `[ai:runner] ${status} feature=${entry.feature} model=${entry.model} latency=${entry.latencyMs}ms${costSuffix}${cacheSuffix}${guardSuffix}${errSuffix}`,
+    `[ai:runner] ${status} feature=${entry.feature} model=${entry.model} latency=${entry.latencyMs}ms${costSuffix}${cacheSuffix}${replaySuffix}${guardSuffix}${errSuffix}`,
   );
 }

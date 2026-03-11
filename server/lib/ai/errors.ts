@@ -175,6 +175,30 @@ export class AiRateLimitError extends AiError {
 }
 
 /**
+ * A duplicate request arrived while the original is still in progress.
+ *
+ * Thrown by idempotency.ts when a second call with the same
+ * tenant_id + request_id arrives before the first completes.
+ * No provider call is made — the original is still executing.
+ * HTTP 409 — Conflict. Retry-After: 5 seconds.
+ */
+export class AiDuplicateInflightError extends AiError {
+  readonly requestId: string;
+
+  constructor(meta: AiErrorMeta & { requestId: string }) {
+    super(
+      `Duplicate request: request_id="${meta.requestId}" is already in progress for this tenant`,
+      meta,
+      409,
+      "duplicate_inflight",
+      5,
+    );
+    this.name = "AiDuplicateInflightError";
+    this.requestId = meta.requestId;
+  }
+}
+
+/**
  * Tenant has too many simultaneous in-flight AI requests.
  *
  * Thrown by request-safety.ts concurrency guard.

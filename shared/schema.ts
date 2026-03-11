@@ -1221,6 +1221,124 @@ export const insertAiCacheEventSchema = createInsertSchema(aiCacheEvents).omit({
 export type InsertAiCacheEvent = z.infer<typeof insertAiCacheEventSchema>;
 export type AiCacheEvent = typeof aiCacheEvents.$inferSelect;
 
+// ─── AI Request States ────────────────────────────────────────────────────────
+// Persisted idempotency state for AI calls.
+// One row per (tenant_id, request_id) — unique constraint enforced at DB level.
+//
+// Lifecycle:
+//   "in_progress" — request is actively executing (provider call not yet finished)
+//   "completed"   — provider call succeeded; response_payload is safe for replay
+//   "failed"      — provider call failed; retries are allowed after this state
+//
+// Retention: rows expire 24 hours after creation. This window:
+//   - Covers all realistic client retry windows (browser backoff, mobile reconnect)
+//   - Is long enough to protect against same-day replay storms
+//   - Is short enough not to accumulate unbounded state
+//   - Matches a single working session; next-day requests get fresh state
+
+export const aiRequestStates = pgTable(
+  "ai_request_states",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** Tenant that owns this request state — never shared across tenants */
+    tenantId: text("tenant_id").notNull(),
+    /** Caller-supplied request ID — idempotency scope key */
+    requestId: text("request_id").notNull(),
+    /** Route key used for this request */
+    routeKey: text("route_key").notNull(),
+    /** Resolved provider at request start (null if resolution failed before record) */
+    provider: text("provider"),
+    /** Resolved model at request start */
+    model: text("model"),
+    /**
+     * Current state of this request execution.
+     * "in_progress" — actively executing, no result yet
+     * "completed"   — succeeded; response_payload populated for replay
+     * "failed"      — execution failed; retries allowed
+     */
+    status: text("status").notNull(),
+    /**
+     * Normalized success response stored for deterministic replay.
+     * Shape: { text: string, usage: {...}|null, model: string, feature: string }
+     * Only populated when status = "completed". Null otherwise.
+     */
+    responsePayload: jsonb("response_payload"),
+    /** HTTP status code of the final response */
+    responseStatusCode: integer("response_status_code"),
+    /** Stable error code from AiError subclass (populated on failure) */
+    errorCode: text("error_code"),
+    /** When the request execution began */
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    /** When the request execution ended (success or failure) */
+    completedAt: timestamp("completed_at"),
+    /** Absolute expiry — rows past this time can be purged */
+    expiresAt: timestamp("expires_at").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ai_request_states_tenant_request_idx").on(t.tenantId, t.requestId),
+    index("ai_request_states_tenant_idx").on(t.tenantId),
+    index("ai_request_states_status_idx").on(t.status),
+    index("ai_request_states_expires_idx").on(t.expiresAt),
+    index("ai_request_states_tenant_created_at_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+
+export const insertAiRequestStateSchema = createInsertSchema(aiRequestStates).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertAiRequestState = z.infer<typeof insertAiRequestStateSchema>;
+export type AiRequestState = typeof aiRequestStates.$inferSelect;
+
+// ─── AI Request State Events ──────────────────────────────────────────────────
+// Append-only observability log for idempotency lifecycle events.
+// Provides admin/debug traceability without blocking the hot path.
+//
+// Event types:
+//   "request_started"      — new execution ownership acquired
+//   "duplicate_inflight"   — duplicate arrived while first still executing
+//   "duplicate_replayed"   — completed result replayed to duplicate request
+//   "request_completed"    — execution finished successfully
+//   "request_failed"       — execution finished with error
+
+export const aiRequestStateEvents = pgTable(
+  "ai_request_state_events",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    /** HTTP request ID — ties this event back to its origin request */
+    requestId: text("request_id").notNull(),
+    /**
+     * What happened at the idempotency layer.
+     * "request_started"    — new ownership acquired, proceeding with execution
+     * "duplicate_inflight" — duplicate arrived, first request still running
+     * "duplicate_replayed" — duplicate served stored completed result
+     * "request_completed"  — first execution completed and stored result
+     * "request_failed"     — first execution failed; retry allowed
+     */
+    eventType: text("event_type").notNull(),
+    routeKey: text("route_key"),
+    provider: text("provider"),
+    model: text("model"),
+    /** Human-readable context for debugging */
+    reason: text("reason"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_request_state_events_tenant_idx").on(t.tenantId),
+    index("ai_request_state_events_request_idx").on(t.requestId),
+    index("ai_request_state_events_event_type_idx").on(t.eventType),
+    index("ai_request_state_events_created_at_idx").on(t.createdAt),
+  ],
+);
+
+export const insertAiRequestStateEventSchema = createInsertSchema(aiRequestStateEvents).omit({ id: true, createdAt: true });
+export type InsertAiRequestStateEvent = z.infer<typeof insertAiRequestStateEventSchema>;
+export type AiRequestStateEvent = typeof aiRequestStateEvents.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
