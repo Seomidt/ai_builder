@@ -5,12 +5,14 @@
  *
  * runAiCall() is the single function all future AI features should call.
  * It resolves provider + model via the router, invokes the provider adapter,
- * logs usage, normalises errors, and measures latency.
+ * estimates cost, logs usage, normalises errors, and measures latency.
  *
- * Features never need to know which provider or model is used.
+ * Features never need to know which provider, model, or pricing is used.
  * No business logic, no prompts, no retries, no streaming.
  *
  * Phase 3C: routes through router.ts → providers/registry.ts → provider adapter
+ * Phase 3E: async routing with tenant/global DB overrides
+ * Phase 3F: cost estimation via loadPricing() + estimateAiCost()
  */
 
 import OpenAI from "openai";
@@ -18,6 +20,8 @@ import { AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS } from "./config";
 import { resolveRoute } from "./router";
 import { getProvider } from "./providers/registry";
 import { logAiUsage } from "./usage";
+import { loadPricing } from "./pricing";
+import { estimateAiCost } from "./costs";
 import {
   AiUnavailableError,
   AiTimeoutError,
@@ -36,7 +40,8 @@ export interface AiCallInput {
  * Execute a single AI call with full lifecycle management.
  *
  * Resolves provider + model through the router, delegates to the provider
- * adapter, logs usage to ai_usage, and returns a normalised AiCallResult.
+ * adapter, estimates cost from token usage, logs usage to ai_usage, and
+ * returns a normalised AiCallResult.
  *
  * @param context  Identity, routing, and tracing metadata from the caller
  * @param input    System prompt and user input for the model
@@ -62,6 +67,7 @@ export async function runAiCall(
     const aiErr = normalizeError(err, meta);
     void logAiUsage({
       feature,
+      provider: route.provider,
       tenantId: tenantId ?? null,
       userId: userId ?? null,
       requestId: context.requestId ?? null,
@@ -69,6 +75,7 @@ export async function runAiCall(
       status: "error",
       errorMessage: aiErr.message,
       latencyMs,
+      estimatedCostUsd: null,
     });
     emitRunnerLog({ feature, model: route.model, latencyMs, success: false, error: aiErr.message });
     throw aiErr;
@@ -84,8 +91,13 @@ export async function runAiCall(
 
     const latencyMs = Date.now() - startMs;
 
+    // Estimate cost from token usage — never blocks the call
+    const pricing = await loadPricing(route.provider, route.model);
+    const estimatedCostUsd = estimateAiCost({ usage: result.usage ?? null, pricing });
+
     void logAiUsage({
       feature,
+      provider: route.provider,
       tenantId: tenantId ?? null,
       userId: userId ?? null,
       requestId: context.requestId ?? null,
@@ -96,9 +108,10 @@ export async function runAiCall(
       inputPreview,
       status: "success",
       latencyMs,
+      estimatedCostUsd,
     });
 
-    emitRunnerLog({ feature, model: route.model, latencyMs, success: true });
+    emitRunnerLog({ feature, model: route.model, latencyMs, success: true, estimatedCostUsd });
 
     return {
       text: result.text,
@@ -121,6 +134,7 @@ export async function runAiCall(
 
     void logAiUsage({
       feature,
+      provider: route.provider,
       tenantId: tenantId ?? null,
       userId: userId ?? null,
       requestId: context.requestId ?? null,
@@ -128,6 +142,7 @@ export async function runAiCall(
       status: "error",
       errorMessage: aiErr.message,
       latencyMs,
+      estimatedCostUsd: null,
     });
 
     emitRunnerLog({ feature, model: route.model, latencyMs, success: false, error: aiErr.message });
@@ -168,10 +183,14 @@ function emitRunnerLog(entry: {
   latencyMs: number;
   success: boolean;
   error?: string;
+  estimatedCostUsd?: number | null;
 }): void {
   const status = entry.success ? "✓" : "✗";
   const errSuffix = entry.error ? ` | error="${entry.error.slice(0, 120)}"` : "";
+  const costSuffix = entry.estimatedCostUsd != null
+    ? ` | cost=$${entry.estimatedCostUsd.toFixed(8)}`
+    : "";
   console.log(
-    `[ai:runner] ${status} feature=${entry.feature} model=${entry.model} latency=${entry.latencyMs}ms${errSuffix}`,
+    `[ai:runner] ${status} feature=${entry.feature} model=${entry.model} latency=${entry.latencyMs}ms${costSuffix}${errSuffix}`,
   );
 }

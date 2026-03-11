@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 3E complete)
+# AI Builder Platform — V1 (Phase 3F complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -57,7 +57,9 @@ server/
       overrides.ts       loadOverride() — DB override loader + TTL cache
       types.ts           AiCallContext, AiCallResult
       errors.ts          Typed error hierarchy
-      usage.ts           logAiUsage() → ai_usage table
+      usage.ts           logAiUsage() → ai_usage table (with estimatedCostUsd)
+      pricing.ts         loadPricing() — DB first, code default fallback + TTL cache
+      costs.ts           estimateAiCost() — token × rate calculation
       providers/         AiProvider interface, OpenAI adapter, registry
       prompts/           getSummarizePrompt()
     supabase.ts, github.ts, github-commit-format.ts
@@ -85,6 +87,7 @@ shared/
 | 3C | `feature/ai-router` | Provider abstraction — AiProvider, OpenAI adapter, registry, router |
 | 3D | `feature/ai-summarize` | First AI feature — summarize prompt, service, POST /api/ai/summarize |
 | 3E | `feature/ai-route-overrides` | Model routing overrides — ai_model_overrides, loadOverride(), async router |
+| 3F | `feature/ai-pricing-registry` | AI Pricing Registry — ai_model_pricing, loadPricing(), estimateAiCost(), estimated_cost_usd in ai_usage |
 
 ## AI Stack — Routing Flow
 
@@ -95,16 +98,20 @@ runAiCall(context, input)
       → fallback: AI_MODEL_ROUTES[routeKey]
   → getProvider(provider)
   → provider.generateText(...)
-  → logAiUsage(...)
+  → loadPricing(provider, model) — DB active row → code default
+  → estimateAiCost(usage, pricing)
+  → logAiUsage(..., estimatedCostUsd)
 ```
 
 ## Key Files
 
-- `shared/schema.ts` — all tables including ai_usage, ai_model_overrides
+- `shared/schema.ts` — all tables including ai_usage, ai_model_overrides, ai_model_pricing
 - `server/lib/ai/config.ts` — AI_MODEL_ROUTES (6 routes), AiProviderKey
-- `server/lib/ai/runner.ts` — runAiCall()
+- `server/lib/ai/runner.ts` — runAiCall() + cost estimation
 - `server/lib/ai/router.ts` — resolveRoute() (async)
 - `server/lib/ai/overrides.ts` — loadOverride() + TTL cache
+- `server/lib/ai/pricing.ts` — loadPricing() + TTL cache
+- `server/lib/ai/costs.ts` — estimateAiCost() + code defaults
 - `server/lib/ai/providers/registry.ts` — ACTIVE_PROVIDERS
 - `server/features/ai-summarize/summarize.service.ts` — first feature
 
@@ -114,6 +121,8 @@ runAiCall(context, input)
 - **DB push command**: `npm run db:push`
 - **Next migration index**: `0003_*`
 - `ai_model_overrides` has coalesce unique index applied directly via SQL (not in Drizzle schema)
+- `ai_model_pricing` has partial unique index `ON ai_model_pricing (provider, model) WHERE is_active = true` applied via SQL
+- `ai_usage.estimated_cost_usd` is `numeric(12,8)` — Drizzle returns as string, convert with `Number()` when reading
 
 ## V2 / Next TODO
 

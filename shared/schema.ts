@@ -7,6 +7,7 @@ import {
   timestamp,
   jsonb,
   integer,
+  numeric,
   pgEnum,
   index,
   uniqueIndex,
@@ -704,6 +705,8 @@ export const aiUsage = pgTable(
     status: aiUsageStatusEnum("status").notNull().default("success"),
     errorMessage: text("error_message"),
     latencyMs: integer("latency_ms"),
+    /** Estimated USD cost calculated from token usage × pricing — null if pricing unknown */
+    estimatedCostUsd: numeric("estimated_cost_usd", { precision: 12, scale: 8 }),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [
@@ -769,6 +772,55 @@ export const insertAiModelOverrideSchema = createInsertSchema(aiModelOverrides).
 });
 export type InsertAiModelOverride = z.infer<typeof insertAiModelOverrideSchema>;
 export type AiModelOverride = typeof aiModelOverrides.$inferSelect;
+
+// ─── AI Model Pricing ─────────────────────────────────────────────────────────
+
+/**
+ * Stores DB-level pricing for AI provider + model pairs.
+ *
+ * Used by the pricing loader (server/lib/ai/pricing.ts) to estimate the USD
+ * cost of every AI call and persist it on ai_usage.estimated_cost_usd.
+ *
+ * Rules:
+ *   - Only one active pricing row per provider + model (enforced by partial unique index)
+ *   - DB pricing takes priority over code defaults in server/lib/ai/costs.ts
+ *   - Rows are deactivated rather than deleted to preserve history for future Admin UI
+ *
+ * Future Admin UI will be able to list, create, and deactivate rows without
+ * any runtime refactor.
+ */
+export const aiModelPricing = pgTable(
+  "ai_model_pricing",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** AI provider key — "openai" | "anthropic" | "google" */
+    provider: text("provider").notNull(),
+    /** Concrete model identifier — e.g. "gpt-4.1-mini" */
+    model: text("model").notNull(),
+    /** USD cost per 1,000,000 input tokens */
+    inputPerMillionUsd: numeric("input_per_million_usd", { precision: 10, scale: 6 }).notNull(),
+    /** USD cost per 1,000,000 output tokens */
+    outputPerMillionUsd: numeric("output_per_million_usd", { precision: 10, scale: 6 }).notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    /** Optional context for Admin — e.g. "Updated after OpenAI price drop 2025-04" */
+    notes: text("notes"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_model_pricing_active_idx").on(t.isActive),
+    index("ai_model_pricing_provider_model_idx").on(t.provider, t.model),
+  ],
+);
+
+export const insertAiModelPricingSchema = createInsertSchema(aiModelPricing).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertAiModelPricing = z.infer<typeof insertAiModelPricingSchema>;
+export type AiModelPricing = typeof aiModelPricing.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;

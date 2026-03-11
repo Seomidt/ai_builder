@@ -20,7 +20,9 @@ export interface LogAiUsagePayload {
   requestId?: string | null;
   /** Feature or agent key that made the call (e.g. "planner_agent", "summarize") */
   feature: string;
-  /** OpenAI model identifier (e.g. "gpt-4.1-mini") */
+  /** AI provider key — "openai" | "anthropic" | "google" */
+  provider?: string | null;
+  /** Concrete model identifier (e.g. "gpt-4.1-mini") */
   model: string;
   promptTokens?: number | null;
   completionTokens?: number | null;
@@ -30,6 +32,8 @@ export interface LogAiUsagePayload {
   status: "success" | "error";
   errorMessage?: string | null;
   latencyMs?: number | null;
+  /** Estimated USD cost from token usage × pricing — null if pricing unknown */
+  estimatedCostUsd?: number | null;
 }
 
 /**
@@ -53,6 +57,9 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
       status: payload.status,
       errorMessage: payload.errorMessage ?? null,
       latencyMs: payload.latencyMs ?? null,
+      estimatedCostUsd: payload.estimatedCostUsd != null
+        ? String(payload.estimatedCostUsd)
+        : null,
     });
   } catch (err) {
     // Logging must never crash the application
