@@ -1457,6 +1457,86 @@ export const insertAiAnomalyEventSchema = createInsertSchema(aiAnomalyEvents).om
 export type InsertAiAnomalyEvent = z.infer<typeof insertAiAnomalyEventSchema>;
 export type AiAnomalyEvent = typeof aiAnomalyEvents.$inferSelect;
 
+// ─── AI Request Step States ───────────────────────────────────────────────────
+// Per-request AI step budget tracking.
+// One row per (tenant_id, request_id) — enforces max AI calls per logical request.
+//
+// Status lifecycle:
+//   "active"    — request is executing, steps remaining
+//   "exhausted" — step limit reached; further AI calls are blocked
+//   "completed" — all AI steps finished normally
+//
+// Retention: expires_at aligned with idempotency retention (24h).
+
+export const aiRequestStepStates = pgTable(
+  "ai_request_step_states",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    requestId: text("request_id").notNull(),
+    /** Running count of AI provider calls attempted under this request */
+    totalAiCalls: integer("total_ai_calls").notNull().default(0),
+    /** Configured maximum AI calls allowed for this request */
+    maxAiCalls: integer("max_ai_calls").notNull(),
+    /** "active" | "exhausted" | "completed" */
+    status: text("status").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+    /** Absolute expiry — rows past this time can be purged */
+    expiresAt: timestamp("expires_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("ai_request_step_states_tenant_request_idx").on(t.tenantId, t.requestId),
+    index("ai_request_step_states_tenant_idx").on(t.tenantId),
+    index("ai_request_step_states_expires_idx").on(t.expiresAt),
+    index("ai_request_step_states_status_idx").on(t.status),
+  ],
+);
+
+export const insertAiRequestStepStateSchema = createInsertSchema(aiRequestStepStates).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertAiRequestStepState = z.infer<typeof insertAiRequestStepStateSchema>;
+export type AiRequestStepState = typeof aiRequestStepStates.$inferSelect;
+
+// ─── AI Request Step Events ───────────────────────────────────────────────────
+// Append-only observability log for step budget lifecycle events.
+//
+// event_type values:
+//   "step_started"         — one AI provider call acquired and starting
+//   "step_completed"       — AI provider call finished (success or error)
+//   "step_budget_exceeded" — request attempted more calls than allowed
+
+export const aiRequestStepEvents = pgTable(
+  "ai_request_step_events",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    requestId: text("request_id").notNull(),
+    /** "step_started" | "step_completed" | "step_budget_exceeded" */
+    eventType: text("event_type").notNull(),
+    /** Which step number this event belongs to (1-indexed) */
+    stepNumber: integer("step_number"),
+    routeKey: text("route_key"),
+    feature: text("feature"),
+    provider: text("provider"),
+    model: text("model"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_request_step_events_tenant_idx").on(t.tenantId),
+    index("ai_request_step_events_request_idx").on(t.requestId),
+    index("ai_request_step_events_event_type_idx").on(t.eventType),
+    index("ai_request_step_events_created_at_idx").on(t.createdAt),
+  ],
+);
+
+export const insertAiRequestStepEventSchema = createInsertSchema(aiRequestStepEvents).omit({ id: true, createdAt: true });
+export type InsertAiRequestStepEvent = z.infer<typeof insertAiRequestStepEventSchema>;
+export type AiRequestStepEvent = typeof aiRequestStepEvents.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });

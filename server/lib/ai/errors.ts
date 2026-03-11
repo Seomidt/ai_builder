@@ -225,3 +225,36 @@ export class AiConcurrencyError extends AiError {
     this.concurrencyLimit = meta.concurrencyLimit;
   }
 }
+
+/**
+ * A single logical request has exceeded its per-request AI call budget.
+ *
+ * Thrown by step-budget.ts when a request identified by request_id
+ * attempts more AI provider calls than the configured limit (default: 5).
+ *
+ * No provider call is made — the budget was exhausted before the attempt.
+ * HTTP 429 — Too Many Requests. Framed as request execution limit.
+ * Retry-After: not applicable (same request_id will always be blocked).
+ */
+export class AiStepBudgetExceededError extends AiError {
+  readonly requestId: string;
+  readonly totalAiCalls: number;
+  readonly maxAiCalls: number;
+
+  constructor(meta: AiErrorMeta & {
+    requestId: string;
+    totalAiCalls: number;
+    maxAiCalls: number;
+  }) {
+    super(
+      `Step budget exceeded: request_id="${meta.requestId}" has already executed ${meta.totalAiCalls} AI calls (limit: ${meta.maxAiCalls})`,
+      meta,
+      429,
+      "step_budget_exceeded",
+    );
+    this.name = "AiStepBudgetExceededError";
+    this.requestId = meta.requestId;
+    this.totalAiCalls = meta.totalAiCalls;
+    this.maxAiCalls = meta.maxAiCalls;
+  }
+}

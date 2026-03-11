@@ -94,8 +94,10 @@ import {
   AiRateLimitError,
   AiConcurrencyError,
   AiDuplicateInflightError,
+  AiStepBudgetExceededError,
   type AiErrorMeta,
 } from "./errors";
+import { acquireAiStep, recordStepCompleted } from "./step-budget";
 import type { AiCallContext, AiCallResult } from "./types";
 import type { AiUsageLimit } from "@shared/schema";
 
@@ -243,6 +245,10 @@ export async function runAiCall(
     concurrencyAcquired = true;
   }
 
+  // Phase 3L: tracks the step number acquired for the current provider call.
+  // null = no step was acquired (cache hit, replay, pre-flight block, or no request_id).
+  let acquiredStepNumber: number | null = null;
+
   try {
     // ── Step 8: Budget/usage guardrail ─────────────────────────────────────────
     let guardState: AiUsageState = "normal";
@@ -340,6 +346,22 @@ export async function runAiCall(
       // Cache MISS — cache_miss event already recorded inside lookupCachedResponse.
     }
 
+    // ── Step 10.5 (Phase 3L): Step budget acquire ────────────────────────────────
+    // Runs ONLY on the provider-call path (after cache miss or cache-disabled).
+    // Cache hits, duplicate replays, and pre-flight blocks never reach this point.
+    // If over the per-request step limit, throws AiStepBudgetExceededError.
+    if (tenantId && context.requestId) {
+      acquiredStepNumber = await acquireAiStep({
+        tenantId,
+        requestId: context.requestId,
+        feature,
+        routeKey: modelKey,
+        provider: route.provider,
+        model: route.model,
+        meta: { feature, model: route.model, latencyMs: Date.now() - startMs },
+      });
+    }
+
     // ── Step 11: Provider call ───────────────────────────────────────────────────
     const result = await provider.generateText({
       model: route.model,
@@ -387,6 +409,19 @@ export async function runAiCall(
         currentUsageUsd: guardCurrentUsageUsd,
         limit: guardLimit,
         requestId: context.requestId,
+      });
+    }
+
+    // Phase 3L: Record step completed for a successful provider call.
+    if (tenantId && context.requestId && acquiredStepNumber !== null) {
+      recordStepCompleted({
+        tenantId,
+        requestId: context.requestId,
+        stepNumber: acquiredStepNumber,
+        routeKey: modelKey,
+        feature,
+        provider: route.provider,
+        model: route.model,
       });
     }
 
@@ -450,7 +485,10 @@ export async function runAiCall(
       err instanceof AiRateLimitError ||
       err instanceof AiConcurrencyError ||
       err instanceof AiBudgetExceededError ||
-      err instanceof AiDuplicateInflightError
+      err instanceof AiDuplicateInflightError ||
+      // Phase 3L: step budget exceeded is a pre-flight block — no provider call made,
+      // no step was incremented, so no step_completed needed.
+      err instanceof AiStepBudgetExceededError
     ) {
       // Safety/idempotency blocks — mark failed if we own a state row
       if (idpOwned && idpStateId && tenantId && context.requestId) {
@@ -470,6 +508,20 @@ export async function runAiCall(
     const latencyMs = Date.now() - startMs;
     const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
     const aiErr = normalizeError(err, meta);
+
+    // Phase 3L: provider call was attempted (step was acquired) but failed.
+    // Count this as a completed step — the provider attempt consumed a slot.
+    if (tenantId && context.requestId && acquiredStepNumber !== null) {
+      recordStepCompleted({
+        tenantId,
+        requestId: context.requestId,
+        stepNumber: acquiredStepNumber,
+        routeKey: modelKey,
+        feature,
+        provider: route.provider,
+        model: route.model,
+      });
+    }
 
     void logAiUsage({
       feature,
