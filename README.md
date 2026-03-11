@@ -26,40 +26,54 @@ client/src/
 server/
   lib/
     ai/
-      config.ts          AI_MODEL_ROUTES, AiProviderKey, runtime limits
-      runner.ts          runAiCall() — single entry point for all AI features
-      router.ts          resolveRoute() — async, tenant/global override-aware
-      overrides.ts       loadOverride() — DB override loader with TTL cache
-      types.ts           AiCallContext, AiCallResult
-      errors.ts          Typed error hierarchy (AiServiceError, AiQuotaError, ...)
-      usage.ts           logAiUsage() → ai_usage table
+      config.ts                  AI_MODEL_ROUTES, AiProviderKey, runtime limits, cache policies
+      runner.ts                  runAiCall() — single entry point for all AI features
+      router.ts                  resolveRoute() — async, tenant/global override-aware
+      overrides.ts               loadOverride() — DB override loader with TTL cache
+      types.ts                   AiCallContext, AiCallResult
+      errors.ts                  Typed error hierarchy — all AiError subclasses
+      usage.ts                   logAiUsage() → ai_usage + tenant_ai_usage_periods upsert
+      usage-periods.ts           getCurrentPeriod() — calendar month boundary helper
+      pricing.ts                 loadPricing() — DB first, code default fallback + TTL cache
+      costs.ts                   estimateAiCost() — token × rate calculation
+      guards.ts                  AI usage guardrails — budget mode, blocked state, thresholds
+      usage-summary.ts           getAiUsageSummary() — normalized tenant usage contract
+      request-safety.ts          Token cap, rate limit, concurrency guard
+      request-safety-summary.ts  getRequestSafetySummary() — backend summary
+      response-cache.ts          Tenant-isolated AI response cache (SHA-256 fingerprint)
+      cache-summary.ts           getCacheSummary() — hit/miss/write counts
+      cache-retention.ts         Batch cleanup SQL for expired ai_response_cache rows
+      idempotency.ts             2-layer duplicate suppression (in-process + DB)
+      request-state-summary.ts   getAiRequestStateSummary() — idempotency state counts
+      request-state-retention.ts Cleanup SQL for ai_request_states + ai_request_state_events
+      retention.ts               Cleanup SQL for ai_usage rows (90-day window)
       providers/
-        provider.ts      AiProvider interface
-        openai-provider.ts  OpenAI Responses API adapter
-        registry.ts      ACTIVE_PROVIDERS map, getProvider()
+        provider.ts              AiProvider interface
+        openai-provider.ts       OpenAI Responses API adapter
+        registry.ts              ACTIVE_PROVIDERS map, getProvider()
       prompts/
-        summarize.ts     getSummarizePrompt()
+        summarize.ts             getSummarizePrompt()
     supabase.ts
     github.ts
     github-commit-format.ts
   features/
     ai-summarize/
-      summarize.service.ts   summarize() — first real AI feature
+      summarize.service.ts       summarize() — first real AI feature
   middleware/
-    auth.ts              JWT → req.user
-  repositories/          projects, architectures, runs, integrations, knowledge
-  services/              projects, architectures, runs, integrations, run-executor
-  routes.ts              Thin API handlers
-  storage.ts             IStorage + DatabaseStorage
-  db.ts                  Drizzle + pg pool
+    auth.ts                      JWT → req.user
+  repositories/                  projects, architectures, runs, integrations, knowledge
+  services/                      projects, architectures, runs, integrations, run-executor
+  routes.ts                      Thin API handlers
+  storage.ts                     IStorage + DatabaseStorage
+  db.ts                          Drizzle + pg pool
 
 shared/
-  schema.ts              All Drizzle tables + insert schemas + TypeScript types
+  schema.ts                      All Drizzle tables + insert schemas + TypeScript types
 ```
 
 ---
 
-## Database Schema (21 tables)
+## Database Schema (25 tables)
 
 | Domain | Tables |
 |--------|--------|
@@ -70,31 +84,55 @@ shared/
 | AI Runs | `ai_runs`, `ai_steps`, `ai_artifacts`, `ai_tool_calls`, `ai_approvals`, `artifact_dependencies` |
 | Integrations | `integrations`, `organization_secrets` |
 | Knowledge | `knowledge_documents` |
-| AI Infrastructure | `ai_usage`, `ai_model_overrides` |
+| AI Infrastructure | `ai_usage`, `ai_model_overrides`, `ai_model_pricing`, `ai_usage_limits`, `usage_threshold_events`, `tenant_ai_usage_periods`, `tenant_rate_limits`, `request_safety_events`, `ai_response_cache`, `ai_cache_events`, `ai_request_states`, `ai_request_state_events` |
 
-### ai_usage
-Logs every AI call made through `runAiCall()`. Fields: feature, tenantId, userId, requestId, model, prompt/completion/total tokens, inputPreview, status, errorMessage, latencyMs.
+### AI Infrastructure Tables
 
-### ai_model_overrides
-Stores DB-level routing overrides for AI model selection. Overrides are keyed by `route_key` (not feature). Scopes: `global` and `tenant`. Priority: tenant → global → code default.
+| Table | Purpose |
+|-------|---------|
+| `ai_usage` | Every AI call — tokens, cost, status, requestId, latency |
+| `ai_model_overrides` | Route-level model/provider overrides (tenant or global) |
+| `ai_model_pricing` | Token pricing per provider+model — DB first, code fallback |
+| `ai_usage_limits` | Per-tenant budget limits and hard stop thresholds |
+| `usage_threshold_events` | Budget warning/blocked events (deduplicated 24h window) |
+| `tenant_ai_usage_periods` | Aggregate cost summary per tenant+period (guardrail source of truth) |
+| `tenant_rate_limits` | Per-tenant RPM/RPH overrides |
+| `request_safety_events` | Token cap, rate limit, concurrency block events |
+| `ai_response_cache` | Cached successful AI responses (TTL 1h, tenant-scoped) |
+| `ai_cache_events` | Cache hit/miss/write/skip event log |
+| `ai_request_states` | Idempotency state per (tenant, request_id) — 24h TTL |
+| `ai_request_state_events` | Idempotency lifecycle events — 30-day retention |
 
 ---
 
 ## AI Stack (Phase 3)
 
-All AI calls flow through a single pipeline:
+All AI calls flow through a single orchestration pipeline in `runner.ts`:
 
 ```
 feature code
-  → runAiCall(context, input)          runner.ts
-      → resolveRoute(routeKey, tenantId)  router.ts
-          → loadOverride(routeKey, tenantId)  overrides.ts
-              → DB: tenant override?
-              → DB: global override?
-              → fallback: AI_MODEL_ROUTES[routeKey]
-      → getProvider(provider)           registry.ts
-      → provider.generateText(...)      openai-provider.ts
-      → logAiUsage(...)                 usage.ts
+  → runAiCall(context, input)
+      1. Resolve route (provider + model)
+      2. Get provider adapter
+      3. Idempotency check [if request_id present]
+         ├─ duplicate_inflight  → 409 Conflict (no provider call)
+         ├─ duplicate_replay    → return stored result (no cost row)
+         └─ owned               → proceed
+      4. Resolve effective safety config (tenant override → global defaults)
+      5. Token cap precheck (413 if exceeded)
+      6. Rate limit check (429 if exceeded)
+      7. Concurrency guard acquire (429 if exceeded)
+      8. Budget/usage guard
+         ├─ blocked    → 402 Budget Exceeded (no provider call)
+         └─ budget_mode → apply BUDGET_MODE_POLICY (reduced tokens + prefix)
+      9. Cache lookup [if route cacheable + tenantId present]
+         ├─ HIT  → return cached result (no provider call, no cost row)
+         └─ MISS → continue
+     10. Provider call (OpenAI Responses API)
+     11. Usage logging → ai_usage + tenant_ai_usage_periods
+     12. Cache write (success only)
+     13. Mark request completed (idempotency state)
+     14. Release concurrency slot + idempotency ownership (always, in finally)
 ```
 
 ### Model Routes (code defaults)
@@ -110,15 +148,46 @@ feature code
 
 ### Model Routing Overrides
 
-DB overrides can change which model is used for a route key, per tenant or globally, without code changes or redeploys.
-
 ```sql
 -- Example: override 'default' route globally to use gpt-4.1
 INSERT INTO ai_model_overrides (scope, scope_id, route_key, provider, model, is_active)
 VALUES ('global', NULL, 'default', 'openai', 'gpt-4.1', true);
 ```
 
-Cache TTLs: 60s (hit), 10s (not found), 5min stale grace on DB failure.
+### Idempotency
+
+Duplicate requests are suppressed at two layers:
+1. **In-process Set** — same-process concurrent duplicates blocked immediately
+2. **DB `ai_request_states`** — cross-request/process duplicates and replay
+
+| Scenario | Behavior | HTTP |
+|----------|----------|------|
+| No `request_id` | Normal execution | 200 |
+| First request | Execute + store result | 200 |
+| Duplicate while in-flight | Blocked | 409 + Retry-After: 5 |
+| Duplicate after success | Replay stored result (no cost row) | 200 |
+| Duplicate after failure | New execution allowed (retryable) | 200 |
+
+### Response Cache
+
+Enabled for `"default"` route only. TTL: 3600s. Fingerprint:
+`SHA-256(v1:{tenantId}:{routeKey}:{provider}:{model}:{maxOutputTokens}:{contentHash})`
+
+Cache hits produce **no ai_usage provider-cost rows** — observable via `ai_cache_events` only.
+
+### HTTP Error Semantics
+
+| Error | HTTP | Code | Retry-After |
+|-------|------|------|-------------|
+| Token cap exceeded | 413 | `token_cap_exceeded` | — |
+| Rate limit exceeded | 429 | `rate_limit_exceeded` | 60s / 3600s |
+| Concurrency exceeded | 429 | `concurrency_limit_exceeded` | 5s |
+| Budget exceeded | 402 | `ai_budget_exceeded` | — |
+| Duplicate inflight | 409 | `duplicate_inflight` | 5s |
+| Provider quota | 429 | `ai_quota_exceeded` | 60s |
+| Provider error | 502 | `ai_service_error` | — |
+| Timeout | 504 | `ai_timeout` | — |
+| Unavailable | 503 | `ai_unavailable` | — |
 
 ---
 
@@ -186,6 +255,17 @@ Cache TTLs: 60s (hit), 10s (not found), 5min stale grace on DB failure.
 | 3C | `feature/ai-router` | Provider abstraction: AiProvider interface, OpenAI adapter, registry, router | Complete |
 | 3D | `feature/ai-summarize` | First AI feature: summarize prompt, service, POST /api/ai/summarize | Complete |
 | 3E | `feature/ai-route-overrides` | Model routing overrides: ai_model_overrides table, loadOverride(), async router | Complete |
+| 3F | `feature/ai-pricing-registry` | AI Pricing Registry: ai_model_pricing, loadPricing(), estimateAiCost(), estimated_cost_usd | Complete |
+| 3G | `feature/ai-usage-guardrails` | AI Usage Guardrails: ai_usage_limits, usage_threshold_events, guards.ts, budget mode, hard stop | Complete |
+| 3G.1 | `feature/ai-usage-hardening` | Usage Hardening: tenant_ai_usage_periods aggregate, getCurrentPeriod(), aggregate-first guardrails | Complete |
+| 3H | `feature/ai-usage-final-hardening` | Request Safety: token cap (413), rate limit (429), concurrency guard (429), request_safety_events | Complete |
+| 3H.1 | `feature/http-error-semantics` | HTTP Error Semantics: httpStatus + errorCode + Retry-After on all AiError subclasses | Complete |
+| 3I | `feature/ai-response-cache` | AI Response Cache: SHA-256 fingerprint, TTL, tenant isolation, cache hit/miss/write events | Complete |
+| 3I.1 | `feature/ai-response-cache` | Cache Key Hardening: maxOutputTokens in fingerprint to prevent cross-config collisions | Complete |
+| 3I.2 | `feature/cache-cleanup-foundation` | Cache Cleanup Foundation: preview + batch cleanup SQL for ai_response_cache | Complete |
+| 3I.3 | `feature/cache-batch-cleanup` | Batch Cache Cleanup: oldest-first deletion, configurable CACHE_CLEANUP_BATCH_SIZE | Complete |
+| 3J | `feature/ai-idempotency-layer` | AI Idempotency: 2-layer duplicate suppression, in-flight 409, completed replay, failed retry | Complete |
+| 3J.1 | `feature/request-state-retention` | Request State Retention: expires_at states cleanup, 30-day events cleanup SQL | Complete |
 
 ---
 
@@ -232,14 +312,19 @@ All requests use `x-organization-id` header to identify the tenant. Defaults to 
 - **All AI calls go through `runAiCall()`** — never call generateText() or logAiUsage() directly
 - **Overrides are route_key-based** — features map to route keys, route keys map to overrides
 - **Server-side secrets only** — GitHub/OpenAI/Supabase service role never reach the client
+- **Idempotency requires request_id** — duplicate suppression only activates when `X-Request-Id` is present
+- **Cache hits produce no cost rows** — observable via ai_cache_events only
+- **Failed request_ids are retryable** — transient errors do not permanently block a request_id
+- **Retention is manual** — no scheduler; cleanup SQL is provided in retention foundation files
 
 ---
 
 ## Next
 
-- [ ] Phase 4: Admin UI for model routing overrides
+- [ ] Phase 4: Admin UI for model routing overrides + usage dashboard
 - [ ] Real Supabase Auth session (frontend login/signup)
 - [ ] GitHub tool execution (create branch, write files, open PR)
 - [ ] `knowledge_chunks` + `knowledge_vectors` tables
 - [ ] Full RLS policies on all tenant tables
 - [ ] Vercel deployment automation
+- [ ] Retention cron jobs for ai_response_cache, ai_request_states, ai_request_state_events, ai_usage
