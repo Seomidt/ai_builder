@@ -1030,6 +1030,90 @@ export const insertTenantAiUsagePeriodSchema = createInsertSchema(tenantAiUsageP
 export type InsertTenantAiUsagePeriod = z.infer<typeof insertTenantAiUsagePeriodSchema>;
 export type TenantAiUsagePeriod = typeof tenantAiUsagePeriods.$inferSelect;
 
+// ─── Tenant Rate Limits ───────────────────────────────────────────────────────
+// Admin-configured per-tenant rate and concurrency limits for AI request safety.
+// One active row per tenant. Overrides global AI_SAFETY_DEFAULTS in config.ts.
+
+export const tenantRateLimits = pgTable(
+  "tenant_rate_limits",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    /** Maximum AI requests allowed per minute */
+    requestsPerMinute: integer("requests_per_minute").notNull(),
+    /** Maximum AI requests allowed per hour */
+    requestsPerHour: integer("requests_per_hour").notNull(),
+    /** Maximum simultaneous in-flight AI requests for this tenant */
+    maxConcurrentRequests: integer("max_concurrent_requests").notNull(),
+    /** When false, this row is ignored and global defaults apply */
+    isActive: boolean("is_active").notNull().default(true),
+    /** Optional admin notes */
+    notes: text("notes"),
+    /** Who created this limit row */
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    // One active limit row per tenant — partial unique index consistent with repo conventions
+    uniqueIndex("tenant_rate_limits_tenant_active_idx")
+      .on(t.tenantId)
+      .where(sql`is_active = true`),
+    index("tenant_rate_limits_tenant_idx").on(t.tenantId),
+  ],
+);
+
+export const insertTenantRateLimitSchema = createInsertSchema(tenantRateLimits).omit({ id: true, createdAt: true });
+export type InsertTenantRateLimit = z.infer<typeof insertTenantRateLimitSchema>;
+export type TenantRateLimit = typeof tenantRateLimits.$inferSelect;
+
+// ─── Request Safety Events ────────────────────────────────────────────────────
+// Append-only event log for request-level safety blocks.
+// Distinct from usage_threshold_events (which tracks budget thresholds).
+// Provides traceability for token cap, rate limit, and concurrency blocks.
+
+export const requestSafetyEvents = pgTable(
+  "request_safety_events",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    /** HTTP request ID — ties this event back to its origin request */
+    requestId: text("request_id"),
+    /** Feature key that triggered the blocked call */
+    feature: text("feature"),
+    /**
+     * What kind of safety block occurred.
+     * "token_cap_exceeded"  — input too large before provider call
+     * "rate_limit_blocked"  — tenant exceeded requests_per_minute or requests_per_hour
+     * "concurrency_blocked" — too many simultaneous in-flight requests for this tenant
+     */
+    eventType: text("event_type").notNull(),
+    /** Observed value that triggered the block (tokens, request count, concurrent count) */
+    metricValue: integer("metric_value"),
+    /** Configured limit that was breached */
+    limitValue: integer("limit_value"),
+    /** Logical route key used for this call (e.g. "default", "heavy") */
+    routeKey: text("route_key"),
+    /** Resolved provider at time of block */
+    provider: text("provider"),
+    /** Resolved model at time of block */
+    model: text("model"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("request_safety_events_tenant_idx").on(t.tenantId),
+    index("request_safety_events_tenant_created_at_idx").on(t.tenantId, t.createdAt),
+    index("request_safety_events_event_type_idx").on(t.eventType),
+  ],
+);
+
+export const insertRequestSafetyEventSchema = createInsertSchema(requestSafetyEvents).omit({ id: true, createdAt: true });
+export type InsertRequestSafetyEvent = z.infer<typeof insertRequestSafetyEventSchema>;
+export type RequestSafetyEvent = typeof requestSafetyEvents.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });

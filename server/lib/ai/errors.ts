@@ -8,6 +8,11 @@
  *
  * All errors carry feature, model and latencyMs so diagnostics
  * are possible even when the error is caught far from the call site.
+ *
+ * Phase 3H additions:
+ * - AiTokenCapError     — input exceeded maxInputTokens before provider call
+ * - AiRateLimitError    — tenant exceeded requestsPerMinute or requestsPerHour
+ * - AiConcurrencyError  — tenant has too many simultaneous in-flight requests
  */
 
 export interface AiErrorMeta {
@@ -79,5 +84,81 @@ export class AiBudgetExceededError extends AiError {
       meta,
     );
     this.name = "AiBudgetExceededError";
+  }
+}
+
+/**
+ * Input text exceeded maxInputTokens before the provider call was attempted.
+ *
+ * Thrown by request-safety.ts token cap check.
+ * No provider call is made — the check is purely pre-flight.
+ * The estimated token count and configured limit are included in the message
+ * so callers can surface useful feedback without parsing strings.
+ */
+export class AiTokenCapError extends AiError {
+  readonly estimatedTokens: number;
+  readonly tokenLimit: number;
+
+  constructor(meta: AiErrorMeta & { estimatedTokens: number; tokenLimit: number }) {
+    super(
+      `Input too large: estimated ${meta.estimatedTokens} tokens exceeds limit of ${meta.tokenLimit}`,
+      meta,
+    );
+    this.name = "AiTokenCapError";
+    this.estimatedTokens = meta.estimatedTokens;
+    this.tokenLimit = meta.tokenLimit;
+  }
+}
+
+/**
+ * Tenant has exceeded their configured request rate limit.
+ *
+ * Thrown by request-safety.ts rate limit check.
+ * No provider call is made.
+ * Includes which limit was breached (per-minute or per-hour) and the counts.
+ */
+export class AiRateLimitError extends AiError {
+  readonly limitType: "per_minute" | "per_hour";
+  readonly currentCount: number;
+  readonly limit: number;
+
+  constructor(meta: AiErrorMeta & {
+    limitType: "per_minute" | "per_hour";
+    currentCount: number;
+    limit: number;
+  }) {
+    super(
+      `Rate limit exceeded: ${meta.currentCount} requests in window, limit is ${meta.limit} (${meta.limitType})`,
+      meta,
+    );
+    this.name = "AiRateLimitError";
+    this.limitType = meta.limitType;
+    this.currentCount = meta.currentCount;
+    this.limit = meta.limit;
+  }
+}
+
+/**
+ * Tenant has too many simultaneous in-flight AI requests.
+ *
+ * Thrown by request-safety.ts concurrency guard.
+ * No provider call is made — slot was never acquired.
+ * The concurrency guard is process-local in Phase 3H.
+ */
+export class AiConcurrencyError extends AiError {
+  readonly currentConcurrent: number;
+  readonly concurrencyLimit: number;
+
+  constructor(meta: AiErrorMeta & {
+    currentConcurrent: number;
+    concurrencyLimit: number;
+  }) {
+    super(
+      `Concurrency limit exceeded: ${meta.currentConcurrent} requests in flight, limit is ${meta.concurrencyLimit}`,
+      meta,
+    );
+    this.name = "AiConcurrencyError";
+    this.currentConcurrent = meta.currentConcurrent;
+    this.concurrencyLimit = meta.concurrencyLimit;
   }
 }

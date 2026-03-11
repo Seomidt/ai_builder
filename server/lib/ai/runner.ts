@@ -4,20 +4,32 @@
  * SERVER-ONLY: This module must never be imported from client/ code.
  *
  * runAiCall() is the single function all future AI features should call.
- * It resolves provider + model via the router, runs usage guardrails,
- * invokes the provider adapter, estimates cost, logs usage, and normalises errors.
+ * It resolves provider + model via the router, enforces request safety,
+ * runs usage guardrails, invokes the provider adapter, estimates cost,
+ * logs usage, and normalises errors.
  *
- * Features never need to know which provider, model, pricing, or budget state is used.
- * No business logic, no prompts, no retries, no streaming.
+ * Features never need to know which provider, model, pricing, safety limit,
+ * or budget state is used. No business logic, no prompts, no retries.
  *
  * Phase 3C: routes through router.ts → providers/registry.ts → provider adapter
  * Phase 3E: async routing with tenant/global DB overrides
  * Phase 3F: cost estimation via loadPricing() + estimateAiCost()
  * Phase 3G: AI usage guardrails — budget_mode policy + hard stop via guards.ts
- * Final hardening:
- *   - Cost basis logging: pricing_source, pricing_version, billable token fields,
- *     cached_input_tokens, reasoning_tokens written to ai_usage
- *   - status="blocked" for guardrail hard-stop (distinct from provider errors)
+ * Final hardening: cost basis fields, blocked status, pricing source/version
+ * Phase 3H: request safety — token cap, rate limit, concurrency guard
+ *
+ * Request flow:
+ *   1. Resolve route (provider + model)
+ *   2. Get provider adapter
+ *   3. Resolve effective safety config (tenant DB override → global defaults)
+ *   4. Token cap precheck (blocks oversized input before provider call)
+ *   5. Rate limit check (RPM + RPH)
+ *   6. Concurrency guard acquire (process-local slot)
+ *   7. Budget/usage guard (existing per-period cost guardrail)
+ *   8. Budget mode policy (verbosity reduction)
+ *   9. Provider call with centrally enforced maxOutputTokens
+ *  10. Usage logging + threshold events
+ *  11. Concurrency slot release (in finally — always runs)
  */
 
 import OpenAI from "openai";
@@ -36,11 +48,21 @@ import {
   type AiUsageState,
 } from "./guards";
 import {
+  resolveEffectiveSafetyConfig,
+  checkTokenCap,
+  checkRateLimit,
+  acquireConcurrencySlot,
+  releaseConcurrencySlot,
+} from "./request-safety";
+import {
   AiUnavailableError,
   AiTimeoutError,
   AiQuotaError,
   AiServiceError,
   AiBudgetExceededError,
+  AiTokenCapError,
+  AiRateLimitError,
+  AiConcurrencyError,
   type AiErrorMeta,
 } from "./errors";
 import type { AiCallContext, AiCallResult } from "./types";
@@ -54,19 +76,12 @@ export interface AiCallInput {
 /**
  * Execute a single AI call with full lifecycle management.
  *
- * Flow:
- *   1. Resolve provider + model (route overrides aware)
- *   2. Get provider adapter
- *   3. Evaluate tenant usage guardrail state (skipped if no tenantId)
- *   4. Hard stop if state === "blocked" → log status="blocked", throw AiBudgetExceededError
- *   5. Apply budget mode policy if state === "budget_mode"
- *   6. Execute provider call
- *   7. Estimate cost, log usage with full cost basis, record threshold events
- *
- * Guard failure safe behavior:
- *   DB errors inside guards.ts are caught internally and return null/0.
- *   If that happens, guardState stays "normal" — we prefer running the call
- *   over blocking it due to a DB failure.
+ * Safety guarantees:
+ *   - No provider call is made if token cap, rate limit, or concurrency check fails
+ *   - Concurrency slot is always released (success, error, or safety block)
+ *   - Provider/model is NEVER switched by safety logic — same route always used
+ *   - All safety blocks are recorded in request_safety_events for traceability
+ *   - Existing ai_usage and aggregate accounting is not affected by safety blocks
  *
  * @param context  Identity, routing, and tracing metadata from the caller
  * @param input    System prompt and user input for the model
@@ -80,9 +95,11 @@ export async function runAiCall(
   const { feature, tenantId, userId, model: modelKey = "default" } = context;
   const startMs = Date.now();
 
+  // ── Step 1: Resolve route ────────────────────────────────────────────────────
   const route = await resolveRoute(modelKey, tenantId);
   const inputPreview = input.userInput.slice(0, AI_INPUT_PREVIEW_MAX_CHARS);
 
+  // ── Step 2: Get provider adapter ─────────────────────────────────────────────
   let provider;
   try {
     provider = getProvider(route.provider);
@@ -106,78 +123,130 @@ export async function runAiCall(
     throw aiErr;
   }
 
-  // ── Guardrail evaluation ─────────────────────────────────────────────────────
-  // If tenantId is absent, guardrails are skipped entirely (no tenant to check).
-  // Guard DB failures are caught inside guards.ts — they return null/0 safely.
+  // ── Step 3: Resolve effective safety config ───────────────────────────────────
+  // Loads tenant DB override if present, falls back to AI_SAFETY_DEFAULTS.
+  // Fail-open on DB error — returns global defaults.
+  const safetyConfig = await resolveEffectiveSafetyConfig(tenantId);
 
-  let guardState: AiUsageState = "normal";
-  let guardLimit: AiUsageLimit | null = null;
-  let guardCurrentUsageUsd = 0;
+  // Shared meta for all safety errors (latency will be ~0ms — checks are pre-flight)
+  const safetyMeta: AiErrorMeta = { feature, model: route.model, latencyMs: Date.now() - startMs };
+  const safetyContext = {
+    tenantId: tenantId ?? "anonymous",
+    requestId: context.requestId,
+    feature,
+    routeKey: modelKey,
+    provider: route.provider,
+    model: route.model,
+    meta: safetyMeta,
+  };
 
+  // ── Step 4: Token cap precheck ───────────────────────────────────────────────
+  // Rejects oversized inputs before any API spend.
+  // Uses chars/4 approximation. Never silently trims.
   if (tenantId) {
-    const [limit, currentUsageUsd] = await Promise.all([
-      loadUsageLimit(tenantId),
-      getCurrentAiUsageForPeriod(tenantId),
-    ]);
-    guardLimit = limit;
-    guardCurrentUsageUsd = currentUsageUsd;
-    if (limit) {
-      guardState = evaluateAiUsageState({ currentUsageUsd, limit });
-    }
-  }
-
-  // ── Hard stop ────────────────────────────────────────────────────────────────
-  // Log status="blocked" — analytically distinct from provider errors.
-  // No aggregate increment: no provider call was made, no tokens consumed.
-  if (guardState === "blocked") {
-    const latencyMs = Date.now() - startMs;
-    const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
-
-    void logAiUsage({
-      feature,
-      provider: route.provider,
-      tenantId: tenantId ?? null,
-      userId: userId ?? null,
-      requestId: context.requestId ?? null,
-      model: route.model,
-      status: "blocked",
-      errorMessage: "AI budget exceeded: included usage exhausted",
-      latencyMs,
-      estimatedCostUsd: null,
+    await checkTokenCap({
+      userInput: input.userInput,
+      maxInputTokens: safetyConfig.maxInputTokens,
+      ...safetyContext,
     });
-
-    if (tenantId && guardLimit) {
-      void maybeRecordThresholdEvent({
-        tenantId,
-        state: guardState,
-        currentUsageUsd: guardCurrentUsageUsd,
-        limit: guardLimit,
-        requestId: context.requestId,
-      });
-    }
-
-    emitRunnerLog({ feature, model: route.model, latencyMs, guardState, success: false, error: "budget_exceeded" });
-    throw new AiBudgetExceededError(meta);
   }
 
-  // ── Budget mode policy ───────────────────────────────────────────────────────
-  // No provider/model switch. Same route, reduced output tokens + concise prefix.
-  const effectiveSystemPrompt =
-    guardState === "budget_mode"
-      ? `${BUDGET_MODE_POLICY.systemPromptPrefix}${input.systemPrompt}`
-      : input.systemPrompt;
+  // ── Step 5: Rate limit check ─────────────────────────────────────────────────
+  // Checks requests_per_minute and requests_per_hour.
+  // Both windows use rolling counts from ai_usage. Fail-open on DB error.
+  if (tenantId) {
+    await checkRateLimit({
+      safetyConfig,
+      ...safetyContext,
+    });
+  }
 
-  const maxOutputTokens =
-    guardState === "budget_mode" ? BUDGET_MODE_POLICY.maxOutputTokens : undefined;
+  // ── Step 6: Concurrency guard acquire ────────────────────────────────────────
+  // Process-local in-flight counter per tenant.
+  // MUST be released in the finally block below.
+  let concurrencyAcquired = false;
+  if (tenantId) {
+    await acquireConcurrencySlot({
+      maxConcurrentRequests: safetyConfig.maxConcurrentRequests,
+      ...safetyContext,
+    });
+    concurrencyAcquired = true;
+  }
 
-  // ── Provider call ────────────────────────────────────────────────────────────
   try {
+    // ── Step 7: Budget/usage guardrail ─────────────────────────────────────────
+    // If tenantId is absent, guardrails are skipped entirely.
+    // Guard DB failures are caught inside guards.ts — they return null/0 safely.
+
+    let guardState: AiUsageState = "normal";
+    let guardLimit: AiUsageLimit | null = null;
+    let guardCurrentUsageUsd = 0;
+
+    if (tenantId) {
+      const [limit, currentUsageUsd] = await Promise.all([
+        loadUsageLimit(tenantId),
+        getCurrentAiUsageForPeriod(tenantId),
+      ]);
+      guardLimit = limit;
+      guardCurrentUsageUsd = currentUsageUsd;
+      if (limit) {
+        guardState = evaluateAiUsageState({ currentUsageUsd, limit });
+      }
+    }
+
+    // Hard stop — log status="blocked" and throw. No provider call.
+    if (guardState === "blocked") {
+      const latencyMs = Date.now() - startMs;
+      const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
+
+      void logAiUsage({
+        feature,
+        provider: route.provider,
+        tenantId: tenantId ?? null,
+        userId: userId ?? null,
+        requestId: context.requestId ?? null,
+        model: route.model,
+        status: "blocked",
+        errorMessage: "AI budget exceeded: included usage exhausted",
+        latencyMs,
+        estimatedCostUsd: null,
+      });
+
+      if (tenantId && guardLimit) {
+        void maybeRecordThresholdEvent({
+          tenantId,
+          state: guardState,
+          currentUsageUsd: guardCurrentUsageUsd,
+          limit: guardLimit,
+          requestId: context.requestId,
+        });
+      }
+
+      emitRunnerLog({ feature, model: route.model, latencyMs, guardState, success: false, error: "budget_exceeded" });
+      throw new AiBudgetExceededError(meta);
+    }
+
+    // ── Step 8: Budget mode policy ──────────────────────────────────────────────
+    const effectiveSystemPrompt =
+      guardState === "budget_mode"
+        ? `${BUDGET_MODE_POLICY.systemPromptPrefix}${input.systemPrompt}`
+        : input.systemPrompt;
+
+    // Enforce output token cap centrally.
+    // Safety cap (from config/DB) applies always.
+    // Budget mode further restricts to 512 tokens (more conservative wins).
+    const effectiveMaxOutputTokens =
+      guardState === "budget_mode"
+        ? Math.min(BUDGET_MODE_POLICY.maxOutputTokens, safetyConfig.maxOutputTokens)
+        : safetyConfig.maxOutputTokens;
+
+    // ── Step 9: Provider call ───────────────────────────────────────────────────
     const result = await provider.generateText({
       model: route.model,
       systemPrompt: effectiveSystemPrompt,
       userInput: input.userInput,
       timeoutMs: AI_TIMEOUT_MS,
-      maxOutputTokens,
+      maxOutputTokens: effectiveMaxOutputTokens,
     });
 
     const latencyMs = Date.now() - startMs;
@@ -185,11 +254,10 @@ export async function runAiCall(
     const pricingResult = await loadPricing(route.provider, route.model);
     const estimatedCostUsd = estimateAiCost({ usage: result.usage ?? null, pricing: pricingResult.pricing });
 
-    // Cost basis: billable tokens = same as raw tokens in current formula.
-    // Stored explicitly so future billing can reconstruct the cost calculation.
     const inputTokensBillable = result.usage?.input_tokens ?? null;
     const outputTokensBillable = result.usage?.output_tokens ?? null;
 
+    // ── Step 10: Usage logging + threshold events ───────────────────────────────
     void logAiUsage({
       feature,
       provider: route.provider,
@@ -237,10 +305,20 @@ export async function runAiCall(
       model: route.model,
       feature,
     };
+
   } catch (err) {
+    // Re-throw typed safety/budget errors without wrapping them in a generic error
+    if (
+      err instanceof AiTokenCapError ||
+      err instanceof AiRateLimitError ||
+      err instanceof AiConcurrencyError ||
+      err instanceof AiBudgetExceededError
+    ) {
+      throw err;
+    }
+
     const latencyMs = Date.now() - startMs;
     const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
-
     const aiErr = normalizeError(err, meta);
 
     void logAiUsage({
@@ -256,9 +334,16 @@ export async function runAiCall(
       estimatedCostUsd: null,
     });
 
-    emitRunnerLog({ feature, model: route.model, latencyMs, guardState, success: false, error: aiErr.message });
-
+    emitRunnerLog({ feature, model: route.model, latencyMs, guardState: "normal", success: false, error: aiErr.message });
     throw aiErr;
+
+  } finally {
+    // ── Step 11: Always release concurrency slot ────────────────────────────────
+    // Runs on success, error, safety block, and budget block.
+    // No slot leak possible — if acquire succeeded, release always runs.
+    if (concurrencyAcquired && tenantId) {
+      releaseConcurrencySlot(tenantId);
+    }
   }
 }
 
