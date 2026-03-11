@@ -9,10 +9,12 @@
  * All errors carry feature, model and latencyMs so diagnostics
  * are possible even when the error is caught far from the call site.
  *
- * Phase 3H additions:
- * - AiTokenCapError     — input exceeded maxInputTokens before provider call
- * - AiRateLimitError    — tenant exceeded requestsPerMinute or requestsPerHour
- * - AiConcurrencyError  — tenant has too many simultaneous in-flight requests
+ * Each error carries:
+ *   httpStatus         — correct HTTP status code for this outcome
+ *   errorCode          — stable machine-readable code for API clients
+ *   retryAfterSeconds  — hint for Retry-After header (undefined = no retry hint)
+ *
+ * Phase 3H.1: HTTP status codes and stable error payloads added.
  */
 
 export interface AiErrorMeta {
@@ -26,20 +28,37 @@ export class AiError extends Error {
   readonly feature: string;
   readonly model: string;
   readonly latencyMs: number;
+  readonly httpStatus: number;
+  readonly errorCode: string;
+  readonly retryAfterSeconds: number | undefined;
 
-  constructor(message: string, meta: AiErrorMeta) {
+  constructor(
+    message: string,
+    meta: AiErrorMeta,
+    httpStatus: number,
+    errorCode: string,
+    retryAfterSeconds?: number,
+  ) {
     super(message);
     this.name = "AiError";
     this.feature = meta.feature;
     this.model = meta.model;
     this.latencyMs = meta.latencyMs;
+    this.httpStatus = httpStatus;
+    this.errorCode = errorCode;
+    this.retryAfterSeconds = retryAfterSeconds;
   }
 }
 
 /** OPENAI_API_KEY is missing or empty */
 export class AiUnavailableError extends AiError {
   constructor(meta: AiErrorMeta) {
-    super("AI service is unavailable: OPENAI_API_KEY is not configured", meta);
+    super(
+      "AI service is unavailable: OPENAI_API_KEY is not configured",
+      meta,
+      503,
+      "ai_unavailable",
+    );
     this.name = "AiUnavailableError";
   }
 }
@@ -47,15 +66,26 @@ export class AiUnavailableError extends AiError {
 /** The provider call was aborted due to the AI_TIMEOUT_MS limit */
 export class AiTimeoutError extends AiError {
   constructor(meta: AiErrorMeta) {
-    super(`AI call timed out after ${meta.latencyMs}ms (feature: ${meta.feature})`, meta);
+    super(
+      `AI call timed out after ${meta.latencyMs}ms (feature: ${meta.feature})`,
+      meta,
+      504,
+      "ai_timeout",
+    );
     this.name = "AiTimeoutError";
   }
 }
 
-/** OpenAI returned HTTP 429 — rate limit or quota exceeded */
+/** OpenAI returned HTTP 429 — rate limit or quota exceeded at provider level */
 export class AiQuotaError extends AiError {
   constructor(meta: AiErrorMeta) {
-    super("AI quota exceeded: OpenAI returned 429", meta);
+    super(
+      "AI quota exceeded: OpenAI returned 429",
+      meta,
+      429,
+      "ai_quota_exceeded",
+      60,
+    );
     this.name = "AiQuotaError";
   }
 }
@@ -63,7 +93,7 @@ export class AiQuotaError extends AiError {
 /** Any other provider or runtime failure */
 export class AiServiceError extends AiError {
   constructor(message: string, meta: AiErrorMeta) {
-    super(message, meta);
+    super(message, meta, 502, "ai_service_error");
     this.name = "AiServiceError";
   }
 }
@@ -75,13 +105,15 @@ export class AiServiceError extends AiError {
  * as "blocked" (current period usage ≥ hard_limit_percent of budget).
  *
  * No provider call is made after this error is thrown.
- * Future pay-as-you-go can be wired by handling this error at the feature layer.
+ * HTTP 402 — explicit budget exhaustion signal.
  */
 export class AiBudgetExceededError extends AiError {
   constructor(meta: AiErrorMeta) {
     super(
       "AI budget exceeded: included AI usage for this period has been exhausted",
       meta,
+      402,
+      "ai_budget_exceeded",
     );
     this.name = "AiBudgetExceededError";
   }
@@ -92,8 +124,7 @@ export class AiBudgetExceededError extends AiError {
  *
  * Thrown by request-safety.ts token cap check.
  * No provider call is made — the check is purely pre-flight.
- * The estimated token count and configured limit are included in the message
- * so callers can surface useful feedback without parsing strings.
+ * HTTP 413 — Payload Too Large.
  */
 export class AiTokenCapError extends AiError {
   readonly estimatedTokens: number;
@@ -103,6 +134,8 @@ export class AiTokenCapError extends AiError {
     super(
       `Input too large: estimated ${meta.estimatedTokens} tokens exceeds limit of ${meta.tokenLimit}`,
       meta,
+      413,
+      "token_cap_exceeded",
     );
     this.name = "AiTokenCapError";
     this.estimatedTokens = meta.estimatedTokens;
@@ -115,7 +148,7 @@ export class AiTokenCapError extends AiError {
  *
  * Thrown by request-safety.ts rate limit check.
  * No provider call is made.
- * Includes which limit was breached (per-minute or per-hour) and the counts.
+ * HTTP 429 — Too Many Requests. Retry-After: 60 seconds (per-minute window).
  */
 export class AiRateLimitError extends AiError {
   readonly limitType: "per_minute" | "per_hour";
@@ -130,6 +163,9 @@ export class AiRateLimitError extends AiError {
     super(
       `Rate limit exceeded: ${meta.currentCount} requests in window, limit is ${meta.limit} (${meta.limitType})`,
       meta,
+      429,
+      "rate_limit_exceeded",
+      meta.limitType === "per_minute" ? 60 : 3600,
     );
     this.name = "AiRateLimitError";
     this.limitType = meta.limitType;
@@ -143,7 +179,7 @@ export class AiRateLimitError extends AiError {
  *
  * Thrown by request-safety.ts concurrency guard.
  * No provider call is made — slot was never acquired.
- * The concurrency guard is process-local in Phase 3H.
+ * HTTP 429 — Too Many Requests. Retry-After: 5 seconds.
  */
 export class AiConcurrencyError extends AiError {
   readonly currentConcurrent: number;
@@ -156,6 +192,9 @@ export class AiConcurrencyError extends AiError {
     super(
       `Concurrency limit exceeded: ${meta.currentConcurrent} requests in flight, limit is ${meta.concurrencyLimit}`,
       meta,
+      429,
+      "concurrency_limit_exceeded",
+      5,
     );
     this.name = "AiConcurrencyError";
     this.currentConcurrent = meta.currentConcurrent;

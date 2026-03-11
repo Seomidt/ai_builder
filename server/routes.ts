@@ -7,10 +7,37 @@ import { runExecutorService } from "./services/run-executor.service";
 import { summarize } from "./features/ai-summarize/summarize.service";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
+import { AiError } from "./lib/ai/errors";
 
-function handleError(res: Response, error: unknown) {
+/**
+ * Central error → HTTP response mapper.
+ *
+ * AI typed errors (AiError subclasses) carry their own httpStatus, errorCode,
+ * and optional retryAfterSeconds — these are used directly so no guard outcome
+ * ever surfaces as a generic 500.
+ *
+ * Stable AI error payload shape:
+ *   { error: "<machine_code>", message: "<human_readable>", request_id?, retry_after_seconds? }
+ *
+ * Phase 3H.1: Added AiError branch for correct HTTP semantics.
+ */
+function handleError(res: Response, error: unknown, requestId?: string | null) {
   if (error instanceof ZodError) {
     return res.status(400).json({ error: fromZodError(error).message });
+  }
+  if (error instanceof AiError) {
+    if (error.retryAfterSeconds !== undefined) {
+      res.set("Retry-After", String(error.retryAfterSeconds));
+    }
+    const payload: Record<string, unknown> = {
+      error: error.errorCode,
+      message: error.message,
+    };
+    if (requestId) payload.request_id = requestId;
+    if (error.retryAfterSeconds !== undefined) {
+      payload.retry_after_seconds = error.retryAfterSeconds;
+    }
+    return res.status(error.httpStatus).json(payload);
   }
   if (error instanceof Error) {
     const status = error.message.includes("not found") ? 404 : 500;
@@ -377,7 +404,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
       return res.json({ summary: result.summary });
     } catch (err) {
-      handleError(res, err);
+      const reqId = req.headers["x-request-id"] as string | undefined ?? null;
+      handleError(res, err, reqId);
     }
   });
 
