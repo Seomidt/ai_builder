@@ -17,6 +17,12 @@ export interface AiProviderGenerateInput {
   userInput: string;
   /** Optional timeout override in milliseconds */
   timeoutMs?: number;
+  /**
+   * Optional maximum number of output tokens.
+   * Set by runner.ts in budget_mode to reduce verbosity.
+   * If omitted, the provider uses its own default (no hard cap).
+   */
+  maxOutputTokens?: number;
 }
 
 export interface AiProviderGenerateResult {

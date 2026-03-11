@@ -62,3 +62,22 @@ export class AiServiceError extends AiError {
     this.name = "AiServiceError";
   }
 }
+
+/**
+ * Tenant has exhausted their included AI usage budget.
+ *
+ * Thrown by runner.ts when guards.ts evaluates the tenant's usage state
+ * as "blocked" (current period usage ≥ hard_limit_percent of budget).
+ *
+ * No provider call is made after this error is thrown.
+ * Future pay-as-you-go can be wired by handling this error at the feature layer.
+ */
+export class AiBudgetExceededError extends AiError {
+  constructor(meta: AiErrorMeta) {
+    super(
+      "AI budget exceeded: included AI usage for this period has been exhausted",
+      meta,
+    );
+    this.name = "AiBudgetExceededError";
+  }
+}

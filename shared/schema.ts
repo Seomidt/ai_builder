@@ -544,6 +544,102 @@ export const artifactDependencies = pgTable(
   ],
 );
 
+// ─── AI Usage Limits ──────────────────────────────────────────────────────────
+
+/**
+ * Per-tenant AI usage budget configuration.
+ *
+ * One row per tenant. Controls warning threshold (budget mode) and hard stop.
+ * Admin creates/updates rows; runtime reads them each AI call via guards.ts.
+ *
+ * Percent fields are integers: 80 = 80% of monthly_ai_budget_usd.
+ * If no row exists for a tenant, guards.ts treats it as unlimited (normal).
+ */
+export const aiUsageLimits = pgTable(
+  "ai_usage_limits",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    /** Monthly AI budget ceiling in USD */
+    monthlyAiBudgetUsd: numeric("monthly_ai_budget_usd", { precision: 12, scale: 6 }).notNull(),
+    /** Percent of budget at which budget_mode is entered (default: 80) */
+    warningThresholdPercent: integer("warning_threshold_percent").notNull().default(80),
+    /** Percent of budget at which AI access is blocked (default: 100) */
+    hardLimitPercent: integer("hard_limit_percent").notNull().default(100),
+    /** Whether to enter budget mode at warning threshold */
+    budgetModeEnabled: boolean("budget_mode_enabled").notNull().default(true),
+    /** Whether to hard-stop AI calls at hard limit */
+    hardStopEnabled: boolean("hard_stop_enabled").notNull().default(true),
+    /** Whether to allow overage beyond the hard limit (future pay-as-you-go hook) */
+    overageAllowed: boolean("overage_allowed").notNull().default(false),
+    notes: text("notes"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ai_usage_limits_tenant_idx").on(t.tenantId),
+  ],
+);
+
+export const insertAiUsageLimitSchema = createInsertSchema(aiUsageLimits).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertAiUsageLimit = z.infer<typeof insertAiUsageLimitSchema>;
+export type AiUsageLimit = typeof aiUsageLimits.$inferSelect;
+
+// ─── Usage Threshold Events ───────────────────────────────────────────────────
+
+/**
+ * Records when a tenant newly crosses a usage threshold.
+ *
+ * Foundation only — no notifications, no workers.
+ * Prevents the same threshold event from being recorded repeatedly
+ * by checking for unresolved recent events before inserting.
+ *
+ * event_type examples: "warning_threshold_reached", "hard_limit_reached"
+ * metric_type: "ai" (extensible for future storage / compute guardrails)
+ */
+export const usageThresholdEvents = pgTable(
+  "usage_threshold_events",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    /** Category of metric: "ai" */
+    metricType: text("metric_type").notNull(),
+    /** e.g. "warning_threshold_reached" | "hard_limit_reached" */
+    eventType: text("event_type").notNull(),
+    /** Threshold percent that was reached */
+    thresholdPercent: integer("threshold_percent").notNull(),
+    /** Current metric value (AI usage cost USD) at event time */
+    metricValue: numeric("metric_value", { precision: 12, scale: 6 }).notNull(),
+    /** Configured budget value (USD) at event time */
+    budgetValue: numeric("budget_value", { precision: 12, scale: 6 }).notNull(),
+    /** Request ID that triggered the threshold crossing, if available */
+    requestId: text("request_id"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    /** Set when threshold is resolved (usage drops below, or limit raised) */
+    resolvedAt: timestamp("resolved_at"),
+  },
+  (t) => [
+    index("usage_threshold_events_tenant_idx").on(t.tenantId),
+    index("usage_threshold_events_event_type_idx").on(t.eventType),
+    index("usage_threshold_events_created_at_idx").on(t.createdAt),
+  ],
+);
+
+export const insertUsageThresholdEventSchema = createInsertSchema(usageThresholdEvents).omit({
+  id: true,
+  createdAt: true,
+  resolvedAt: true,
+});
+export type InsertUsageThresholdEvent = z.infer<typeof insertUsageThresholdEventSchema>;
+export type UsageThresholdEvent = typeof usageThresholdEvents.$inferSelect;
+
 // ─── Insert Schemas ───────────────────────────────────────────────────────────
 
 export const insertOrganizationSchema = createInsertSchema(organizations).omit({

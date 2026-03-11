@@ -16,7 +16,7 @@ export class OpenAiProvider implements AiProvider {
   readonly key = "openai";
 
   async generateText(input: AiProviderGenerateInput): Promise<AiProviderGenerateResult> {
-    const { model, systemPrompt, userInput, timeoutMs } = input;
+    const { model, systemPrompt, userInput, timeoutMs, maxOutputTokens } = input;
 
     const client = getOpenAIClient();
 
@@ -32,6 +32,7 @@ export class OpenAiProvider implements AiProvider {
           model,
           instructions: systemPrompt,
           input: userInput,
+          ...(maxOutputTokens !== undefined ? { max_output_tokens: maxOutputTokens } : {}),
         },
         { signal: controller.signal },
       );

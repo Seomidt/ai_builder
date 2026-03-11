@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 3F complete)
+# AI Builder Platform — V1 (Phase 3G complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -60,6 +60,8 @@ server/
       usage.ts           logAiUsage() → ai_usage table (with estimatedCostUsd)
       pricing.ts         loadPricing() — DB first, code default fallback + TTL cache
       costs.ts           estimateAiCost() — token × rate calculation
+      guards.ts          AI usage guardrails — loadUsageLimit, evaluateAiUsageState, BUDGET_MODE_POLICY
+      usage-summary.ts   getAiUsageSummary() — normalized tenant usage contract for future UI
       providers/         AiProvider interface, OpenAI adapter, registry
       prompts/           getSummarizePrompt()
     supabase.ts, github.ts, github-commit-format.ts
@@ -88,6 +90,7 @@ shared/
 | 3D | `feature/ai-summarize` | First AI feature — summarize prompt, service, POST /api/ai/summarize |
 | 3E | `feature/ai-route-overrides` | Model routing overrides — ai_model_overrides, loadOverride(), async router |
 | 3F | `feature/ai-pricing-registry` | AI Pricing Registry — ai_model_pricing, loadPricing(), estimateAiCost(), estimated_cost_usd in ai_usage |
+| 3G | `feature/ai-usage-guardrails` | AI Usage Guardrails — ai_usage_limits, usage_threshold_events, guards.ts, BUDGET_MODE_POLICY, hard stop, usage-summary.ts |
 
 ## AI Stack — Routing Flow
 
@@ -97,21 +100,29 @@ runAiCall(context, input)
       → loadOverride() — tenant → global → null
       → fallback: AI_MODEL_ROUTES[routeKey]
   → getProvider(provider)
+  → [if tenantId] loadUsageLimit() + getCurrentAiUsageForPeriod()
+  → evaluateAiUsageState() → normal | budget_mode | blocked
+  → if blocked: throw AiBudgetExceededError (no provider call)
+  → if budget_mode: apply BUDGET_MODE_POLICY (maxOutputTokens + concise prefix)
   → provider.generateText(...)
   → loadPricing(provider, model) — DB active row → code default
   → estimateAiCost(usage, pricing)
   → logAiUsage(..., estimatedCostUsd)
+  → [if non-normal] maybeRecordThresholdEvent()
 ```
 
 ## Key Files
 
-- `shared/schema.ts` — all tables including ai_usage, ai_model_overrides, ai_model_pricing
+- `shared/schema.ts` — all tables including ai_usage, ai_model_overrides, ai_model_pricing, ai_usage_limits, usage_threshold_events
 - `server/lib/ai/config.ts` — AI_MODEL_ROUTES (6 routes), AiProviderKey
-- `server/lib/ai/runner.ts` — runAiCall() + cost estimation
+- `server/lib/ai/runner.ts` — runAiCall() + guardrails + cost estimation
 - `server/lib/ai/router.ts` — resolveRoute() (async)
 - `server/lib/ai/overrides.ts` — loadOverride() + TTL cache
 - `server/lib/ai/pricing.ts` — loadPricing() + TTL cache
 - `server/lib/ai/costs.ts` — estimateAiCost() + code defaults
+- `server/lib/ai/guards.ts` — loadUsageLimit, evaluateAiUsageState, BUDGET_MODE_POLICY, maybeRecordThresholdEvent
+- `server/lib/ai/usage-summary.ts` — getAiUsageSummary() — normalized usage contract
+- `server/lib/ai/errors.ts` — AiBudgetExceededError + typed error hierarchy
 - `server/lib/ai/providers/registry.ts` — ACTIVE_PROVIDERS
 - `server/features/ai-summarize/summarize.service.ts` — first feature
 
@@ -123,6 +134,9 @@ runAiCall(context, input)
 - `ai_model_overrides` has coalesce unique index applied directly via SQL (not in Drizzle schema)
 - `ai_model_pricing` has partial unique index `ON ai_model_pricing (provider, model) WHERE is_active = true` applied via SQL
 - `ai_usage.estimated_cost_usd` is `numeric(12,8)` — Drizzle returns as string, convert with `Number()` when reading
+- `ai_usage_limits` has unique index on `tenant_id` — one row per tenant
+- `usage_threshold_events` — append-only foundation, deduplicated by 24h window per event_type
+- Budget mode: `BUDGET_MODE_POLICY` in guards.ts — `maxOutputTokens: 512`, concise system prompt prefix
 
 ## V2 / Next TODO
 
