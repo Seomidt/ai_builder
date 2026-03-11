@@ -818,6 +818,13 @@ export const aiUsage = pgTable(
     index("ai_usage_tenant_created_at_idx").on(t.tenantId, t.createdAt),
     // Composite index for status-filtered period queries (raw fallback path in guards)
     index("ai_usage_tenant_status_created_at_idx").on(t.tenantId, t.status, t.createdAt),
+    // Idempotency: one log row per tenant+request. NULL request_id is excluded (untraceable calls
+    // are not deduplicated — they have no stable identity to compare against).
+    uniqueIndex("ai_usage_tenant_request_id_idx")
+      .on(t.tenantId, t.requestId)
+      .where(sql`request_id IS NOT NULL`),
+    // Cost sanity: estimated cost must be non-negative if present
+    check("ai_usage_cost_non_negative_check", sql`estimated_cost_usd IS NULL OR estimated_cost_usd >= 0`),
   ],
 );
 

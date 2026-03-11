@@ -7,11 +7,14 @@
  *
  * Design principles:
  * - Logging failures must NEVER crash the application flow (fire-and-forget)
+ * - Idempotency: duplicate request_id per tenant is silently ignored via ON CONFLICT DO NOTHING
+ * - If a duplicate is detected, the aggregate upsert is also skipped (no double-count)
  * - Aggregate update is synchronous within logAiUsage but safe from propagating errors
  * - Uses the same Drizzle db instance as the rest of the server
  * - Callers own the decision of when and whether to log
  *
  * Phase 3G.1: added provider field, aggregate period upsert
+ * Hardening: idempotency via partial unique index on (tenant_id, request_id)
  */
 
 import { sql } from "drizzle-orm";
@@ -45,32 +48,53 @@ export interface LogAiUsagePayload {
 /**
  * Insert a row into ai_usage, and on success also upsert the aggregate period row.
  *
+ * Idempotency: uses ON CONFLICT DO NOTHING against the partial unique index
+ * (tenant_id, request_id) WHERE request_id IS NOT NULL. If a duplicate is
+ * detected (empty returning), the aggregate upsert is also skipped so no
+ * double-counting occurs. Calls without a request_id are not deduplicated.
+ *
  * Fire-and-forget: any database error is caught and logged to console only.
  * The calling code never sees a thrown error from this function.
  */
 export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
+  let inserted: { id: string }[];
+
   try {
-    await db.insert(aiUsage).values({
-      tenantId: payload.tenantId ?? null,
-      userId: payload.userId ?? null,
-      requestId: payload.requestId ?? null,
-      feature: payload.feature,
-      provider: payload.provider ?? null,
-      model: payload.model,
-      promptTokens: payload.promptTokens ?? 0,
-      completionTokens: payload.completionTokens ?? 0,
-      totalTokens: payload.totalTokens ?? 0,
-      inputPreview: payload.inputPreview ?? null,
-      status: payload.status,
-      errorMessage: payload.errorMessage ?? null,
-      latencyMs: payload.latencyMs ?? null,
-      estimatedCostUsd: payload.estimatedCostUsd != null
-        ? String(payload.estimatedCostUsd)
-        : null,
-    });
+    inserted = await db
+      .insert(aiUsage)
+      .values({
+        tenantId: payload.tenantId ?? null,
+        userId: payload.userId ?? null,
+        requestId: payload.requestId ?? null,
+        feature: payload.feature,
+        provider: payload.provider ?? null,
+        model: payload.model,
+        promptTokens: payload.promptTokens ?? 0,
+        completionTokens: payload.completionTokens ?? 0,
+        totalTokens: payload.totalTokens ?? 0,
+        inputPreview: payload.inputPreview ?? null,
+        status: payload.status,
+        errorMessage: payload.errorMessage ?? null,
+        latencyMs: payload.latencyMs ?? null,
+        estimatedCostUsd: payload.estimatedCostUsd != null
+          ? String(payload.estimatedCostUsd)
+          : null,
+      })
+      .onConflictDoNothing()
+      .returning({ id: aiUsage.id });
   } catch (err) {
     // Logging must never crash the application
     console.error("[ai/usage] Failed to log AI usage:", err instanceof Error ? err.message : err);
+    return;
+  }
+
+  // Empty result means the insert was a no-op due to duplicate request_id
+  if (inserted.length === 0) {
+    console.warn(
+      "[ai/usage] Duplicate request_id detected — skipping log:",
+      payload.requestId,
+      "tenant:", payload.tenantId,
+    );
     return;
   }
 
