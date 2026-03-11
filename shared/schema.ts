@@ -1644,6 +1644,8 @@ export const aiBillingUsage = pgTable(
     check("ai_billing_usage_input_tokens_check", sql`input_tokens_billable >= 0`),
     check("ai_billing_usage_output_tokens_check", sql`output_tokens_billable >= 0`),
     check("ai_billing_usage_total_tokens_check", sql`total_tokens_billable >= 0`),
+    // Composite index for per-tenant billing range queries — required by wallet balance and billing summary
+    index("ai_billing_usage_tenant_created_idx").on(t.tenantId, t.createdAt),
   ],
 );
 
@@ -1691,6 +1693,136 @@ export const aiRequestStepEvents = pgTable(
 export const insertAiRequestStepEventSchema = createInsertSchema(aiRequestStepEvents).omit({ id: true, createdAt: true });
 export type InsertAiRequestStepEvent = z.infer<typeof insertAiRequestStepEventSchema>;
 export type AiRequestStepEvent = typeof aiRequestStepEvents.$inferSelect;
+
+// ─── Tenant Credit Accounts ───────────────────────────────────────────────────
+// One wallet account per tenant.
+// This table is account metadata only — NOT the source of truth for balance.
+// Balance must be derived from tenant_credit_ledger rows.
+//
+// Kept minimal: no balance column. No balance stored here.
+// Balance = SUM(credit ledger rows) - SUM(debit ledger rows).
+
+export const tenantCreditAccounts = pgTable(
+  "tenant_credit_accounts",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** Tenant that owns this account */
+    tenantId: text("tenant_id").notNull(),
+    /** Currency for this account — USD only for Phase 4B */
+    currency: text("currency").notNull().default("USD"),
+    isActive: boolean("is_active").notNull().default(true),
+    notes: text("notes"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tenant_credit_accounts_tenant_idx").on(t.tenantId),
+    index("tenant_credit_accounts_active_idx").on(t.isActive),
+  ],
+);
+
+export const insertTenantCreditAccountSchema = createInsertSchema(tenantCreditAccounts).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertTenantCreditAccount = z.infer<typeof insertTenantCreditAccountSchema>;
+export type TenantCreditAccount = typeof tenantCreditAccounts.$inferSelect;
+
+// ─── Tenant Credit Ledger ─────────────────────────────────────────────────────
+// Immutable ledger of all wallet events.
+// This IS the source of truth for tenant credit balance.
+//
+// Ledger rules:
+//   - Rows are NEVER updated or deleted during normal operation
+//   - Balance = SUM(credits) - SUM(debits)
+//   - Available balance excludes expired credits (expires_at < NOW())
+//   - One debit row per ai_billing_usage row (enforced by partial unique index on billing_usage_id)
+//   - Debits must always reference a billing_usage_id
+//
+// entry_type values:
+//   "credit_grant"      — credits manually or automatically added to the account
+//   "credit_debit"      — credits consumed by a billable AI call
+//   "credit_expiration" — explicit expiration event (reduces balance when posted)
+//   "credit_adjustment" — admin correction entry
+//
+// direction values:
+//   "credit" — increases balance (grants, adjustments up)
+//   "debit"  — decreases balance (AI usage, expirations)
+
+export const tenantCreditLedger = pgTable(
+  "tenant_credit_ledger",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** Tenant that owns this ledger entry */
+    tenantId: text("tenant_id").notNull(),
+    /** FK to tenant_credit_accounts.id */
+    accountId: text("account_id").notNull(),
+    /**
+     * "credit_grant" | "credit_debit" | "credit_expiration" | "credit_adjustment"
+     */
+    entryType: text("entry_type").notNull(),
+    /** Amount in USD — always >= 0. Direction determines sign semantics. */
+    amountUsd: numeric("amount_usd", { precision: 14, scale: 8 }).notNull(),
+    /**
+     * "credit" — increases balance
+     * "debit"  — decreases balance
+     */
+    direction: text("direction").notNull(),
+    /**
+     * FK to ai_billing_usage.id — populated on credit_debit entries.
+     * Partial unique index ensures one debit row per billing_usage_id.
+     */
+    billingUsageId: text("billing_usage_id"),
+    /** Category of the reference that created this entry */
+    referenceType: text("reference_type"),
+    /** ID of the reference object (plan ID, promo code, etc.) */
+    referenceId: text("reference_id"),
+    /** HTTP request ID for tracing */
+    requestId: text("request_id"),
+    /**
+     * When this credit expires (only relevant for credit_grant entries).
+     * NULL = no expiration. expires_at < NOW() = excluded from available balance.
+     */
+    expiresAt: timestamp("expires_at"),
+    description: text("description"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "tenant_credit_ledger_entry_type_check",
+      sql`entry_type IN ('credit_grant','credit_debit','credit_expiration','credit_adjustment')`,
+    ),
+    check(
+      "tenant_credit_ledger_direction_check",
+      sql`direction IN ('credit','debit')`,
+    ),
+    check("tenant_credit_ledger_amount_check", sql`amount_usd >= 0`),
+    // Core idempotency rule: one debit row per billing_usage_id
+    uniqueIndex("tenant_credit_ledger_billing_debit_idx")
+      .on(t.billingUsageId)
+      .where(sql`entry_type = 'credit_debit' AND billing_usage_id IS NOT NULL`),
+    index("tenant_credit_ledger_tenant_idx").on(t.tenantId),
+    index("tenant_credit_ledger_account_idx").on(t.accountId),
+    index("tenant_credit_ledger_created_at_idx").on(t.createdAt),
+    index("tenant_credit_ledger_expires_at_idx").on(t.expiresAt),
+    index("tenant_credit_ledger_billing_usage_idx").on(t.billingUsageId),
+    index("tenant_credit_ledger_tenant_created_at_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+
+export const insertTenantCreditLedgerSchema = createInsertSchema(tenantCreditLedger).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertTenantCreditLedger = z.infer<typeof insertTenantCreditLedgerSchema>;
+export type TenantCreditLedgerEntry = typeof tenantCreditLedger.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;

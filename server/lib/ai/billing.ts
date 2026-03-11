@@ -17,12 +17,20 @@
  * Config resolution: tenant → global → code default
  * Code default: cost_plus_multiplier with multiplier = 3.0
  *
- * Phase 4A: billing foundation only. No Stripe sync, no invoices, no credits.
+ * Phase 4A: billing foundation only. No Stripe sync, no invoices.
+ * Phase 4B: wallet debit triggered after confirmed billing insert.
+ *
+ * Wallet failure policy:
+ *   ai_billing_usage is the canonical billing ledger.
+ *   Wallet debit is downstream. If the wallet write fails, the billing row is
+ *   still intact and the debit can be replayed later via billing_usage_id idempotency.
+ *   Wallet failure must never break AI runtime or billing success.
  */
 
 import { eq, and, sql } from "drizzle-orm";
 import { db } from "../../db";
 import { aiCustomerPricingConfigs, aiBillingUsage } from "@shared/schema";
+import { maybeRecordWalletDebit } from "./wallet";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -211,17 +219,28 @@ export function calculateCustomerPrice(
 // ─── Billing Write ─────────────────────────────────────────────────────────────
 
 /**
+ * Return type for recordAiBillingUsage:
+ *   id                — the newly created billing row id (for wallet debit reference)
+ *   customerPriceUsd  — computed customer price (for wallet debit amount)
+ * Returns null if the row was a no-op (duplicate) or if the write failed.
+ */
+export interface BillingWriteResult {
+  id: string;
+  customerPriceUsd: number;
+}
+
+/**
  * Insert one immutable billing row for the given ai_usage row.
  *
  * Uses ON CONFLICT DO NOTHING on usage_id to prevent duplicate billing rows.
  * Billing write failures are caught and logged — never thrown to callers.
  *
- * Returns true if a billing row was inserted, false if it was a no-op or failed.
+ * Returns a BillingWriteResult if a new row was created, null if suppressed or failed.
  */
 export async function recordAiBillingUsage(
   input: BillingUsageInput,
   config: ResolvedCustomerPricingConfig,
-): Promise<boolean> {
+): Promise<BillingWriteResult | null> {
   const calc = calculateCustomerPrice(config, {
     providerCostUsd: input.providerCostUsd,
     inputTokensBillable: input.inputTokensBillable,
@@ -257,30 +276,47 @@ export async function recordAiBillingUsage(
         "[ai/billing] Duplicate billing attempt suppressed for usage_id:",
         input.usageId,
       );
-      return false;
+      return null;
     }
 
-    return true;
+    return { id: inserted[0].id, customerPriceUsd: calc.customerPriceUsd };
   } catch (err) {
     console.error(
       "[ai/billing] Failed to write billing row (suppressed):",
       err instanceof Error ? err.message : err,
       "usage_id:", input.usageId,
     );
-    return false;
+    return null;
   }
 }
 
 /**
- * Load pricing config and write billing row in one step.
+ * Load pricing config, write billing row, then trigger wallet debit — all in one step.
  *
  * This is the main entry point called from usage.ts after confirmed ai_usage success.
- * Fire-and-forget safe: never throws. Billing write failure does not affect runtime.
+ * Fire-and-forget safe: never throws. Billing or wallet failure does not affect runtime.
+ *
+ * Flow:
+ *   1. Load effective pricing config (fails open → code default)
+ *   2. Insert ai_billing_usage row (ON CONFLICT DO NOTHING)
+ *   3. If billing row was newly created → trigger wallet debit (maybeRecordWalletDebit)
+ *   4. Wallet debit is downstream and fail-open; billing row is canonical
  */
 export async function maybeRecordAiBillingUsage(input: BillingUsageInput): Promise<void> {
   try {
     const config = await loadEffectiveCustomerPricingConfig(input.tenantId);
-    await recordAiBillingUsage(input, config);
+    const result = await recordAiBillingUsage(input, config);
+
+    // Only debit wallet when a new billing row was actually created.
+    // Duplicate/replay paths return null and must not create additional debits.
+    if (result !== null) {
+      await maybeRecordWalletDebit({
+        tenantId: input.tenantId,
+        billingUsageId: result.id,
+        amountUsd: result.customerPriceUsd,
+        requestId: input.requestId ?? null,
+      });
+    }
   } catch (err) {
     // Belt-and-suspenders: should never reach here due to internal catches, but just in case.
     console.error(
