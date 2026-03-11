@@ -27,12 +27,12 @@ server/
   lib/
     ai/
       config.ts                  AI_MODEL_ROUTES, AiProviderKey, runtime limits, cache policies
-      runner.ts                  runAiCall() — single entry point for all AI features
+      runner.ts                  runAiCall() — single entry point for all AI features (15 steps)
       router.ts                  resolveRoute() — async, tenant/global override-aware
       overrides.ts               loadOverride() — DB override loader with TTL cache
       types.ts                   AiCallContext, AiCallResult
-      errors.ts                  Typed error hierarchy — all AiError subclasses
-      usage.ts                   logAiUsage() → ai_usage + tenant_ai_usage_periods upsert
+      errors.ts                  Typed error hierarchy — AiError + 10 subclasses
+      usage.ts                   logAiUsage() → ai_usage + tenant_ai_usage_periods + anomaly trigger
       usage-periods.ts           getCurrentPeriod() — calendar month boundary helper
       pricing.ts                 loadPricing() — DB first, code default fallback + TTL cache
       costs.ts                   estimateAiCost() — token × rate calculation
@@ -46,6 +46,12 @@ server/
       idempotency.ts             2-layer duplicate suppression (in-process + DB)
       request-state-summary.ts   getAiRequestStateSummary() — idempotency state counts
       request-state-retention.ts Cleanup SQL for ai_request_states + ai_request_state_events
+      anomaly-detector.ts        runAnomalyDetection() — per-request + window anomalies (Phase 3K)
+      anomaly-summary.ts         getAnomalySummary() — recent anomaly event counts
+      anomaly-retention.ts       Cleanup SQL for ai_anomaly_events (90-day retention)
+      step-budget.ts             acquireAiStep() — per-request AI call limit (Phase 3L)
+      step-budget-summary.ts     getStepBudgetSummary() — active/exhausted/completed requests
+      step-budget-retention.ts   Cleanup SQL for step states + events
       retention.ts               Cleanup SQL for ai_usage rows (90-day window)
       providers/
         provider.ts              AiProvider interface
@@ -73,7 +79,7 @@ shared/
 
 ---
 
-## Database Schema (25 tables)
+## Database Schema (29 tables)
 
 | Domain | Tables |
 |--------|--------|
@@ -84,7 +90,7 @@ shared/
 | AI Runs | `ai_runs`, `ai_steps`, `ai_artifacts`, `ai_tool_calls`, `ai_approvals`, `artifact_dependencies` |
 | Integrations | `integrations`, `organization_secrets` |
 | Knowledge | `knowledge_documents` |
-| AI Infrastructure | `ai_usage`, `ai_model_overrides`, `ai_model_pricing`, `ai_usage_limits`, `usage_threshold_events`, `tenant_ai_usage_periods`, `tenant_rate_limits`, `request_safety_events`, `ai_response_cache`, `ai_cache_events`, `ai_request_states`, `ai_request_state_events` |
+| AI Infrastructure | `ai_usage`, `ai_model_overrides`, `ai_model_pricing`, `ai_usage_limits`, `usage_threshold_events`, `tenant_ai_usage_periods`, `tenant_rate_limits`, `request_safety_events`, `ai_response_cache`, `ai_cache_events`, `ai_request_states`, `ai_request_state_events`, `ai_anomaly_configs`, `ai_anomaly_events`, `ai_request_step_states`, `ai_request_step_events` |
 
 ### AI Infrastructure Tables
 
@@ -102,6 +108,10 @@ shared/
 | `ai_cache_events` | Cache hit/miss/write/skip event log |
 | `ai_request_states` | Idempotency state per (tenant, request_id) — 24h TTL |
 | `ai_request_state_events` | Idempotency lifecycle events — 30-day retention |
+| `ai_anomaly_configs` | Anomaly detection thresholds (global or per-tenant scope) |
+| `ai_anomaly_events` | Detected cost/token/rate anomaly signals — 90-day retention |
+| `ai_request_step_states` | Per-request AI call counter — max 5 calls per request_id |
+| `ai_request_step_events` | Step lifecycle events — 30-day retention |
 
 ---
 
@@ -112,27 +122,30 @@ All AI calls flow through a single orchestration pipeline in `runner.ts`:
 ```
 feature code
   → runAiCall(context, input)
-      1. Resolve route (provider + model)
-      2. Get provider adapter
-      3. Idempotency check [if request_id present]
-         ├─ duplicate_inflight  → 409 Conflict (no provider call)
-         ├─ duplicate_replay    → return stored result (no cost row)
-         └─ owned               → proceed
-      4. Resolve effective safety config (tenant override → global defaults)
-      5. Token cap precheck (413 if exceeded)
-      6. Rate limit check (429 if exceeded)
-      7. Concurrency guard acquire (429 if exceeded)
-      8. Budget/usage guard
-         ├─ blocked    → 402 Budget Exceeded (no provider call)
-         └─ budget_mode → apply BUDGET_MODE_POLICY (reduced tokens + prefix)
-      9. Cache lookup [if route cacheable + tenantId present]
-         ├─ HIT  → return cached result (no provider call, no cost row)
-         └─ MISS → continue
-     10. Provider call (OpenAI Responses API)
-     11. Usage logging → ai_usage + tenant_ai_usage_periods
-     12. Cache write (success only)
-     13. Mark request completed (idempotency state)
-     14. Release concurrency slot + idempotency ownership (always, in finally)
+      1.  Resolve route (provider + model)
+      2.  Get provider adapter
+      3.  Idempotency check [if request_id present]
+          ├─ duplicate_inflight  → 409 Conflict (no provider call)
+          ├─ duplicate_replay    → return stored result (no cost row, no step)
+          └─ owned               → proceed
+      4.  Resolve effective safety config (tenant override → global defaults)
+      5.  Token cap precheck (413 if exceeded)
+      6.  Rate limit check (429 if exceeded)
+      7.  Concurrency guard acquire (429 if exceeded)
+      8.  Budget/usage guard
+          ├─ blocked    → 402 Budget Exceeded (no provider call)
+          └─ budget_mode → apply BUDGET_MODE_POLICY (reduced tokens + prefix)
+      9.  Cache lookup [if route cacheable + tenantId present]
+          ├─ HIT  → return cached result (no provider call, no cost row, no step consumed)
+          └─ MISS → continue
+     10.  Step budget acquire [if tenantId + requestId present]
+          ├─ exceeded   → 429 Step Budget Exceeded (no provider call)
+          └─ within limit → increment counter, record step_started
+     11.  Provider call (OpenAI Responses API)
+     12.  Usage logging → ai_usage + tenant_ai_usage_periods + anomaly detection [fire-and-forget]
+     13.  Cache write (success only)
+     14.  Mark request completed (idempotency state)
+     15.  Release concurrency slot + idempotency ownership (always, in finally)
 ```
 
 ### Model Routes (code defaults)
@@ -145,14 +158,6 @@ feature code
 | `coding` | openai | gpt-4.1 | Code generation |
 | `cheap` | google | gemini-2.0-flash | Placeholder |
 | `reasoning` | anthropic | claude-opus-4-5 | Placeholder |
-
-### Model Routing Overrides
-
-```sql
--- Example: override 'default' route globally to use gpt-4.1
-INSERT INTO ai_model_overrides (scope, scope_id, route_key, provider, model, is_active)
-VALUES ('global', NULL, 'default', 'openai', 'gpt-4.1', true);
-```
 
 ### Idempotency
 
@@ -173,7 +178,38 @@ Duplicate requests are suppressed at two layers:
 Enabled for `"default"` route only. TTL: 3600s. Fingerprint:
 `SHA-256(v1:{tenantId}:{routeKey}:{provider}:{model}:{maxOutputTokens}:{contentHash})`
 
-Cache hits produce **no ai_usage provider-cost rows** — observable via `ai_cache_events` only.
+Cache hits produce **no ai_usage provider-cost rows** and **no step budget consumption**.
+
+### Anomaly Detection (Phase 3K)
+
+Detection-only — no runtime blocking. Fires after every successful ai_usage write.
+
+| Signal | Threshold (default) |
+|--------|---------------------|
+| `cost_per_request_exceeded` | > $0.10 per call |
+| `tokens_per_request_exceeded` | > 12,000 total tokens |
+| `output_tokens_per_request_exceeded` | > 4,000 output tokens |
+| `requests_per_5m_exceeded` | > 60 requests in 5 minutes |
+| `cost_per_5m_exceeded` | > $3.00 in 5 minutes |
+| `requests_per_1h_exceeded` | > 500 requests in 1 hour |
+| `cost_per_1h_exceeded` | > $20.00 in 1 hour |
+
+Config resolution: tenant-specific → global → code defaults. Cooldown: 15 minutes per anomaly key.
+
+### Step Budget (Phase 3L)
+
+Prevents cost amplification loops from a single logical request spawning too many AI calls.
+
+| What counts as a step | Counts? |
+|-----------------------|---------|
+| Successful provider call | Yes |
+| Failed provider call (error after attempt) | Yes |
+| Cache HIT | No |
+| Duplicate replay | No |
+| Pre-flight block (token cap, rate limit, budget) | No |
+| No `request_id` | Not enforced |
+
+Default limit: **5 AI calls per request_id**. 6th call → HTTP 429 `step_budget_exceeded`.
 
 ### HTTP Error Semantics
 
@@ -184,6 +220,7 @@ Cache hits produce **no ai_usage provider-cost rows** — observable via `ai_cac
 | Concurrency exceeded | 429 | `concurrency_limit_exceeded` | 5s |
 | Budget exceeded | 402 | `ai_budget_exceeded` | — |
 | Duplicate inflight | 409 | `duplicate_inflight` | 5s |
+| Step budget exceeded | 429 | `step_budget_exceeded` | — |
 | Provider quota | 429 | `ai_quota_exceeded` | 60s |
 | Provider error | 502 | `ai_service_error` | — |
 | Timeout | 504 | `ai_timeout` | — |
@@ -266,6 +303,8 @@ Cache hits produce **no ai_usage provider-cost rows** — observable via `ai_cac
 | 3I.3 | `feature/cache-batch-cleanup` | Batch Cache Cleanup: oldest-first deletion, configurable CACHE_CLEANUP_BATCH_SIZE | Complete |
 | 3J | `feature/ai-idempotency-layer` | AI Idempotency: 2-layer duplicate suppression, in-flight 409, completed replay, failed retry | Complete |
 | 3J.1 | `feature/request-state-retention` | Request State Retention: expires_at states cleanup, 30-day events cleanup SQL | Complete |
+| 3K | `feature/ai-cost-anomaly-detection` | AI Cost Anomaly Detection: per-request + window signals, tenant config override, 15m cooldown | Complete |
+| 3L | `feature/ai-step-budget-guard` | AI Step Budget Guard: max 5 AI calls per request_id, step events, 429 on exceeded | Complete |
 
 ---
 
@@ -315,16 +354,19 @@ All requests use `x-organization-id` header to identify the tenant. Defaults to 
 - **Idempotency requires request_id** — duplicate suppression only activates when `X-Request-Id` is present
 - **Cache hits produce no cost rows** — observable via ai_cache_events only
 - **Failed request_ids are retryable** — transient errors do not permanently block a request_id
-- **Retention is manual** — no scheduler; cleanup SQL is provided in retention foundation files
+- **Anomaly detection is observational** — Phase 3K detects only, never blocks runtime
+- **Step budget is per request_id** — cache hits, replays, and pre-flight blocks never consume a step
+- **Retention is manual** — no scheduler; cleanup SQL provided in retention foundation files
 
 ---
 
 ## Next
 
+- [ ] Phase 3M+: Next infrastructure phase
 - [ ] Phase 4: Admin UI for model routing overrides + usage dashboard
 - [ ] Real Supabase Auth session (frontend login/signup)
 - [ ] GitHub tool execution (create branch, write files, open PR)
 - [ ] `knowledge_chunks` + `knowledge_vectors` tables
 - [ ] Full RLS policies on all tenant tables
 - [ ] Vercel deployment automation
-- [ ] Retention cron jobs for ai_response_cache, ai_request_states, ai_request_state_events, ai_usage
+- [ ] Retention cron jobs for all ai_* tables

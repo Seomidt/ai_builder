@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 3J.1 complete)
+# AI Builder Platform — V1 (Phase 3L complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -31,6 +31,9 @@ Internal control plane for AI-driven software generation. Express + React + Driz
 - **Cache hits produce no cost rows**: observable via ai_cache_events only
 - **Failed request_ids are retryable**: transient provider errors do not permanently block a request_id
 - **Retention is manual**: no scheduler; cleanup SQL provided in retention foundation files
+- **Anomaly detection is observational only**: no runtime blocking in Phase 3K — events only
+- **Step budget is per request_id**: cache hits, replays, and pre-flight blocks never consume a step
+- **Step budget fail-open**: DB errors in step-budget.ts allow the call through — observability must not block runtime
 
 ## Environment Variables Required
 
@@ -56,12 +59,12 @@ server/
   lib/
     ai/
       config.ts                  AI_MODEL_ROUTES, AiProviderKey, runtime limits, cache policies
-      runner.ts                  runAiCall() — single orchestration entry point (14 steps)
+      runner.ts                  runAiCall() — single orchestration entry point (15 steps)
       router.ts                  resolveRoute() — async, override-aware
       overrides.ts               loadOverride() — DB override loader + TTL cache
       types.ts                   AiCallContext, AiCallResult
-      errors.ts                  Typed error hierarchy — AiError + 9 subclasses
-      usage.ts                   logAiUsage() → ai_usage + tenant_ai_usage_periods upsert
+      errors.ts                  Typed error hierarchy — AiError + 10 subclasses
+      usage.ts                   logAiUsage() → ai_usage + tenant_ai_usage_periods + anomaly detection
       usage-periods.ts           getCurrentPeriod() — calendar month boundary
       pricing.ts                 loadPricing() — DB first, code default fallback + TTL cache
       costs.ts                   estimateAiCost() — token × rate
@@ -75,6 +78,12 @@ server/
       idempotency.ts             2-layer duplicate suppression (in-process Set + DB)
       request-state-summary.ts   getAiRequestStateSummary() — idempotency state counts
       request-state-retention.ts Cleanup SQL for ai_request_states + ai_request_state_events
+      anomaly-detector.ts        runAnomalyDetection() — per-request + window cost/token anomalies
+      anomaly-summary.ts         getAnomalySummary() — recent anomaly event counts
+      anomaly-retention.ts       Cleanup SQL for ai_anomaly_events (90-day retention)
+      step-budget.ts             acquireAiStep() — per-request AI call limit (default: 5)
+      step-budget-summary.ts     getStepBudgetSummary() — active/exhausted/completed requests
+      step-budget-retention.ts   Cleanup SQL for ai_request_step_states + ai_request_step_events
       retention.ts               Cleanup SQL for ai_usage rows (90-day window)
       providers/                 AiProvider interface, OpenAI adapter, registry
       prompts/                   getSummarizePrompt()
@@ -89,7 +98,7 @@ server/
   db.ts                          Drizzle + pg pool
 
 shared/
-  schema.ts                      All Drizzle tables + insert schemas + TypeScript types (25 tables)
+  schema.ts                      All Drizzle tables + insert schemas + TypeScript types (29 tables)
 ```
 
 ## Phase History
@@ -114,41 +123,46 @@ shared/
 | 3I.3 | `feature/cache-batch-cleanup` | Batch Cache Cleanup — oldest-first deletion, CACHE_CLEANUP_BATCH_SIZE |
 | 3J | `feature/ai-idempotency-layer` | AI Idempotency — 2-layer duplicate suppression, inflight 409, completed replay, failed retry |
 | 3J.1 | `feature/request-state-retention` | Request State Retention — expires_at states cleanup, 30-day events cleanup SQL |
+| 3K | `feature/ai-cost-anomaly-detection` | AI Cost Anomaly Detection — ai_anomaly_configs + ai_anomaly_events, per-request + window detection, 15m cooldown |
+| 3L | `feature/ai-step-budget-guard` | AI Step Budget Guard — ai_request_step_states + ai_request_step_events, max 5 AI calls per request_id |
 
 ## AI Stack — Full Pipeline (runner.ts)
 
 ```
 runAiCall(context, input)
-  1. resolveRoute(routeKey, tenantId)
-       → loadOverride() — tenant → global → null
-       → fallback: AI_MODEL_ROUTES[routeKey]
-  2. getProvider(provider)
-  3. [if tenantId + requestId] beginAiRequest()
-       → duplicate_inflight  → throw AiDuplicateInflightError (409, Retry-After: 5)
-       → duplicate_replay    → return stored AiCallResult (no provider call, no cost row)
-       → owned               → proceed; release in finally
-  4. resolveEffectiveSafetyConfig(tenantId)
-  5. [if tenantId] checkTokenCap()        → 413 on violation
-  6. [if tenantId] checkRateLimit()       → 429 on violation (Retry-After: 60 or 3600)
-  7. [if tenantId] acquireConcurrencySlot() → 429 on violation (Retry-After: 5)
-  8. [if tenantId] loadUsageLimit() + getCurrentAiUsageForPeriod()
-       → blocked    → throw AiBudgetExceededError (402)
-       → budget_mode → apply BUDGET_MODE_POLICY (maxOutputTokens: 512, concise prefix)
-  9. [if cacheable + tenantId] lookupCachedResponse()
-       → HIT  → return cached AiCallResult (no provider call, no cost row)
-       → MISS → continue
- 10. provider.generateText(...)
- 11. logAiUsage(...) + maybeRecordThresholdEvent()
- 12. [if cacheable + tenantId] storeCachedResponse()
- 13. [if idp owned] markAiRequestCompleted()
- 14. finally: releaseConcurrencySlot() + releaseAiRequestOwnership()
+  1.  resolveRoute(routeKey, tenantId)
+        → loadOverride() — tenant → global → null
+        → fallback: AI_MODEL_ROUTES[routeKey]
+  2.  getProvider(provider)
+  3.  [if tenantId + requestId] beginAiRequest()
+        → duplicate_inflight  → throw AiDuplicateInflightError (409, Retry-After: 5)
+        → duplicate_replay    → return stored AiCallResult (no provider call, no cost row)
+        → owned               → proceed; release in finally
+  4.  resolveEffectiveSafetyConfig(tenantId)
+  5.  [if tenantId] checkTokenCap()          → 413 on violation
+  6.  [if tenantId] checkRateLimit()         → 429 on violation (Retry-After: 60 or 3600)
+  7.  [if tenantId] acquireConcurrencySlot() → 429 on violation (Retry-After: 5)
+  8.  [if tenantId] loadUsageLimit() + getCurrentAiUsageForPeriod()
+        → blocked    → throw AiBudgetExceededError (402)
+        → budget_mode → apply BUDGET_MODE_POLICY (maxOutputTokens: 512, concise prefix)
+  9.  [if cacheable + tenantId] lookupCachedResponse()
+        → HIT  → return cached AiCallResult (no provider call, no cost row, no step)
+        → MISS → continue
+ 10.  [if tenantId + requestId] acquireAiStep()
+        → exceeded  → throw AiStepBudgetExceededError (429, step_budget_exceeded)
+        → within limit → increment counter, record step_started event, continue
+ 11.  provider.generateText(...)
+ 12.  logAiUsage(...) + maybeRecordThresholdEvent() + runAnomalyDetection() [fire-and-forget]
+ 13.  [if cacheable + tenantId] storeCachedResponse()
+ 14.  [if idp owned] markAiRequestCompleted()
+ 15.  finally: releaseConcurrencySlot() + releaseAiRequestOwnership()
 ```
 
 ## Key Files
 
-- `shared/schema.ts` — all 25 tables
+- `shared/schema.ts` — all 29 tables
 - `server/lib/ai/config.ts` — AI_MODEL_ROUTES (6 routes), cache policies
-- `server/lib/ai/runner.ts` — runAiCall() — 14-step orchestration pipeline
+- `server/lib/ai/runner.ts` — runAiCall() — 15-step orchestration pipeline
 - `server/lib/ai/router.ts` — resolveRoute() (async, override-aware)
 - `server/lib/ai/overrides.ts` — loadOverride() + TTL cache
 - `server/lib/ai/pricing.ts` — loadPricing() + TTL cache
@@ -158,23 +172,33 @@ runAiCall(context, input)
 - `server/lib/ai/usage-summary.ts` — getAiUsageSummary()
 - `server/lib/ai/request-safety.ts` — token cap, rate limit, concurrency guard
 - `server/lib/ai/response-cache.ts` — lookupCachedResponse() + storeCachedResponse()
-- `server/lib/ai/cache-retention.ts` — deleteExpiredCacheEntriesBatch() + deleteAllExpiredCacheEntries()
+- `server/lib/ai/cache-retention.ts` — deleteExpiredCacheEntriesBatch()
 - `server/lib/ai/idempotency.ts` — beginAiRequest(), markAiRequestCompleted(), markAiRequestFailed()
 - `server/lib/ai/request-state-retention.ts` — PREVIEW/DELETE SQL for states + events
+- `server/lib/ai/anomaly-detector.ts` — loadEffectiveAnomalyConfig(), runAnomalyDetection()
+- `server/lib/ai/anomaly-summary.ts` — getAnomalySummary()
+- `server/lib/ai/anomaly-retention.ts` — runAnomalyEventCleanup() (90-day retention)
+- `server/lib/ai/step-budget.ts` — acquireAiStep(), recordStepCompleted(), finalizeAiStepBudget()
+- `server/lib/ai/step-budget-summary.ts` — getStepBudgetSummary()
+- `server/lib/ai/step-budget-retention.ts` — runStepStateCleanup() + runStepEventCleanup()
 - `server/lib/ai/retention.ts` — PREVIEW/DELETE SQL for ai_usage (90-day window)
-- `server/lib/ai/errors.ts` — AiError + 9 typed subclasses with httpStatus + errorCode + retryAfterSeconds
+- `server/lib/ai/errors.ts` — AiError + 10 typed subclasses with httpStatus + errorCode + retryAfterSeconds
 
 ## Database Notes
 
 - **Demo org**: `demo-org`, projectId `ebd30281-0f9c-43c8-bb06-c20e531e8fc4`
 - **DB push command**: `npm run db:push`
-- `ai_model_overrides` — partial unique expression index via SQL: `CREATE UNIQUE INDEX ai_model_overrides_active_unique_idx ON ai_model_overrides (scope, COALESCE(scope_id, 'global'), route_key) WHERE is_active = true`
+- `ai_model_overrides` — partial unique expression index via SQL: `CREATE UNIQUE INDEX ... WHERE is_active = true`
 - `ai_model_pricing` — partial unique index `ON ai_model_pricing (provider, model) WHERE is_active = true`
 - `ai_usage.estimated_cost_usd` is `numeric(12,8)` — Drizzle returns as string, convert with `Number()` when reading
-- `tenant_ai_usage_periods` — aggregate summary (Phase 3G.1). One row per tenant+period. Updated synchronously via ON CONFLICT DO UPDATE. Guards read from here first, fall back to raw ai_usage if no row.
+- `tenant_ai_usage_periods` — aggregate summary (Phase 3G.1). One row per tenant+period. Updated synchronously via ON CONFLICT DO UPDATE.
 - `ai_response_cache` — unique index on `(tenant_id, cache_key)`. TTL 3600s. Only `"default"` route cached. Cache hits produce NO ai_usage cost rows.
-- `ai_request_states` — unique index on `(tenant_id, request_id)`. TTL 24h. Failed state is retryable (reset via UPDATE WHERE status = 'failed').
-- `ai_request_state_events` — 30-day retention window. Append-only, no runtime dependency.
+- `ai_request_states` — unique index on `(tenant_id, request_id)`. TTL 24h. Failed state is retryable.
+- `ai_request_state_events` — 30-day retention window. Append-only.
+- `ai_anomaly_configs` — scope CHECK IN ('global','tenant'). Partial unique indexes for one active global + one active tenant row. Config resolution: tenant → global → code defaults.
+- `ai_anomaly_events` — cooldown_key prevents duplicate spam within 15-minute window. 90-day retention.
+- `ai_request_step_states` — unique index on `(tenant_id, request_id)`. TTL 24h. Default max_ai_calls = 5.
+- `ai_request_step_events` — 30-day retention. step_budget_exceeded events logged before throw.
 - **All ID columns**: `varchar("id").primaryKey().default(sql\`gen_random_uuid()\`)` — never native uuid type
 - **Numeric DB fields**: Drizzle returns `numeric` as strings — convert with `Number()` when reading
 
@@ -187,10 +211,11 @@ npm run db:push   # Sync schema to DB
 
 ## V2 / Next TODO
 
+- [ ] Phase 3M+: Next infrastructure phase
 - [ ] Phase 4: Admin UI for model routing overrides + usage dashboard
 - [ ] Real Supabase Auth session (frontend login/signup)
 - [ ] GitHub tool execution (create branch, write files, open PR)
 - [ ] `knowledge_chunks` + `knowledge_vectors` tables
 - [ ] Full RLS policies on all tenant tables
 - [ ] Vercel deployment automation
-- [ ] Retention cron jobs for ai_response_cache, ai_request_states, ai_request_state_events, ai_usage
+- [ ] Retention cron jobs for all ai_* tables
