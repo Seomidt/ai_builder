@@ -1114,6 +1114,113 @@ export const insertRequestSafetyEventSchema = createInsertSchema(requestSafetyEv
 export type InsertRequestSafetyEvent = z.infer<typeof insertRequestSafetyEventSchema>;
 export type RequestSafetyEvent = typeof requestSafetyEvents.$inferSelect;
 
+// ─── AI Response Cache ────────────────────────────────────────────────────────
+// Stores successful normalized AI responses keyed by tenant + deterministic hash.
+// Only successful provider responses are stored here — never blocked/error outcomes.
+// Unique constraint on (tenant_id, cache_key) enforces tenant isolation at DB level.
+
+export const aiResponseCache = pgTable(
+  "ai_response_cache",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** Tenant that owns this cache entry — never reused across tenants */
+    tenantId: text("tenant_id").notNull(),
+    /** Logical route key used when this response was generated */
+    routeKey: text("route_key").notNull(),
+    /** Resolved provider at write time */
+    provider: text("provider").notNull(),
+    /** Resolved model at write time */
+    model: text("model").notNull(),
+    /**
+     * SHA-256 hash of the fully qualified cache fingerprint.
+     * Includes tenantId, routeKey, provider, model, cacheKeyVersion,
+     * and SHA-256 of (systemPrompt + "|" + userInput).
+     * Unique per tenant — enforced via unique index.
+     */
+    cacheKey: text("cache_key").notNull(),
+    /**
+     * Pre-hash fingerprint for debugging (without raw prompt text).
+     * Format: "<version>:<tenantId>:<routeKey>:<provider>:<model>:<contentHash>"
+     */
+    requestFingerprint: text("request_fingerprint").notNull(),
+    /**
+     * Full normalized AI response stored as JSON.
+     * Shape: { text: string, usage: {...} | null, model: string, feature: string }
+     */
+    responsePayload: jsonb("response_payload").notNull(),
+    /** Response text extracted from payload for direct reads without JSON parsing */
+    responseText: text("response_text"),
+    /** Always "success" — only successful provider responses are cached */
+    status: text("status").notNull().default("success"),
+    /** TTL in seconds from write time */
+    ttlSeconds: integer("ttl_seconds").notNull(),
+    /** Absolute expiry timestamp — entries past this are stale and must not be returned */
+    expiresAt: timestamp("expires_at").notNull(),
+    /** Number of times this entry has been served from cache */
+    hitCount: integer("hit_count").notNull().default(0),
+    /** Timestamp of most recent cache hit */
+    lastHitAt: timestamp("last_hit_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ai_response_cache_tenant_key_idx").on(t.tenantId, t.cacheKey),
+    index("ai_response_cache_tenant_idx").on(t.tenantId),
+    index("ai_response_cache_expires_idx").on(t.expiresAt),
+    index("ai_response_cache_tenant_route_idx").on(t.tenantId, t.routeKey),
+  ],
+);
+
+export const insertAiResponseCacheSchema = createInsertSchema(aiResponseCache).omit({ id: true, createdAt: true, hitCount: true });
+export type InsertAiResponseCache = z.infer<typeof insertAiResponseCacheSchema>;
+export type AiResponseCache = typeof aiResponseCache.$inferSelect;
+
+// ─── AI Cache Events ─────────────────────────────────────────────────────────
+// Append-only event log for cache hit/miss/write/skip observability.
+// Used for analytics and debugging — not in hot-path decision-making.
+
+export const aiCacheEvents = pgTable(
+  "ai_cache_events",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    /** HTTP request ID — ties this event back to its origin request */
+    requestId: text("request_id"),
+    /** Logical route key used for this call */
+    routeKey: text("route_key"),
+    /** Resolved provider */
+    provider: text("provider"),
+    /** Resolved model */
+    model: text("model"),
+    /**
+     * What happened at the cache layer.
+     * "cache_hit"   — valid cached response found and returned (no provider call)
+     * "cache_miss"  — no valid cache entry; provider call will follow
+     * "cache_write" — successful provider response written to cache
+     * "cache_skip"  — route is cacheable but caching skipped (see reason)
+     */
+    eventType: text("event_type").notNull(),
+    /** SHA-256 cache key used for the lookup or write */
+    cacheKey: text("cache_key"),
+    /** Human-readable reason for cache_skip events */
+    reason: text("reason"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_cache_events_tenant_idx").on(t.tenantId),
+    index("ai_cache_events_event_type_idx").on(t.eventType),
+    index("ai_cache_events_created_at_idx").on(t.createdAt),
+    index("ai_cache_events_tenant_created_at_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+
+export const insertAiCacheEventSchema = createInsertSchema(aiCacheEvents).omit({ id: true, createdAt: true });
+export type InsertAiCacheEvent = z.infer<typeof insertAiCacheEventSchema>;
+export type AiCacheEvent = typeof aiCacheEvents.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });

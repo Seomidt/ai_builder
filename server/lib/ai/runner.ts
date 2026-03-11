@@ -5,11 +5,8 @@
  *
  * runAiCall() is the single function all future AI features should call.
  * It resolves provider + model via the router, enforces request safety,
- * runs usage guardrails, invokes the provider adapter, estimates cost,
- * logs usage, and normalises errors.
- *
- * Features never need to know which provider, model, pricing, safety limit,
- * or budget state is used. No business logic, no prompts, no retries.
+ * runs usage guardrails, checks the response cache, invokes the provider adapter,
+ * estimates cost, logs usage, writes to cache, and normalises errors.
  *
  * Phase 3C: routes through router.ts → providers/registry.ts → provider adapter
  * Phase 3E: async routing with tenant/global DB overrides
@@ -17,6 +14,8 @@
  * Phase 3G: AI usage guardrails — budget_mode policy + hard stop via guards.ts
  * Final hardening: cost basis fields, blocked status, pricing source/version
  * Phase 3H: request safety — token cap, rate limit, concurrency guard
+ * Phase 3H.1: correct HTTP status codes + Retry-After support
+ * Phase 3I: tenant-safe response cache — hit/miss/write observability
  *
  * Request flow:
  *   1. Resolve route (provider + model)
@@ -27,13 +26,22 @@
  *   6. Concurrency guard acquire (process-local slot)
  *   7. Budget/usage guard (existing per-period cost guardrail)
  *   8. Budget mode policy (verbosity reduction)
- *   9. Provider call with centrally enforced maxOutputTokens
- *  10. Usage logging + threshold events
- *  11. Concurrency slot release (in finally — always runs)
+ *   9. Cache policy resolve + lookup
+ *      └─ HIT  → record cache_hit event → return cached result (no provider call)
+ *      └─ MISS → record cache_miss event → continue to step 10
+ *  10. Provider call with centrally enforced maxOutputTokens
+ *  11. Usage logging + threshold events
+ *  12. Cache write (success only, if route is cacheable)
+ *  13. Concurrency slot release (in finally — always runs)
+ *
+ * Cache accounting decision (Phase 3I):
+ *   - Cache HIT:  NO ai_usage row written (zero provider cost). Observable via ai_cache_events.
+ *   - Cache MISS: Normal ai_usage success row written (provider cost applies).
+ *   - Cache WRITE: ai_cache_events cache_write row written after successful provider call.
  */
 
 import OpenAI from "openai";
-import { AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS } from "./config";
+import { AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS, getRouteCachePolicy } from "./config";
 import { resolveRoute } from "./router";
 import { getProvider } from "./providers/registry";
 import { logAiUsage } from "./usage";
@@ -54,6 +62,10 @@ import {
   acquireConcurrencySlot,
   releaseConcurrencySlot,
 } from "./request-safety";
+import {
+  lookupCachedResponse,
+  storeCachedResponse,
+} from "./response-cache";
 import {
   AiUnavailableError,
   AiTimeoutError,
@@ -78,14 +90,16 @@ export interface AiCallInput {
  *
  * Safety guarantees:
  *   - No provider call is made if token cap, rate limit, or concurrency check fails
- *   - Concurrency slot is always released (success, error, or safety block)
- *   - Provider/model is NEVER switched by safety logic — same route always used
+ *   - No provider call is made on a cache hit
+ *   - Concurrency slot is always released (success, cache hit, error, or safety block)
+ *   - Provider/model is NEVER switched by safety or cache logic — same route always used
  *   - All safety blocks are recorded in request_safety_events for traceability
- *   - Existing ai_usage and aggregate accounting is not affected by safety blocks
+ *   - Cache hits are recorded in ai_cache_events — not in ai_usage (no cost row)
+ *   - Only successful, non-empty provider responses are written to cache
  *
  * @param context  Identity, routing, and tracing metadata from the caller
  * @param input    System prompt and user input for the model
- * @returns        Normalised AiCallResult on success
+ * @returns        Normalised AiCallResult on success (provider or cache)
  * @throws         Typed AiError subclass on failure — always after logging
  */
 export async function runAiCall(
@@ -124,11 +138,8 @@ export async function runAiCall(
   }
 
   // ── Step 3: Resolve effective safety config ───────────────────────────────────
-  // Loads tenant DB override if present, falls back to AI_SAFETY_DEFAULTS.
-  // Fail-open on DB error — returns global defaults.
   const safetyConfig = await resolveEffectiveSafetyConfig(tenantId);
 
-  // Shared meta for all safety errors (latency will be ~0ms — checks are pre-flight)
   const safetyMeta: AiErrorMeta = { feature, model: route.model, latencyMs: Date.now() - startMs };
   const safetyContext = {
     tenantId: tenantId ?? "anonymous",
@@ -141,8 +152,6 @@ export async function runAiCall(
   };
 
   // ── Step 4: Token cap precheck ───────────────────────────────────────────────
-  // Rejects oversized inputs before any API spend.
-  // Uses chars/4 approximation. Never silently trims.
   if (tenantId) {
     await checkTokenCap({
       userInput: input.userInput,
@@ -152,8 +161,6 @@ export async function runAiCall(
   }
 
   // ── Step 5: Rate limit check ─────────────────────────────────────────────────
-  // Checks requests_per_minute and requests_per_hour.
-  // Both windows use rolling counts from ai_usage. Fail-open on DB error.
   if (tenantId) {
     await checkRateLimit({
       safetyConfig,
@@ -162,8 +169,6 @@ export async function runAiCall(
   }
 
   // ── Step 6: Concurrency guard acquire ────────────────────────────────────────
-  // Process-local in-flight counter per tenant.
-  // MUST be released in the finally block below.
   let concurrencyAcquired = false;
   if (tenantId) {
     await acquireConcurrencySlot({
@@ -175,9 +180,6 @@ export async function runAiCall(
 
   try {
     // ── Step 7: Budget/usage guardrail ─────────────────────────────────────────
-    // If tenantId is absent, guardrails are skipped entirely.
-    // Guard DB failures are caught inside guards.ts — they return null/0 safely.
-
     let guardState: AiUsageState = "normal";
     let guardLimit: AiUsageLimit | null = null;
     let guardCurrentUsageUsd = 0;
@@ -194,7 +196,6 @@ export async function runAiCall(
       }
     }
 
-    // Hard stop — log status="blocked" and throw. No provider call.
     if (guardState === "blocked") {
       const latencyMs = Date.now() - startMs;
       const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
@@ -232,15 +233,48 @@ export async function runAiCall(
         ? `${BUDGET_MODE_POLICY.systemPromptPrefix}${input.systemPrompt}`
         : input.systemPrompt;
 
-    // Enforce output token cap centrally.
-    // Safety cap (from config/DB) applies always.
-    // Budget mode further restricts to 512 tokens (more conservative wins).
     const effectiveMaxOutputTokens =
       guardState === "budget_mode"
         ? Math.min(BUDGET_MODE_POLICY.maxOutputTokens, safetyConfig.maxOutputTokens)
         : safetyConfig.maxOutputTokens;
 
-    // ── Step 9: Provider call ───────────────────────────────────────────────────
+    // ── Step 9: Cache policy resolve + lookup ───────────────────────────────────
+    // Only tenant-scoped calls use the cache. Anonymous calls skip caching entirely.
+    // Cache lookup uses the effective system prompt (post-budget-mode adjustment)
+    // so budget_mode and normal responses are keyed separately.
+    const cachePolicy = getRouteCachePolicy(modelKey);
+
+    if (cachePolicy.enabled && tenantId) {
+      const cacheCtx = {
+        tenantId,
+        routeKey: modelKey,
+        provider: route.provider,
+        model: route.model,
+        systemPrompt: effectiveSystemPrompt,
+        userInput: input.userInput,
+        requestId: context.requestId,
+        feature,
+      };
+
+      const lookup = await lookupCachedResponse(cacheCtx);
+
+      if (lookup.hit) {
+        // Cache HIT — return without any provider call or usage cost row.
+        // Concurrency slot released in finally block.
+        emitRunnerLog({
+          feature,
+          model: route.model,
+          latencyMs: Date.now() - startMs,
+          guardState,
+          success: true,
+          cacheHit: true,
+        });
+        return lookup.result;
+      }
+      // Cache MISS — cache_miss event already recorded inside lookupCachedResponse.
+    }
+
+    // ── Step 10: Provider call ───────────────────────────────────────────────────
     const result = await provider.generateText({
       model: route.model,
       systemPrompt: effectiveSystemPrompt,
@@ -257,7 +291,7 @@ export async function runAiCall(
     const inputTokensBillable = result.usage?.input_tokens ?? null;
     const outputTokensBillable = result.usage?.output_tokens ?? null;
 
-    // ── Step 10: Usage logging + threshold events ───────────────────────────────
+    // ── Step 11: Usage logging + threshold events ───────────────────────────────
     void logAiUsage({
       feature,
       provider: route.provider,
@@ -290,9 +324,7 @@ export async function runAiCall(
       });
     }
 
-    emitRunnerLog({ feature, model: route.model, latencyMs, guardState, success: true, estimatedCostUsd });
-
-    return {
+    const finalResult: AiCallResult = {
       text: result.text,
       usage: result.usage
         ? {
@@ -306,8 +338,31 @@ export async function runAiCall(
       feature,
     };
 
+    // ── Step 12: Cache write (success only, cacheable routes only) ───────────────
+    // Only runs on cache miss + successful provider call + non-empty response.
+    // Blocked/error outcomes never reach this point.
+    // storeCachedResponse is fail-open — errors are swallowed internally.
+    if (cachePolicy.enabled && tenantId) {
+      void storeCachedResponse(
+        {
+          tenantId,
+          routeKey: modelKey,
+          provider: route.provider,
+          model: route.model,
+          systemPrompt: effectiveSystemPrompt,
+          userInput: input.userInput,
+          requestId: context.requestId,
+          feature,
+        },
+        finalResult,
+      );
+    }
+
+    emitRunnerLog({ feature, model: route.model, latencyMs, guardState, success: true, estimatedCostUsd });
+
+    return finalResult;
+
   } catch (err) {
-    // Re-throw typed safety/budget errors without wrapping them in a generic error
     if (
       err instanceof AiTokenCapError ||
       err instanceof AiRateLimitError ||
@@ -338,9 +393,8 @@ export async function runAiCall(
     throw aiErr;
 
   } finally {
-    // ── Step 11: Always release concurrency slot ────────────────────────────────
-    // Runs on success, error, safety block, and budget block.
-    // No slot leak possible — if acquire succeeded, release always runs.
+    // ── Step 13: Always release concurrency slot ────────────────────────────────
+    // Runs on success, cache hit, error, safety block, and budget block.
     if (concurrencyAcquired && tenantId) {
       releaseConcurrencySlot(tenantId);
     }
@@ -378,15 +432,17 @@ function emitRunnerLog(entry: {
   success: boolean;
   error?: string;
   estimatedCostUsd?: number | null;
+  cacheHit?: boolean;
 }): void {
   const status = entry.success ? "✓" : "✗";
   const guardSuffix = entry.guardState !== "normal" ? ` | guard=${entry.guardState}` : "";
+  const cacheSuffix = entry.cacheHit ? " | cache=HIT" : "";
   const errSuffix = entry.error ? ` | error="${entry.error.slice(0, 120)}"` : "";
   const costSuffix =
     entry.estimatedCostUsd != null
       ? ` | cost=$${entry.estimatedCostUsd.toFixed(8)}`
       : "";
   console.log(
-    `[ai:runner] ${status} feature=${entry.feature} model=${entry.model} latency=${entry.latencyMs}ms${costSuffix}${guardSuffix}${errSuffix}`,
+    `[ai:runner] ${status} feature=${entry.feature} model=${entry.model} latency=${entry.latencyMs}ms${costSuffix}${cacheSuffix}${guardSuffix}${errSuffix}`,
   );
 }
