@@ -24,6 +24,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../../db";
 import { aiUsage, tenantAiUsagePeriods } from "@shared/schema";
 import { getCurrentPeriod } from "./usage-periods";
+import { runAnomalyDetection } from "./anomaly-detector";
 
 export interface LogAiUsagePayload {
   tenantId?: string | null;
@@ -158,6 +159,26 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
   if (payload.status !== "success" || !payload.tenantId) return;
 
   await upsertUsagePeriodAggregate(payload);
+
+  // Phase 3K: anomaly detection after confirmed successful usage write.
+  // Fire-and-forget — must never block or throw into the caller.
+  runAnomalyDetection({
+    tenantId: payload.tenantId,
+    requestId: payload.requestId,
+    feature: payload.feature,
+    routeKey: null,
+    provider: payload.provider,
+    model: payload.model,
+    estimatedCostUsd: payload.estimatedCostUsd,
+    totalTokens: payload.totalTokens,
+    completionTokens: payload.completionTokens,
+    outputTokensBillable: payload.outputTokensBillable,
+  }).catch((err) => {
+    console.error(
+      "[ai/usage] Anomaly detection error (suppressed):",
+      err instanceof Error ? err.message : err,
+    );
+  });
 }
 
 /**

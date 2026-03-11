@@ -1339,6 +1339,124 @@ export const insertAiRequestStateEventSchema = createInsertSchema(aiRequestState
 export type InsertAiRequestStateEvent = z.infer<typeof insertAiRequestStateEventSchema>;
 export type AiRequestStateEvent = typeof aiRequestStateEvents.$inferSelect;
 
+// ─── AI Anomaly Configs ───────────────────────────────────────────────────────
+// Admin-configured thresholds for cost/token/rate anomaly detection.
+// Two scopes:
+//   "global"  — applies to all tenants unless a tenant-specific row overrides it
+//   "tenant"  — per-tenant override; takes precedence over global row
+//
+// Only one active row per scope (enforced via partial unique indexes).
+// Detection is purely observational — no runtime blocking in this phase.
+
+export const aiAnomalyConfigs = pgTable(
+  "ai_anomaly_configs",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** Null for global scope; set for tenant scope */
+    tenantId: text("tenant_id"),
+    /** "global" | "tenant" */
+    scope: text("scope").notNull(),
+    isActive: boolean("is_active").notNull().default(true),
+    /** Max estimated_cost_usd per single request before anomaly event is fired */
+    maxCostPerRequestUsd: numeric("max_cost_per_request_usd", { precision: 14, scale: 8 }),
+    /** Max total_tokens per single request */
+    maxTotalTokensPerRequest: integer("max_total_tokens_per_request"),
+    /** Max output/completion tokens per single request */
+    maxOutputTokensPerRequest: integer("max_output_tokens_per_request"),
+    /** Max successful requests in any rolling 5-minute window */
+    maxRequestsPer5m: integer("max_requests_per_5m"),
+    /** Max estimated_cost_usd in any rolling 5-minute window */
+    maxCostPer5mUsd: numeric("max_cost_per_5m_usd", { precision: 14, scale: 8 }),
+    /** Max successful requests in any rolling 1-hour window */
+    maxRequestsPer1h: integer("max_requests_per_1h"),
+    /** Max estimated_cost_usd in any rolling 1-hour window */
+    maxCostPer1hUsd: numeric("max_cost_per_1h_usd", { precision: 14, scale: 8 }),
+    notes: text("notes"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("ai_anomaly_configs_scope_check", sql`scope IN ('global','tenant')`),
+    // One active global config row at most
+    uniqueIndex("ai_anomaly_configs_active_global_idx")
+      .on(t.scope)
+      .where(sql`scope = 'global' AND is_active = true`),
+    // One active tenant config row per tenant_id at most
+    uniqueIndex("ai_anomaly_configs_active_tenant_idx")
+      .on(t.tenantId)
+      .where(sql`scope = 'tenant' AND is_active = true`),
+    index("ai_anomaly_configs_tenant_idx").on(t.tenantId),
+    index("ai_anomaly_configs_active_idx").on(t.isActive),
+  ],
+);
+
+export const insertAiAnomalyConfigSchema = createInsertSchema(aiAnomalyConfigs).omit({ id: true, createdAt: true });
+export type InsertAiAnomalyConfig = z.infer<typeof insertAiAnomalyConfigSchema>;
+export type AiAnomalyConfig = typeof aiAnomalyConfigs.$inferSelect;
+
+// ─── AI Anomaly Events ────────────────────────────────────────────────────────
+// Append-only log of detected cost/token/rate anomaly signals.
+// Linked to specific request context when available.
+// Events are admin/debug signals only — no auto-blocking in this phase.
+//
+// event_type values:
+//   "cost_per_request_exceeded"        — single request cost above threshold
+//   "tokens_per_request_exceeded"      — single request total tokens above threshold
+//   "output_tokens_per_request_exceeded" — single request output tokens above threshold
+//   "requests_per_5m_exceeded"         — rolling 5m request count above threshold
+//   "cost_per_5m_exceeded"             — rolling 5m cost above threshold
+//   "requests_per_1h_exceeded"         — rolling 1h request count above threshold
+//   "cost_per_1h_exceeded"             — rolling 1h cost above threshold
+
+export const aiAnomalyEvents = pgTable(
+  "ai_anomaly_events",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    /** HTTP request ID — ties this event back to its origin request (null for window events) */
+    requestId: text("request_id"),
+    /** Feature/agent key that triggered the call */
+    feature: text("feature"),
+    /** Logical route key used for the call */
+    routeKey: text("route_key"),
+    /** Resolved provider at time of event */
+    provider: text("provider"),
+    /** Resolved model at time of event */
+    model: text("model"),
+    /** Anomaly signal type — see table comment for allowed values */
+    eventType: text("event_type").notNull(),
+    /** Observed metric value that triggered the anomaly */
+    observedValue: numeric("observed_value", { precision: 14, scale: 8 }),
+    /** Configured threshold that was exceeded */
+    thresholdValue: numeric("threshold_value", { precision: 14, scale: 8 }),
+    /** Start of the window for window-based anomalies (null for per-request) */
+    periodStart: timestamp("period_start"),
+    /** End of the window for window-based anomalies (null for per-request) */
+    periodEnd: timestamp("period_end"),
+    /**
+     * Deduplication key used for cooldown suppression.
+     * Format: "<tenantId>:<eventType>[:<routeKey>][:<model>]"
+     */
+    cooldownKey: text("cooldown_key"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_anomaly_events_tenant_idx").on(t.tenantId),
+    index("ai_anomaly_events_event_type_idx").on(t.eventType),
+    index("ai_anomaly_events_created_at_idx").on(t.createdAt),
+    index("ai_anomaly_events_request_idx").on(t.requestId),
+    index("ai_anomaly_events_tenant_created_at_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+
+export const insertAiAnomalyEventSchema = createInsertSchema(aiAnomalyEvents).omit({ id: true, createdAt: true });
+export type InsertAiAnomalyEvent = z.infer<typeof insertAiAnomalyEventSchema>;
+export type AiAnomalyEvent = typeof aiAnomalyEvents.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
