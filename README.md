@@ -52,6 +52,9 @@ server/
       step-budget.ts             acquireAiStep() — per-request AI call limit (Phase 3L)
       step-budget-summary.ts     getStepBudgetSummary() — active/exhausted/completed requests
       step-budget-retention.ts   Cleanup SQL for step states + events
+      billing.ts                 loadEffectiveCustomerPricingConfig(), calculateCustomerPrice(), maybeRecordAiBillingUsage() (Phase 4A)
+      billing-summary.ts         getAiBillingSummary() — provider cost / customer price / margin
+      billing-retention.ts       SQL foundation for ai_billing_usage cleanup (24-month retention)
       retention.ts               Cleanup SQL for ai_usage rows (90-day window)
       providers/
         provider.ts              AiProvider interface
@@ -79,7 +82,7 @@ shared/
 
 ---
 
-## Database Schema (29 tables)
+## Database Schema (31 tables)
 
 | Domain | Tables |
 |--------|--------|
@@ -91,6 +94,7 @@ shared/
 | Integrations | `integrations`, `organization_secrets` |
 | Knowledge | `knowledge_documents` |
 | AI Infrastructure | `ai_usage`, `ai_model_overrides`, `ai_model_pricing`, `ai_usage_limits`, `usage_threshold_events`, `tenant_ai_usage_periods`, `tenant_rate_limits`, `request_safety_events`, `ai_response_cache`, `ai_cache_events`, `ai_request_states`, `ai_request_state_events`, `ai_anomaly_configs`, `ai_anomaly_events`, `ai_request_step_states`, `ai_request_step_events` |
+| AI Billing | `ai_customer_pricing_configs`, `ai_billing_usage` |
 
 ### AI Infrastructure Tables
 
@@ -112,6 +116,8 @@ shared/
 | `ai_anomaly_events` | Detected cost/token/rate anomaly signals — 90-day retention |
 | `ai_request_step_states` | Per-request AI call counter — max 5 calls per request_id |
 | `ai_request_step_events` | Step lifecycle events — 30-day retention |
+| `ai_customer_pricing_configs` | Customer-facing pricing config (global or per-tenant) — multiplier, markup, per-token |
+| `ai_billing_usage` | Immutable billing ledger — one row per successful ai_usage, provider cost + customer price + margin |
 
 ---
 
@@ -305,6 +311,7 @@ Default limit: **5 AI calls per request_id**. 6th call → HTTP 429 `step_budget
 | 3J.1 | `feature/request-state-retention` | Request State Retention: expires_at states cleanup, 30-day events cleanup SQL | Complete |
 | 3K | `feature/ai-cost-anomaly-detection` | AI Cost Anomaly Detection: per-request + window signals, tenant config override, 15m cooldown | Complete |
 | 3L | `feature/ai-step-budget-guard` | AI Step Budget Guard: max 5 AI calls per request_id, step events, 429 on exceeded | Complete |
+| 4A | `feature/ai-billing-engine` | AI Billing Engine: ai_customer_pricing_configs + ai_billing_usage, 3 pricing modes, immutable ledger, margin tracking | Complete |
 
 ---
 

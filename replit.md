@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 3L complete)
+# AI Builder Platform — V1 (Phase 4A complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -34,6 +34,10 @@ Internal control plane for AI-driven software generation. Express + React + Driz
 - **Anomaly detection is observational only**: no runtime blocking in Phase 3K — events only
 - **Step budget is per request_id**: cache hits, replays, and pre-flight blocks never consume a step
 - **Step budget fail-open**: DB errors in step-budget.ts allow the call through — observability must not block runtime
+- **Billing is downstream of ai_usage**: billing row only created after confirmed successful ai_usage insert
+- **Billing rows are immutable**: pricing changes never mutate past ai_billing_usage rows
+- **Billing is fail-open**: DB errors in billing.ts are caught and logged — never propagated to AI runtime
+- **One billing row per ai_usage row**: UNIQUE on usage_id enforces this at DB level
 
 ## Environment Variables Required
 
@@ -84,6 +88,9 @@ server/
       step-budget.ts             acquireAiStep() — per-request AI call limit (default: 5)
       step-budget-summary.ts     getStepBudgetSummary() — active/exhausted/completed requests
       step-budget-retention.ts   Cleanup SQL for ai_request_step_states + ai_request_step_events
+      billing.ts                 loadEffectiveCustomerPricingConfig(), calculateCustomerPrice(), maybeRecordAiBillingUsage()
+      billing-summary.ts         getAiBillingSummary() — provider cost / customer price / margin per tenant
+      billing-retention.ts       SQL foundation for ai_billing_usage cleanup (24-month retention)
       retention.ts               Cleanup SQL for ai_usage rows (90-day window)
       providers/                 AiProvider interface, OpenAI adapter, registry
       prompts/                   getSummarizePrompt()
@@ -98,7 +105,7 @@ server/
   db.ts                          Drizzle + pg pool
 
 shared/
-  schema.ts                      All Drizzle tables + insert schemas + TypeScript types (29 tables)
+  schema.ts                      All Drizzle tables + insert schemas + TypeScript types (31 tables)
 ```
 
 ## Phase History
@@ -125,6 +132,7 @@ shared/
 | 3J.1 | `feature/request-state-retention` | Request State Retention — expires_at states cleanup, 30-day events cleanup SQL |
 | 3K | `feature/ai-cost-anomaly-detection` | AI Cost Anomaly Detection — ai_anomaly_configs + ai_anomaly_events, per-request + window detection, 15m cooldown |
 | 3L | `feature/ai-step-budget-guard` | AI Step Budget Guard — ai_request_step_states + ai_request_step_events, max 5 AI calls per request_id |
+| 4A | `feature/ai-billing-engine` | AI Billing Engine — ai_customer_pricing_configs + ai_billing_usage, 3 pricing modes, immutable ledger, margin tracking |
 
 ## AI Stack — Full Pipeline (runner.ts)
 
@@ -181,6 +189,9 @@ runAiCall(context, input)
 - `server/lib/ai/step-budget.ts` — acquireAiStep(), recordStepCompleted(), finalizeAiStepBudget()
 - `server/lib/ai/step-budget-summary.ts` — getStepBudgetSummary()
 - `server/lib/ai/step-budget-retention.ts` — runStepStateCleanup() + runStepEventCleanup()
+- `server/lib/ai/billing.ts` — loadEffectiveCustomerPricingConfig(), calculateCustomerPrice(), maybeRecordAiBillingUsage()
+- `server/lib/ai/billing-summary.ts` — getAiBillingSummary()
+- `server/lib/ai/billing-retention.ts` — getBillingRetentionSql() (24-month default)
 - `server/lib/ai/retention.ts` — PREVIEW/DELETE SQL for ai_usage (90-day window)
 - `server/lib/ai/errors.ts` — AiError + 10 typed subclasses with httpStatus + errorCode + retryAfterSeconds
 
@@ -199,6 +210,8 @@ runAiCall(context, input)
 - `ai_anomaly_events` — cooldown_key prevents duplicate spam within 15-minute window. 90-day retention.
 - `ai_request_step_states` — unique index on `(tenant_id, request_id)`. TTL 24h. Default max_ai_calls = 5.
 - `ai_request_step_events` — 30-day retention. step_budget_exceeded events logged before throw.
+- `ai_customer_pricing_configs` — scope CHECK IN ('global','tenant'). pricing_mode CHECK IN ('cost_plus_multiplier','fixed_markup','per_1k_tokens'). Partial unique indexes for one active global + one active tenant row. Config resolution: tenant → global → code default (3× multiplier).
+- `ai_billing_usage` — UNIQUE on usage_id. Immutable ledger. One row per ai_usage row max. Never written for blocked/error/cache-hit/replay calls. 24-month recommended retention.
 - **All ID columns**: `varchar("id").primaryKey().default(sql\`gen_random_uuid()\`)` — never native uuid type
 - **Numeric DB fields**: Drizzle returns `numeric` as strings — convert with `Number()` when reading
 
@@ -211,7 +224,8 @@ npm run db:push   # Sync schema to DB
 
 ## V2 / Next TODO
 
-- [ ] Phase 3M+: Next infrastructure phase
+- [ ] Phase 4B: Billing period aggregates + usage-based billing summary
+- [ ] Phase 4C: Stripe metered billing sync
 - [ ] Phase 4: Admin UI for model routing overrides + usage dashboard
 - [ ] Real Supabase Auth session (frontend login/signup)
 - [ ] GitHub tool execution (create branch, write files, open PR)
