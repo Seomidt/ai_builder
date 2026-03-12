@@ -56,6 +56,7 @@ import {
   timestamp,
   jsonb,
   integer,
+  bigint,
   numeric,
   pgEnum,
   index,
@@ -2367,6 +2368,146 @@ export const insertBillingEventSchema = createInsertSchema(billingEvents).omit({
 });
 export type InsertBillingEvent = z.infer<typeof insertBillingEventSchema>;
 export type BillingEvent = typeof billingEvents.$inferSelect;
+
+// ─── Phase 4G: Provider Cost Reconciliation ────────────────────────────────────
+
+/**
+ * provider_usage_snapshots — externally supplied provider usage/cost totals.
+ *
+ * Inserted manually or via admin import. Represents provider-reported numbers
+ * for a specific provider/model/period combination.
+ * Used as the reference side in provider reconciliation runs.
+ * Not the billing source of truth — diagnostic reference only.
+ */
+export const providerUsageSnapshots = pgTable(
+  "provider_usage_snapshots",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    provider: text("provider").notNull(),
+    periodStart: timestamp("period_start").notNull(),
+    periodEnd: timestamp("period_end").notNull(),
+    model: text("model").notNull(),
+    providerInputTokens: bigint("provider_input_tokens", { mode: "number" }).notNull().default(0),
+    providerOutputTokens: bigint("provider_output_tokens", { mode: "number" }).notNull().default(0),
+    providerTotalTokens: bigint("provider_total_tokens", { mode: "number" }).notNull().default(0),
+    providerCostUsd: numeric("provider_cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    invoiceReference: text("invoice_reference"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("provider_usage_snapshots_period_check", sql`${t.periodStart} < ${t.periodEnd}`),
+    check("provider_usage_snapshots_input_tokens_check", sql`${t.providerInputTokens} >= 0`),
+    check("provider_usage_snapshots_output_tokens_check", sql`${t.providerOutputTokens} >= 0`),
+    check("provider_usage_snapshots_total_tokens_check", sql`${t.providerTotalTokens} >= 0`),
+    check("provider_usage_snapshots_cost_check", sql`${t.providerCostUsd} >= 0`),
+    index("provider_usage_snapshots_provider_period_idx").on(t.provider, t.periodStart, t.periodEnd),
+    index("provider_usage_snapshots_model_idx").on(t.model),
+  ],
+);
+
+export const insertProviderUsageSnapshotSchema = createInsertSchema(providerUsageSnapshots).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertProviderUsageSnapshot = z.infer<typeof insertProviderUsageSnapshotSchema>;
+export type ProviderUsageSnapshot = typeof providerUsageSnapshots.$inferSelect;
+
+/**
+ * provider_reconciliation_runs — tracks each reconciliation run execution.
+ *
+ * One run covers a specific provider + period window.
+ * Stores aggregate diff totals and status. Findings are in
+ * provider_reconciliation_findings (FK: reconciliation_run_id).
+ */
+export const providerReconciliationRuns = pgTable(
+  "provider_reconciliation_runs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    provider: text("provider").notNull(),
+    periodStart: timestamp("period_start").notNull(),
+    periodEnd: timestamp("period_end").notNull(),
+    status: text("status").notNull().default("running"),
+    totalUsageRows: integer("total_usage_rows").notNull().default(0),
+    totalBillingRows: integer("total_billing_rows").notNull().default(0),
+    tokenDiff: bigint("token_diff", { mode: "number" }).notNull().default(0),
+    costDiffUsd: numeric("cost_diff_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+  },
+  (t) => [
+    check("provider_reconciliation_runs_period_check", sql`${t.periodStart} < ${t.periodEnd}`),
+    check(
+      "provider_reconciliation_runs_status_check",
+      sql`${t.status} IN ('running','completed','failed')`,
+    ),
+    index("provider_reconciliation_runs_provider_period_idx").on(t.provider, t.periodStart, t.periodEnd),
+    index("provider_reconciliation_runs_status_created_idx").on(t.status, t.createdAt),
+  ],
+);
+
+export const insertProviderReconciliationRunSchema = createInsertSchema(providerReconciliationRuns).omit({
+  id: true,
+  createdAt: true,
+  completedAt: true,
+});
+export type InsertProviderReconciliationRun = z.infer<typeof insertProviderReconciliationRunSchema>;
+export type ProviderReconciliationRun = typeof providerReconciliationRuns.$inferSelect;
+
+/**
+ * provider_reconciliation_findings — persisted drift/mismatch records.
+ *
+ * Each finding represents one detected discrepancy in a reconciliation run.
+ * Immutable — never updated or deleted except by retention cleanup.
+ *
+ * finding_type values:
+ *   'missing_billing_row'   — ai_usage row exists but no ai_billing_usage
+ *   'duplicate_billing_row' — multiple ai_billing_usage rows for same usage_id
+ *   'token_mismatch'        — provider token totals differ from internal ai_usage totals
+ *   'cost_mismatch'         — provider cost differs from internal ai_billing_usage totals
+ *   'provider_drift'        — model/pricing-level discrepancy between provider and internal
+ *
+ * severity:
+ *   'critical' — revenue loss or invoice integrity risk
+ *   'warning'  — anomaly worth investigating
+ *   'info'     — benign note or informational
+ */
+export const providerReconciliationFindings = pgTable(
+  "provider_reconciliation_findings",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    reconciliationRunId: text("reconciliation_run_id").notNull(),
+    findingType: text("finding_type").notNull(),
+    severity: text("severity").notNull().default("warning"),
+    usageId: text("usage_id"),
+    billingUsageId: text("billing_usage_id"),
+    expectedTokens: bigint("expected_tokens", { mode: "number" }),
+    actualTokens: bigint("actual_tokens", { mode: "number" }),
+    expectedCostUsd: numeric("expected_cost_usd", { precision: 14, scale: 8 }),
+    actualCostUsd: numeric("actual_cost_usd", { precision: 14, scale: 8 }),
+    tenantId: text("tenant_id"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "provider_reconciliation_findings_severity_check",
+      sql`${t.severity} IN ('info','warning','critical')`,
+    ),
+    index("provider_reconciliation_findings_run_idx").on(t.reconciliationRunId),
+    index("provider_reconciliation_findings_type_idx").on(t.findingType),
+    index("provider_reconciliation_findings_tenant_idx").on(t.tenantId),
+    index("provider_reconciliation_findings_severity_created_idx").on(t.severity, t.createdAt),
+  ],
+);
+
+export const insertProviderReconciliationFindingSchema = createInsertSchema(
+  providerReconciliationFindings,
+).omit({ id: true, createdAt: true });
+export type InsertProviderReconciliationFinding = z.infer<
+  typeof insertProviderReconciliationFindingSchema
+>;
+export type ProviderReconciliationFinding = typeof providerReconciliationFindings.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;

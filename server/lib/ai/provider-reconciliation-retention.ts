@@ -1,112 +1,157 @@
 /**
- * Provider Reconciliation Retention Foundation
+ * Provider Reconciliation Retention — Phase 4G
  *
- * SERVER-ONLY: This module must never be imported from client/ code.
+ * SERVER-ONLY: Manual/admin retention helpers for provider reconciliation tables.
  *
- * Provides preview + cleanup SQL for reconciliation runs and deltas.
+ * Retention policy:
+ *   Minimum 12 months. Reconciliation data is financial audit evidence —
+ *   retain conservatively.
  *
- * Default retention: 12 months (365 days).
- * Reconciliation data is financial audit evidence — retain conservatively.
+ * IMPORTANT: Findings must be deleted before parent runs due to FK dependency.
+ *   Cleanup order: provider_reconciliation_findings → provider_reconciliation_runs
  *
- * IMPORTANT: This is MANUAL / FOUNDATION ONLY.
- * No scheduler is wired in Phase 4C. These SQL strings are for future
- * admin tooling, cron jobs, or DB maintenance scripts.
- *
- * Cleanup order:
- *   1. Delete deltas first (FK dependency on runs)
- *   2. Then delete runs
- *   Never delete runs without also deleting their deltas.
+ * No automated scheduler in Phase 4G. Manual/admin-triggered only.
  */
+
+import { lt } from "drizzle-orm";
+import { db } from "../../db";
+import { providerReconciliationRuns, providerReconciliationFindings } from "@shared/schema";
 
 /** Minimum recommended retention for reconciliation data (12 months) */
-export const RECONCILIATION_RETENTION_DAYS = 365;
+export const PROVIDER_RECONCILIATION_RETENTION_MONTHS = 12;
+
+// ─── Cutoff Calculation ───────────────────────────────────────────────────────
 
 /**
- * Preview SQL — returns count of rows that WOULD be deleted.
- * Run this before any cleanup to confirm scope.
+ * Calculate the retention cutoff date.
+ * Minimum enforced: 12 months.
  */
-export const RECONCILIATION_PREVIEW_SQL = `
--- Preview: reconciliation data older than ${RECONCILIATION_RETENTION_DAYS} days
-SELECT
-  'ai_provider_reconciliation_runs'     AS table_name,
-  COUNT(*)                              AS rows_to_delete,
-  MIN(created_at)                       AS oldest_row,
-  MAX(created_at)                       AS newest_qualifying_row
-FROM ai_provider_reconciliation_runs
-WHERE created_at < NOW() - INTERVAL '${RECONCILIATION_RETENTION_DAYS} days'
-UNION ALL
-SELECT
-  'ai_provider_reconciliation_deltas'   AS table_name,
-  COUNT(*)                              AS rows_to_delete,
-  MIN(created_at)                       AS oldest_row,
-  MAX(created_at)                       AS newest_qualifying_row
-FROM ai_provider_reconciliation_deltas
-WHERE created_at < NOW() - INTERVAL '${RECONCILIATION_RETENTION_DAYS} days';
-`.trim();
+export function previewProviderReconciliationRetentionCutoff(months: number): Date {
+  const retentionMonths = Math.max(PROVIDER_RECONCILIATION_RETENTION_MONTHS, months);
+  const cutoff = new Date();
+  cutoff.setMonth(cutoff.getMonth() - retentionMonths);
+  return cutoff;
+}
 
-/**
- * Cleanup SQL — delete deltas first, then runs.
- * Run RECONCILIATION_PREVIEW_SQL first and verify scope.
- *
- * Must be executed as two statements in order:
- *   1. Delete deltas (references runs via run_id)
- *   2. Delete runs
- */
-export const RECONCILIATION_CLEANUP_DELTA_SQL = `
--- Step 1: Delete reconciliation deltas older than ${RECONCILIATION_RETENTION_DAYS} days
--- VERIFY with preview SQL before running.
-DELETE FROM ai_provider_reconciliation_deltas
-WHERE created_at < NOW() - INTERVAL '${RECONCILIATION_RETENTION_DAYS} days'
-RETURNING id, run_id, provider, severity, created_at;
-`.trim();
+// ─── Preview ──────────────────────────────────────────────────────────────────
 
-export const RECONCILIATION_CLEANUP_RUN_SQL = `
--- Step 2: Delete reconciliation runs older than ${RECONCILIATION_RETENTION_DAYS} days
--- Only run AFTER step 1 (delete deltas first).
-DELETE FROM ai_provider_reconciliation_runs
-WHERE created_at < NOW() - INTERVAL '${RECONCILIATION_RETENTION_DAYS} days'
-RETURNING id, provider, status, created_at;
-`.trim();
-
-/**
- * Return all retention SQL strings for the given retention window.
- */
-export function getReconciliationRetentionSql(retentionDays: number = RECONCILIATION_RETENTION_DAYS): {
+export interface ProviderReconciliationRetentionPreview {
+  eligibleRunCount: number;
+  eligibleFindingCount: number;
+  cutoffDate: Date;
   previewSql: string;
-  cleanupDeltaSql: string;
-  cleanupRunSql: string;
-} {
-  return {
-    previewSql: `
--- Preview: reconciliation data older than ${retentionDays} days
-SELECT
-  'ai_provider_reconciliation_runs'     AS table_name,
-  COUNT(*)                              AS rows_to_delete,
-  MIN(created_at)                       AS oldest_row,
-  MAX(created_at)                       AS newest_qualifying_row
-FROM ai_provider_reconciliation_runs
-WHERE created_at < NOW() - INTERVAL '${retentionDays} days'
+}
+
+/**
+ * Preview how many rows would be deleted. Read-only — does NOT delete.
+ * Run this before cleanupOldProviderReconciliationData to confirm scope.
+ */
+export async function previewProviderReconciliationDeletion(
+  cutoffDate: Date,
+): Promise<ProviderReconciliationRetentionPreview> {
+  const runs = await db
+    .select({ id: providerReconciliationRuns.id })
+    .from(providerReconciliationRuns)
+    .where(lt(providerReconciliationRuns.createdAt, cutoffDate))
+    .limit(10000);
+
+  const findings = await db
+    .select({ id: providerReconciliationFindings.id })
+    .from(providerReconciliationFindings)
+    .where(lt(providerReconciliationFindings.createdAt, cutoffDate))
+    .limit(10000);
+
+  const previewSql = `
+-- Preview: provider reconciliation data eligible for deletion
+-- Cutoff: ${cutoffDate.toISOString()}
+
+SELECT 'provider_reconciliation_findings' AS table_name,
+       COUNT(*) AS eligible_count,
+       MIN(created_at) AS oldest_row,
+       MAX(created_at) AS newest_eligible_row
+FROM provider_reconciliation_findings
+WHERE created_at < '${cutoffDate.toISOString()}'
 UNION ALL
-SELECT
-  'ai_provider_reconciliation_deltas'   AS table_name,
-  COUNT(*)                              AS rows_to_delete,
-  MIN(created_at)                       AS oldest_row,
-  MAX(created_at)                       AS newest_qualifying_row
-FROM ai_provider_reconciliation_deltas
-WHERE created_at < NOW() - INTERVAL '${retentionDays} days';
-    `.trim(),
-    cleanupDeltaSql: `
--- Step 1: Delete reconciliation deltas older than ${retentionDays} days
-DELETE FROM ai_provider_reconciliation_deltas
-WHERE created_at < NOW() - INTERVAL '${retentionDays} days'
-RETURNING id, run_id, provider, severity, created_at;
-    `.trim(),
-    cleanupRunSql: `
--- Step 2: Delete reconciliation runs older than ${retentionDays} days
--- Only run AFTER step 1.
-DELETE FROM ai_provider_reconciliation_runs
-WHERE created_at < NOW() - INTERVAL '${retentionDays} days'
-RETURNING id, provider, status, created_at;
-    `.trim(),
+SELECT 'provider_reconciliation_runs' AS table_name,
+       COUNT(*) AS eligible_count,
+       MIN(created_at) AS oldest_row,
+       MAX(created_at) AS newest_eligible_row
+FROM provider_reconciliation_runs
+WHERE created_at < '${cutoffDate.toISOString()}';
+`.trim();
+
+  return {
+    eligibleRunCount: runs.length,
+    eligibleFindingCount: findings.length,
+    cutoffDate,
+    previewSql,
   };
+}
+
+// ─── Cleanup ──────────────────────────────────────────────────────────────────
+
+export interface ProviderReconciliationCleanupResult {
+  deletedFindingCount: number;
+  deletedRunCount: number;
+  cutoffDate: Date;
+}
+
+/**
+ * Delete provider reconciliation data older than the cutoff date.
+ *
+ * Safety:
+ *   - Minimum cutoff enforced at 12 months
+ *   - Findings deleted before runs (FK dependency)
+ *   - Run previewProviderReconciliationDeletion first
+ *
+ * This is a destructive operation — rows are permanently deleted.
+ */
+export async function cleanupOldProviderReconciliationData(
+  cutoffDate: Date,
+): Promise<ProviderReconciliationCleanupResult> {
+  // Step 1: Delete findings first (FK dependency on runs)
+  const deletedFindings = await db
+    .delete(providerReconciliationFindings)
+    .where(lt(providerReconciliationFindings.createdAt, cutoffDate))
+    .returning({ id: providerReconciliationFindings.id });
+
+  // Step 2: Delete runs
+  const deletedRuns = await db
+    .delete(providerReconciliationRuns)
+    .where(lt(providerReconciliationRuns.createdAt, cutoffDate))
+    .returning({ id: providerReconciliationRuns.id });
+
+  console.info(
+    `[ai/provider-reconciliation-retention] Cleanup complete.`,
+    `Deleted ${deletedFindings.length} findings and ${deletedRuns.length} runs`,
+    `older than ${cutoffDate.toISOString()}`,
+  );
+
+  return {
+    deletedFindingCount: deletedFindings.length,
+    deletedRunCount: deletedRuns.length,
+    cutoffDate,
+  };
+}
+
+// ─── Raw SQL Reference ────────────────────────────────────────────────────────
+
+/**
+ * Returns raw SQL for manual cleanup operations.
+ * Execute findings deletion BEFORE runs deletion.
+ */
+export function getProviderReconciliationCleanupSql(cutoffDate: Date): string {
+  return `
+-- Provider Reconciliation Cleanup — Phase 4G retention
+-- Minimum retention: 12 months
+-- Run preview first to confirm scope.
+
+-- Step 1: Delete findings (FK dependency on runs — must be first)
+DELETE FROM provider_reconciliation_findings
+WHERE created_at < '${cutoffDate.toISOString()}';
+
+-- Step 2: Delete runs (only after findings are deleted)
+DELETE FROM provider_reconciliation_runs
+WHERE created_at < '${cutoffDate.toISOString()}';
+`.trim();
 }

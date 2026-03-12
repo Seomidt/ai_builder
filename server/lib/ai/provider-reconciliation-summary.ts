@@ -1,135 +1,143 @@
 /**
- * Provider Reconciliation Summary
+ * Provider Reconciliation Summary — Phase 4G
  *
- * SERVER-ONLY: This module must never be imported from client/ code.
+ * SERVER-ONLY: Read helpers for provider_reconciliation_runs
+ * and provider_reconciliation_findings tables.
  *
- * Backend-only summary helpers for reconciliation health monitoring.
- * Used for admin visibility into discrepancy patterns and reconciliation coverage.
- *
- * Phase 4C: foundation only. No public API, no UI.
+ * Backend-only — no UI. Used for admin visibility and forensic debugging.
  */
 
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { db } from "../../db";
-import { aiProviderReconciliationRuns, aiProviderReconciliationDeltas } from "@shared/schema";
+import { providerReconciliationRuns, providerReconciliationFindings } from "@shared/schema";
+import type { ProviderReconciliationRun, ProviderReconciliationFinding } from "@shared/schema";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-export interface ReconciliationRunSummary {
-  runId: string;
-  provider: string;
-  periodStart: string;
-  periodEnd: string;
-  status: string;
-  totalDeltas: number;
-  criticalDeltas: number;
-  warningDeltas: number;
-  infoDeltas: number;
-  createdAt: string;
-  completedAt: string | null;
-}
-
-export interface ReconciliationHealthSummary {
-  totalRuns: number;
-  completedRuns: number;
-  failedRuns: number;
-  startedRuns: number;
-  totalDeltas: number;
-  criticalDeltas: number;
-  warningDeltas: number;
-  latestRunAt: string | null;
-  latestCriticalDeltaAt: string | null;
-}
-
-// ─── Run Summary ──────────────────────────────────────────────────────────────
+// ─── List Runs ────────────────────────────────────────────────────────────────
 
 /**
- * Return a summary for a single reconciliation run with delta counts by severity.
- * Throws on DB error.
+ * Return reconciliation runs for a provider, newest first.
+ * Limit defaults to 50.
  */
-export async function getReconciliationRunSummary(
+export async function getProviderReconciliationRuns(
+  provider: string,
+  limit = 50,
+): Promise<ProviderReconciliationRun[]> {
+  return db
+    .select()
+    .from(providerReconciliationRuns)
+    .where(eq(providerReconciliationRuns.provider, provider))
+    .orderBy(desc(providerReconciliationRuns.createdAt))
+    .limit(limit);
+}
+
+// ─── List Findings ────────────────────────────────────────────────────────────
+
+/**
+ * Return all findings for a specific reconciliation run.
+ * Ordered by severity descending (critical first), then created_at.
+ */
+export async function getProviderReconciliationFindings(
   runId: string,
-): Promise<ReconciliationRunSummary | null> {
+  limit = 200,
+): Promise<ProviderReconciliationFinding[]> {
+  return db
+    .select()
+    .from(providerReconciliationFindings)
+    .where(eq(providerReconciliationFindings.reconciliationRunId, runId))
+    .orderBy(desc(providerReconciliationFindings.severity), providerReconciliationFindings.createdAt)
+    .limit(limit);
+}
+
+// ─── Latest Run Summary ───────────────────────────────────────────────────────
+
+export interface LatestProviderReconciliationSummary {
+  runId: string;
+  provider: string;
+  status: string;
+  periodStart: Date;
+  periodEnd: Date;
+  totalUsageRows: number;
+  totalBillingRows: number;
+  tokenDiff: number;
+  costDiffUsd: number;
+  findingCount: number;
+  criticalCount: number;
+  warningCount: number;
+  infoCount: number;
+  findingsByType: Record<string, number>;
+  createdAt: Date;
+  completedAt: Date | null;
+}
+
+/**
+ * Return a structured summary for the latest completed reconciliation run
+ * for a given provider. Returns null if no runs exist.
+ *
+ * Includes:
+ *   - run status and aggregate diff totals
+ *   - finding counts by severity
+ *   - finding counts by type
+ */
+export async function getLatestProviderReconciliationSummary(
+  provider: string,
+): Promise<LatestProviderReconciliationSummary | null> {
   const runs = await db
     .select()
-    .from(aiProviderReconciliationRuns)
-    .where(eq(aiProviderReconciliationRuns.id, runId))
+    .from(providerReconciliationRuns)
+    .where(
+      and(
+        eq(providerReconciliationRuns.provider, provider),
+        eq(providerReconciliationRuns.status, "completed"),
+      ),
+    )
+    .orderBy(desc(providerReconciliationRuns.createdAt))
     .limit(1);
 
   if (runs.length === 0) return null;
   const run = runs[0];
 
-  const [deltas] = await db
+  // Aggregate findings for this run
+  const [agg] = await db
     .select({
-      totalDeltas: sql<string>`COUNT(*)`,
-      criticalDeltas: sql<string>`COUNT(*) FILTER (WHERE severity = 'critical')`,
-      warningDeltas: sql<string>`COUNT(*) FILTER (WHERE severity = 'warning')`,
-      infoDeltas: sql<string>`COUNT(*) FILTER (WHERE severity = 'info')`,
+      totalCount: sql<string>`COUNT(*)`,
+      criticalCount: sql<string>`COUNT(*) FILTER (WHERE severity = 'critical')`,
+      warningCount: sql<string>`COUNT(*) FILTER (WHERE severity = 'warning')`,
+      infoCount: sql<string>`COUNT(*) FILTER (WHERE severity = 'info')`,
     })
-    .from(aiProviderReconciliationDeltas)
-    .where(eq(aiProviderReconciliationDeltas.runId, runId));
+    .from(providerReconciliationFindings)
+    .where(eq(providerReconciliationFindings.reconciliationRunId, run.id));
+
+  // Counts by finding_type
+  const byType = await db
+    .select({
+      findingType: providerReconciliationFindings.findingType,
+      cnt: sql<string>`COUNT(*)`,
+    })
+    .from(providerReconciliationFindings)
+    .where(eq(providerReconciliationFindings.reconciliationRunId, run.id))
+    .groupBy(providerReconciliationFindings.findingType);
+
+  const findingsByType: Record<string, number> = {};
+  for (const row of byType) {
+    findingsByType[row.findingType] = Number(row.cnt);
+  }
 
   return {
     runId: run.id,
     provider: run.provider,
-    periodStart: run.periodStart.toISOString(),
-    periodEnd: run.periodEnd.toISOString(),
     status: run.status,
-    totalDeltas: Number(deltas?.totalDeltas ?? 0),
-    criticalDeltas: Number(deltas?.criticalDeltas ?? 0),
-    warningDeltas: Number(deltas?.warningDeltas ?? 0),
-    infoDeltas: Number(deltas?.infoDeltas ?? 0),
-    createdAt: run.createdAt.toISOString(),
-    completedAt: run.completedAt?.toISOString() ?? null,
-  };
-}
-
-// ─── Global Health Summary ────────────────────────────────────────────────────
-
-/**
- * Return a global reconciliation health summary across all providers and runs.
- * Throws on DB error.
- */
-export async function getReconciliationHealthSummary(): Promise<ReconciliationHealthSummary> {
-  const [runsAgg] = await db
-    .select({
-      totalRuns: sql<string>`COUNT(*)`,
-      completedRuns: sql<string>`COUNT(*) FILTER (WHERE status = 'completed')`,
-      failedRuns: sql<string>`COUNT(*) FILTER (WHERE status = 'failed')`,
-      startedRuns: sql<string>`COUNT(*) FILTER (WHERE status = 'started')`,
-    })
-    .from(aiProviderReconciliationRuns);
-
-  const [deltasAgg] = await db
-    .select({
-      totalDeltas: sql<string>`COUNT(*)`,
-      criticalDeltas: sql<string>`COUNT(*) FILTER (WHERE severity = 'critical')`,
-      warningDeltas: sql<string>`COUNT(*) FILTER (WHERE severity = 'warning')`,
-    })
-    .from(aiProviderReconciliationDeltas);
-
-  const latestRun = await db
-    .select({ createdAt: aiProviderReconciliationRuns.createdAt })
-    .from(aiProviderReconciliationRuns)
-    .orderBy(desc(aiProviderReconciliationRuns.createdAt))
-    .limit(1);
-
-  const latestCritical = await db
-    .select({ createdAt: aiProviderReconciliationDeltas.createdAt })
-    .from(aiProviderReconciliationDeltas)
-    .where(eq(aiProviderReconciliationDeltas.severity, "critical"))
-    .orderBy(desc(aiProviderReconciliationDeltas.createdAt))
-    .limit(1);
-
-  return {
-    totalRuns: Number(runsAgg?.totalRuns ?? 0),
-    completedRuns: Number(runsAgg?.completedRuns ?? 0),
-    failedRuns: Number(runsAgg?.failedRuns ?? 0),
-    startedRuns: Number(runsAgg?.startedRuns ?? 0),
-    totalDeltas: Number(deltasAgg?.totalDeltas ?? 0),
-    criticalDeltas: Number(deltasAgg?.criticalDeltas ?? 0),
-    warningDeltas: Number(deltasAgg?.warningDeltas ?? 0),
-    latestRunAt: latestRun[0]?.createdAt?.toISOString() ?? null,
-    latestCriticalDeltaAt: latestCritical[0]?.createdAt?.toISOString() ?? null,
+    periodStart: run.periodStart,
+    periodEnd: run.periodEnd,
+    totalUsageRows: run.totalUsageRows,
+    totalBillingRows: run.totalBillingRows,
+    tokenDiff: run.tokenDiff,
+    costDiffUsd: Number(run.costDiffUsd),
+    findingCount: Number(agg?.totalCount ?? 0),
+    criticalCount: Number(agg?.criticalCount ?? 0),
+    warningCount: Number(agg?.warningCount ?? 0),
+    infoCount: Number(agg?.infoCount ?? 0),
+    findingsByType,
+    createdAt: run.createdAt,
+    completedAt: run.completedAt ?? null,
   };
 }
