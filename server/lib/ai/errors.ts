@@ -227,6 +227,29 @@ export class AiConcurrencyError extends AiError {
 }
 
 /**
+ * Tenant wallet credit balance is at or below the hard limit.
+ *
+ * Thrown by runner.ts when the tenant's available_balance_usd <= hard_limit_usd
+ * configured on their tenant_credit_accounts row.
+ *
+ * No provider call is made. No billing row is created. No wallet debit is created.
+ * HTTP 402 — Payment Required. Signals a financial/payment boundary, not a system error.
+ *
+ * Tenant must add credits or adjust hard_limit_usd before AI calls will resume.
+ */
+export class AiWalletLimitError extends AiError {
+  constructor(meta: AiErrorMeta & { availableBalance: number; hardLimit: number }) {
+    super(
+      `AI call blocked: wallet balance ($${meta.availableBalance.toFixed(8)}) is at or below hard limit ($${meta.hardLimit.toFixed(8)})`,
+      meta,
+      402,
+      "wallet_limit_exceeded",
+    );
+    this.name = "AiWalletLimitError";
+  }
+}
+
+/**
  * A single logical request has exceeded its per-request AI call budget.
  *
  * Thrown by step-budget.ts when a request identified by request_id

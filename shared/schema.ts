@@ -1629,6 +1629,28 @@ export const aiBillingUsage = pgTable(
      * "cost_plus_multiplier" | "fixed_markup" | "per_1k_tokens"
      */
     pricingMode: text("pricing_mode").notNull(),
+    /**
+     * Wallet downstream delivery status.
+     *
+     * Immutability note:
+     *   Financial value columns (provider_cost_usd, customer_price_usd, margin_usd,
+     *   pricing_mode, pricing_source, pricing_version, created_at, usage_id, tenant_id,
+     *   feature, provider, model) are NEVER updated after insert.
+     *
+     *   ONLY these three wallet-delivery fields may be updated — they track downstream
+     *   processing state, not billing value. They do not affect the canonical financial
+     *   record; ai_billing_usage remains the source of truth.
+     *
+     * wallet_status values:
+     *   "pending"  — row created; wallet debit not yet confirmed
+     *   "debited"  — wallet debit row created successfully in tenant_credit_ledger
+     *   "failed"   — wallet debit attempt failed; replayable via billing_usage_id
+     */
+    walletStatus: text("wallet_status").notNull().default("pending"),
+    /** Error message if wallet debit failed — null on success */
+    walletErrorMessage: text("wallet_error_message"),
+    /** Timestamp when wallet debit was confirmed — null until debited */
+    walletDebitedAt: timestamp("wallet_debited_at"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [
@@ -1644,8 +1666,17 @@ export const aiBillingUsage = pgTable(
     check("ai_billing_usage_input_tokens_check", sql`input_tokens_billable >= 0`),
     check("ai_billing_usage_output_tokens_check", sql`output_tokens_billable >= 0`),
     check("ai_billing_usage_total_tokens_check", sql`total_tokens_billable >= 0`),
-    // Composite index for per-tenant billing range queries — required by wallet balance and billing summary
+    check(
+      "ai_billing_usage_wallet_status_check",
+      sql`wallet_status IN ('pending','debited','failed')`,
+    ),
+    // Composite index for per-tenant billing range queries (billing summary, wallet queries)
     index("ai_billing_usage_tenant_created_idx").on(t.tenantId, t.createdAt),
+    // Analytics indexes: per-feature and per-model cost breakdowns
+    index("ai_billing_usage_tenant_feature_idx").on(t.tenantId, t.feature),
+    index("ai_billing_usage_tenant_model_idx").on(t.tenantId, t.model),
+    // Wallet replay queries: find pending/failed rows for a tenant sorted by time
+    index("ai_billing_usage_tenant_wallet_status_idx").on(t.tenantId, t.walletStatus, t.createdAt),
   ],
 );
 
@@ -1713,6 +1744,24 @@ export const tenantCreditAccounts = pgTable(
     /** Currency for this account — USD only for Phase 4B */
     currency: text("currency").notNull().default("USD"),
     isActive: boolean("is_active").notNull().default(true),
+    /**
+     * Negative balance policy limits (Phase 4C).
+     *
+     * Both values are <= 0. Default 0 means no negative balance allowed.
+     *
+     * soft_limit_usd: warning threshold — available_balance may go this far below 0.
+     *   Must be <= 0. Example: -5.00 means warn when balance is between -5 and 0.
+     *
+     * hard_limit_usd: enforcement boundary — if available_balance <= hard_limit_usd,
+     *   future billable AI calls are blocked with AiWalletLimitError (402).
+     *   Must be <= soft_limit_usd (stricter than soft limit).
+     *   Default 0 means block immediately at zero balance.
+     *
+     * Check: soft_limit_usd <= 0
+     * Check: hard_limit_usd <= soft_limit_usd
+     */
+    softLimitUsd: numeric("soft_limit_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    hardLimitUsd: numeric("hard_limit_usd", { precision: 14, scale: 8 }).notNull().default("0"),
     notes: text("notes"),
     createdBy: text("created_by"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -1721,6 +1770,8 @@ export const tenantCreditAccounts = pgTable(
   (t) => [
     uniqueIndex("tenant_credit_accounts_tenant_idx").on(t.tenantId),
     index("tenant_credit_accounts_active_idx").on(t.isActive),
+    check("tenant_credit_accounts_soft_limit_check", sql`soft_limit_usd <= 0`),
+    check("tenant_credit_accounts_hard_limit_check", sql`hard_limit_usd <= soft_limit_usd`),
   ],
 );
 
@@ -1823,6 +1874,122 @@ export const insertTenantCreditLedgerSchema = createInsertSchema(tenantCreditLed
 });
 export type InsertTenantCreditLedger = z.infer<typeof insertTenantCreditLedgerSchema>;
 export type TenantCreditLedgerEntry = typeof tenantCreditLedger.$inferSelect;
+
+// ─── Provider Reconciliation Runs ────────────────────────────────────────────
+// Foundation for detecting discrepancies between internal billing records
+// and provider invoices/usage reports.
+//
+// Phase 4C: foundation only — detection, not auto-correction.
+// Reconciliation logic is manual/admin initiated. No auto-correction of billing rows.
+//
+// status values:
+//   "started"   — run is in progress
+//   "completed" — run finished successfully (deltas recorded)
+//   "failed"    — run encountered an error
+
+export const aiProviderReconciliationRuns = pgTable(
+  "ai_provider_reconciliation_runs",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** Provider this run covers (e.g. "openai") */
+    provider: text("provider").notNull(),
+    /** Start of the reconciliation period */
+    periodStart: timestamp("period_start").notNull(),
+    /** End of the reconciliation period */
+    periodEnd: timestamp("period_end").notNull(),
+    /** "started" | "completed" | "failed" */
+    status: text("status").notNull(),
+    notes: text("notes"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+  },
+  (t) => [
+    check(
+      "ai_recon_runs_status_check",
+      sql`status IN ('started','completed','failed')`,
+    ),
+    // Query pattern: find runs by provider + time period
+    index("ai_recon_runs_provider_period_idx").on(t.provider, t.periodStart, t.periodEnd),
+    index("ai_recon_runs_status_idx").on(t.status),
+  ],
+);
+
+export const insertAiProviderReconciliationRunSchema = createInsertSchema(aiProviderReconciliationRuns).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertAiProviderReconciliationRun = z.infer<typeof insertAiProviderReconciliationRunSchema>;
+export type AiProviderReconciliationRun = typeof aiProviderReconciliationRuns.$inferSelect;
+
+// ─── Provider Reconciliation Deltas ──────────────────────────────────────────
+// Individual discrepancy records within a reconciliation run.
+// Each delta records one metric (cost, tokens, request count) where internal
+// and external values differ.
+//
+// metric_type values:
+//   "provider_cost_delta"   — cost discrepancy in USD
+//   "request_count_delta"   — request count discrepancy
+//   "input_tokens_delta"    — input token count discrepancy
+//   "output_tokens_delta"   — output token count discrepancy
+//   "total_tokens_delta"    — total token count discrepancy
+//
+// severity values:
+//   "info"     — negligible delta, within expected rounding tolerance
+//   "warning"  — notable delta, may require investigation
+//   "critical" — significant delta, requires immediate review
+
+export const aiProviderReconciliationDeltas = pgTable(
+  "ai_provider_reconciliation_deltas",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** FK to ai_provider_reconciliation_runs.id */
+    runId: text("run_id").notNull(),
+    /** Tenant this delta relates to — null means aggregate/cross-tenant */
+    tenantId: text("tenant_id"),
+    /** Provider this delta relates to */
+    provider: text("provider").notNull(),
+    /** Model this delta relates to — null for aggregate */
+    model: text("model"),
+    /** Type of discrepancy */
+    metricType: text("metric_type").notNull(),
+    /** Value as recorded in our internal system */
+    internalValue: numeric("internal_value", { precision: 14, scale: 8 }),
+    /** Value as reported by provider invoice/API */
+    externalValue: numeric("external_value", { precision: 14, scale: 8 }),
+    /** external_value - internal_value (positive = we under-counted) */
+    deltaValue: numeric("delta_value", { precision: 14, scale: 8 }),
+    /** "info" | "warning" | "critical" */
+    severity: text("severity").notNull(),
+    notes: text("notes"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "ai_recon_deltas_metric_type_check",
+      sql`metric_type IN ('provider_cost_delta','request_count_delta','input_tokens_delta','output_tokens_delta','total_tokens_delta')`,
+    ),
+    check(
+      "ai_recon_deltas_severity_check",
+      sql`severity IN ('info','warning','critical')`,
+    ),
+    index("ai_recon_deltas_run_idx").on(t.runId),
+    index("ai_recon_deltas_provider_idx").on(t.provider),
+    index("ai_recon_deltas_tenant_idx").on(t.tenantId),
+    index("ai_recon_deltas_severity_idx").on(t.severity),
+    index("ai_recon_deltas_created_at_idx").on(t.createdAt),
+  ],
+);
+
+export const insertAiProviderReconciliationDeltaSchema = createInsertSchema(aiProviderReconciliationDeltas).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertAiProviderReconciliationDelta = z.infer<typeof insertAiProviderReconciliationDeltaSchema>;
+export type AiProviderReconciliationDelta = typeof aiProviderReconciliationDeltas.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;

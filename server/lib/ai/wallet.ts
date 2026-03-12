@@ -25,9 +25,10 @@
  * Phase 4B: foundation only. No Stripe sync, no subscription plans, no invoice generation.
  */
 
-import { eq, and, sql, isNull, or, gt } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "../../db";
 import { tenantCreditAccounts, tenantCreditLedger } from "@shared/schema";
+import type { AiErrorMeta } from "./errors";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -261,7 +262,6 @@ export async function maybeRecordWalletDebit(input: {
 }): Promise<void> {
   try {
     const accountId = await ensureTenantCreditAccount(input.tenantId);
-
     await debitTenantCreditsForBillingUsage({
       tenantId: input.tenantId,
       accountId,
@@ -274,6 +274,116 @@ export async function maybeRecordWalletDebit(input: {
       "[ai/wallet] Wallet debit failed (suppressed — billing row intact):",
       err instanceof Error ? err.message : err,
       "billing_usage_id:", input.billingUsageId,
+      "tenant:", input.tenantId,
+    );
+  }
+}
+
+// ─── Debit With Status Result ─────────────────────────────────────────────────
+
+export interface WalletDebitResult {
+  debited: boolean;
+  alreadyExisted?: boolean;
+  error?: string;
+}
+
+/**
+ * Attempt a wallet debit and return the result — does NOT swallow errors.
+ *
+ * Unlike maybeRecordWalletDebit, this version returns a structured result so
+ * the caller (billing.ts) can update wallet_status on the billing row.
+ *
+ * Returns:
+ *   { debited: true }                   — new debit row created
+ *   { debited: true, alreadyExisted: true } — debit row already existed (idempotent replay)
+ *   { debited: false, error: "..." }    — write failed
+ */
+export async function attemptWalletDebitReturningResult(input: {
+  tenantId: string;
+  billingUsageId: string;
+  amountUsd: number;
+  requestId?: string | null;
+}): Promise<WalletDebitResult> {
+  try {
+    const accountId = await ensureTenantCreditAccount(input.tenantId);
+
+    const isNew = await debitTenantCreditsForBillingUsage({
+      tenantId: input.tenantId,
+      accountId,
+      billingUsageId: input.billingUsageId,
+      amountUsd: input.amountUsd,
+      requestId: input.requestId ?? null,
+    });
+
+    // isNew = false means the row already existed (ON CONFLICT DO NOTHING suppressed it)
+    return isNew ? { debited: true } : { debited: true, alreadyExisted: true };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    console.error(
+      "[ai/wallet] attemptWalletDebitReturningResult failed:",
+      error,
+      "billing_usage_id:", input.billingUsageId,
+    );
+    return { debited: false, error };
+  }
+}
+
+// ─── Hard-Limit Check ─────────────────────────────────────────────────────────
+
+/**
+ * Check if a tenant's wallet balance is at or below their configured hard limit.
+ *
+ * Called by runner.ts (step 8.5) before any provider call.
+ * If available_balance_usd <= hard_limit_usd → throws AiWalletLimitError (402).
+ *
+ * Behavior when no credit account exists:
+ *   No account row means the tenant has never been granted credits.
+ *   Hard limit defaults to 0, available balance is 0.
+ *   0 <= 0 → blocked. This is safe: a fresh tenant without credits
+ *   cannot make billable AI calls without first being granted credits.
+ *
+ *   Callers may override this by granting credits first, or by setting
+ *   hard_limit_usd < 0 on the account to allow PAYG-style overage.
+ *
+ * Fail-open on DB errors: if the check itself fails, we allow the call through
+ * and log the error — a DB error on the hard-limit check must not silently block
+ * valid tenant calls. This is the explicit policy for Phase 4C.
+ */
+export async function checkWalletHardLimit(input: {
+  tenantId: string;
+  meta: AiErrorMeta;
+}): Promise<void> {
+  const { AiWalletLimitError } = await import("./errors");
+
+  try {
+    // Read account for hard_limit_usd — if no account, use default 0
+    const accountRows = await db
+      .select({ hardLimitUsd: tenantCreditAccounts.hardLimitUsd })
+      .from(tenantCreditAccounts)
+      .where(eq(tenantCreditAccounts.tenantId, input.tenantId))
+      .limit(1);
+
+    const hardLimit = Number(accountRows[0]?.hardLimitUsd ?? 0);
+
+    // Calculate available balance from ledger
+    const balance = await getTenantCreditBalance(input.tenantId);
+
+    if (balance.availableBalanceUsd <= hardLimit) {
+      throw new AiWalletLimitError({
+        ...input.meta,
+        availableBalance: balance.availableBalanceUsd,
+        hardLimit,
+      });
+    }
+  } catch (err) {
+    // Re-throw AiWalletLimitError (this is an intentional block)
+    const { AiWalletLimitError: WalletLimitErr } = await import("./errors");
+    if (err instanceof WalletLimitErr) throw err;
+
+    // DB errors on the hard-limit check are fail-open — log and allow through
+    console.error(
+      "[ai/wallet] checkWalletHardLimit DB error (fail-open — call allowed through):",
+      err instanceof Error ? err.message : err,
       "tenant:", input.tenantId,
     );
   }

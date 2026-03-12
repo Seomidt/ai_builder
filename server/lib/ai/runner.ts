@@ -95,8 +95,10 @@ import {
   AiConcurrencyError,
   AiDuplicateInflightError,
   AiStepBudgetExceededError,
+  AiWalletLimitError,
   type AiErrorMeta,
 } from "./errors";
+import { checkWalletHardLimit } from "./wallet";
 import { acquireAiStep, recordStepCompleted } from "./step-budget";
 import type { AiCallContext, AiCallResult } from "./types";
 import type { AiUsageLimit } from "@shared/schema";
@@ -298,6 +300,20 @@ export async function runAiCall(
       throw new AiBudgetExceededError(meta);
     }
 
+    // ── Step 8.5: Wallet hard-limit check (Phase 4C) ────────────────────────────
+    // Placement: after budget guard (step 8), before provider call path.
+    // Only runs for tenant-scoped calls. Anonymous calls skip wallet enforcement.
+    //
+    // If available_balance_usd <= hard_limit_usd on tenant_credit_accounts,
+    // throws AiWalletLimitError (402). No provider call, no billing row, no debit.
+    //
+    // Fail-open: DB errors on the check allow the call through (see wallet.ts).
+    // Hard limit default is 0 — tenant with no credits account is blocked by default.
+    if (tenantId) {
+      const walletMeta: AiErrorMeta = { feature, model: route.model, latencyMs: Date.now() - startMs };
+      await checkWalletHardLimit({ tenantId, meta: walletMeta });
+    }
+
     // ── Step 9: Budget mode policy ──────────────────────────────────────────────
     const effectiveSystemPrompt =
       guardState === "budget_mode"
@@ -486,9 +502,10 @@ export async function runAiCall(
       err instanceof AiConcurrencyError ||
       err instanceof AiBudgetExceededError ||
       err instanceof AiDuplicateInflightError ||
-      // Phase 3L: step budget exceeded is a pre-flight block — no provider call made,
-      // no step was incremented, so no step_completed needed.
-      err instanceof AiStepBudgetExceededError
+      // Phase 3L: step budget exceeded is a pre-flight block — no provider call made.
+      err instanceof AiStepBudgetExceededError ||
+      // Phase 4C: wallet hard-limit block — no provider call, no billing row, no debit.
+      err instanceof AiWalletLimitError
     ) {
       // Safety/idempotency blocks — mark failed if we own a state row
       if (idpOwned && idpStateId && tenantId && context.requestId) {

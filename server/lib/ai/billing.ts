@@ -30,7 +30,7 @@
 import { eq, and, sql } from "drizzle-orm";
 import { db } from "../../db";
 import { aiCustomerPricingConfigs, aiBillingUsage } from "@shared/schema";
-import { maybeRecordWalletDebit } from "./wallet";
+import { attemptWalletDebitReturningResult } from "./wallet";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -290,32 +290,94 @@ export async function recordAiBillingUsage(
   }
 }
 
+// ─── Wallet Status Update ─────────────────────────────────────────────────────
+
 /**
- * Load pricing config, write billing row, then trigger wallet debit — all in one step.
+ * Update wallet delivery status fields on an existing billing row.
+ *
+ * ONLY the three wallet-delivery metadata fields are updated:
+ *   wallet_status, wallet_error_message, wallet_debited_at
+ *
+ * Financial value columns are NEVER updated. This function is the only
+ * permitted mutating operation on ai_billing_usage rows post-insert.
+ *
+ * Fails silently — billing row audit integrity is more important than
+ * enforcing wallet status propagation. Callers must log failures.
+ */
+export async function updateBillingWalletStatus(
+  billingId: string,
+  status: "debited" | "failed",
+  errorMessage: string | null,
+  debitedAt: Date | null,
+): Promise<void> {
+  try {
+    await db
+      .update(aiBillingUsage)
+      .set({
+        walletStatus: status,
+        walletErrorMessage: errorMessage,
+        walletDebitedAt: debitedAt,
+      })
+      .where(eq(aiBillingUsage.id, billingId));
+  } catch (err) {
+    console.error(
+      "[ai/billing] Failed to update wallet_status on billing row (suppressed):",
+      err instanceof Error ? err.message : err,
+      "billing_id:", billingId,
+    );
+  }
+}
+
+/**
+ * Load pricing config, write billing row, attempt wallet debit, update wallet status.
  *
  * This is the main entry point called from usage.ts after confirmed ai_usage success.
  * Fire-and-forget safe: never throws. Billing or wallet failure does not affect runtime.
  *
  * Flow:
  *   1. Load effective pricing config (fails open → code default)
- *   2. Insert ai_billing_usage row (ON CONFLICT DO NOTHING)
- *   3. If billing row was newly created → trigger wallet debit (maybeRecordWalletDebit)
- *   4. Wallet debit is downstream and fail-open; billing row is canonical
+ *   2. Insert ai_billing_usage row (ON CONFLICT DO NOTHING) — wallet_status='pending' by default
+ *   3. If billing row was newly created:
+ *      a. Attempt wallet debit via attemptWalletDebitReturningResult
+ *      b. On success → update wallet_status='debited', wallet_debited_at=now()
+ *      c. On failure → update wallet_status='failed', wallet_error_message=err
+ *   4. Duplicate/replay billing rows (result=null) are skipped entirely
+ *
+ * Immutability guarantee:
+ *   Financial columns (amounts, pricing, tokens) are set at insert and never touched again.
+ *   Only wallet delivery metadata fields are updated post-insert.
  */
 export async function maybeRecordAiBillingUsage(input: BillingUsageInput): Promise<void> {
   try {
     const config = await loadEffectiveCustomerPricingConfig(input.tenantId);
     const result = await recordAiBillingUsage(input, config);
 
-    // Only debit wallet when a new billing row was actually created.
-    // Duplicate/replay paths return null and must not create additional debits.
+    // Only attempt wallet debit when a new billing row was actually created.
+    // Duplicate/replay paths return null — no second debit attempt, no status update.
     if (result !== null) {
-      await maybeRecordWalletDebit({
+      const walletResult = await attemptWalletDebitReturningResult({
         tenantId: input.tenantId,
         billingUsageId: result.id,
         amountUsd: result.customerPriceUsd,
         requestId: input.requestId ?? null,
       });
+
+      if (walletResult.debited) {
+        await updateBillingWalletStatus(result.id, "debited", null, new Date());
+      } else {
+        await updateBillingWalletStatus(
+          result.id,
+          "failed",
+          walletResult.error ?? "unknown wallet error",
+          null,
+        );
+        console.error(
+          "[ai/billing] Wallet debit failed — billing row intact, wallet_status=failed:",
+          walletResult.error,
+          "billing_id:", result.id,
+          "tenant:", input.tenantId,
+        );
+      }
     }
   } catch (err) {
     // Belt-and-suspenders: should never reach here due to internal catches, but just in case.

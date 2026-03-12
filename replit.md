@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 4B complete)
+# AI Builder Platform — V1 (Phase 4C complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -38,6 +38,11 @@ Internal control plane for AI-driven software generation. Express + React + Driz
 - **Billing rows are immutable**: pricing changes never mutate past ai_billing_usage rows
 - **Billing is fail-open**: DB errors in billing.ts are caught and logged — never propagated to AI runtime
 - **One billing row per ai_usage row**: UNIQUE on usage_id enforces this at DB level
+- **Wallet hard-limit check at step 8.5**: runner.ts checks available_balance_usd <= hard_limit_usd before provider call — throws AiWalletLimitError (402); DB errors are fail-open
+- **wallet_status flow**: `pending` (insert default) → `debited` (on success) or `failed` (on wallet write error). Updated by billing.ts post-insert only
+- **Wallet debit replay is idempotent**: billing_usage_id partial unique index on ledger prevents double-debits; replay scripts via wallet-replay.ts
+- **Reconciliation is detection-only**: ai_provider_reconciliation_runs/deltas record discrepancies; never auto-corrects billing rows
+- **AiWalletLimitError (402)**: HTTP 402, pre-flight block — no provider call, no billing row, no debit. Tenant must add credits
 
 ## Environment Variables Required
 
