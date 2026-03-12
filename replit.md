@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5 complete)
+# AI Builder Platform — V1 (Phase 4D complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
