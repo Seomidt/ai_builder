@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 4A complete)
+# AI Builder Platform — V1 (Phase 4B complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -105,7 +105,7 @@ server/
   db.ts                          Drizzle + pg pool
 
 shared/
-  schema.ts                      All Drizzle tables + insert schemas + TypeScript types (31 tables)
+  schema.ts                      All Drizzle tables + insert schemas + TypeScript types (33 tables)
 ```
 
 ## Phase History
@@ -133,6 +133,7 @@ shared/
 | 3K | `feature/ai-cost-anomaly-detection` | AI Cost Anomaly Detection — ai_anomaly_configs + ai_anomaly_events, per-request + window detection, 15m cooldown |
 | 3L | `feature/ai-step-budget-guard` | AI Step Budget Guard — ai_request_step_states + ai_request_step_events, max 5 AI calls per request_id |
 | 4A | `feature/ai-billing-engine` | AI Billing Engine — ai_customer_pricing_configs + ai_billing_usage, 3 pricing modes, immutable ledger, margin tracking |
+| 4B | `feature/wallet-credit-ledger` | Wallet/Credit Ledger — tenant_credit_accounts + tenant_credit_ledger, immutable ledger, gross/available balance, billing-driven debit, expiration-ready, fail-open |
 
 ## AI Stack — Full Pipeline (runner.ts)
 
@@ -161,6 +162,7 @@ runAiCall(context, input)
         → within limit → increment counter, record step_started event, continue
  11.  provider.generateText(...)
  12.  logAiUsage(...) + maybeRecordThresholdEvent() + runAnomalyDetection() [fire-and-forget]
+       → maybeRecordAiBillingUsage() [fire-and-forget: ai_billing_usage + wallet debit]
  13.  [if cacheable + tenantId] storeCachedResponse()
  14.  [if idp owned] markAiRequestCompleted()
  15.  finally: releaseConcurrencySlot() + releaseAiRequestOwnership()
@@ -189,9 +191,12 @@ runAiCall(context, input)
 - `server/lib/ai/step-budget.ts` — acquireAiStep(), recordStepCompleted(), finalizeAiStepBudget()
 - `server/lib/ai/step-budget-summary.ts` — getStepBudgetSummary()
 - `server/lib/ai/step-budget-retention.ts` — runStepStateCleanup() + runStepEventCleanup()
-- `server/lib/ai/billing.ts` — loadEffectiveCustomerPricingConfig(), calculateCustomerPrice(), maybeRecordAiBillingUsage()
+- `server/lib/ai/billing.ts` — loadEffectiveCustomerPricingConfig(), calculateCustomerPrice(), maybeRecordAiBillingUsage() → triggers wallet debit
 - `server/lib/ai/billing-summary.ts` — getAiBillingSummary()
 - `server/lib/ai/billing-retention.ts` — getBillingRetentionSql() (24-month default)
+- `server/lib/ai/wallet.ts` — ensureTenantCreditAccount(), grantTenantCredits(), debitTenantCreditsForBillingUsage(), getTenantCreditBalance(), maybeRecordWalletDebit()
+- `server/lib/ai/wallet-summary.ts` — getTenantWalletSummary() (gross + available balance)
+- `server/lib/ai/wallet-retention.ts` — getWalletRetentionSql() (24-month default)
 - `server/lib/ai/retention.ts` — PREVIEW/DELETE SQL for ai_usage (90-day window)
 - `server/lib/ai/errors.ts` — AiError + 10 typed subclasses with httpStatus + errorCode + retryAfterSeconds
 
@@ -211,7 +216,11 @@ runAiCall(context, input)
 - `ai_request_step_states` — unique index on `(tenant_id, request_id)`. TTL 24h. Default max_ai_calls = 5.
 - `ai_request_step_events` — 30-day retention. step_budget_exceeded events logged before throw.
 - `ai_customer_pricing_configs` — scope CHECK IN ('global','tenant'). pricing_mode CHECK IN ('cost_plus_multiplier','fixed_markup','per_1k_tokens'). Partial unique indexes for one active global + one active tenant row. Config resolution: tenant → global → code default (3× multiplier).
-- `ai_billing_usage` — UNIQUE on usage_id. Immutable ledger. One row per ai_usage row max. Never written for blocked/error/cache-hit/replay calls. 24-month recommended retention.
+- `ai_billing_usage` — UNIQUE on usage_id. Immutable ledger. One row per ai_usage row max. Never written for blocked/error/cache-hit/replay calls. 24-month recommended retention. Composite index `(tenant_id, created_at)` added Phase 4B.
+- `tenant_credit_accounts` — one wallet account per tenant (UNIQUE on tenant_id). Metadata only — balance NOT stored here. Currency: USD.
+- `tenant_credit_ledger` — immutable wallet event ledger. Source of truth for balance. entry_type CHECK IN ('credit_grant','credit_debit','credit_expiration','credit_adjustment'). direction CHECK IN ('credit','debit'). Partial unique index on `billing_usage_id WHERE entry_type='credit_debit'` ensures one debit per billing row. expires_at support for credit expiration. 24-month retention.
+- **Balance model**: gross_balance_usd = SUM(all credits) - SUM(all debits). available_balance_usd = SUM(non-expired credits) - SUM(all debits).
+- **Wallet debit flow**: provider call → ai_usage → ai_billing_usage → wallet debit (all downstream, fail-open). Wallet failure never breaks runtime.
 - **All ID columns**: `varchar("id").primaryKey().default(sql\`gen_random_uuid()\`)` — never native uuid type
 - **Numeric DB fields**: Drizzle returns `numeric` as strings — convert with `Number()` when reading
 
@@ -224,7 +233,7 @@ npm run db:push   # Sync schema to DB
 
 ## V2 / Next TODO
 
-- [ ] Phase 4B: Billing period aggregates + usage-based billing summary
+- [x] Phase 4B: Wallet/Credit Ledger — tenant credit accounts + immutable ledger + billing-driven debit
 - [ ] Phase 4C: Stripe metered billing sync
 - [ ] Phase 4: Admin UI for model routing overrides + usage dashboard
 - [ ] Real Supabase Auth session (frontend login/signup)
