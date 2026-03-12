@@ -48,9 +48,10 @@ import {
 import type { BillingPeriod, BillingPeriodTenantSnapshot } from "@shared/schema";
 import {
   getBillingPeriodById,
-  markBillingPeriodClosing,
-  markBillingPeriodClosed,
-  restoreBillingPeriodToOpen,
+  lockBillingPeriodRow,
+  markBillingPeriodClosingTx,
+  markBillingPeriodClosedTx,
+  restoreBillingPeriodToOpenTx,
   BillingPeriodError,
 } from "./billing-periods";
 
@@ -182,79 +183,129 @@ export async function createTenantBillingSnapshots(periodId: string): Promise<nu
 // ─── Period Close Flow ────────────────────────────────────────────────────────
 
 /**
- * Close a billing period safely.
+ * Close a billing period safely with concurrency protection.
  *
  * This is the main entry point for the period close flow.
  *
- * Full lifecycle:
- *   1. Validate period exists
- *   2. Validate period status is 'open' — rejects already-closed or closing periods
- *   3. Transition to 'closing'
- *   4. Generate tenant snapshots (idempotent via ON CONFLICT DO NOTHING)
- *   5. Transition to 'closed' + set closed_at
+ * Full lifecycle (Phase 4D.1 — concurrency-safe):
+ *
+ *   Phase 1 (within a transaction with SELECT FOR UPDATE row lock):
+ *     1. Lock the billing period row — serializes concurrent close attempts
+ *     2. Validate status is 'open' — rejects already-closed/closing periods
+ *     3. Transition to 'closing' within the transaction
+ *     4. Commit — releases row lock
+ *
+ *   Phase 2 (outside transaction — idempotent):
+ *     5. Generate tenant snapshots (ON CONFLICT DO NOTHING)
+ *
+ *   Phase 3 (within a second transaction with SELECT FOR UPDATE):
+ *     6. Lock the row again — verify still 'closing'
+ *     7. Transition to 'closed' + set closed_at
+ *     8. Commit
+ *
+ * Concurrency guarantee:
+ *   Two parallel calls with the same periodId will serialize at the Phase 1 lock.
+ *   The second caller will find status='closing' (or 'closed') and throw immediately.
+ *   Snapshot inserts are idempotent via UNIQUE constraint — no duplicate rows possible.
  *
  * Failure safety:
- *   If snapshot generation fails, restores period to 'open' before throwing.
- *   Period will never be left in 'closing' after a call to closeBillingPeriod().
+ *   If snapshot generation fails (between Phase 1 and Phase 3), Phase 3 recovery
+ *   transaction restores the period to 'open' so it can be retried cleanly.
  *
- * Idempotency:
- *   - Calling on an already-closed period throws BillingPeriodError (does not duplicate data).
- *   - Snapshot creation is idempotent via UNIQUE constraint — retry after partial failure is safe.
- *
- * Returns the count of newly inserted snapshot rows.
- * Throws BillingPeriodError on validation failures.
- * Throws on unexpected DB errors.
+ * Throws BillingPeriodError on:
+ *   - period not found
+ *   - period is not 'open' (already_closed, already_closing)
+ * Throws on unexpected DB errors (snapshot generation, lock acquisition).
  */
 export async function closeBillingPeriod(periodId: string): Promise<{ snapshotsCreated: number }> {
-  // Step 1+2: Validate period exists and is open
-  const period = await getBillingPeriodById(periodId);
-  if (!period) {
-    throw new BillingPeriodError(
-      `Cannot close billing period: not found: ${periodId}`,
-      "period_not_found",
-    );
-  }
-  if (period.status === "closed") {
-    throw new BillingPeriodError(
-      `Billing period ${periodId} is already closed`,
-      "already_closed",
-    );
-  }
-  if (period.status === "closing") {
-    throw new BillingPeriodError(
-      `Billing period ${periodId} is already in 'closing' state — resume or check for stuck close`,
-      "already_closing",
-    );
-  }
-  if (period.status !== "open") {
-    throw new BillingPeriodError(
-      `Billing period ${periodId} has unexpected status: ${period.status}`,
-      "invalid_status",
-    );
-  }
+  // ── Phase 1: Lock row, validate, claim 'closing' ─────────────────────────
+  //
+  // SELECT FOR UPDATE serializes concurrent close attempts.
+  // Only one caller can hold the row lock at a time.
+  // The second caller blocks here, then sees the updated status after Phase 1 commits.
+  await db.transaction(async (tx) => {
+    const period = await lockBillingPeriodRow(tx, periodId);
 
-  // Step 3: Transition to 'closing'
-  await markBillingPeriodClosing(periodId);
+    if (!period) {
+      throw new BillingPeriodError(
+        `Cannot close billing period: not found: ${periodId}`,
+        "period_not_found",
+      );
+    }
+    if (period.status === "closed") {
+      throw new BillingPeriodError(
+        `Billing period ${periodId} is already closed`,
+        "already_closed",
+      );
+    }
+    if (period.status === "closing") {
+      throw new BillingPeriodError(
+        `Billing period ${periodId} is already in 'closing' state — another worker may be closing it`,
+        "already_closing",
+      );
+    }
+    if (period.status !== "open") {
+      throw new BillingPeriodError(
+        `Billing period ${periodId} has unexpected status: ${period.status}`,
+        "invalid_status",
+      );
+    }
 
-  // Steps 4+5+6: Generate snapshots, then close
+    // Transition to 'closing' within the same transaction (atomic with the lock check)
+    await markBillingPeriodClosingTx(tx, periodId);
+  });
+  // Phase 1 transaction committed — row lock released.
+  // Any concurrent caller now sees status='closing' and will throw 'already_closing'.
+
+  // ── Phase 2: Generate snapshots (idempotent, outside transaction) ─────────
+  //
+  // Snapshot inserts use ON CONFLICT DO NOTHING — safe under retries.
+  // If this fails, Phase 3 recovery restores the period to 'open'.
   let snapshotsCreated = 0;
   try {
     snapshotsCreated = await createTenantBillingSnapshots(periodId);
-    await markBillingPeriodClosed(periodId);
-
-    console.info(
-      `[billing-period-snapshots] Period ${periodId} closed successfully.`,
-      `Snapshots created: ${snapshotsCreated}`,
-    );
-  } catch (err) {
-    // Restore to 'open' — period must not be left stuck in 'closing'
-    await restoreBillingPeriodToOpen(periodId);
+  } catch (snapshotErr) {
+    // Snapshot generation failed — restore period to 'open' in a recovery transaction
     console.error(
-      `[billing-period-snapshots] Close failed for period ${periodId} — restored to 'open':`,
-      err instanceof Error ? err.message : err,
+      `[billing-period-snapshots] Snapshot generation failed for period ${periodId} — attempting recovery:`,
+      snapshotErr instanceof Error ? snapshotErr.message : snapshotErr,
     );
-    throw err;
+    await db.transaction(async (tx) => {
+      // Lock the row to safely check state before restoring
+      const period = await lockBillingPeriodRow(tx, periodId);
+      if (period && period.status === "closing") {
+        await restoreBillingPeriodToOpenTx(tx, periodId);
+      } else {
+        console.error(
+          `[billing-period-snapshots] Cannot restore period ${periodId} — unexpected status: ${period?.status}`,
+        );
+      }
+    });
+    throw snapshotErr;
   }
+
+  // ── Phase 3: Lock row again, verify still 'closing', mark 'closed' ────────
+  await db.transaction(async (tx) => {
+    const period = await lockBillingPeriodRow(tx, periodId);
+
+    if (!period) {
+      throw new BillingPeriodError(`Period ${periodId} disappeared after snapshot generation`, "period_not_found");
+    }
+    if (period.status !== "closing") {
+      // This should never happen in normal operation — only if a concurrent process
+      // has interfered beyond the Phase 1 lock. Log and throw.
+      throw new BillingPeriodError(
+        `Period ${periodId} is no longer 'closing' before final close — status is '${period.status}'`,
+        "unexpected_status_before_close",
+      );
+    }
+
+    await markBillingPeriodClosedTx(tx, periodId);
+  });
+
+  console.info(
+    `[billing-period-snapshots] Period ${periodId} closed successfully. Snapshots created: ${snapshotsCreated}`,
+  );
 
   return { snapshotsCreated };
 }

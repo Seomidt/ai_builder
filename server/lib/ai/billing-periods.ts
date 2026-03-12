@@ -14,22 +14,26 @@
  *   open   period → aggregate from live ai_billing_usage
  *   closed period → aggregate from billing_period_tenant_snapshots
  *
- * Invariants:
- *   - period_start < period_end (enforced by CHECK constraint)
- *   - status must be one of open/closing/closed (CHECK constraint)
- *   - UNIQUE(period_start, period_end) prevents duplicate period definitions
+ * DB-level invariants (Phase 4D.1 hardening):
+ *   - period_start < period_end (CHECK constraint)
+ *   - status ∈ {open, closing, closed} (CHECK constraint)
+ *   - UNIQUE(period_start, period_end) (uniqueIndex)
+ *   - Non-overlapping periods (EXCLUDE USING gist btree_gist)
+ *   - billing_period_tenant_snapshots are immutable (DB trigger prevents UPDATE/DELETE)
  *   - closed_at is only set when status = 'closed'
- *   - Closing a non-open period is an error — never silent
- *   - Re-closing a closed period is safely rejected
+ *   - Close flow uses SELECT FOR UPDATE row-level locking (concurrency-safe)
  *
- * Phase 5: foundation only. No scheduler, no cron, no admin API.
- * Periods are created and closed manually via these functions.
+ * Phase 4D: foundation only. No scheduler, no cron, no admin API.
+ * Periods are created and closed manually via closeBillingPeriod().
  */
 
 import { eq, desc, and } from "drizzle-orm";
 import { db } from "../../db";
 import { billingPeriods } from "@shared/schema";
 import type { BillingPeriod } from "@shared/schema";
+
+// Type for a Drizzle transaction client (used by concurrency-safe close flow)
+type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 // ─── Errors ────────────────────────────────────────────────────────────────────
 
@@ -38,6 +42,43 @@ export class BillingPeriodError extends Error {
     super(message);
     this.name = "BillingPeriodError";
   }
+}
+
+// ─── Concurrency-Safe Row Lock ────────────────────────────────────────────────
+
+/**
+ * Lock a billing period row using SELECT FOR UPDATE within a transaction.
+ *
+ * Must be called inside a `db.transaction()` block.
+ * Blocks until the row lock is acquired — any concurrent writer holding the lock
+ * must commit or rollback first.
+ *
+ * This is the primary concurrency guard for the period close flow.
+ * Two concurrent close attempts will serialize at this point:
+ *   - Worker A: acquires lock, proceeds with close
+ *   - Worker B: waits... acquires lock after A commits, sees status='closing'
+ *     or 'closed', throws BillingPeriodError immediately — no duplicate work
+ *
+ * Returns the current period row (fresh read under lock), or null if not found.
+ *
+ * Usage:
+ *   await db.transaction(async (tx) => {
+ *     const period = await lockBillingPeriodRow(tx, periodId);
+ *     // ... check status, mutate ...
+ *   });
+ */
+export async function lockBillingPeriodRow(
+  tx: DbTransaction,
+  periodId: string,
+): Promise<BillingPeriod | null> {
+  const rows = await tx
+    .select()
+    .from(billingPeriods)
+    .where(eq(billingPeriods.id, periodId))
+    .for("update")
+    .limit(1);
+
+  return rows[0] ?? null;
 }
 
 // ─── Read Operations ──────────────────────────────────────────────────────────
@@ -130,14 +171,10 @@ export async function createBillingPeriod(
 }
 
 /**
- * Transition a billing period to 'closing'.
+ * Transition a billing period to 'closing' — standalone (outside transaction).
  *
- * This is step 3 of the close flow.
- * Must only be called on open periods — enforced by this function.
- *
- * Throws BillingPeriodError if:
- *   - Period not found
- *   - Period is not in 'open' status
+ * Non-transactional version kept for backwards compatibility.
+ * For concurrency-safe close, use closeBillingPeriod() which uses the tx versions.
  */
 export async function markBillingPeriodClosing(periodId: string): Promise<void> {
   const period = await getBillingPeriodById(periodId);
@@ -150,22 +187,29 @@ export async function markBillingPeriodClosing(periodId: string): Promise<void> 
       "invalid_status_transition",
     );
   }
-
   await db
     .update(billingPeriods)
     .set({ status: "closing" })
     .where(and(eq(billingPeriods.id, periodId), eq(billingPeriods.status, "open")));
-
   console.info(`[billing-periods] Period ${periodId} → closing`);
 }
 
 /**
- * Transition a billing period to 'closed' and set closed_at.
+ * Transition a billing period to 'closing' within an existing transaction.
  *
- * This is step 6 of the close flow — called only after successful snapshot generation.
- * Must only be called on 'closing' periods.
- *
- * Throws BillingPeriodError if period is not in 'closing' status.
+ * Called inside a db.transaction() block with SELECT FOR UPDATE already held.
+ * The caller has already validated status via lockBillingPeriodRow().
+ */
+export async function markBillingPeriodClosingTx(tx: DbTransaction, periodId: string): Promise<void> {
+  await tx
+    .update(billingPeriods)
+    .set({ status: "closing" })
+    .where(and(eq(billingPeriods.id, periodId), eq(billingPeriods.status, "open")));
+  console.info(`[billing-periods] Period ${periodId} → closing (tx)`);
+}
+
+/**
+ * Transition a billing period to 'closed' — standalone (outside transaction).
  */
 export async function markBillingPeriodClosed(periodId: string): Promise<void> {
   const period = await getBillingPeriodById(periodId);
@@ -178,20 +222,48 @@ export async function markBillingPeriodClosed(periodId: string): Promise<void> {
       "invalid_status_transition",
     );
   }
-
   await db
     .update(billingPeriods)
     .set({ status: "closed", closedAt: new Date() })
     .where(and(eq(billingPeriods.id, periodId), eq(billingPeriods.status, "closing")));
-
   console.info(`[billing-periods] Period ${periodId} → closed`);
 }
 
 /**
- * Restore a 'closing' period back to 'open' — for rollback after snapshot failure.
+ * Transition a billing period to 'closed' within an existing transaction.
  *
- * Called in the error path of closeBillingPeriod() to avoid leaving a period
- * stuck in 'closing' after a snapshot generation failure.
+ * Called inside a db.transaction() block with SELECT FOR UPDATE already held.
+ * The caller has already validated status via lockBillingPeriodRow().
+ */
+export async function markBillingPeriodClosedTx(tx: DbTransaction, periodId: string): Promise<void> {
+  await tx
+    .update(billingPeriods)
+    .set({ status: "closed", closedAt: new Date() })
+    .where(and(eq(billingPeriods.id, periodId), eq(billingPeriods.status, "closing")));
+  console.info(`[billing-periods] Period ${periodId} → closed (tx)`);
+}
+
+/**
+ * Restore a 'closing' period back to 'open' within a transaction — for rollback after snapshot failure.
+ *
+ * Only operates on 'closing' → 'open'. Never reopens 'closed' periods.
+ */
+export async function restoreBillingPeriodToOpenTx(tx: DbTransaction, periodId: string): Promise<void> {
+  const result = await tx
+    .update(billingPeriods)
+    .set({ status: "open" })
+    .where(and(eq(billingPeriods.id, periodId), eq(billingPeriods.status, "closing")))
+    .returning({ id: billingPeriods.id });
+
+  if (result.length > 0) {
+    console.warn(`[billing-periods] Period ${periodId} restored to 'open' after snapshot failure (tx)`);
+  } else {
+    console.error(`[billing-periods] Could not restore period ${periodId} to 'open' (tx) — unexpected state`);
+  }
+}
+
+/**
+ * Restore a 'closing' period back to 'open' — standalone version for error paths.
  *
  * Only operates on 'closing' → 'open'. Never reopens 'closed' periods.
  */
@@ -205,8 +277,6 @@ export async function restoreBillingPeriodToOpen(periodId: string): Promise<void
   if (result.length > 0) {
     console.warn(`[billing-periods] Period ${periodId} restored to 'open' after snapshot failure`);
   } else {
-    console.error(
-      `[billing-periods] Could not restore period ${periodId} to 'open' — may already be in unexpected state`,
-    );
+    console.error(`[billing-periods] Could not restore period ${periodId} to 'open' — unexpected state`);
   }
 }
