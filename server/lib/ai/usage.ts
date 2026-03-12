@@ -26,6 +26,7 @@ import { aiUsage, tenantAiUsagePeriods } from "@shared/schema";
 import { getCurrentPeriod } from "./usage-periods";
 import { runAnomalyDetection } from "./anomaly-detector";
 import { maybeRecordAiBillingUsage } from "./billing";
+import { recordUsageRecordedEvent } from "./billing-events";
 
 export interface LogAiUsagePayload {
   tenantId?: string | null;
@@ -153,6 +154,19 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
       "tenant:", payload.tenantId,
     );
     return;
+  }
+
+  // Phase 4F: fire usage_recorded billing event after confirmed ai_usage insert.
+  // Best-effort — never blocks billing or runtime flow.
+  if (payload.tenantId && payload.status === "success") {
+    recordUsageRecordedEvent({
+      tenantId: payload.tenantId,
+      requestId: payload.requestId ?? null,
+      usageId: inserted[0].id,
+      provider: payload.provider ?? null,
+      model: payload.model,
+      estimatedCostUsd: payload.estimatedCostUsd ?? null,
+    });
   }
 
   // Only aggregate and bill successful calls with a known tenant.

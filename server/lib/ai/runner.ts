@@ -100,6 +100,13 @@ import {
 } from "./errors";
 import { checkWalletHardLimit } from "./wallet";
 import { acquireAiStep, recordStepCompleted } from "./step-budget";
+import {
+  recordRequestStartedEvent,
+  recordProviderCallStartedEvent,
+  recordRequestCompletedEvent,
+  recordRequestReplayedEvent,
+  recordCacheHitReplayedEvent,
+} from "./billing-events";
 import type { AiCallContext, AiCallResult } from "./types";
 import type { AiUsageLimit } from "@shared/schema";
 
@@ -193,6 +200,14 @@ export async function runAiCall(
     if (idpResult.outcome === "duplicate_replay") {
       // Case D — prior completed result available; return it without any provider call
       const latencyMs = Date.now() - startMs;
+      // Phase 4F: request_replayed event — idempotency replay path.
+      if (tenantId) {
+        recordRequestReplayedEvent({
+          tenantId,
+          requestId: context.requestId ?? null,
+          replaySource: "idempotency",
+        });
+      }
       emitRunnerLog({
         feature, model: route.model, latencyMs, guardState: "normal",
         success: true, duplicateReplay: true,
@@ -204,6 +219,17 @@ export async function runAiCall(
     idpOwned = true;
     idpStateId = idpResult.stateId;
     idpInflightKey = idpResult.inflightKey;
+
+    // Phase 4F: request_started event — ownership acquired, execution begins.
+    if (tenantId) {
+      recordRequestStartedEvent({
+        tenantId,
+        requestId: context.requestId ?? null,
+        routeKey: modelKey,
+        provider: route.provider,
+        model: route.model,
+      });
+    }
   }
 
   // ── Step 4: Resolve effective safety config ───────────────────────────────────
@@ -366,6 +392,12 @@ export async function runAiCall(
             responsePayload: lookup.result,
           });
         }
+        // Phase 4F: cache_hit_replayed event — cache hit, no provider call.
+        recordCacheHitReplayedEvent({
+          tenantId,
+          requestId: context.requestId ?? null,
+          routeKey: modelKey,
+        });
         emitRunnerLog({
           feature,
           model: route.model,
@@ -396,6 +428,17 @@ export async function runAiCall(
     }
 
     // ── Step 11: Provider call ───────────────────────────────────────────────────
+    // Phase 4F: provider_call_started event — about to invoke the AI provider.
+    if (tenantId) {
+      recordProviderCallStartedEvent({
+        tenantId,
+        requestId: context.requestId ?? null,
+        provider: route.provider,
+        model: route.model,
+        routeKey: modelKey,
+      });
+    }
+
     const result = await provider.generateText({
       model: route.model,
       systemPrompt: effectiveSystemPrompt,
@@ -505,6 +548,15 @@ export async function runAiCall(
         provider: route.provider,
         model: route.model,
         responsePayload: finalResult,
+      });
+    }
+
+    // Phase 4F: request_completed event — normal provider-call path finished successfully.
+    if (tenantId) {
+      recordRequestCompletedEvent({
+        tenantId,
+        requestId: context.requestId ?? null,
+        latencyMs,
       });
     }
 

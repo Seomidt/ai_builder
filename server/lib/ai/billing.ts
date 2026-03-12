@@ -31,6 +31,12 @@ import { eq, and, sql } from "drizzle-orm";
 import { db } from "../../db";
 import { aiCustomerPricingConfigs, aiBillingUsage } from "@shared/schema";
 import { attemptWalletDebitReturningResult } from "./wallet";
+import {
+  recordBillingUsageCreatedEvent,
+  recordWalletDebitAttemptedEvent,
+  recordWalletDebitSucceededEvent,
+  recordWalletDebitFailedEvent,
+} from "./billing-events";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -355,6 +361,25 @@ export async function maybeRecordAiBillingUsage(input: BillingUsageInput): Promi
     // Only attempt wallet debit when a new billing row was actually created.
     // Duplicate/replay paths return null — no second debit attempt, no status update.
     if (result !== null) {
+      // Phase 4F: billing_usage_created event after confirmed ai_billing_usage insert.
+      recordBillingUsageCreatedEvent({
+        tenantId: input.tenantId,
+        requestId: input.requestId ?? null,
+        usageId: input.usageId,
+        billingUsageId: result.id,
+        customerPriceUsd: result.customerPriceUsd,
+        providerCostUsd: input.providerCostUsd,
+        marginUsd: Math.max(0, result.customerPriceUsd - input.providerCostUsd),
+      });
+
+      // Phase 4F: wallet_debit_attempted event before debit write.
+      recordWalletDebitAttemptedEvent({
+        tenantId: input.tenantId,
+        requestId: input.requestId ?? null,
+        billingUsageId: result.id,
+        amountUsd: result.customerPriceUsd,
+      });
+
       const walletResult = await attemptWalletDebitReturningResult({
         tenantId: input.tenantId,
         billingUsageId: result.id,
@@ -364,6 +389,14 @@ export async function maybeRecordAiBillingUsage(input: BillingUsageInput): Promi
 
       if (walletResult.debited) {
         await updateBillingWalletStatus(result.id, "debited", null, new Date());
+        // Phase 4F: wallet_debit_succeeded event.
+        recordWalletDebitSucceededEvent({
+          tenantId: input.tenantId,
+          requestId: input.requestId ?? null,
+          billingUsageId: result.id,
+          amountUsd: result.customerPriceUsd,
+          alreadyExisted: walletResult.alreadyExisted ?? false,
+        });
       } else {
         await updateBillingWalletStatus(
           result.id,
@@ -371,6 +404,14 @@ export async function maybeRecordAiBillingUsage(input: BillingUsageInput): Promi
           walletResult.error ?? "unknown wallet error",
           null,
         );
+        // Phase 4F: wallet_debit_failed event.
+        recordWalletDebitFailedEvent({
+          tenantId: input.tenantId,
+          requestId: input.requestId ?? null,
+          billingUsageId: result.id,
+          amountUsd: result.customerPriceUsd,
+          error: walletResult.error ?? "unknown wallet error",
+        });
         console.error(
           "[ai/billing] Wallet debit failed — billing row intact, wallet_status=failed:",
           walletResult.error,

@@ -2311,6 +2311,63 @@ export const insertBillingAuditFindingSchema = createInsertSchema(billingAuditFi
 export type InsertBillingAuditFinding = z.infer<typeof insertBillingAuditFindingSchema>;
 export type BillingAuditFinding = typeof billingAuditFindings.$inferSelect;
 
+// ─── Phase 4F: Billing Event Log ──────────────────────────────────────────────
+
+/**
+ * billing_events — immutable monetization event timeline.
+ *
+ * Append-only. Rows are never updated or deleted (within retention window).
+ * Not the billing source of truth — canonical truth remains ai_billing_usage.
+ *
+ * Event type vocabulary (see BILLING_EVENT_TYPES in billing-events.ts):
+ *   request_started        — idempotency ownership acquired
+ *   provider_call_started  — provider call about to execute
+ *   usage_recorded         — ai_usage row created
+ *   billing_usage_created  — ai_billing_usage row created
+ *   wallet_debit_attempted — wallet debit write started
+ *   wallet_debit_succeeded — wallet debit committed
+ *   wallet_debit_failed    — wallet debit failed (billing row intact)
+ *   request_completed      — request finished successfully
+ *   request_replayed       — idempotency/cache replay returned existing result
+ *   cache_hit_replayed     — cache hit returned without provider call
+ *   wallet_replay_attempted — wallet replay worker attempted a missed debit
+ *
+ * Failure policy: event writes are best-effort (fire-and-forget).
+ * A billing event write failure must never break ai_usage, ai_billing_usage,
+ * or tenant_credit_ledger writes.
+ */
+export const billingEvents = pgTable(
+  "billing_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    eventType: text("event_type").notNull(),
+    requestId: text("request_id"),
+    usageId: text("usage_id"),
+    billingUsageId: text("billing_usage_id"),
+    walletLedgerId: text("wallet_ledger_id"),
+    status: text("status").notNull().default("recorded"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("billing_events_status_check", sql`${t.status} IN ('recorded')`),
+    index("billing_events_tenant_created_at_idx").on(t.tenantId, t.createdAt),
+    index("billing_events_event_type_created_at_idx").on(t.eventType, t.createdAt),
+    index("billing_events_request_id_idx").on(t.requestId),
+    index("billing_events_usage_id_idx").on(t.usageId),
+    index("billing_events_billing_usage_id_idx").on(t.billingUsageId),
+    index("billing_events_wallet_ledger_id_idx").on(t.walletLedgerId),
+  ],
+);
+
+export const insertBillingEventSchema = createInsertSchema(billingEvents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertBillingEvent = z.infer<typeof insertBillingEventSchema>;
+export type BillingEvent = typeof billingEvents.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
