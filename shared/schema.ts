@@ -2125,6 +2125,143 @@ export const insertBillingPeriodTenantSnapshotSchema = createInsertSchema(billin
 export type InsertBillingPeriodTenantSnapshot = z.infer<typeof insertBillingPeriodTenantSnapshotSchema>;
 export type BillingPeriodTenantSnapshot = typeof billingPeriodTenantSnapshots.$inferSelect;
 
+// ─── Phase 4E: Billing Audit & Reconciliation ─────────────────────────────────
+
+/**
+ * billing_audit_runs
+ *
+ * Execution metadata for each billing audit pass.
+ * One row per audit run — created at start, updated at completion/failure.
+ *
+ * audit_type values:
+ *   'usage_billing_consistency'   — ai_usage ↔ ai_billing_usage
+ *   'billing_wallet_consistency'  — ai_billing_usage ↔ tenant_credit_ledger
+ *   'period_snapshot_consistency' — closed period snapshot ↔ live aggregation
+ *   'full_billing_audit'          — all checks in sequence
+ */
+export const billingAuditRuns = pgTable(
+  "billing_audit_runs",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** Type of audit executed */
+    auditType: text("audit_type").notNull(),
+    /**
+     * Lifecycle status of this run.
+     * 'started'   — running
+     * 'completed' — finished; check findings for results
+     * 'failed'    — audit itself failed (infra error, not billing error)
+     */
+    status: text("status").notNull().default("started"),
+    /** Optional: billing period scoped to this run (for period_snapshot_consistency) */
+    periodId: text("period_id"),
+    /** Optional human-readable notes (set on completion/failure) */
+    notes: text("notes"),
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "billing_audit_runs_status_check",
+      sql`status IN ('started','completed','failed')`,
+    ),
+    index("billing_audit_runs_type_started_idx").on(t.auditType, t.startedAt),
+    index("billing_audit_runs_status_started_idx").on(t.status, t.startedAt),
+    index("billing_audit_runs_period_idx").on(t.periodId),
+  ],
+);
+
+export const insertBillingAuditRunSchema = createInsertSchema(billingAuditRuns).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertBillingAuditRun = z.infer<typeof insertBillingAuditRunSchema>;
+export type BillingAuditRun = typeof billingAuditRuns.$inferSelect;
+
+/**
+ * billing_audit_findings
+ *
+ * Immutable audit findings — one row per detected inconsistency.
+ * Never updated or deleted. Designed for incident investigation and future admin tooling.
+ *
+ * finding_type values:
+ *   'missing_billing_row'       — ai_usage row has no corresponding ai_billing_usage row
+ *   'orphan_billing_row'        — ai_billing_usage row has no matching ai_usage row
+ *   'missing_wallet_debit'      — billing row with wallet_status='debited' but no ledger debit
+ *   'orphan_wallet_debit'       — ledger debit row references nonexistent billing_usage_id
+ *   'wallet_amount_mismatch'    — ledger debit amount differs from customer_price_usd
+ *   'duplicate_wallet_debit'    — more than one effective debit row for same billing_usage_id
+ *   'snapshot_total_mismatch'   — snapshot total differs from live aggregation
+ *   'request_count_mismatch'    — snapshot request_count differs from live count
+ *   'negative_margin_detected'  — margin_usd < 0
+ *   'invalid_pricing_result'    — arithmetic inconsistency in pricing columns
+ *   'period_total_mismatch'     — period grand total mismatch (provider_cost or customer_price)
+ *   'missing_snapshot_row'      — closed period has active tenant with no snapshot row
+ *   'orphan_snapshot_row'       — snapshot row exists for tenant with no activity in period
+ *   'tenant_mismatch'           — tenant_id inconsistency between related rows
+ *
+ * severity values (see AUDIT_SEVERITY_POLICY):
+ *   'critical' — revenue loss, silent data corruption, or invoice integrity risk
+ *   'warning'  — anomaly worth investigating; not immediately harmful
+ *   'info'     — benign note; bookkeeping or metadata discrepancy
+ *
+ * entity_type values:
+ *   'ai_usage' | 'ai_billing_usage' | 'tenant_credit_ledger'
+ *   'billing_period' | 'billing_period_tenant_snapshot' | 'tenant' | 'system'
+ */
+export const billingAuditFindings = pgTable(
+  "billing_audit_findings",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    /** FK to billing_audit_runs.id */
+    runId: text("run_id").notNull(),
+    /** Tenant this finding belongs to — null for system-level findings */
+    tenantId: text("tenant_id"),
+    /** Billing period ID if finding is period-scoped */
+    periodId: text("period_id"),
+    /** Specific type of inconsistency detected */
+    findingType: text("finding_type").notNull(),
+    /** Severity tier — see AUDIT_SEVERITY_POLICY in billing-audit.ts */
+    severity: text("severity").notNull(),
+    /** Category of the primary entity this finding concerns */
+    entityType: text("entity_type").notNull(),
+    /** ID of the primary entity (usage_id, billing_usage_id, ledger_id, etc.) */
+    entityId: text("entity_id"),
+    /** Expected value (from canonical source) — null for count-based findings */
+    expectedValue: numeric("expected_value", { precision: 14, scale: 8 }),
+    /** Actual value found — null for count-based findings */
+    actualValue: numeric("actual_value", { precision: 14, scale: 8 }),
+    /** delta = actual - expected — null if not numeric */
+    deltaValue: numeric("delta_value", { precision: 14, scale: 8 }),
+    /** Structured forensic context — IDs, boundaries, relevant values for diagnosis */
+    details: jsonb("details"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "billing_audit_findings_severity_check",
+      sql`severity IN ('info','warning','critical')`,
+    ),
+    index("billing_audit_findings_run_idx").on(t.runId),
+    index("billing_audit_findings_tenant_idx").on(t.tenantId),
+    index("billing_audit_findings_period_idx").on(t.periodId),
+    index("billing_audit_findings_type_idx").on(t.findingType),
+    index("billing_audit_findings_severity_created_idx").on(t.severity, t.createdAt),
+    index("billing_audit_findings_entity_idx").on(t.entityType, t.entityId),
+  ],
+);
+
+export const insertBillingAuditFindingSchema = createInsertSchema(billingAuditFindings).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertBillingAuditFinding = z.infer<typeof insertBillingAuditFindingSchema>;
+export type BillingAuditFinding = typeof billingAuditFindings.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
