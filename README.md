@@ -15,6 +15,16 @@ Internal control plane for AI-driven software generation. Built on Express + Rea
 
 ---
 
+## Architecture Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/SYSTEM_ROADMAP.md](docs/SYSTEM_ROADMAP.md) | Full phase roadmap — Phase 3 through Phase 8 |
+| [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) | Core runtime pipeline, data ledgers, security and financial integrity layers |
+| [docs/MONETIZATION_ARCHITECTURE.md](docs/MONETIZATION_ARCHITECTURE.md) | Billing ledger, wallet ledger, snapshots and audit system |
+
+---
+
 ## Project Structure
 
 ```
