@@ -349,6 +349,23 @@ export async function runAiCall(
       if (lookup.hit) {
         // Cache HIT — return without any provider call or usage cost row.
         // Idempotency + concurrency slots released in finally block.
+        //
+        // Phase 4E.2 fix — cache hit idempotency finalization:
+        // Before returning, mark the idempotency state as completed so that
+        // future requests with the same request_id receive duplicate_replay
+        // instead of duplicate_inflight (which would happen if the state
+        // remained in_progress indefinitely after a cache hit).
+        if (idpOwned && idpStateId && tenantId && context.requestId) {
+          void markAiRequestCompleted({
+            stateId: idpStateId,
+            tenantId,
+            requestId: context.requestId,
+            routeKey: modelKey,
+            provider: route.provider,
+            model: route.model,
+            responsePayload: lookup.result,
+          });
+        }
         emitRunnerLog({
           feature,
           model: route.model,

@@ -32,7 +32,7 @@
  * Phase 3J.
  */
 
-import { eq, and } from "drizzle-orm";
+import { eq, and, gt } from "drizzle-orm";
 import { db } from "../../db";
 import { aiRequestStates, aiRequestStateEvents } from "@shared/schema";
 import type { AiCallResult } from "./types";
@@ -273,6 +273,18 @@ export async function beginAiRequest(
 
 // ── Load existing state ───────────────────────────────────────────────────────
 
+/**
+ * Load current ai_request_states row for (tenantId, requestId).
+ *
+ * Phase 4E.2 fix — expired row filtering:
+ * Only returns rows where expires_at > NOW(). Expired rows are treated as
+ * non-existent so a new request with the same requestId can proceed freely
+ * after the TTL window, instead of being permanently blocked by a stale row
+ * whose unique constraint still prevents a clean INSERT.
+ *
+ * Without this filter, a row that expired 2 hours ago would cause the conflict
+ * path to read it back (as "failed" or "in_progress"), blocking legitimate reuse.
+ */
 export async function getExistingAiRequestState(
   tenantId: string,
   requestId: string,
@@ -284,6 +296,8 @@ export async function getExistingAiRequestState(
       and(
         eq(aiRequestStates.tenantId, tenantId),
         eq(aiRequestStates.requestId, requestId),
+        // Phase 4E.2: ignore expired rows — treat as non-existent
+        gt(aiRequestStates.expiresAt, new Date()),
       ),
     )
     .limit(1);
