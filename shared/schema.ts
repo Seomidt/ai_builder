@@ -2756,6 +2756,126 @@ export const insertMarginTrackingSnapshotSchema = createInsertSchema(marginTrack
 export type InsertMarginTrackingSnapshot = z.infer<typeof insertMarginTrackingSnapshotSchema>;
 export type MarginTrackingSnapshot = typeof marginTrackingSnapshots.$inferSelect;
 
+// ─── Phase 4J: Invoice Generation System ─────────────────────────────────────
+
+/**
+ * invoices — immutable tenant invoice records generated from closed billing periods.
+ *
+ * Design rules:
+ *   - One invoice per (tenant_id, billing_period_id) — enforced by UNIQUE constraint
+ *   - Totals derived from billing_period_tenant_snapshots.customer_price_usd
+ *   - Finalized invoices must not be mutated (service-level + DB enforcement)
+ *   - invoice_number format: INV-{YYYYMM}-{TENANT8}-{PERIOD8}
+ *     where YYYYMM = period start month, TENANT8 and PERIOD8 = first 8 chars of their IDs
+ *
+ * Status lifecycle: draft → finalized (terminal positive) | void (terminal negative)
+ * Stripe sync: not in this phase.
+ * Tax engine: not in this phase.
+ */
+export const invoices = pgTable(
+  "invoices",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    billingPeriodId: text("billing_period_id").notNull(),
+    invoiceNumber: text("invoice_number").notNull(),
+    status: text("status").notNull().default("draft"),
+    currency: text("currency").notNull().default("USD"),
+    subtotalUsd: numeric("subtotal_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    totalUsd: numeric("total_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    issuedAt: timestamp("issued_at"),
+    finalizedAt: timestamp("finalized_at"),
+    notes: text("notes"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "invoices_status_check",
+      sql`${t.status} IN ('draft','finalized','void')`,
+    ),
+    check(
+      "invoices_subtotal_check",
+      sql`${t.subtotalUsd} >= 0`,
+    ),
+    check(
+      "invoices_total_check",
+      sql`${t.totalUsd} >= 0`,
+    ),
+    uniqueIndex("invoices_invoice_number_unique").on(t.invoiceNumber),
+    uniqueIndex("invoices_tenant_period_unique").on(t.tenantId, t.billingPeriodId),
+    index("invoices_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("invoices_period_idx").on(t.billingPeriodId),
+    index("invoices_status_created_idx").on(t.status, t.createdAt),
+  ],
+);
+
+export const insertInvoiceSchema = createInsertSchema(invoices).omit({
+  id: true,
+  createdAt: true,
+  finalizedAt: true,
+  issuedAt: true,
+});
+export type InsertInvoice = z.infer<typeof insertInvoiceSchema>;
+export type Invoice = typeof invoices.$inferSelect;
+
+/**
+ * invoice_line_items — summary line items belonging to an invoice.
+ *
+ * Design rules:
+ *   - FK: invoice_id → invoices.id
+ *   - Line items are summary-oriented — not one row per ai_billing_usage request
+ *   - For finalized invoices, line items must not be mutated (service-level enforcement)
+ *   - metadata jsonb may include source snapshot IDs and aggregate totals
+ *
+ * line_type:
+ *   'ai_usage_summary'     — primary charge line (customer_price_usd)
+ *   'wallet_debit_summary' — informational: debited_amount_usd
+ *   'margin_summary'       — informational: margin_usd
+ *   'adjustment'           — manual correction (future use)
+ */
+export const invoiceLineItems = pgTable(
+  "invoice_line_items",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    invoiceId: text("invoice_id").notNull(),
+    lineType: text("line_type").notNull(),
+    description: text("description").notNull(),
+    quantity: numeric("quantity", { precision: 14, scale: 8 }).notNull().default("1"),
+    unitAmountUsd: numeric("unit_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    lineTotalUsd: numeric("line_total_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "ili_line_type_check",
+      sql`${t.lineType} IN ('ai_usage_summary','wallet_debit_summary','margin_summary','adjustment')`,
+    ),
+    check(
+      "ili_quantity_check",
+      sql`${t.quantity} >= 0`,
+    ),
+    check(
+      "ili_unit_amount_check",
+      sql`${t.unitAmountUsd} >= 0`,
+    ),
+    check(
+      "ili_line_total_check",
+      sql`${t.lineTotalUsd} >= 0`,
+    ),
+    index("ili_invoice_id_idx").on(t.invoiceId),
+    index("ili_line_type_idx").on(t.lineType),
+  ],
+);
+
+export const insertInvoiceLineItemSchema = createInsertSchema(invoiceLineItems).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertInvoiceLineItem = z.infer<typeof insertInvoiceLineItemSchema>;
+export type InvoiceLineItem = typeof invoiceLineItems.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
