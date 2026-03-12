@@ -126,8 +126,12 @@ export async function createDraftInvoiceForTenantPeriod(
   );
 
   // 5) Derive invoice totals from snapshot (canonical accounting source)
-  const subtotalUsd = String(snapshot.customerPriceUsd);
-  const totalUsd = String(snapshot.customerPriceUsd);
+  // Phase 4K: include storage charges from snapshot if present
+  const aiPrice = Number(snapshot.customerPriceUsd);
+  const storagePrice = Number((snapshot as any).storageCustomerPriceUsd ?? 0);
+  const combinedTotal = (aiPrice + storagePrice).toFixed(8);
+  const subtotalUsd = combinedTotal;
+  const totalUsd = combinedTotal;
 
   // 6) Insert invoice row
   const inserted = await db
@@ -148,6 +152,7 @@ export async function createDraftInvoiceForTenantPeriod(
         customerPriceUsd: String(snapshot.customerPriceUsd),
         marginUsd: String(snapshot.marginUsd),
         debitedAmountUsd: String(snapshot.debitedAmountUsd),
+        storageCustomerPriceUsd: String(storagePrice),
         periodStart: period.periodStart.toISOString(),
         periodEnd: period.periodEnd.toISOString(),
       },
@@ -155,8 +160,8 @@ export async function createDraftInvoiceForTenantPeriod(
     .returning();
   const invoice = inserted[0];
 
-  // 7) Generate summary line items
-  await generateLineItems(invoice.id, snapshot, billingPeriodId);
+  // 7) Generate summary line items (AI + storage if applicable)
+  await generateLineItems(invoice.id, snapshot, billingPeriodId, storagePrice);
 
   console.log(
     `[ai/invoices] Draft invoice created: ${invoice.invoiceNumber} (id=${invoice.id})`,
@@ -177,6 +182,7 @@ async function generateLineItems(
     providerCostUsd: string | number;
   },
   billingPeriodId: string,
+  storageCustomerPriceUsd = 0,
 ): Promise<void> {
   const requestCount = Number(snapshot.requestCount);
   const customerPrice = Number(snapshot.customerPriceUsd);
@@ -239,6 +245,26 @@ async function generateLineItems(
       note: "Platform margin is recorded here for analytics only and does not affect invoice total.",
     },
   });
+
+  // Line 4: storage_usage — storage charges from closed period snapshot (Phase 4K)
+  // Only added when storage_customer_price_usd > 0 in the period snapshot.
+  // line_total_usd contributes to invoice total (included in combinedTotal above).
+  if (storageCustomerPriceUsd > 0) {
+    await db.insert(invoiceLineItems).values({
+      invoiceId,
+      lineType: "storage_usage",
+      description: "Cloud storage usage (Cloudflare R2)",
+      quantity: "1",
+      unitAmountUsd: String(storageCustomerPriceUsd.toFixed(8)),
+      lineTotalUsd: String(storageCustomerPriceUsd.toFixed(8)),
+      metadata: {
+        sourceSnapshotId: snapshot.id,
+        billingPeriodId,
+        storageCustomerPriceUsd,
+        note: "Storage charges derived from closed period snapshot storage_customer_price_usd. Not re-derived from live storage usage.",
+      },
+    });
+  }
 }
 
 // ─── Finalization ─────────────────────────────────────────────────────────────

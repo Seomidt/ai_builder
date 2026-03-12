@@ -2146,6 +2146,15 @@ export const billingPeriodTenantSnapshots = pgTable(
     requestCount: integer("request_count").notNull().default(0),
     /** Sum of customer_price_usd where wallet_status='debited' — successful wallet debits */
     debitedAmountUsd: numeric("debited_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    // ─── Phase 4K: Storage billing totals (added to existing snapshot row) ─────
+    /** Sum of storage_billing_usage.customer_price_usd in period (Phase 4K) */
+    storageCustomerPriceUsd: numeric("storage_customer_price_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** Sum of storage_billing_usage.provider_cost_usd in period (Phase 4K) */
+    storageProviderCostUsd: numeric("storage_provider_cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** Sum of storage margin in period (Phase 4K) */
+    storageMarginUsd: numeric("storage_margin_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** Sum of storage_billing_usage.billable_usage_amount in period (Phase 4K) */
+    storageBillableUsage: numeric("storage_billable_usage", { precision: 18, scale: 8 }).notNull().default("0"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [
@@ -2850,7 +2859,7 @@ export const invoiceLineItems = pgTable(
   (t) => [
     check(
       "ili_line_type_check",
-      sql`${t.lineType} IN ('ai_usage_summary','wallet_debit_summary','margin_summary','adjustment')`,
+      sql`${t.lineType} IN ('ai_usage_summary','wallet_debit_summary','margin_summary','adjustment','storage_usage')`,
     ),
     check(
       "ili_quantity_check",
@@ -2875,6 +2884,218 @@ export const insertInvoiceLineItemSchema = createInsertSchema(invoiceLineItems).
 });
 export type InsertInvoiceLineItem = z.infer<typeof insertInvoiceLineItemSchema>;
 export type InvoiceLineItem = typeof invoiceLineItems.$inferSelect;
+
+// ─── Phase 4K: Storage Usage Billing ─────────────────────────────────────────
+
+/**
+ * storage_usage — canonical storage usage measurements per tenant.
+ *
+ * This is the primary source of raw usage data for storage billing.
+ * Supports future Cloudflare R2 API import (source_type='imported_snapshot').
+ *
+ * metric_type values:
+ *   'gb_stored'    — gigabytes stored (at-rest storage)
+ *   'gb_egress'    — gigabytes egressed (data transfer)
+ *   'class_a_ops'  — Class A operations (writes, lists)
+ *   'class_b_ops'  — Class B operations (reads)
+ */
+export const storageUsage = pgTable(
+  "storage_usage",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    storageProvider: text("storage_provider").notNull().default("cloudflare"),
+    storageProduct: text("storage_product").notNull().default("r2"),
+    bucket: text("bucket"),
+    metricType: text("metric_type").notNull(),
+    usageAmount: numeric("usage_amount", { precision: 18, scale: 8 }).notNull().default("0"),
+    usageUnit: text("usage_unit").notNull(),
+    usagePeriodStart: timestamp("usage_period_start").notNull(),
+    usagePeriodEnd: timestamp("usage_period_end").notNull(),
+    sourceType: text("source_type").notNull().default("manual_snapshot"),
+    sourceReference: text("source_reference"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("su_usage_amount_check", sql`${t.usageAmount} >= 0`),
+    check("su_period_check", sql`${t.usagePeriodEnd} > ${t.usagePeriodStart}`),
+    check(
+      "su_metric_type_check",
+      sql`${t.metricType} IN ('gb_stored','gb_egress','class_a_ops','class_b_ops')`,
+    ),
+    check(
+      "su_source_type_check",
+      sql`${t.sourceType} IN ('manual_snapshot','imported_snapshot','system_measurement')`,
+    ),
+    index("su_tenant_period_idx").on(t.tenantId, t.usagePeriodStart, t.usagePeriodEnd),
+    index("su_provider_product_idx").on(t.storageProvider, t.storageProduct),
+    index("su_metric_type_idx").on(t.metricType),
+    index("su_tenant_metric_period_idx").on(t.tenantId, t.metricType, t.usagePeriodStart),
+  ],
+);
+
+export const insertStorageUsageSchema = createInsertSchema(storageUsage).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertStorageUsage = z.infer<typeof insertStorageUsageSchema>;
+export type StorageUsage = typeof storageUsage.$inferSelect;
+
+/**
+ * storage_pricing_versions — provider-side storage pricing basis per metric.
+ *
+ * Supports included/free usage threshold (included_usage).
+ * Non-overlapping windows enforced in DB via btree_gist EXCLUDE constraint
+ * on (storage_provider, storage_product, metric_type, tsrange).
+ */
+export const storagePricingVersions = pgTable(
+  "storage_pricing_versions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    storageProvider: text("storage_provider").notNull().default("cloudflare"),
+    storageProduct: text("storage_product").notNull().default("r2"),
+    metricType: text("metric_type").notNull(),
+    pricingVersion: text("pricing_version").notNull(),
+    effectiveFrom: timestamp("effective_from").notNull(),
+    effectiveTo: timestamp("effective_to"),
+    includedUsage: numeric("included_usage", { precision: 18, scale: 8 }),
+    unitPriceUsd: numeric("unit_price_usd", { precision: 18, scale: 10 }).notNull().default("0"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("spv_unit_price_check", sql`${t.unitPriceUsd} >= 0`),
+    check(
+      "spv_included_usage_check",
+      sql`${t.includedUsage} IS NULL OR ${t.includedUsage} >= 0`,
+    ),
+    check(
+      "spv_effective_window_check",
+      sql`${t.effectiveTo} IS NULL OR ${t.effectiveTo} > ${t.effectiveFrom}`,
+    ),
+    index("spv_provider_product_metric_idx").on(
+      t.storageProvider,
+      t.storageProduct,
+      t.metricType,
+      t.effectiveFrom,
+    ),
+    index("spv_pricing_version_idx").on(t.pricingVersion),
+  ],
+);
+
+export const insertStoragePricingVersionSchema = createInsertSchema(storagePricingVersions).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertStoragePricingVersion = z.infer<typeof insertStoragePricingVersionSchema>;
+export type StoragePricingVersion = typeof storagePricingVersions.$inferSelect;
+
+/**
+ * customer_storage_pricing_versions — tenant-specific storage pricing.
+ *
+ * Allows per-tenant overrides for storage pricing (markup, custom tiers).
+ * Non-overlapping windows enforced in DB via btree_gist EXCLUDE constraint
+ * on (tenant_id, storage_provider, storage_product, metric_type, tsrange).
+ */
+export const customerStoragePricingVersions = pgTable(
+  "customer_storage_pricing_versions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    storageProvider: text("storage_provider").notNull().default("cloudflare"),
+    storageProduct: text("storage_product").notNull().default("r2"),
+    metricType: text("metric_type").notNull(),
+    pricingVersion: text("pricing_version").notNull(),
+    effectiveFrom: timestamp("effective_from").notNull(),
+    effectiveTo: timestamp("effective_to"),
+    includedUsage: numeric("included_usage", { precision: 18, scale: 8 }),
+    unitPriceUsd: numeric("unit_price_usd", { precision: 18, scale: 10 }).notNull().default("0"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("cspv_unit_price_check", sql`${t.unitPriceUsd} >= 0`),
+    check(
+      "cspv_included_usage_check",
+      sql`${t.includedUsage} IS NULL OR ${t.includedUsage} >= 0`,
+    ),
+    check(
+      "cspv_effective_window_check",
+      sql`${t.effectiveTo} IS NULL OR ${t.effectiveTo} > ${t.effectiveFrom}`,
+    ),
+    index("cspv_tenant_provider_metric_idx").on(
+      t.tenantId,
+      t.storageProvider,
+      t.storageProduct,
+      t.metricType,
+      t.effectiveFrom,
+    ),
+    index("cspv_tenant_version_idx").on(t.tenantId, t.pricingVersion),
+  ],
+);
+
+export const insertCustomerStoragePricingVersionSchema = createInsertSchema(
+  customerStoragePricingVersions,
+).omit({ id: true, createdAt: true });
+export type InsertCustomerStoragePricingVersion = z.infer<
+  typeof insertCustomerStoragePricingVersionSchema
+>;
+export type CustomerStoragePricingVersion =
+  typeof customerStoragePricingVersions.$inferSelect;
+
+/**
+ * storage_billing_usage — canonical storage billing ledger.
+ *
+ * One row per storage_usage row (UNIQUE on storage_usage_id).
+ * Canonical storage billing truth — do not merge with ai_billing_usage.
+ *
+ * Derivation rules (from storage_usage + pricing versions):
+ *   included_usage_amount = min(raw_usage_amount, included threshold)
+ *   billable_usage_amount = max(raw_usage_amount - included_usage_amount, 0)
+ *   provider_cost_usd     = billable_usage_amount × provider unit price
+ *   customer_price_usd    = billable_usage_amount × customer unit price
+ *   margin_usd            = customer_price_usd - provider_cost_usd
+ */
+export const storageBillingUsage = pgTable(
+  "storage_billing_usage",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    storageUsageId: text("storage_usage_id").notNull(),
+    tenantId: text("tenant_id").notNull(),
+    storageProvider: text("storage_provider").notNull(),
+    storageProduct: text("storage_product").notNull(),
+    metricType: text("metric_type").notNull(),
+    providerPricingVersionId: text("provider_pricing_version_id"),
+    customerPricingVersionId: text("customer_pricing_version_id"),
+    rawUsageAmount: numeric("raw_usage_amount", { precision: 18, scale: 8 }).notNull().default("0"),
+    includedUsageAmount: numeric("included_usage_amount", { precision: 18, scale: 8 }).notNull().default("0"),
+    billableUsageAmount: numeric("billable_usage_amount", { precision: 18, scale: 8 }).notNull().default("0"),
+    providerCostUsd: numeric("provider_cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    customerPriceUsd: numeric("customer_price_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    marginUsd: numeric("margin_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    pricingVersion: text("pricing_version").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("sbu_raw_usage_check", sql`${t.rawUsageAmount} >= 0`),
+    check("sbu_included_usage_check", sql`${t.includedUsageAmount} >= 0`),
+    check("sbu_billable_usage_check", sql`${t.billableUsageAmount} >= 0`),
+    check("sbu_provider_cost_check", sql`${t.providerCostUsd} >= 0`),
+    check("sbu_customer_price_check", sql`${t.customerPriceUsd} >= 0`),
+    uniqueIndex("sbu_storage_usage_id_unique").on(t.storageUsageId),
+    index("sbu_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("sbu_metric_created_idx").on(t.metricType, t.createdAt),
+    index("sbu_tenant_metric_created_idx").on(t.tenantId, t.metricType, t.createdAt),
+  ],
+);
+
+export const insertStorageBillingUsageSchema = createInsertSchema(storageBillingUsage).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertStorageBillingUsage = z.infer<typeof insertStorageBillingUsageSchema>;
+export type StorageBillingUsage = typeof storageBillingUsage.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;
