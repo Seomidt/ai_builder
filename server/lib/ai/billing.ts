@@ -37,6 +37,10 @@ import {
   recordWalletDebitSucceededEvent,
   recordWalletDebitFailedEvent,
 } from "./billing-events";
+import {
+  resolveProviderPricingVersionBestEffort,
+  resolveCustomerPricingVersionBestEffort,
+} from "./pricing-versioning";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -253,6 +257,24 @@ export async function recordAiBillingUsage(
     outputTokensBillable: input.outputTokensBillable,
   });
 
+  // Phase 4H: Resolve pricing version IDs at billing time (best-effort — null if not configured).
+  // These fields are purely for traceability — they never affect calculated billing values.
+  const billingTime = new Date();
+  const [providerPricingVersionRow, customerPricingVersionRow] = await Promise.all([
+    input.provider && input.model
+      ? resolveProviderPricingVersionBestEffort(input.provider, input.model, billingTime)
+      : Promise.resolve(null),
+    input.tenantId && input.feature && input.provider
+      ? resolveCustomerPricingVersionBestEffort(
+          input.tenantId,
+          input.feature,
+          input.provider,
+          input.model ?? null,
+          billingTime,
+        )
+      : Promise.resolve(null),
+  ]);
+
   try {
     const inserted = await db
       .insert(aiBillingUsage)
@@ -272,6 +294,8 @@ export async function recordAiBillingUsage(
         marginUsd: String(calc.marginUsd),
         pricingSource: calc.pricingSource,
         pricingVersion: calc.pricingVersion ?? null,
+        providerPricingVersionId: providerPricingVersionRow?.id ?? null,
+        customerPricingVersionId: customerPricingVersionRow?.id ?? null,
         pricingMode: calc.pricingMode,
       })
       .onConflictDoNothing()

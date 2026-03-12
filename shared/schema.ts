@@ -1675,6 +1675,16 @@ export const aiBillingUsage = pgTable(
     /** Version: ai_customer_pricing_configs.id used, or null for code_default */
     pricingVersion: text("pricing_version"),
     /**
+     * Phase 4H: resolved provider_pricing_versions.id at billing time.
+     * Null if no provider pricing version row existed for this provider/model.
+     */
+    providerPricingVersionId: text("provider_pricing_version_id"),
+    /**
+     * Phase 4H: resolved customer_pricing_versions.id at billing time.
+     * Null if no customer pricing version row existed for this tenant/feature/provider.
+     */
+    customerPricingVersionId: text("customer_pricing_version_id"),
+    /**
      * Pricing mode applied to compute this row.
      * "cost_plus_multiplier" | "fixed_markup" | "per_1k_tokens"
      */
@@ -2508,6 +2518,130 @@ export type InsertProviderReconciliationFinding = z.infer<
   typeof insertProviderReconciliationFindingSchema
 >;
 export type ProviderReconciliationFinding = typeof providerReconciliationFindings.$inferSelect;
+
+// ─── Phase 4H: Pricing Versioning ────────────────────────────────────────────
+
+/**
+ * provider_pricing_versions — immutable historical provider cost prices.
+ *
+ * One row = one pricing regime for a provider/model combination.
+ * effective_from/effective_to define non-overlapping windows.
+ * Overlapping windows for the same provider+model are rejected by a DB
+ * EXCLUDE constraint (btree_gist extension, applied via raw SQL migration).
+ *
+ * Immutability rule: rows used for historical billing must never be edited.
+ * Future price changes must insert a new row with a new pricing_version and
+ * updated effective_from — never mutate existing rows.
+ */
+export const providerPricingVersions = pgTable(
+  "provider_pricing_versions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    provider: text("provider").notNull(),
+    model: text("model").notNull(),
+    pricingVersion: text("pricing_version").notNull(),
+    effectiveFrom: timestamp("effective_from").notNull(),
+    effectiveTo: timestamp("effective_to"),
+    inputTokenPriceUsd: numeric("input_token_price_usd", { precision: 18, scale: 10 }).notNull().default("0"),
+    outputTokenPriceUsd: numeric("output_token_price_usd", { precision: 18, scale: 10 }).notNull().default("0"),
+    cachedInputTokenPriceUsd: numeric("cached_input_token_price_usd", { precision: 18, scale: 10 }).notNull().default("0"),
+    reasoningTokenPriceUsd: numeric("reasoning_token_price_usd", { precision: 18, scale: 10 }).notNull().default("0"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "ppv_input_price_check",
+      sql`${t.inputTokenPriceUsd} >= 0`,
+    ),
+    check(
+      "ppv_output_price_check",
+      sql`${t.outputTokenPriceUsd} >= 0`,
+    ),
+    check(
+      "ppv_cached_input_price_check",
+      sql`${t.cachedInputTokenPriceUsd} >= 0`,
+    ),
+    check(
+      "ppv_reasoning_price_check",
+      sql`${t.reasoningTokenPriceUsd} >= 0`,
+    ),
+    check(
+      "ppv_effective_range_check",
+      sql`${t.effectiveTo} IS NULL OR ${t.effectiveTo} > ${t.effectiveFrom}`,
+    ),
+    index("ppv_provider_model_from_idx").on(t.provider, t.model, t.effectiveFrom),
+    index("ppv_pricing_version_idx").on(t.pricingVersion),
+    index("ppv_provider_model_to_idx").on(t.provider, t.model, t.effectiveTo),
+  ],
+);
+
+export const insertProviderPricingVersionSchema = createInsertSchema(providerPricingVersions).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertProviderPricingVersion = z.infer<typeof insertProviderPricingVersionSchema>;
+export type ProviderPricingVersion = typeof providerPricingVersions.$inferSelect;
+
+/**
+ * customer_pricing_versions — immutable historical customer pricing overrides.
+ *
+ * One row = one pricing regime for a tenant/feature/provider combination.
+ * model is optional — null means "applies to all models for this provider".
+ * effective_from/effective_to define non-overlapping windows.
+ * Overlapping windows for the same scope are rejected by a DB EXCLUDE constraint.
+ *
+ * Immutability rule: same as provider_pricing_versions — append new rows,
+ * never mutate rows that have been used for billing.
+ */
+export const customerPricingVersions = pgTable(
+  "customer_pricing_versions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    feature: text("feature").notNull(),
+    provider: text("provider").notNull(),
+    model: text("model"),
+    pricingVersion: text("pricing_version").notNull(),
+    pricingMode: text("pricing_mode").notNull(),
+    pricingSource: text("pricing_source").notNull().default("tenant_config"),
+    effectiveFrom: timestamp("effective_from").notNull(),
+    effectiveTo: timestamp("effective_to"),
+    multiplier: numeric("multiplier", { precision: 14, scale: 8 }),
+    flatMarkupUsd: numeric("flat_markup_usd", { precision: 14, scale: 8 }),
+    perRequestMarkupUsd: numeric("per_request_markup_usd", { precision: 14, scale: 8 }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "cpv_effective_range_check",
+      sql`${t.effectiveTo} IS NULL OR ${t.effectiveTo} > ${t.effectiveFrom}`,
+    ),
+    check(
+      "cpv_multiplier_check",
+      sql`${t.multiplier} IS NULL OR ${t.multiplier} >= 0`,
+    ),
+    check(
+      "cpv_flat_markup_check",
+      sql`${t.flatMarkupUsd} IS NULL OR ${t.flatMarkupUsd} >= 0`,
+    ),
+    check(
+      "cpv_per_request_markup_check",
+      sql`${t.perRequestMarkupUsd} IS NULL OR ${t.perRequestMarkupUsd} >= 0`,
+    ),
+    index("cpv_tenant_feature_provider_from_idx").on(t.tenantId, t.feature, t.provider, t.effectiveFrom),
+    index("cpv_tenant_version_idx").on(t.tenantId, t.pricingVersion),
+    index("cpv_tenant_feature_to_idx").on(t.tenantId, t.feature, t.effectiveTo),
+  ],
+);
+
+export const insertCustomerPricingVersionSchema = createInsertSchema(customerPricingVersions).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertCustomerPricingVersion = z.infer<typeof insertCustomerPricingVersionSchema>;
+export type CustomerPricingVersion = typeof customerPricingVersions.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;
