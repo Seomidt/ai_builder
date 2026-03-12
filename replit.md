@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 4C complete)
+# AI Builder Platform — V1 (Phase 5 complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -43,6 +43,12 @@ Internal control plane for AI-driven software generation. Express + React + Driz
 - **Wallet debit replay is idempotent**: billing_usage_id partial unique index on ledger prevents double-debits; replay scripts via wallet-replay.ts
 - **Reconciliation is detection-only**: ai_provider_reconciliation_runs/deltas record discrepancies; never auto-corrects billing rows
 - **AiWalletLimitError (402)**: HTTP 402, pre-flight block — no provider call, no billing row, no debit. Tenant must add credits
+- **Billing period lifecycle**: open → closing → closed — only manual close via closeBillingPeriod(); no auto-scheduler in Phase 5
+- **Snapshot immutability**: billing_period_tenant_snapshots are never updated/deleted after creation — UNIQUE(billing_period_id, tenant_id) enforces idempotency
+- **Reporting source rule**: open period → live ai_billing_usage; closed period → billing_period_tenant_snapshots (enforced via getBillingDataSourceForPeriod)
+- **Period inclusion rule**: created_at >= period_start AND < period_end (inclusive start, exclusive end — consistent throughout)
+- **Snapshot source**: all amounts from ai_billing_usage (canonical); debited_amount_usd = SUM(customer_price_usd) WHERE wallet_status='debited'
+- **Zero-usage tenants excluded**: no snapshot rows created for tenants with no billing activity in the period
 
 ## Environment Variables Required
 
