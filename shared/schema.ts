@@ -1,3 +1,52 @@
+/**
+ * Supabase / Postgres Schema — AI Builder Platform
+ *
+ * ─── RLS Security Posture (Phase 4E.1 hardening) ─────────────────────────────
+ *
+ * ALL 45 tables in the public schema have Row Level Security (RLS) ENABLED.
+ * RLS policies are applied directly in Postgres (not via Drizzle — unsupported).
+ *
+ * CLASSIFICATION:
+ *
+ * Client-facing tables (RLS ON + SELECT policies via auth.uid()):
+ *   profiles              — own profile only (SELECT/INSERT/UPDATE: auth.uid() = id)
+ *   organizations         — orgs user is a member of
+ *   organization_members  — memberships in user's orgs
+ *   projects              — projects in user's orgs
+ *   integrations          — integrations in user's orgs
+ *   knowledge_documents   — documents in user's orgs
+ *   ai_runs               — AI runs in user's orgs (via organization_id)
+ *   ai_steps              — steps for runs user can see
+ *   ai_artifacts          — artifacts for runs user can see
+ *   ai_tool_calls         — tool calls for runs user can see
+ *   ai_approvals          — approvals for runs user can see
+ *   artifact_dependencies — dependencies in user's orgs
+ *
+ * Backend/internal-only tables (RLS ON, NO client policies):
+ *   All other tables — PostgREST access blocked. Backend Drizzle ORM connects
+ *   directly to Postgres via service connection (bypasses RLS). Includes:
+ *   ai_usage, ai_billing_usage, tenant_credit_accounts, tenant_credit_ledger,
+ *   billing_periods, billing_period_tenant_snapshots, billing_audit_runs,
+ *   billing_audit_findings, ai_request_states, ai_request_state_events,
+ *   ai_anomaly_*, ai_provider_reconciliation_*, ai_response_cache, ai_cache_events,
+ *   ai_customer_pricing_configs, ai_model_pricing, ai_model_overrides,
+ *   ai_request_step_*, architecture_*, organization_secrets, tenant_rate_limits,
+ *   tenant_ai_usage_periods, request_safety_events, usage_threshold_events,
+ *   ai_usage_limits.
+ *
+ * WHY TABLES STAY IN public SCHEMA:
+ *   Drizzle ORM does not support non-public schemas without significant refactoring
+ *   of all query files. RLS achieves the same PostgREST blocking goal with zero
+ *   risk to the existing backend architecture.
+ *
+ * FUNCTION HARDENING:
+ *   prevent_billing_snapshot_mutation() — SET search_path = public (hardened)
+ *
+ * EXTENSION NOTE:
+ *   btree_gist is installed in public schema (Supabase managed). Moving it to
+ *   extensions schema is not safe — it would invalidate the billing_periods_no_overlap
+ *   exclusion constraint. Acceptable in managed Supabase environment.
+ */
 import { sql } from "drizzle-orm";
 import {
   pgTable,
