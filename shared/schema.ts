@@ -2643,6 +2643,119 @@ export const insertCustomerPricingVersionSchema = createInsertSchema(customerPri
 export type InsertCustomerPricingVersion = z.infer<typeof insertCustomerPricingVersionSchema>;
 export type CustomerPricingVersion = typeof customerPricingVersions.$inferSelect;
 
+// ─── Phase 4I: Cost & Margin Tracking ────────────────────────────────────────
+
+/**
+ * margin_tracking_runs — records execution of a margin aggregation pass.
+ *
+ * scope_type controls what was aggregated:
+ *   'tenant'  — single tenant over a time window
+ *   'period'  — a specific billing period (by period_id)
+ *   'global'  — all tenants over a time window
+ *
+ * Financial totals here are aggregate summaries of the run — not canonical truth.
+ * ai_billing_usage remains the canonical source for all billing values.
+ */
+export const marginTrackingRuns = pgTable(
+  "margin_tracking_runs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    scopeType: text("scope_type").notNull(),
+    periodId: text("period_id"),
+    tenantId: text("tenant_id"),
+    status: text("status").notNull().default("running"),
+    totalBillingRows: integer("total_billing_rows").notNull().default(0),
+    totalProviderCostUsd: numeric("total_provider_cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    totalCustomerPriceUsd: numeric("total_customer_price_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    totalMarginUsd: numeric("total_margin_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+  },
+  (t) => [
+    check(
+      "mtr_status_check",
+      sql`${t.status} IN ('running','completed','failed')`,
+    ),
+    check(
+      "mtr_provider_cost_check",
+      sql`${t.totalProviderCostUsd} >= 0`,
+    ),
+    check(
+      "mtr_customer_price_check",
+      sql`${t.totalCustomerPriceUsd} >= 0`,
+    ),
+    index("mtr_scope_created_idx").on(t.scopeType, t.createdAt),
+    index("mtr_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("mtr_period_created_idx").on(t.periodId, t.createdAt),
+  ],
+);
+
+export const insertMarginTrackingRunSchema = createInsertSchema(marginTrackingRuns).omit({
+  id: true,
+  createdAt: true,
+  completedAt: true,
+});
+export type InsertMarginTrackingRun = z.infer<typeof insertMarginTrackingRunSchema>;
+export type MarginTrackingRun = typeof marginTrackingRuns.$inferSelect;
+
+/**
+ * margin_tracking_snapshots — aggregated margin breakdown rows per run.
+ *
+ * Each row represents the margin summary for a (tenant, feature, provider, model)
+ * combination within a margin tracking run.
+ *
+ * Derived from ai_billing_usage — not canonical financial truth.
+ * margin_pct is null when customer_price_usd = 0 (avoid divide-by-zero).
+ *
+ * FK: run_id → margin_tracking_runs.id (enforced in DB, text in Drizzle for consistency).
+ */
+export const marginTrackingSnapshots = pgTable(
+  "margin_tracking_snapshots",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    runId: text("run_id").notNull(),
+    tenantId: text("tenant_id"),
+    periodId: text("period_id"),
+    feature: text("feature"),
+    provider: text("provider"),
+    model: text("model"),
+    billingRowCount: integer("billing_row_count").notNull().default(0),
+    providerCostUsd: numeric("provider_cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    customerPriceUsd: numeric("customer_price_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    marginUsd: numeric("margin_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    marginPct: numeric("margin_pct", { precision: 10, scale: 6 }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "mts_billing_row_count_check",
+      sql`${t.billingRowCount} >= 0`,
+    ),
+    check(
+      "mts_provider_cost_check",
+      sql`${t.providerCostUsd} >= 0`,
+    ),
+    check(
+      "mts_customer_price_check",
+      sql`${t.customerPriceUsd} >= 0`,
+    ),
+    index("mts_run_id_idx").on(t.runId),
+    index("mts_tenant_idx").on(t.tenantId),
+    index("mts_period_idx").on(t.periodId),
+    index("mts_feature_idx").on(t.feature),
+    index("mts_provider_idx").on(t.provider),
+    index("mts_model_idx").on(t.model),
+    index("mts_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+
+export const insertMarginTrackingSnapshotSchema = createInsertSchema(marginTrackingSnapshots).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertMarginTrackingSnapshot = z.infer<typeof insertMarginTrackingSnapshotSchema>;
+export type MarginTrackingSnapshot = typeof marginTrackingSnapshots.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
