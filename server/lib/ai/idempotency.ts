@@ -189,8 +189,9 @@ export async function beginAiRequest(
     return { outcome: "duplicate_inflight" };
   }
 
-  // status = "failed" — reset and allow retry
-  // UPDATE in place so the stateId (PK) remains stable for event linking
+  // status = "failed" — attempt to claim retry ownership atomically.
+  // WHERE status='failed' ensures only one concurrent caller can win the reset.
+  // UPDATE in place so the stateId (PK) remains stable for event linking.
   const reset = await db
     .update(aiRequestStates)
     .set({
@@ -212,7 +213,51 @@ export async function beginAiRequest(
     )
     .returning({ id: aiRequestStates.id });
 
-  const stateId = reset.length > 0 ? reset[0].id : existing.id;
+  // Phase 4E.2 fix — retry ownership race:
+  // If zero rows were updated, another concurrent worker already claimed this retry.
+  // We must NOT continue as owner. Re-read the current state and return the
+  // correct non-owner outcome. Proceeding as owner here would duplicate the
+  // provider call and create a duplicate billing row.
+  if (reset.length === 0) {
+    const current = await getExistingAiRequestState(tenantId, requestId);
+
+    if (!current) {
+      // Row disappeared between our read and the reset attempt — treat as new request.
+      inflightRegistry.add(key);
+      return { outcome: "owned", stateId: "", inflightKey: key };
+    }
+
+    if (current.status === "completed" && current.responsePayload) {
+      // The winning worker already finished — replay the result.
+      const payload = current.responsePayload as unknown as AiCallResult;
+      void recordAiRequestStateEvent({
+        tenantId,
+        requestId,
+        eventType: "duplicate_replayed",
+        routeKey,
+        provider,
+        model,
+        reason: `retry_race_lost state_id=${current.id}`,
+      });
+      return { outcome: "duplicate_replay", payload };
+    }
+
+    // The winning worker owns it and is in_progress (or another failed state).
+    // Return duplicate_inflight — do not proceed as owner.
+    void recordAiRequestStateEvent({
+      tenantId,
+      requestId,
+      eventType: "duplicate_inflight",
+      routeKey,
+      provider,
+      model,
+      reason: `retry_race_lost state_id=${current.id} status=${current.status}`,
+    });
+    return { outcome: "duplicate_inflight" };
+  }
+
+  // reset.length > 0 — we are the exclusive owner of this retry.
+  const stateId = reset[0].id;
   inflightRegistry.add(key);
   void recordAiRequestStateEvent({
     tenantId,

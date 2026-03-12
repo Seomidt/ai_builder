@@ -142,24 +142,21 @@ export async function acquireAiStep(ctx: StepBudgetContext): Promise<number> {
   try {
     const stateRow = await ensureStepStateRow(ctx.tenantId, ctx.requestId, maxAiCalls);
 
-    // Check current count BEFORE incrementing
-    if (stateRow.totalAiCalls >= stateRow.maxAiCalls) {
-      // Mark exhausted if not already
-      if (stateRow.status !== "exhausted") {
-        await db
-          .update(aiRequestStepStates)
-          .set({
-            status: "exhausted",
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(aiRequestStepStates.tenantId, ctx.tenantId),
-              eq(aiRequestStepStates.requestId, ctx.requestId),
-            ),
-          );
-      }
+    // Phase 4E.2 fix — atomic step-budget increment:
+    // The budget predicate (total_ai_calls < max_ai_calls) is enforced INSIDE
+    // the UPDATE WHERE clause so the check and increment are a single atomic
+    // DB operation. A separate pre-check is still present as a fast-path hint
+    // but is NOT relied upon for correctness — the UPDATE is the authority.
+    //
+    // Before fix: two workers could both read total_ai_calls=4 (< max 5),
+    // both pass the pre-check, both increment → counter lands at 6, bypassing
+    // the limit.
+    //
+    // After fix: only one worker's UPDATE matches the WHERE predicate once the
+    // limit is reached. The losing worker gets zero rows back and is blocked.
 
+    // Fast-path hint (NOT relied on for correctness):
+    if (stateRow.totalAiCalls >= stateRow.maxAiCalls) {
       // Record budget exceeded event (fire-and-forget)
       void recordStepEvent({
         tenantId: ctx.tenantId,
@@ -171,12 +168,10 @@ export async function acquireAiStep(ctx: StepBudgetContext): Promise<number> {
         provider: ctx.provider,
         model: ctx.model,
       });
-
       console.warn(
-        `[step-budget] Budget exceeded: request=${ctx.requestId} tenant=${ctx.tenantId} ` +
+        `[step-budget] Budget exceeded (pre-check): request=${ctx.requestId} tenant=${ctx.tenantId} ` +
         `calls=${stateRow.totalAiCalls} max=${stateRow.maxAiCalls}`,
       );
-
       throw new AiStepBudgetExceededError({
         ...ctx.meta,
         requestId: ctx.requestId,
@@ -185,7 +180,9 @@ export async function acquireAiStep(ctx: StepBudgetContext): Promise<number> {
       });
     }
 
-    // Within budget — atomically increment
+    // Atomic check-and-increment: budget predicate lives inside the WHERE.
+    // If another concurrent worker incremented to the limit between the pre-check
+    // above and this UPDATE, the WHERE predicate will not match → zero rows returned.
     const updated = await db
       .update(aiRequestStepStates)
       .set({
@@ -196,11 +193,69 @@ export async function acquireAiStep(ctx: StepBudgetContext): Promise<number> {
         and(
           eq(aiRequestStepStates.tenantId, ctx.tenantId),
           eq(aiRequestStepStates.requestId, ctx.requestId),
+          // Atomic budget predicate — this is the enforceable authority:
+          sql`${aiRequestStepStates.totalAiCalls} < ${aiRequestStepStates.maxAiCalls}`,
         ),
       )
-      .returning({ totalAiCalls: aiRequestStepStates.totalAiCalls });
+      .returning({
+        totalAiCalls: aiRequestStepStates.totalAiCalls,
+        maxAiCalls: aiRequestStepStates.maxAiCalls,
+      });
 
-    const stepNumber = updated[0]?.totalAiCalls ?? stateRow.totalAiCalls + 1;
+    // Zero rows updated → budget was exhausted at the atomic update level.
+    // The pre-check did not catch it (concurrent race). Block the provider call.
+    if (!updated[0]) {
+      // Re-read current counts for accurate error reporting
+      const currentRows = await db
+        .select({ totalAiCalls: aiRequestStepStates.totalAiCalls, maxAiCalls: aiRequestStepStates.maxAiCalls })
+        .from(aiRequestStepStates)
+        .where(
+          and(
+            eq(aiRequestStepStates.tenantId, ctx.tenantId),
+            eq(aiRequestStepStates.requestId, ctx.requestId),
+          ),
+        )
+        .limit(1);
+
+      const totalAiCalls = currentRows[0]?.totalAiCalls ?? stateRow.totalAiCalls;
+      const maxAiCalls = currentRows[0]?.maxAiCalls ?? stateRow.maxAiCalls;
+
+      // Mark exhausted
+      void db
+        .update(aiRequestStepStates)
+        .set({ status: "exhausted", updatedAt: new Date() })
+        .where(
+          and(
+            eq(aiRequestStepStates.tenantId, ctx.tenantId),
+            eq(aiRequestStepStates.requestId, ctx.requestId),
+          ),
+        );
+
+      void recordStepEvent({
+        tenantId: ctx.tenantId,
+        requestId: ctx.requestId,
+        eventType: "step_budget_exceeded",
+        stepNumber: Number(totalAiCalls) + 1,
+        routeKey: ctx.routeKey,
+        feature: ctx.feature,
+        provider: ctx.provider,
+        model: ctx.model,
+      });
+
+      console.warn(
+        `[step-budget] Budget exceeded (atomic guard): request=${ctx.requestId} tenant=${ctx.tenantId} ` +
+        `calls=${totalAiCalls} max=${maxAiCalls}`,
+      );
+
+      throw new AiStepBudgetExceededError({
+        ...ctx.meta,
+        requestId: ctx.requestId,
+        totalAiCalls: Number(totalAiCalls),
+        maxAiCalls: Number(maxAiCalls),
+      });
+    }
+
+    const stepNumber = updated[0].totalAiCalls;
 
     // Record step_started event (fire-and-forget)
     void recordStepEvent({
