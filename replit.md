@@ -322,3 +322,34 @@ npm run db:push   # Sync schema to DB
 - No destructive cleanup in Phase 4Q — all retention helpers are inspection-only
 - Failed snapshots persist as snapshot_status='failed' rows for operational forensics
 - Phase 4C helpers (getBillingHealthSummary, getTenantBillingHealthSummary) preserved in billing-observability.ts
+
+## Phase 4R — Automated Billing Operations (branch: feature/automated-billing-operations, commit: b3fab3d)
+
+### New tables (2)
+- **billing_job_definitions** — durable catalog of automated billing jobs. job_key unique, singleton_mode, schedule_type (manual/interval/cron), retry_limit, timeout_seconds. 5 CHECK constraints, 3 indexes (pkey, bjd_job_key_unique, bjd_status_created_idx, bjd_category_created_idx)
+- **billing_job_runs** — durable execution log. FK to billing_job_definitions, run_status lifecycle (started/completed/failed/timed_out/skipped), lock_acquired, result_summary JSONB, attempt_number. 5 CHECK constraints, 5 indexes
+
+### New lib files (6)
+- `server/lib/ai/billing-job-locks.ts` — distributed locking via pg_try_advisory_xact_lock + started-row singleton guard
+- `server/lib/ai/billing-operations.ts` — central job engine, run lifecycle (start/complete/fail/skip), retry logic with attempt_number increment, job executor registry
+- `server/lib/ai/billing-jobs.ts` — 10 predefined job definitions + executor registrations wired to existing safe engines
+- `server/lib/ai/billing-job-health.ts` — health summary, stale run detection, failed job preview, job state explanation
+- `server/lib/ai/billing-scheduler.ts` — interval-based scheduler, due-job detection, scheduler trigger entrypoint
+- `server/lib/ai/billing-ops-retention.ts` — inspection helpers (completed/failed/timed-out runs preview, definitions without runs, duplicate started runs). Read-only, no cleanup
+
+### New admin routes (17 endpoints under /api/admin/billing-ops/)
+- GET /jobs, POST /jobs/seed, POST /jobs/:jobKey/run
+- GET /runs, GET /runs/:runId, POST /runs/:runId/retry
+- GET /health
+- GET /inspections/stale-runs, GET /inspections/failed-runs/:days
+- POST /scheduler/trigger, GET /scheduler/status
+- GET /retention/policy, /completed-runs/:days, /failed-runs/:days, /timed-out-runs/:days, /definitions-without-runs, /duplicate-started-runs
+
+### Key design rules enforced
+- Singleton enforcement via pg advisory lock (Layer 1) + started-row check (Layer 2)
+- Lock check happens BEFORE run row creation — prevents self-blocking
+- Retry runs increment attempt_number and record retriedFromRunId in metadata
+- All execution goes through runBillingJob — no bypass
+- Scheduler only triggers interval jobs — manual/cron jobs never auto-triggered
+- No in-memory locks — all state in billing_job_runs
+- No destructive cleanup in Phase 4R — retention helpers are inspection-only
