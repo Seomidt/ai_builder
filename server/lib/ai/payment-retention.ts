@@ -143,6 +143,9 @@ export interface StalePaymentPreview {
 export async function previewPendingPaymentsOlderThan(
   days: number,
 ): Promise<StalePaymentPreview[]> {
+  if (days <= 0) {
+    throw new Error(`[ai/payment-retention] days must be > 0, got ${days}`);
+  }
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const rows = await db
     .select()
@@ -174,6 +177,9 @@ export async function previewPendingPaymentsOlderThan(
 export async function previewFailedPaymentsOlderThan(
   days: number,
 ): Promise<StalePaymentPreview[]> {
+  if (days <= 0) {
+    throw new Error(`[ai/payment-retention] days must be > 0, got ${days}`);
+  }
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const rows = await db
     .select()
