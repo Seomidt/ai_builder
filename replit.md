@@ -509,3 +509,97 @@ npm run db:push   # Sync schema to DB
 ### Migration notes
 - Old stub knowledge_documents table and its legacy enums (knowledge_source_type, knowledge_status) were dropped via raw SQL before drizzle-kit push — no data loss (stub only)
 - Duplicate insertKnowledgeDocumentSchema export removed from shared/schema.ts (old legacy export at line ~1137)
+
+## Phase 5B — Document Parsing & Chunking Pipeline (branch: feature/document-parsing-chunking)
+
+### Schema extensions (raw SQL migrations applied)
+
+**knowledge_document_versions** — 8 new columns:
+- `parser_name`, `parser_version` — which parser ran
+- `parse_status` (CHECK: pending/running/completed/failed), `parse_started_at`, `parse_completed_at`
+- `parsed_text_checksum` — SHA-256 hex of normalized parsed text (dedup guard)
+- `normalized_character_count` (CHECK ≥ 0)
+- `parse_failure_reason` — explicit error message when parse fails
+
+**knowledge_processing_jobs** — 4 new columns:
+- `processor_name`, `processor_version` — identifies which processing implementation ran
+- `locked_at` — when job was acquired/locked (race-safe acquire)
+- `heartbeat_at` — last worker heartbeat timestamp
+
+**knowledge_chunks** — 7 new columns:
+- `chunk_strategy`, `chunk_version` — strategy name + version for deterministic rebuilds
+- `overlap_characters` (CHECK ≥ 0) — actual overlap used for this chunk
+- `source_heading_path`, `source_section_label` — structural context from parsed document
+- `replaced_at`, `replaced_by_job_id` — audit trail for chunk replacement
+
+**Partial unique indexes on knowledge_chunks** (replacing old global uniques):
+- `kc_version_chunk_index_active_unique`: (knowledge_document_version_id, chunk_index) WHERE chunk_active = true
+- `kc_version_chunk_key_active_unique`: (knowledge_document_version_id, chunk_key) WHERE chunk_active = true
+
+These allow safe chunk replacement: deactivate old chunks (chunk_active=false), insert new ones with same key.
+
+### New lib files (2)
+
+**`server/lib/ai/document-parsers.ts`**
+- `DocumentParser` interface + `ParseResult` type
+- Format parsers: `TextParser`, `MarkdownParser`, `HtmlParser`, `JsonParser`, `CsvParser`
+- Explicit failure for unsupported formats: PDF/DOCX/binary throw `KnowledgeInvariantError` (INV-P9)
+- `getParserForMimeType(mime)` factory returns correct parser or throws
+- Each parser normalizes text, removes HTML tags, flattens JSON/CSV, normalizes whitespace
+
+**`server/lib/ai/document-chunking.ts`**
+- `buildChunkKey(docId, verId, idx, strategy, version)` — deterministic, stable key
+- `buildChunkHash(text, strategy, version)` — SHA-256 of content+strategy+version
+- `ChunkingConfig` type: maxCharacters (default 800), overlapCharacters (default 100), strategy, version
+- `chunkParsedDocument(text, docId, verId, config)` → `ChunkCandidate[]`
+- Strategy: paragraph_window — split on double-newlines, enforce maxCharacters, slide overlap
+
+### Extended lib: `server/lib/ai/knowledge-processing.ts`
+
+**New/extended functions:**
+- `runParseForDocumentVersion(verId, tenantId, {content})` — full parse lifecycle: acquire job, run parser, record metadata, mark parse_status=completed/failed
+- `runChunkingForDocumentVersion(verId, tenantId, {content, chunkingConfig?})` — full chunk lifecycle: acquire job, deactivate prior active chunks, insert new chunks, upsert index_state to pending/stale
+- `acquireKnowledgeProcessingJob(jobId, tenantId, {workerId?})` — CAS acquire (queued→running via UPDATE...RETURNING), race-safe — second acquire returns null
+- `isVersionRetrievable(verId, tenantId)` — checks KB active, doc active, version is_current, index_state=indexed
+- `explainDocumentVersionParseState(verId, tenantId)` — returns parseStatus, parser, checksum, charCount
+- `explainDocumentVersionChunkState(verId, tenantId)` — returns activeChunkCount, strategy, index_state
+- `previewChunkReplacement(verId, tenantId, config)` — read-only preview: how many chunks would change
+- `listDocumentProcessingJobs(docId, tenantId)` — list all jobs for a document across all versions
+
+### New admin routes (~20 endpoints) in `server/routes/admin.ts`
+
+- POST `/api/admin/knowledge/parse/versions/:verId` — trigger parse for a version
+- POST `/api/admin/knowledge/chunk/versions/:verId` — trigger chunking for a version
+- GET `/api/admin/knowledge/jobs/:jobId` — job detail
+- POST `/api/admin/knowledge/jobs/:jobId/acquire` — acquire job (worker endpoint)
+- GET `/api/admin/knowledge/versions/:verId/parse-state` — parse state explanation
+- GET `/api/admin/knowledge/versions/:verId/chunk-state` — chunk state explanation
+- GET `/api/admin/knowledge/versions/:verId/chunk-preview` — preview chunk replacement
+- GET `/api/admin/knowledge/versions/:verId/retrievable` — retrievability check
+- GET `/api/admin/knowledge/documents/:docId/processing-jobs` — list all jobs for document
+
+### Invariants enforced (INV-P1 through INV-P10)
+
+- INV-P1: Version must exist and belong to tenant before any processing
+- INV-P2: Document must exist and belong to tenant
+- INV-P3: Chunking NEVER sets index_state='indexed' — only 'pending' or 'stale'
+- INV-P4: Archived KB or archived document blocks all processing
+- INV-P5: parse_status transitions are strictly: null → pending → running → completed/failed
+- INV-P6: Chunk replacement is atomic — old chunks deactivated before new inserted
+- INV-P7: replacedByJobId must reference a real job row
+- INV-P8: Job acquire uses CAS (compare-and-swap on status=queued) — prevents double-acquire
+- INV-P9: Unsupported mime types (PDF, DOCX, binary) fail explicitly — no silent fallback
+- INV-P10: Cross-tenant access raises KnowledgeInvariantError immediately
+
+### Validation: 14/14 scenarios passed
+
+S1 parse supported text/markdown, S2 parse unsupported format (PDF) fails explicitly, S3 chunk parsed version (indexState=pending, NOT indexed), S4 rerun chunking deactivates prior chunks (audit trail), S5 parse failure doesn't mutate current version, S6 chunk rebuild transactionally safe (no mixed state), S7 non-current version chunking doesn't affect current, S8 cross-tenant linkage rejected, S9 archived KB/doc blocks processing, S10 deterministic chunk keys and hashes, S11 changed chunk config causes stale transition, S12 job lock safety (second acquire rejected), S13 inspection helpers work, S14 Phase 5A invariants still hold.
+
+### DB verification confirmed
+
+- All 8 parse columns on knowledge_document_versions present
+- All 4 lock/heartbeat columns on knowledge_processing_jobs present
+- All 7 chunk rebuild columns on knowledge_chunks present
+- Both partial unique indexes (WHERE chunk_active=true) verified in pg_indexes
+- All 3 CHECK constraints verified in pg_constraint
+- Real rows confirmed: parsed versions with parser metadata, chunks with strategy/overlap/replacement audit trail, processing jobs with processor_name/locked_at

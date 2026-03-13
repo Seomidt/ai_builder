@@ -121,7 +121,21 @@ import {
   listIndexStateByKnowledgeBase,
   updateKnowledgeIndexState,
   isVersionRetrievable,
+  listChunksByVersion,
+  runParseForDocumentVersion,
+  runChunkingForDocumentVersion,
+  previewChunkingForDocumentVersion,
+  markParseFailed,
+  markParseCompleted,
+  explainDocumentVersionParseState,
+  explainDocumentVersionChunkState,
+  previewChunkReplacement,
+  listDocumentProcessingJobs,
+  summarizeChunkingResult,
+  acquireKnowledgeProcessingJob,
+  failKnowledgeProcessingJob,
 } from "../lib/ai/knowledge-processing";
+import { selectDocumentParser } from "../lib/ai/document-parsers";
 import { getVectorAdapterInfo } from "../lib/ai/vector-adapter";
 
 // Phase 4S: Billing Recovery & Integrity
@@ -1674,6 +1688,283 @@ export function registerAdminRoutes(app: Express): void {
       res.json({ vectorAdapter: info });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B: Parse Routes ─────────────────────────────────────────────────
+
+  app.post("/api/admin/knowledge/parse/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        documentType: z.string().optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        processorName: z.string().optional(),
+        processorVersion: z.string().optional(),
+      }).parse(req.body);
+      const result = await runParseForDocumentVersion(body.versionId, body.tenantId, body);
+      res.json({ parseResult: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/parse/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const explanation = await explainDocumentVersionParseState(versionId, tenantId);
+      res.json({ parseState: explanation });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/parse/mark-failed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().min(1),
+      }).parse(req.body);
+      await markParseFailed(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/parse/mark-completed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        parserName: z.string().min(1),
+        parserVersion: z.string().min(1),
+        parsedTextChecksum: z.string().min(1),
+        normalizedCharacterCount: z.number().int().nonnegative(),
+      }).parse(req.body);
+      await markParseCompleted(body.versionId, body.tenantId, body);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/parse/select-parser", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        mimeType: z.string().min(1),
+        documentType: z.string().optional(),
+      }).parse(req.body);
+      const descriptor = selectDocumentParser(body.mimeType, body.documentType);
+      res.json({ parser: descriptor });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B: Chunk Routes ──────────────────────────────────────────────────
+
+  app.post("/api/admin/knowledge/chunk/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        chunkingConfig: z.object({
+          maxCharacters: z.number().int().positive().optional(),
+          overlapCharacters: z.number().int().nonnegative().optional(),
+          strategy: z.string().optional(),
+          strategyVersion: z.string().optional(),
+        }).optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        processorName: z.string().optional(),
+        processorVersion: z.string().optional(),
+      }).parse(req.body);
+      const result = await runChunkingForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        chunkingConfig: body.chunkingConfig,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+        processorName: body.processorName,
+        processorVersion: body.processorVersion,
+      });
+      res.json({ chunkingResult: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/chunk/preview", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().min(1),
+        mimeType: z.string().optional(),
+        documentType: z.string().optional(),
+        chunkingConfig: z.object({
+          maxCharacters: z.number().int().positive().optional(),
+          overlapCharacters: z.number().int().nonnegative().optional(),
+          strategy: z.string().optional(),
+          strategyVersion: z.string().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const preview = await previewChunkingForDocumentVersion(
+        body.versionId,
+        body.tenantId,
+        body.content,
+        { chunkingConfig: body.chunkingConfig, mimeType: body.mimeType, documentType: body.documentType },
+      );
+      res.json({ chunkPreview: preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/chunk/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const explanation = await explainDocumentVersionChunkState(versionId, tenantId);
+      res.json({ chunkState: explanation });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/chunk/preview-replacement/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewChunkReplacement(versionId, tenantId);
+      res.json({ replacementPreview: preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/chunk/list/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      const activeOnly = req.query.activeOnly !== "false";
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const chunks = await listChunksByVersion(versionId, tenantId, activeOnly);
+      res.json({ chunks, count: chunks.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B: Job Routes ────────────────────────────────────────────────────
+
+  app.get("/api/admin/knowledge/jobs/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      const jobType = req.query.jobType ? String(req.query.jobType) : undefined;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listDocumentProcessingJobs(documentId, tenantId, jobType);
+      res.json({ jobs, count: jobs.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/jobs/summary/:jobId", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeChunkingResult(jobId, tenantId);
+      res.json({ jobSummary: summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/jobs/acquire", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        jobId: z.string().min(1),
+        tenantId: z.string().min(1),
+        workerId: z.string().optional(),
+        processorName: z.string().optional(),
+        processorVersion: z.string().optional(),
+      }).parse(req.body);
+      const job = await acquireKnowledgeProcessingJob(body.jobId, body.tenantId, {
+        workerId: body.workerId,
+        processorName: body.processorName,
+        processorVersion: body.processorVersion,
+      });
+      if (!job) {
+        return res.status(409).json({ error: "Job could not be acquired — already running or completed." });
+      }
+      res.json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/jobs/fail", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        jobId: z.string().min(1),
+        tenantId: z.string().min(1),
+        failureReason: z.string().min(1),
+      }).parse(req.body);
+      const job = await failKnowledgeProcessingJob(body.jobId, body.tenantId, body.failureReason);
+      res.json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B: Version Inspection Routes ────────────────────────────────────
+
+  app.get("/api/admin/knowledge/versions/:versionId/parse-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainDocumentVersionParseState(versionId, tenantId);
+      res.json({ parseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/chunk-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainDocumentVersionChunkState(versionId, tenantId);
+      res.json({ chunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/index-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const idxState = await getIndexStateByVersion(versionId, tenantId);
+      const retrievable = await isVersionRetrievable(versionId, tenantId);
+      res.json({ indexState: idxState, retrievable });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
     }
   });
 }
