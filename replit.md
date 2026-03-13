@@ -253,3 +253,26 @@ npm run db:push   # Sync schema to DB
 - [ ] Full RLS policies on all tenant tables
 - [ ] Vercel deployment automation
 - [ ] Retention cron jobs for all ai_* tables
+
+## Phase 4P — Admin Pricing & Plan Management System (complete, branch: feature/admin-pricing-plan-management)
+
+### New tables (schema.ts)
+- `admin_change_requests` — durable audit log for all admin pricing/plan operations. Append-only, status lifecycle: pending → applied|rejected|failed. 8-value change_type CHECK, 3-value status CHECK, 3-value target_scope CHECK. 4 indexes.
+- `admin_change_events` — immutable timeline per change request. Never updated or deleted. 2 indexes.
+
+### New lib files
+- `server/lib/ai/admin-pricing.ts` — preview + apply for provider/customer/storage/customer-storage pricing version creation. Overlap detection (windowsOverlap). Every operation records admin change request + events.
+- `server/lib/ai/admin-plans.ts` — preview + apply plan creation, entitlement replacement (atomic tx: delete all + bulk insert), archive plan, list plans, explainPlanDefinition.
+- `server/lib/ai/admin-tenant-subscriptions.ts` — preview + apply tenant plan change (uses changeTenantSubscription with billing period derivation from plan.billingInterval), preview + apply plan cancellation (uses cancelTenantSubscription), list subscription history with plan join.
+- `server/lib/ai/admin-commercial-preview.ts` — previewPricingImpactForTenant, previewPlanImpactForTenant (entitlement diff: added/removed/changed keys), previewGlobalPricingWindowChange, explainAdminChangePreview.
+- `server/lib/ai/admin-change-summary.ts` — listAdminChangeRequests, getAdminChangeRequestById, listAdminChangeEvents, explainAdminChangeResult.
+- `server/lib/ai/admin-change-retention.ts` — explainAdminChangeRetentionPolicy (read-only), previewPendingAdminChangesOlderThan, previewFailedAdminChangesOlderThan, previewAppliedAdminChangesWithoutEvents, previewPlanRowsStillReferencedHistorically.
+
+### New routes
+- `server/routes/admin.ts` — 25 endpoints under /api/admin/ for pricing preview/apply, plan CRUD, tenant subscription change/cancel, commercial preview, change history, retention inspection. Registered in server/routes.ts via registerAdminRoutes(app).
+
+### Key design rules enforced
+- No edit-in-place on pricing versions — always new rows
+- Overlap detection blocks apply when effectiveFrom windows conflict
+- Historical billing rows and plans are never deleted
+- All admin operations produce admin_change_requests + admin_change_events trail
