@@ -1,9 +1,9 @@
 /**
- * Billing Job Catalog & Executors — Phase 4R
+ * Billing Job Catalog & Executors — Phase 4R / 4S
  *
  * SERVER-ONLY: This module must never be imported from client/ code.
  *
- * Registers all 10 predefined automated monetization job definitions
+ * Registers all 13 predefined automated monetization job definitions
  * and their executor functions. Job definitions are seeded into the DB
  * on first call to ensureBillingJobDefinitions().
  *
@@ -13,6 +13,8 @@
  *   C) Executors return a structured result_summary JSON
  *   D) Jobs are idempotent — safe to re-run over same window
  *   E) No speculative job catalog bloat — only jobs with real existing engines
+ *   F) Phase 4S jobs (billing_integrity_scan, snapshot_rebuild_health_scan,
+ *      repeated_recovery_failure_scan) are scan/detect only — never auto-repair
  */
 
 import { eq } from "drizzle-orm";
@@ -44,6 +46,13 @@ import {
   previewFailedAdminChangesOlderThan,
 } from "./admin-change-retention";
 
+// Phase 4S: Recovery & Integrity scan engines
+import {
+  runBillingIntegrityScan,
+  runRepeatRecoveryFailureScan,
+  runSnapshotRebuildHealthScan,
+} from "./billing-integrity";
+
 // ─── Job Definitions ─────────────────────────────────────────────────────────
 
 export interface BillingJobSeed {
@@ -55,6 +64,8 @@ export interface BillingJobSeed {
   singletonMode: boolean;
   retryLimit: number;
   timeoutSeconds: number;
+  priority?: number;
+  jobDurationWarningMs?: number | null;
 }
 
 const PREDEFINED_JOBS: BillingJobSeed[] = [
@@ -158,6 +169,43 @@ const PREDEFINED_JOBS: BillingJobSeed[] = [
     retryLimit: 1,
     timeoutSeconds: 60,
   },
+  // ─── Phase 4S: Recovery & Integrity scan jobs (scan/detect only, never auto-repair) ───
+  {
+    jobKey: "billing_integrity_scan",
+    jobName: "Billing Integrity Scan",
+    jobCategory: "audit",
+    scheduleType: "interval",
+    scheduleExpression: "43200",
+    singletonMode: true,
+    retryLimit: 1,
+    timeoutSeconds: 300,
+    priority: 3,
+    jobDurationWarningMs: 240000,
+  },
+  {
+    jobKey: "snapshot_rebuild_health_scan",
+    jobName: "Snapshot Rebuild Health Scan",
+    jobCategory: "monitoring",
+    scheduleType: "interval",
+    scheduleExpression: "86400",
+    singletonMode: true,
+    retryLimit: 1,
+    timeoutSeconds: 120,
+    priority: 5,
+    jobDurationWarningMs: 90000,
+  },
+  {
+    jobKey: "repeated_recovery_failure_scan",
+    jobName: "Repeated Recovery Failure Scan",
+    jobCategory: "monitoring",
+    scheduleType: "interval",
+    scheduleExpression: "21600",
+    singletonMode: true,
+    retryLimit: 1,
+    timeoutSeconds: 60,
+    priority: 4,
+    jobDurationWarningMs: 45000,
+  },
 ];
 
 // ─── Seed Job Definitions ─────────────────────────────────────────────────────
@@ -199,6 +247,8 @@ export async function ensureBillingJobDefinitions(): Promise<{
           singletonMode: seed.singletonMode,
           retryLimit: seed.retryLimit,
           timeoutSeconds: seed.timeoutSeconds,
+          priority: seed.priority ?? 5,
+          jobDurationWarningMs: seed.jobDurationWarningMs ?? null,
         })
         .returning();
       created++;
@@ -336,6 +386,57 @@ registerJobExecutor("stale_admin_change_health_scan", async (_run, _def) => {
     pendingAdminChangesOlderThan7Days: pendingOld.length,
     failedAdminChangesOlderThan30Days: failedOld.length,
     scanCompletedAt: new Date().toISOString(),
+  };
+});
+
+// ─── Phase 4S: Recovery & Integrity scan executors (scan/detect only) ─────────
+
+registerJobExecutor("billing_integrity_scan", async (_run, _def) => {
+  const result = await runBillingIntegrityScan({
+    scopeType: "global",
+    scopeId: null,
+    checks: ["ai_usage_gaps", "storage_usage_gaps", "snapshot_drift", "invoice_arithmetic", "stuck_wallet_debits"],
+    stuckWalletThresholdHours: 24,
+    snapshotDriftThresholdPct: 1.0,
+    limit: 200,
+  });
+  return {
+    scanId: result.scanId,
+    totalChecks: result.totalChecks,
+    totalFindings: result.totalFindings,
+    criticalCount: result.criticalCount,
+    highCount: result.highCount,
+    mediumCount: result.mediumCount,
+    lowCount: result.lowCount,
+    durationMs: result.durationMs,
+    scannedAt: result.scannedAt,
+    findingSummary: result.findings.map((f) => ({
+      checkName: f.checkName,
+      severity: f.severity,
+      affectedCount: f.affectedCount,
+    })),
+  };
+});
+
+registerJobExecutor("snapshot_rebuild_health_scan", async (_run, _def) => {
+  const result = await runSnapshotRebuildHealthScan(100);
+  return {
+    missingSnapshotsCount: result.missingSnapshotsCount,
+    staleSnapshotsCount: result.staleSnapshotsCount,
+    missingSnapshotSample: result.missingSnapshots.slice(0, 5),
+    staleSnapshotSample: result.staleSnapshots.slice(0, 5),
+    scannedAt: result.scannedAt,
+    durationMs: result.durationMs,
+  };
+});
+
+registerJobExecutor("repeated_recovery_failure_scan", async (_run, _def) => {
+  const result = await runRepeatRecoveryFailureScan(3, 72, 50);
+  return {
+    totalProblematic: result.totalProblematic,
+    findings: result.findings.slice(0, 10),
+    scannedAt: result.scannedAt,
+    durationMs: result.durationMs,
   };
 });
 

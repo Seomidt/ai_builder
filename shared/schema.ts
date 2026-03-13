@@ -3861,6 +3861,19 @@ export const billingJobDefinitions = pgTable(
     singletonMode: boolean("singleton_mode").notNull().default(true),
     retryLimit: integer("retry_limit").notNull().default(3),
     timeoutSeconds: integer("timeout_seconds").notNull().default(300),
+    /**
+     * Phase 4S (4R hardening): scheduling priority for this job.
+     * Lower number = higher priority. Default 5 = normal priority.
+     * Intended ordering: 1=critical, 3=high, 5=normal, 7=low, 9=background.
+     * Not yet enforced by scheduler — recorded for future priority-based queuing.
+     */
+    priority: integer("priority").notNull().default(5),
+    /**
+     * Phase 4S (4R hardening): duration warning threshold in milliseconds.
+     * If a run's duration_ms exceeds this value, it is flagged as slow.
+     * null = no warning threshold configured.
+     */
+    jobDurationWarningMs: integer("job_duration_warning_ms"),
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -3880,6 +3893,11 @@ export const billingJobDefinitions = pgTable(
     ),
     check("bjd_retry_limit_check", sql`${t.retryLimit} >= 0`),
     check("bjd_timeout_seconds_check", sql`${t.timeoutSeconds} > 0`),
+    check("bjd_priority_check", sql`${t.priority} >= 1 AND ${t.priority} <= 10`),
+    check(
+      "bjd_job_duration_warning_ms_check",
+      sql`${t.jobDurationWarningMs} IS NULL OR ${t.jobDurationWarningMs} > 0`,
+    ),
     uniqueIndex("bjd_job_key_unique").on(t.jobKey),
     index("bjd_status_created_idx").on(t.status, t.createdAt),
     index("bjd_category_created_idx").on(t.jobCategory, t.createdAt),
@@ -3934,6 +3952,12 @@ export const billingJobRuns = pgTable(
     lockAcquired: boolean("lock_acquired").notNull().default(false),
     resultSummary: jsonb("result_summary"),
     errorMessage: text("error_message"),
+    /**
+     * Phase 4S (4R hardening): identifier of the worker/node that executed this run.
+     * Null for runs created before this field was added.
+     * Useful for distributed debugging and diagnosing per-instance failure patterns.
+     */
+    workerId: text("worker_id"),
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
@@ -3972,6 +3996,134 @@ export const insertBillingJobRunSchema = createInsertSchema(billingJobRuns).omit
 });
 export type InsertBillingJobRun = z.infer<typeof insertBillingJobRunSchema>;
 export type BillingJobRun = typeof billingJobRuns.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4S — Billing Recovery, Integrity & Disaster Safety
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * billing_recovery_runs — durable audit log for all billing recovery operations.
+ *
+ * Every recovery attempt (dry-run or apply) creates one row here.
+ * This is the operational audit trail for the recovery layer. NOT accounting truth.
+ *
+ * Design rules:
+ *   - Append-only for core financial values; status/result_summary/error_message updateable
+ *   - dry_run=true runs must never modify billing canonical truth
+ *   - Every apply run must create billing_recovery_actions rows
+ *   - Recovery must be idempotent — repeated runs create new rows, not duplicates in target
+ *
+ * recovery_type values:
+ *   'billing_usage_rebuild'          — rebuild missing ai_billing_usage rows
+ *   'storage_billing_rebuild'        — rebuild missing storage_billing_usage rows
+ *   'billing_snapshot_rebuild'       — rebuild billing_period_tenant_snapshots
+ *   'invoice_line_items_rebuild'     — rebuild invoice line items for non-finalized invoices
+ *   'invoice_totals_rebuild'         — recalculate invoice subtotal/total
+ *   'payment_linkage_repair'         — repair invoice/payment linkage anomalies
+ *   'stripe_linkage_repair'          — repair stripe invoice link anomalies
+ *   'allowance_rebuild'              — rebuild allowance rows where deterministic
+ *   'monitoring_snapshot_rebuild'    — rebuild billing_metrics_snapshots
+ */
+export const billingRecoveryRuns = pgTable(
+  "billing_recovery_runs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    recoveryType: text("recovery_type").notNull(),
+    scopeType: text("scope_type").notNull(),
+    scopeId: text("scope_id"),
+    status: text("status").notNull().default("started"),
+    triggerType: text("trigger_type").notNull(),
+    reason: text("reason").notNull(),
+    dryRun: boolean("dry_run").notNull().default(false),
+    resultSummary: jsonb("result_summary"),
+    errorMessage: text("error_message"),
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "brr_recovery_type_check",
+      sql`${t.recoveryType} IN ('billing_usage_rebuild','storage_billing_rebuild','billing_snapshot_rebuild','invoice_line_items_rebuild','invoice_totals_rebuild','payment_linkage_repair','stripe_linkage_repair','allowance_rebuild','monitoring_snapshot_rebuild')`,
+    ),
+    check(
+      "brr_scope_type_check",
+      sql`${t.scopeType} IN ('global','tenant','billing_period','invoice','payment','usage_row')`,
+    ),
+    check(
+      "brr_status_check",
+      sql`${t.status} IN ('started','completed','failed','skipped')`,
+    ),
+    check(
+      "brr_trigger_type_check",
+      sql`${t.triggerType} IN ('manual','job','system')`,
+    ),
+    index("brr_recovery_type_created_idx").on(t.recoveryType, t.createdAt),
+    index("brr_scope_created_idx").on(t.scopeType, t.scopeId, t.createdAt),
+    index("brr_status_created_idx").on(t.status, t.createdAt),
+    index("brr_started_at_idx").on(t.startedAt),
+  ],
+);
+
+export const insertBillingRecoveryRunSchema = createInsertSchema(billingRecoveryRuns).omit({
+  id: true,
+  createdAt: true,
+  completedAt: true,
+  startedAt: true,
+});
+export type InsertBillingRecoveryRun = z.infer<typeof insertBillingRecoveryRunSchema>;
+export type BillingRecoveryRun = typeof billingRecoveryRuns.$inferSelect;
+
+/**
+ * billing_recovery_actions — detailed action log for each recovery operation step.
+ *
+ * Each billing_recovery_runs row may produce 0..N action rows — one per planned/executed action.
+ * Append-only: never mutate after creation.
+ *
+ * Design rules:
+ *   - before_state and after_state are concise structured diffs, not raw row dumps
+ *   - action_status tracks planned → executed | skipped | failed
+ *   - For dry_run=true runs, all actions should be 'planned' (never 'executed')
+ *
+ * action_status lifecycle:
+ *   'planned'  — would be executed (dry-run or pre-apply preview)
+ *   'executed' — was applied to the database
+ *   'skipped'  — safe no-op (already in correct state, or unsafe to apply)
+ *   'failed'   — attempted but failed (error recorded in details)
+ */
+export const billingRecoveryActions = pgTable(
+  "billing_recovery_actions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    billingRecoveryRunId: varchar("billing_recovery_run_id")
+      .notNull()
+      .references(() => billingRecoveryRuns.id),
+    actionType: text("action_type").notNull(),
+    targetTable: text("target_table").notNull(),
+    targetId: text("target_id"),
+    actionStatus: text("action_status").notNull(),
+    beforeState: jsonb("before_state"),
+    afterState: jsonb("after_state"),
+    details: jsonb("details"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "bra_action_status_check",
+      sql`${t.actionStatus} IN ('planned','executed','skipped','failed')`,
+    ),
+    index("bra_run_created_idx").on(t.billingRecoveryRunId, t.createdAt),
+    index("bra_target_table_created_idx").on(t.targetTable, t.createdAt),
+    index("bra_action_status_created_idx").on(t.actionStatus, t.createdAt),
+  ],
+);
+
+export const insertBillingRecoveryActionSchema = createInsertSchema(billingRecoveryActions).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertBillingRecoveryAction = z.infer<typeof insertBillingRecoveryActionSchema>;
+export type BillingRecoveryAction = typeof billingRecoveryActions.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;

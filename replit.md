@@ -323,6 +323,51 @@ npm run db:push   # Sync schema to DB
 - Failed snapshots persist as snapshot_status='failed' rows for operational forensics
 - Phase 4C helpers (getBillingHealthSummary, getTenantBillingHealthSummary) preserved in billing-observability.ts
 
+## Phase 4S — Billing Recovery & Integrity (branch: feature/billing-recovery-integrity)
+
+### Schema additions
+- **4R hardening (3 new columns):**
+  - `billing_job_definitions.priority` (integer, not null, default 5, CHECK 1–10) — scheduling priority, lower = higher priority
+  - `billing_job_definitions.job_duration_warning_ms` (integer, nullable, CHECK > 0) — slow-run warning threshold
+  - `billing_job_runs.worker_id` (text, nullable) — distributed worker identifier for multi-node debugging
+- **billing_recovery_runs** — durable audit log for billing recovery attempts. Fields: recovery_type (9 CHECK values), scope_type (6 values), status (started/completed/failed/skipped), trigger_type (manual/job/system), dry_run, result_summary JSONB. 4 CHECK constraints, 4 indexes
+- **billing_recovery_actions** — detailed step log per recovery run. FK → billing_recovery_runs. Fields: action_type, target_table, target_id, action_status (planned/executed/skipped/failed), before_state/after_state/details JSONB. 1 CHECK, 3 indexes
+
+### New lib files (4)
+- `server/lib/ai/billing-integrity.ts` — read-only scan engine: ai_usage gaps, storage_usage gaps, snapshot drift (via period date range join), invoice arithmetic, stuck wallet debits. Also: runRepeatRecoveryFailureScan + runSnapshotRebuildHealthScan for job executors
+- `server/lib/ai/billing-recovery.ts` — recovery/rebuild engine: preview + apply for billing_snapshot_rebuild and invoice_totals_rebuild. Preview is always read-only. Apply creates billing_recovery_runs + billing_recovery_actions rows
+- `server/lib/ai/billing-recovery-summary.ts` — read-only explain/detail: getRecoveryRunDetail, listRecoveryRuns, explainRecoveryRun, getRecoveryRunStats
+- `server/lib/ai/billing-recovery-retention.ts` — retention/inspection helpers: age report, action stats, retention candidates, stuck runs, daily trend. All read-only
+
+### Extended: billing-jobs.ts (13 predefined jobs, was 10)
+- billing_integrity_scan — category: audit, every 12h, priority 3, warningMs 240000
+- snapshot_rebuild_health_scan — category: monitoring, every 24h, priority 5, warningMs 90000
+- repeated_recovery_failure_scan — category: monitoring, every 6h, priority 4, warningMs 45000
+- All 3 Phase 4S jobs: scan/detect only — never auto-repair
+
+### New admin routes (14 endpoints under /api/admin/billing-recovery/)
+- POST /scan — global/tenant/period integrity scan (read-only)
+- POST /preview/snapshot-rebuild — dry-run snapshot rebuild preview
+- POST /preview/invoice-totals-rebuild — dry-run invoice totals rebuild preview
+- POST /apply/snapshot-rebuild — apply snapshot rebuild (idempotent)
+- POST /apply/invoice-totals-rebuild — apply invoice totals rebuild (draft invoices only)
+- GET /runs — list recovery runs (filterable)
+- GET /runs/:runId — recovery run full detail with actions
+- GET /runs/:runId/explain — structured human-readable explanation
+- GET /runs/stats/summary — aggregate stats by type/status
+- GET /retention/age-report — run age distribution
+- GET /retention/action-stats — action counts by status/table
+- GET /retention/candidates/:days — archival candidates (read-only)
+- GET /retention/stuck-runs — runs stuck in 'started' beyond threshold
+- GET /retention/daily-trend — per-day run counts
+
+### Key design invariants
+- Preview functions are ALWAYS read-only — never write to canonical billing tables
+- Apply functions are idempotent — safe to re-run on same scope
+- Finalized invoices are NEVER mutated — only draft invoices are touched by invoice_totals_rebuild
+- ai_billing_usage has no billing_period_id FK — date-range join via billing_periods used for live aggregation
+- All recovery_runs rows have dry_run flag — full audit trail of what was real vs preview
+
 ## Phase 4R — Automated Billing Operations (branch: feature/automated-billing-operations, commit: b3fab3d)
 
 ### New tables (2)

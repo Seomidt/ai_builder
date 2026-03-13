@@ -96,6 +96,28 @@ import {
   previewTenantsWithoutRecentMetricsSnapshots,
 } from "../lib/ai/billing-monitoring-retention";
 
+// Phase 4S: Billing Recovery & Integrity
+import { runBillingIntegrityScan } from "../lib/ai/billing-integrity";
+import {
+  previewSnapshotRebuild,
+  applySnapshotRebuild,
+  previewInvoiceTotalsRebuild,
+  applyInvoiceTotalsRebuild,
+} from "../lib/ai/billing-recovery";
+import {
+  listRecoveryRuns,
+  getRecoveryRunDetail,
+  explainRecoveryRun,
+  getRecoveryRunStats,
+} from "../lib/ai/billing-recovery-summary";
+import {
+  getRecoveryRunAgeReport,
+  getRecoveryActionStats,
+  findRetentionCandidates,
+  findStuckRecoveryRuns,
+  getRecoveryRunDailyTrend,
+} from "../lib/ai/billing-recovery-retention";
+
 // Phase 4R: Automated Billing Operations
 import { ensureBillingJobDefinitions } from "../lib/ai/billing-jobs";
 import { runBillingJob, retryBillingJobRun } from "../lib/ai/billing-operations";
@@ -1076,6 +1098,232 @@ export function registerAdminRoutes(app: Express): void {
     try {
       const result = await previewDuplicateStartedRuns();
       res.json({ duplicateGroups: result, count: result.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 4S: Billing Recovery & Integrity Routes ───────────────────────────
+
+  // Integrity scan — read-only, always safe to call
+  app.post("/api/admin/billing-recovery/scan", async (req: Request, res: Response) => {
+    try {
+      const bodySchema = z.object({
+        scopeType: z.enum(["global", "tenant", "billing_period"]).optional(),
+        scopeId: z.string().nullable().optional(),
+        checks: z
+          .array(
+            z.enum([
+              "ai_usage_gaps",
+              "storage_usage_gaps",
+              "snapshot_drift",
+              "invoice_arithmetic",
+              "stuck_wallet_debits",
+            ]),
+          )
+          .optional(),
+        stuckWalletThresholdHours: z.number().int().positive().optional(),
+        snapshotDriftThresholdPct: z.number().positive().optional(),
+        limit: z.number().int().positive().max(500).optional(),
+      });
+      const body = bodySchema.parse(req.body);
+      const result = await runBillingIntegrityScan(body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Preview snapshot rebuild — dry-run, never writes
+  app.post("/api/admin/billing-recovery/preview/snapshot-rebuild", async (req: Request, res: Response) => {
+    try {
+      const bodySchema = z.object({
+        billingPeriodId: z.string().min(1),
+        tenantId: z.string().nullable().optional(),
+      });
+      const body = bodySchema.parse(req.body);
+      const preview = await previewSnapshotRebuild(body.billingPeriodId, body.tenantId ?? null);
+      res.json(preview);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Preview invoice totals rebuild — dry-run, never writes
+  app.post("/api/admin/billing-recovery/preview/invoice-totals-rebuild", async (req: Request, res: Response) => {
+    try {
+      const bodySchema = z.object({
+        scopeType: z.enum(["global", "tenant", "billing_period"]),
+        scopeId: z.string().nullable().optional(),
+      });
+      const body = bodySchema.parse(req.body);
+      const preview = await previewInvoiceTotalsRebuild(body.scopeType, body.scopeId ?? null);
+      res.json(preview);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Apply snapshot rebuild
+  app.post("/api/admin/billing-recovery/apply/snapshot-rebuild", async (req: Request, res: Response) => {
+    try {
+      const bodySchema = z.object({
+        billingPeriodId: z.string().min(1),
+        tenantId: z.string().nullable().optional(),
+        reason: z.string().min(1),
+      });
+      const body = bodySchema.parse(req.body);
+      const result = await applySnapshotRebuild(
+        body.billingPeriodId,
+        body.tenantId ?? null,
+        "manual",
+        body.reason,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Apply invoice totals rebuild
+  app.post("/api/admin/billing-recovery/apply/invoice-totals-rebuild", async (req: Request, res: Response) => {
+    try {
+      const bodySchema = z.object({
+        scopeType: z.enum(["global", "tenant", "billing_period"]),
+        scopeId: z.string().nullable().optional(),
+        reason: z.string().min(1),
+      });
+      const body = bodySchema.parse(req.body);
+      const result = await applyInvoiceTotalsRebuild(
+        body.scopeType,
+        body.scopeId ?? null,
+        "manual",
+        body.reason,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // List recovery runs
+  app.get("/api/admin/billing-recovery/runs", async (req: Request, res: Response) => {
+    try {
+      const querySchema = z.object({
+        recoveryType: z.string().optional(),
+        scopeType: z.string().optional(),
+        scopeId: z.string().optional(),
+        status: z.string().optional(),
+        dryRun: z
+          .string()
+          .optional()
+          .transform((v) => (v === undefined ? undefined : v === "true")),
+        limit: z
+          .string()
+          .optional()
+          .transform((v) => (v ? Number(v) : 50)),
+        offset: z
+          .string()
+          .optional()
+          .transform((v) => (v ? Number(v) : 0)),
+      });
+      const query = querySchema.parse(req.query);
+      const result = await listRecoveryRuns(query);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Get recovery run detail
+  app.get("/api/admin/billing-recovery/runs/:runId", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const detail = await getRecoveryRunDetail(runId);
+      if (!detail) {
+        return res.status(404).json({ error: "Recovery run not found" });
+      }
+      res.json(detail);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Explain recovery run
+  app.get("/api/admin/billing-recovery/runs/:runId/explain", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const explanation = await explainRecoveryRun(runId);
+      if (!explanation) {
+        return res.status(404).json({ error: "Recovery run not found" });
+      }
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Recovery run stats
+  app.get("/api/admin/billing-recovery/runs/stats/summary", async (req: Request, res: Response) => {
+    try {
+      const windowDays = req.query.windowDays ? Number(String(req.query.windowDays)) : 30;
+      const stats = await getRecoveryRunStats(windowDays);
+      res.json({ stats, windowDays });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention: age report
+  app.get("/api/admin/billing-recovery/retention/age-report", async (_req: Request, res: Response) => {
+    try {
+      const report = await getRecoveryRunAgeReport();
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention: action stats
+  app.get("/api/admin/billing-recovery/retention/action-stats", async (req: Request, res: Response) => {
+    try {
+      const windowDays = req.query.windowDays ? Number(String(req.query.windowDays)) : 90;
+      const stats = await getRecoveryActionStats(windowDays);
+      res.json({ stats, windowDays });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention: candidates for archival
+  app.get("/api/admin/billing-recovery/retention/candidates/:days", async (req: Request, res: Response) => {
+    try {
+      const ageDays = Number(String(req.params.days));
+      const limit = req.query.limit ? Number(String(req.query.limit)) : 200;
+      const candidates = await findRetentionCandidates(ageDays, limit);
+      res.json({ candidates, count: candidates.length, ageDays });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention: stuck runs
+  app.get("/api/admin/billing-recovery/retention/stuck-runs", async (req: Request, res: Response) => {
+    try {
+      const minutes = req.query.minutes ? Number(String(req.query.minutes)) : 60;
+      const stuck = await findStuckRecoveryRuns(minutes);
+      res.json({ stuckRuns: stuck, count: stuck.length, thresholdMinutes: minutes });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention: daily trend
+  app.get("/api/admin/billing-recovery/retention/daily-trend", async (req: Request, res: Response) => {
+    try {
+      const windowDays = req.query.windowDays ? Number(String(req.query.windowDays)) : 14;
+      const trend = await getRecoveryRunDailyTrend(windowDays);
+      res.json({ trend, windowDays });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
