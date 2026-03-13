@@ -3097,6 +3097,164 @@ export const insertStorageBillingUsageSchema = createInsertSchema(storageBilling
 export type InsertStorageBillingUsage = z.infer<typeof insertStorageBillingUsageSchema>;
 export type StorageBillingUsage = typeof storageBillingUsage.$inferSelect;
 
+// ─── Phase 4L: Payments & Stripe Sync Foundation ─────────────────────────────
+
+/**
+ * invoice_payments — tracks payment attempts for finalized invoices.
+ *
+ * Design rules:
+ *   - FK: invoice_id → invoices.id
+ *   - One invoice may have multiple payment attempts
+ *   - amount_usd should match invoice total for normal full-payment flow
+ *   - Payment state machine: pending → processing → paid | failed | refunded | void
+ *   - paid_at / failed_at / refunded_at set by state transitions
+ *   - updated_at maintained on every transition
+ *   - Only finalized invoices may enter payment flow (enforced at service level)
+ */
+export const invoicePayments = pgTable(
+  "invoice_payments",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    invoiceId: text("invoice_id").notNull(),
+    tenantId: text("tenant_id").notNull(),
+    paymentProvider: text("payment_provider").notNull().default("stripe"),
+    paymentStatus: text("payment_status").notNull().default("pending"),
+    amountUsd: numeric("amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    currency: text("currency").notNull().default("USD"),
+    providerPaymentReference: text("provider_payment_reference"),
+    paidAt: timestamp("paid_at"),
+    failedAt: timestamp("failed_at"),
+    refundedAt: timestamp("refunded_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "ip_payment_status_check",
+      sql`${t.paymentStatus} IN ('pending','processing','paid','failed','refunded','void')`,
+    ),
+    check(
+      "ip_amount_usd_check",
+      sql`${t.amountUsd} >= 0`,
+    ),
+    index("ip_invoice_id_idx").on(t.invoiceId),
+    index("ip_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("ip_status_created_idx").on(t.paymentStatus, t.createdAt),
+    uniqueIndex("ip_provider_ref_unique").on(t.providerPaymentReference),
+  ],
+);
+
+export const insertInvoicePaymentSchema = createInsertSchema(invoicePayments).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  paidAt: true,
+  failedAt: true,
+  refundedAt: true,
+});
+export type InsertInvoicePayment = z.infer<typeof insertInvoicePaymentSchema>;
+export type InvoicePayment = typeof invoicePayments.$inferSelect;
+
+/**
+ * stripe_invoice_links — maps internal invoices to downstream Stripe objects.
+ *
+ * Design rules:
+ *   - FK: invoice_id → invoices.id
+ *   - Stripe IDs are linkage only — they do not override internal invoice totals
+ *   - sync_status lifecycle: not_synced → synced | sync_failed
+ *   - Stripe linkage is isolated from invoice logic
+ */
+export const stripeInvoiceLinks = pgTable(
+  "stripe_invoice_links",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    invoiceId: text("invoice_id").notNull(),
+    tenantId: text("tenant_id").notNull(),
+    stripeCustomerId: text("stripe_customer_id"),
+    stripeInvoiceId: text("stripe_invoice_id"),
+    stripePaymentIntentId: text("stripe_payment_intent_id"),
+    stripeCheckoutSessionId: text("stripe_checkout_session_id"),
+    syncStatus: text("sync_status").notNull().default("not_synced"),
+    lastSyncedAt: timestamp("last_synced_at"),
+    lastSyncError: text("last_sync_error"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "sil_sync_status_check",
+      sql`${t.syncStatus} IN ('not_synced','synced','sync_failed')`,
+    ),
+    index("sil_invoice_id_idx").on(t.invoiceId),
+    index("sil_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("sil_sync_status_created_idx").on(t.syncStatus, t.createdAt),
+    uniqueIndex("sil_stripe_invoice_id_unique").on(t.stripeInvoiceId),
+    uniqueIndex("sil_stripe_pi_unique").on(t.stripePaymentIntentId),
+    uniqueIndex("sil_stripe_session_unique").on(t.stripeCheckoutSessionId),
+  ],
+);
+
+export const insertStripeInvoiceLinkSchema = createInsertSchema(stripeInvoiceLinks).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  lastSyncedAt: true,
+  lastSyncError: true,
+});
+export type InsertStripeInvoiceLink = z.infer<typeof insertStripeInvoiceLinkSchema>;
+export type StripeInvoiceLink = typeof stripeInvoiceLinks.$inferSelect;
+
+/**
+ * payment_events — append-only payment lifecycle timeline.
+ *
+ * Design rules:
+ *   - FK: invoice_payment_id → invoice_payments.id (nullable)
+ *   - FK: invoice_id → invoices.id
+ *   - Append-only — no update or delete helpers
+ *   - event_source: 'internal' | 'stripe_webhook' | 'manual'
+ *   - event_status: 'recorded' (only value — for future extensibility)
+ *   - provider_event_id: for Stripe webhook dedup (UNIQUE where non-null)
+ */
+export const paymentEvents = pgTable(
+  "payment_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    invoicePaymentId: text("invoice_payment_id"),
+    invoiceId: text("invoice_id").notNull(),
+    tenantId: text("tenant_id").notNull(),
+    eventType: text("event_type").notNull(),
+    eventSource: text("event_source").notNull().default("internal"),
+    eventStatus: text("event_status").notNull().default("recorded"),
+    providerEventId: text("provider_event_id"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "pe_event_source_check",
+      sql`${t.eventSource} IN ('internal','stripe_webhook','manual')`,
+    ),
+    check(
+      "pe_event_status_check",
+      sql`${t.eventStatus} IN ('recorded')`,
+    ),
+    index("pe_invoice_id_created_idx").on(t.invoiceId, t.createdAt),
+    index("pe_payment_id_created_idx").on(t.invoicePaymentId, t.createdAt),
+    index("pe_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("pe_event_type_created_idx").on(t.eventType, t.createdAt),
+    uniqueIndex("pe_provider_event_id_unique").on(t.providerEventId),
+  ],
+);
+
+export const insertPaymentEventSchema = createInsertSchema(paymentEvents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertPaymentEvent = z.infer<typeof insertPaymentEventSchema>;
+export type PaymentEvent = typeof paymentEvents.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
