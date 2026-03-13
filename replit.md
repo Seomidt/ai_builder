@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 4D complete)
+# AI Builder Platform — V1 (Phase 4Q complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -276,3 +276,49 @@ npm run db:push   # Sync schema to DB
 - Overlap detection blocks apply when effectiveFrom windows conflict
 - Historical billing rows and plans are never deleted
 - All admin operations produce admin_change_requests + admin_change_events trail
+
+## Phase 4Q — Billing Observability & Monitoring (complete, branch: feature/billing-observability-monitoring)
+
+### New tables (schema.ts)
+- `billing_metrics_snapshots` — observability snapshots of billing metrics. Read-derived, NOT accounting truth. Lifecycle: started → completed | failed. 3-value snapshotStatus CHECK, 3-value scopeType CHECK (global/tenant/billing_period), window_check (end > start). 4 indexes.
+- `billing_alerts` — operational alert objects for billing anomalies. Deduplication via alert_key + open/acknowledged status. Status lifecycle: open → acknowledged → resolved | suppressed. 3-value severity CHECK, 4-value status CHECK, 5-value scopeType CHECK. 4 indexes.
+
+### New lib files
+- `server/lib/ai/billing-observability.ts` — Phase 4C foundation preserved (getBillingHealthSummary, getTenantBillingHealthSummary). Phase 4Q extends with: createGlobalBillingMetricsSnapshot, createTenantBillingMetricsSnapshot, createBillingPeriodMetricsSnapshot, getLatestGlobalBillingMetrics, getLatestTenantBillingMetrics, getLatestBillingPeriodMetrics. Snapshot engine: started → completed|failed persistence with full metrics JSON (ai, storage, invoices, payments, subscriptions).
+- `server/lib/ai/billing-anomalies.ts` — 6 anomaly detectors: revenue_drop (vs prior window, 20% threshold), margin_drop (AI margin < 5% critical / 10% warning), failed_payment_spike (>10% or >5 absolute), invoice_payment_mismatch (finalized >7 days with no paid payment), reconciliation_gap (critical findings), overage_spike (>50% vs prior). runBillingAnomalyScan() runs all 6 in parallel, returns error report. Each detector calls upsertBillingAlert() for deduplication.
+- `server/lib/ai/billing-monitoring-summary.ts` — 7 read-only summary helpers: getInvoiceMonitoringSummary, getPaymentMonitoringSummary, getSubscriptionMonitoringSummary, getReconciliationMonitoringSummary, getAllowanceMonitoringSummary, getTenantMonetizationHealthSummary, getGlobalMonetizationHealthSummary. All accept optional windowStart/windowEnd/tenantId.
+- `server/lib/ai/billing-alerts.ts` — upsertBillingAlert (deduplication via alertKey + active status), listOpenBillingAlerts, listBillingAlertsByScope, acknowledgeBillingAlert, resolveBillingAlert, suppressBillingAlert, explainBillingAlert (age/status explanation).
+- `server/lib/ai/billing-monitoring-retention.ts` — inspection-only helpers: explainBillingMonitoringRetentionPolicy, previewFailedMetricsSnapshotsOlderThan, previewOpenCriticalAlertsOlderThan, previewMonitoringGaps, previewTenantsWithoutRecentMetricsSnapshots. No destructive cleanup in Phase 4Q.
+
+### New routes (server/routes/admin.ts — 20 endpoints under /api/admin/monitoring/)
+- POST /snapshots/global — create global metrics snapshot
+- POST /snapshots/tenant/:tenantId — create tenant metrics snapshot
+- POST /snapshots/billing-period/:billingPeriodId — create billing period metrics snapshot
+- GET /snapshots/global/latest — latest global snapshot
+- GET /snapshots/tenant/:tenantId/latest — latest tenant snapshot
+- GET /snapshots/billing-period/:billingPeriodId/latest — latest period snapshot
+- POST /anomaly-scan — run all 6 detectors over a window
+- GET /summary/invoices — invoice monitoring summary
+- GET /summary/payments — payment monitoring summary
+- GET /summary/subscriptions — subscription monitoring summary
+- GET /summary/reconciliation — reconciliation monitoring summary
+- GET /summary/allowances — allowance monitoring summary
+- GET /summary/health/global — global monetization health
+- GET /summary/health/tenant/:tenantId — tenant monetization health
+- POST /alerts — upsert billing alert
+- GET /alerts — list open alerts (optional severity filter)
+- GET /alerts/scope/:scopeType/:scopeId — alerts by scope
+- GET /alerts/:alertId/explain — explain alert
+- POST /alerts/:alertId/acknowledge|resolve|suppress — status transitions
+- GET /retention/policy — retention policy explanation
+- GET /retention/failed-snapshots-older-than/:days — stale failed snapshots
+- GET /retention/open-critical-alerts-older-than/:days — aged critical alerts
+- GET /retention/monitoring-gaps — coverage gap detection
+- GET /retention/tenants-without-recent-snapshots/:days — tenant coverage gaps
+
+### Key design rules enforced
+- Snapshots are observability artifacts — NOT accounting truth, never replace canonical tables
+- Anomaly detection via alert_key deduplication — re-running over same window is idempotent
+- No destructive cleanup in Phase 4Q — all retention helpers are inspection-only
+- Failed snapshots persist as snapshot_status='failed' rows for operational forensics
+- Phase 4C helpers (getBillingHealthSummary, getTenantBillingHealthSummary) preserved in billing-observability.ts

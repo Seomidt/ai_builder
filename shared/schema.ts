@@ -3700,6 +3700,125 @@ export type InsertAdminChangeEvent = z.infer<typeof insertAdminChangeEventSchema
 export type AdminChangeEvent = typeof adminChangeEvents.$inferSelect;
 
 // Legacy types kept for compatibility
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4Q — Billing Observability & Monitoring
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * billing_metrics_snapshots — observability snapshots of billing metrics.
+ *
+ * These are read-derived summaries of canonical billing tables.
+ * They are NOT accounting truth and must never replace canonical tables.
+ * snapshot_status='failed' rows are persisted for operational inspection.
+ *
+ * scope_type determines what the snapshot covers:
+ *   'global'         — platform-wide aggregate
+ *   'tenant'         — single tenant (scope_id = tenantId)
+ *   'billing_period' — single billing period (scope_id = billingPeriodId)
+ */
+export const billingMetricsSnapshots = pgTable(
+  "billing_metrics_snapshots",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    scopeType: text("scope_type").notNull(),
+    scopeId: text("scope_id"),
+    metricWindowStart: timestamp("metric_window_start").notNull(),
+    metricWindowEnd: timestamp("metric_window_end").notNull(),
+    metrics: jsonb("metrics").notNull(),
+    snapshotStatus: text("snapshot_status").notNull().default("completed"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "bms_snapshot_status_check",
+      sql`${t.snapshotStatus} IN ('started','completed','failed')`,
+    ),
+    check(
+      "bms_window_check",
+      sql`${t.metricWindowEnd} > ${t.metricWindowStart}`,
+    ),
+    check(
+      "bms_scope_type_check",
+      sql`${t.scopeType} IN ('global','tenant','billing_period')`,
+    ),
+    index("bms_scope_type_created_idx").on(t.scopeType, t.createdAt),
+    index("bms_scope_type_scope_id_created_idx").on(t.scopeType, t.scopeId, t.createdAt),
+    index("bms_window_idx").on(t.metricWindowStart, t.metricWindowEnd),
+    index("bms_status_created_idx").on(t.snapshotStatus, t.createdAt),
+  ],
+);
+
+export const insertBillingMetricsSnapshotSchema = createInsertSchema(billingMetricsSnapshots).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertBillingMetricsSnapshot = z.infer<typeof insertBillingMetricsSnapshotSchema>;
+export type BillingMetricsSnapshot = typeof billingMetricsSnapshots.$inferSelect;
+
+/**
+ * billing_alerts — operational alert objects for billing anomalies and gaps.
+ *
+ * These are operational objects — NOT financial truth.
+ * alert_key enables deduplication: the same alert class for the same scope
+ * is upserted (last_detected_at updated) rather than generating duplicate rows.
+ *
+ * Status lifecycle:
+ *   open → acknowledged (ops aware) → resolved (issue closed) | suppressed (muted)
+ *
+ * severity:
+ *   'critical' — immediate action required
+ *   'warning'  — review recommended
+ *   'info'     — informational
+ */
+export const billingAlerts = pgTable(
+  "billing_alerts",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    alertType: text("alert_type").notNull(),
+    severity: text("severity").notNull(),
+    scopeType: text("scope_type").notNull(),
+    scopeId: text("scope_id"),
+    alertKey: text("alert_key").notNull(),
+    status: text("status").notNull().default("open"),
+    alertMessage: text("alert_message").notNull(),
+    details: jsonb("details"),
+    firstDetectedAt: timestamp("first_detected_at").notNull().defaultNow(),
+    lastDetectedAt: timestamp("last_detected_at").notNull().defaultNow(),
+    resolvedAt: timestamp("resolved_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "ba_severity_check",
+      sql`${t.severity} IN ('info','warning','critical')`,
+    ),
+    check(
+      "ba_status_check",
+      sql`${t.status} IN ('open','acknowledged','resolved','suppressed')`,
+    ),
+    check(
+      "ba_scope_type_check",
+      sql`${t.scopeType} IN ('global','tenant','billing_period','invoice','payment')`,
+    ),
+    index("ba_status_severity_created_idx").on(t.status, t.severity, t.createdAt),
+    index("ba_scope_type_scope_id_created_idx").on(t.scopeType, t.scopeId, t.createdAt),
+    index("ba_alert_type_created_idx").on(t.alertType, t.createdAt),
+    index("ba_alert_key_status_idx").on(t.alertKey, t.status),
+  ],
+);
+
+export const insertBillingAlertSchema = createInsertSchema(billingAlerts).omit({
+  id: true,
+  createdAt: true,
+  firstDetectedAt: true,
+  lastDetectedAt: true,
+  resolvedAt: true,
+});
+export type InsertBillingAlert = z.infer<typeof insertBillingAlertSchema>;
+export type BillingAlert = typeof billingAlerts.$inferSelect;
+
+// Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
 export type InsertUser = z.infer<typeof insertUserSchema>;

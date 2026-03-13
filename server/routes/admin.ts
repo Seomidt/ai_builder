@@ -61,6 +61,40 @@ import {
   previewAppliedAdminChangesWithoutEvents,
   previewPlanRowsStillReferencedHistorically,
 } from "../lib/ai/admin-change-retention";
+import {
+  createGlobalBillingMetricsSnapshot,
+  createTenantBillingMetricsSnapshot,
+  createBillingPeriodMetricsSnapshot,
+  getLatestGlobalBillingMetrics,
+  getLatestTenantBillingMetrics,
+  getLatestBillingPeriodMetrics,
+} from "../lib/ai/billing-observability";
+import { runBillingAnomalyScan } from "../lib/ai/billing-anomalies";
+import {
+  getInvoiceMonitoringSummary,
+  getPaymentMonitoringSummary,
+  getSubscriptionMonitoringSummary,
+  getReconciliationMonitoringSummary,
+  getAllowanceMonitoringSummary,
+  getTenantMonetizationHealthSummary,
+  getGlobalMonetizationHealthSummary,
+} from "../lib/ai/billing-monitoring-summary";
+import {
+  upsertBillingAlert,
+  listOpenBillingAlerts,
+  listBillingAlertsByScope,
+  acknowledgeBillingAlert,
+  resolveBillingAlert,
+  suppressBillingAlert,
+  explainBillingAlert,
+} from "../lib/ai/billing-alerts";
+import {
+  explainBillingMonitoringRetentionPolicy,
+  previewFailedMetricsSnapshotsOlderThan,
+  previewOpenCriticalAlertsOlderThan,
+  previewMonitoringGaps,
+  previewTenantsWithoutRecentMetricsSnapshots,
+} from "../lib/ai/billing-monitoring-retention";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -157,6 +191,21 @@ const tenantPlanChangeSchema = z.object({
 const tenantPlanCancellationSchema = z.object({
   effectiveTo: z.string().transform((s) => new Date(s)),
   requestedBy: z.string().nullable().optional(),
+});
+
+const metricsWindowSchema = z.object({
+  windowStart: z.string().transform((s) => new Date(s)),
+  windowEnd: z.string().transform((s) => new Date(s)),
+});
+
+const upsertBillingAlertSchema = z.object({
+  alertType: z.string().min(1),
+  severity: z.enum(["info", "warning", "critical"]),
+  scopeType: z.enum(["global", "tenant", "billing_period", "invoice", "payment"]),
+  scopeId: z.string().nullable().optional(),
+  alertKey: z.string().min(1),
+  alertMessage: z.string().min(1),
+  details: z.record(z.unknown()).nullable().optional(),
 });
 
 // ─── Route Registration ───────────────────────────────────────────────────────
@@ -507,6 +556,322 @@ export function registerAdminRoutes(app: Express): void {
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 4Q: Billing Monitoring — Metrics Snapshots ──────────────────────
+
+  app.post("/api/admin/monitoring/snapshots/global", async (req: Request, res: Response) => {
+    try {
+      const parsed = metricsWindowSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const result = await createGlobalBillingMetricsSnapshot(
+        parsed.data.windowStart,
+        parsed.data.windowEnd,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/monitoring/snapshots/tenant/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const parsed = metricsWindowSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const result = await createTenantBillingMetricsSnapshot(
+        tenantId,
+        parsed.data.windowStart,
+        parsed.data.windowEnd,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/monitoring/snapshots/billing-period/:billingPeriodId", async (req: Request, res: Response) => {
+    try {
+      const billingPeriodId = String(req.params.billingPeriodId);
+      const parsed = metricsWindowSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const result = await createBillingPeriodMetricsSnapshot(
+        billingPeriodId,
+        parsed.data.windowStart,
+        parsed.data.windowEnd,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/snapshots/global/latest", async (_req: Request, res: Response) => {
+    try {
+      const result = await getLatestGlobalBillingMetrics();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/snapshots/tenant/:tenantId/latest", async (req: Request, res: Response) => {
+    try {
+      const result = await getLatestTenantBillingMetrics(String(req.params.tenantId));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/snapshots/billing-period/:billingPeriodId/latest", async (req: Request, res: Response) => {
+    try {
+      const result = await getLatestBillingPeriodMetrics(String(req.params.billingPeriodId));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 4Q: Billing Monitoring — Anomaly Scan ───────────────────────────
+
+  app.post("/api/admin/monitoring/anomaly-scan", async (req: Request, res: Response) => {
+    try {
+      const parsed = metricsWindowSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const result = await runBillingAnomalyScan(parsed.data.windowStart, parsed.data.windowEnd);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 4Q: Billing Monitoring — Summaries ─────────────────────────────
+
+  app.get("/api/admin/monitoring/summary/invoices", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd, tenantId } = req.query as Record<string, string | undefined>;
+      const result = await getInvoiceMonitoringSummary(
+        windowStart ? new Date(windowStart) : undefined,
+        windowEnd ? new Date(windowEnd) : undefined,
+        tenantId,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/payments", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd, tenantId } = req.query as Record<string, string | undefined>;
+      const result = await getPaymentMonitoringSummary(
+        windowStart ? new Date(windowStart) : undefined,
+        windowEnd ? new Date(windowEnd) : undefined,
+        tenantId,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.query as Record<string, string | undefined>;
+      const result = await getSubscriptionMonitoringSummary(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/reconciliation", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd } = req.query as Record<string, string | undefined>;
+      const result = await getReconciliationMonitoringSummary(
+        windowStart ? new Date(windowStart) : undefined,
+        windowEnd ? new Date(windowEnd) : undefined,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/allowances", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd, tenantId } = req.query as Record<string, string | undefined>;
+      const result = await getAllowanceMonitoringSummary(
+        windowStart ? new Date(windowStart) : undefined,
+        windowEnd ? new Date(windowEnd) : undefined,
+        tenantId,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/health/global", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd } = req.query as Record<string, string | undefined>;
+      if (!windowStart || !windowEnd) {
+        return res.status(400).json({ error: "windowStart and windowEnd query params required" });
+      }
+      const result = await getGlobalMonetizationHealthSummary(
+        new Date(windowStart),
+        new Date(windowEnd),
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/health/tenant/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const { windowStart, windowEnd } = req.query as Record<string, string | undefined>;
+      if (!windowStart || !windowEnd) {
+        return res.status(400).json({ error: "windowStart and windowEnd query params required" });
+      }
+      const result = await getTenantMonetizationHealthSummary(
+        tenantId,
+        new Date(windowStart),
+        new Date(windowEnd),
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 4Q: Billing Monitoring — Alerts ────────────────────────────────
+
+  app.post("/api/admin/monitoring/alerts", async (req: Request, res: Response) => {
+    try {
+      const parsed = upsertBillingAlertSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const result = await upsertBillingAlert(parsed.data);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/alerts", async (req: Request, res: Response) => {
+    try {
+      const { severity, limit } = req.query as Record<string, string | undefined>;
+      const parsedLimit = limit ? Number(limit) : 50;
+      const result = await listOpenBillingAlerts(
+        parsedLimit,
+        severity as "info" | "warning" | "critical" | undefined,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/alerts/scope/:scopeType/:scopeId", async (req: Request, res: Response) => {
+    try {
+      const scopeType = String(req.params.scopeType);
+      const scopeId = String(req.params.scopeId);
+      const { limit } = req.query as Record<string, string | undefined>;
+      const result = await listBillingAlertsByScope(scopeType, scopeId, limit ? Number(limit) : 50);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/alerts/:alertId/explain", async (req: Request, res: Response) => {
+    try {
+      const result = await explainBillingAlert(String(req.params.alertId));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/monitoring/alerts/:alertId/acknowledge", async (req: Request, res: Response) => {
+    try {
+      const result = await acknowledgeBillingAlert(String(req.params.alertId));
+      if (!result) return res.status(404).json({ error: "Alert not found" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/monitoring/alerts/:alertId/resolve", async (req: Request, res: Response) => {
+    try {
+      const result = await resolveBillingAlert(String(req.params.alertId));
+      if (!result) return res.status(404).json({ error: "Alert not found" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/monitoring/alerts/:alertId/suppress", async (req: Request, res: Response) => {
+    try {
+      const result = await suppressBillingAlert(String(req.params.alertId));
+      if (!result) return res.status(404).json({ error: "Alert not found" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 4Q: Billing Monitoring — Retention Helpers ────────────────────
+
+  app.get("/api/admin/monitoring/retention/policy", (_req: Request, res: Response) => {
+    res.json(explainBillingMonitoringRetentionPolicy());
+  });
+
+  app.get("/api/admin/monitoring/retention/failed-snapshots-older-than/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewFailedMetricsSnapshotsOlderThan(days);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/retention/open-critical-alerts-older-than/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewOpenCriticalAlertsOlderThan(days);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/retention/monitoring-gaps", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd } = req.query as Record<string, string | undefined>;
+      if (!windowStart || !windowEnd) {
+        return res.status(400).json({ error: "windowStart and windowEnd query params required" });
+      }
+      const result = await previewMonitoringGaps(new Date(windowStart), new Date(windowEnd));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/retention/tenants-without-recent-snapshots/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewTenantsWithoutRecentMetricsSnapshots(days);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
     }
   });
 }
