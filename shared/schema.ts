@@ -3115,7 +3115,9 @@ export const invoicePayments = pgTable(
   "invoice_payments",
   {
     id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    invoiceId: text("invoice_id").notNull(),
+    invoiceId: text("invoice_id")
+      .notNull()
+      .references(() => invoices.id),
     tenantId: text("tenant_id").notNull(),
     paymentProvider: text("payment_provider").notNull().default("stripe"),
     paymentStatus: text("payment_status").notNull().default("pending"),
@@ -3169,7 +3171,9 @@ export const stripeInvoiceLinks = pgTable(
   "stripe_invoice_links",
   {
     id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    invoiceId: text("invoice_id").notNull(),
+    invoiceId: text("invoice_id")
+      .notNull()
+      .references(() => invoices.id),
     tenantId: text("tenant_id").notNull(),
     stripeCustomerId: text("stripe_customer_id"),
     stripeInvoiceId: text("stripe_invoice_id"),
@@ -3221,8 +3225,11 @@ export const paymentEvents = pgTable(
   "payment_events",
   {
     id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    invoicePaymentId: text("invoice_payment_id"),
-    invoiceId: text("invoice_id").notNull(),
+    invoicePaymentId: text("invoice_payment_id")
+      .references(() => invoicePayments.id),
+    invoiceId: text("invoice_id")
+      .notNull()
+      .references(() => invoices.id),
     tenantId: text("tenant_id").notNull(),
     eventType: text("event_type").notNull(),
     eventSource: text("event_source").notNull().default("internal"),
