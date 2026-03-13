@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5B.2 complete)
+# AI Builder Platform — V1 (Phase 5B.2.1 complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -685,3 +685,36 @@ OCR parser abstraction + image-aware chunking. 22 columns added across 3 tables.
 ### Validation: 15/15 scenarios passed
 
 S1 PNG OCR parse (blocks=3 lines=7 checksum ok), S2 unsupported mime explicit fail (INV-IMG11), S3 oversized image safe rejection, S4 chunk parsed version (indexState=pending NOT indexed), S5 rerun deactivates prior image chunks (audit trail), S6 parse fail doesn't mutate current retrieval, S7 chunk transaction safe (no mixed state), S8 non-current version no affect on current, S9 cross-tenant rejected, S10 archived KB/doc blocked, S11 deterministic OCR chunk keys and hashes, S12 changed config causes replacement+stale, S13 job lock safety (w2 rejected), S14 inspection helpers work (ocrStatus/chunks/jobs), S15 Phase 5A.1 invariants still hold.
+
+## Phase 5B.2.1 — OCR Engine Integration Hardening (branch: feature/ocr-engine-hardening)
+
+Replaces stub_ocr v1.0 with real production OCR engine (openai_vision_ocr v1.0).
+
+### New files
+
+- `server/lib/ai/openai-vision-ocr.ts` — `openaiVisionOcrEngine` (real OCR via GPT-4o Vision API). Content routing: data URL / raw base64 / HTTPS URL → OpenAI Vision API call; plain text → text-based extraction (backward compat). Virtual 1000×1000 canvas coordinate mapping for bounding boxes. 30s timeout + explicit failure.
+- `server/lib/ai/validate-phase5b2-1.ts` — 15 validation scenarios (all passing)
+
+### Updated files
+
+- `server/lib/ai/image-ocr-parsers.ts` — `selectOcrParser()` now routes all supported mime types to `openaiVisionOcrEngine`. Engine hint `'stub_ocr'` overrides to legacy stub for isolated testing. `normalizeOcrDocument()` now always recomputes `textChecksum` after sort. `stubOcrEngine` kept and exported for unit testing only.
+
+### Engine properties (openai_vision_ocr v1.0)
+
+- Model: gpt-4o (vision mode, detail=high, temperature=0, max_tokens=4096)
+- Supported: image/png, image/jpeg, image/jpg, image/webp
+- Content detection: data URL → API; raw base64 → API; HTTPS URL → API; plain text → text fallback
+- Bounding boxes: percentage-based from GPT-4o → scaled to virtual 1000×1000 canvas integers
+- Confidence: per-region float 0.0–1.0 from model (0.85–0.99 clear, 0.65–0.85 unclear)
+- Checksum: SHA-256 of sorted region texts (page|regionIndex|text), hex slice 24 chars
+- Explicit failure: oversized (INV-IMG11), empty (INV-IMG11), no-text image (INV-IMG11), OPENAI_API_KEY missing + binary content (INV-IMG11)
+
+### Backward compatibility
+
+- All existing Phase 5B.2 validation scenarios pass (15/15) with new engine
+- Tests injecting plain text still work via text fallback path (labeled in warnings)
+- `engineHint: 'stub_ocr'` in `OcrParseOptions` routes to legacy engine for isolated tests
+
+### Validation: 15/15 scenarios passed
+
+S1 selectOcrParser routes to openai_vision_ocr for all supported mime types, S2 stub_ocr hint override works, S3 engine properties correct (name/version/types/parse), S4 plain text fallback path produces correct output, S5 normalizeOcrDocument sets textChecksum correctly, S6 computeOcrTextChecksum is deterministic, S7 summarizeOcrParseResult includes engine name, S8 oversized content explicit rejection (INV-IMG11), S9 empty content explicit rejection (INV-IMG11), S10 5/5 unsupported mime types fail explicitly, S11 parseImageDocumentVersion returns full engine info, S12 engineHint=stub_ocr routes to legacy engine, S13 bounding boxes present and valid for plain text path, S14 OCR result integrates with chunkOcrDocument correctly, S15 image/jpg and image/jpeg both supported.

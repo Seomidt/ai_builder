@@ -1,16 +1,23 @@
 /**
- * Phase 5B.2 — Image OCR Parser Abstraction
+ * Phase 5B.2.1 — Image OCR Parser Abstraction (Real Engine)
  *
- * Supported mime types: image/png, image/jpeg, image/webp
- * XLSX and arbitrary binaries: explicit fail (INV-IMG11)
+ * Supported mime types: image/png, image/jpeg, image/jpg, image/webp
+ * Unsupported types: explicit fail (INV-IMG11)
  *
- * OCR engine: stub_ocr v1.0 — deterministic placeholder.
- * Real OCR engine (e.g. tesseract) must be wired in a future phase.
- * This layer builds the full abstraction and explicit failure path now.
+ * Primary OCR engine: openai_vision_ocr v1.0
+ *   - Real text extraction via GPT-4o Vision API
+ *   - Bounding box metadata (percentage → virtual 1000×1000 canvas)
+ *   - Per-region confidence scores
+ *   - Deterministic normalization and text checksum
+ *   - Plain-text fallback for backward compat (tests, pre-extracted content)
+ *   - Explicit failure for unsupported / oversized / empty input (INV-IMG11)
+ *
+ * Legacy engine: stub_ocr v1.0 (kept for isolated unit testing only)
  */
 
 import { createHash } from "crypto";
 import { KnowledgeInvariantError } from "./knowledge-bases";
+import { openaiVisionOcrEngine } from "./openai-vision-ocr";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -68,8 +75,6 @@ export const SUPPORTED_OCR_MIME_TYPES = new Set([
   "image/webp",
 ]);
 
-const MAX_DEFAULT_IMAGE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
-
 // ─── Checksum ────────────────────────────────────────────────────────────────
 
 export function computeOcrTextChecksum(result: OcrParseResult): string {
@@ -80,24 +85,19 @@ export function computeOcrTextChecksum(result: OcrParseResult): string {
   return createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 24);
 }
 
-// ─── Stub OCR Engine ──────────────────────────────────────────────────────────
+// ─── Legacy Stub Engine (unit testing only) ───────────────────────────────────
 /**
- * stub_ocr — deterministic placeholder OCR engine.
- *
- * For testing and integration validation. Parses image-like content
- * by treating the content string as OCR source text (e.g. base64 header
- * stripped or plain text injected for tests).
- *
- * INV-IMG11: Real unsupported binary blobs that cannot be parsed as text
- * still fail explicitly below the content validation check.
+ * stub_ocr — legacy deterministic placeholder.
+ * Kept for isolated unit testing. Not used in production routing.
+ * selectOcrParser() routes to openai_vision_ocr in all production paths.
  */
-const stubOcrEngine: OcrParser = {
+export const stubOcrEngine: OcrParser = {
   name: "stub_ocr",
   version: "1.0",
   supportedMimeTypes: Array.from(SUPPORTED_OCR_MIME_TYPES),
 
   async parse(content: string, mimeType: string, options?: OcrParseOptions): Promise<OcrParseResult> {
-    const maxBytes = options?.maxImageSizeBytes ?? MAX_DEFAULT_IMAGE_SIZE_BYTES;
+    const maxBytes = options?.maxImageSizeBytes ?? 10 * 1024 * 1024;
 
     if (Buffer.byteLength(content, "utf8") > maxBytes) {
       throw new KnowledgeInvariantError(
@@ -105,11 +105,10 @@ const stubOcrEngine: OcrParser = {
         `Image content exceeds maximum safe size (${maxBytes} bytes). Explicit rejection (stub_ocr engine).`,
       );
     }
-
     if (!content || content.trim().length === 0) {
       throw new KnowledgeInvariantError(
         "INV-IMG11",
-        "Image content is empty or zero-length. Explicit failure — stub_ocr engine cannot process empty input.",
+        "Image content is empty or zero-length. Explicit failure — stub_ocr engine.",
       );
     }
 
@@ -168,7 +167,7 @@ const stubOcrEngine: OcrParser = {
       averageConfidence: Math.round(avgConf * 1000) / 1000,
       textChecksum: "",
       warnings: [
-        `stub_ocr: deterministic placeholder engine — real OCR not executed (${label})`,
+        `stub_ocr: legacy deterministic placeholder engine (${label}) — use openai_vision_ocr in production`,
       ],
       metadata: {
         contentHash: contentHash.slice(0, 16),
@@ -185,19 +184,25 @@ const stubOcrEngine: OcrParser = {
 
 /**
  * selectOcrParser — returns the appropriate OCR parser for the given mime type.
- * INV-IMG11: Unsupported/malformed mime types fail explicitly.
+ *
+ * Phase 5B.2.1: Routes ALL supported mime types to openai_vision_ocr.
+ * Unsupported types fail explicitly (INV-IMG11).
+ *
+ * @param mimeType  Normalized mime type of the image document version.
+ * @param hint      Optional engine override (e.g. 'stub_ocr' for isolated testing).
  */
-export function selectOcrParser(mimeType: string): OcrParser {
+export function selectOcrParser(mimeType: string, hint?: string): OcrParser {
   const normalizedMime = mimeType.toLowerCase().trim();
 
-  if (SUPPORTED_OCR_MIME_TYPES.has(normalizedMime)) {
-    return stubOcrEngine;
+  if (!SUPPORTED_OCR_MIME_TYPES.has(normalizedMime)) {
+    throw new KnowledgeInvariantError(
+      "INV-IMG11",
+      `OCR parser not available for mime type '${mimeType}'. Supported: ${Array.from(SUPPORTED_OCR_MIME_TYPES).join(", ")}. Explicit failure — no silent fallback.`,
+    );
   }
 
-  throw new KnowledgeInvariantError(
-    "INV-IMG11",
-    `OCR parser not available for mime type '${mimeType}'. Supported: ${Array.from(SUPPORTED_OCR_MIME_TYPES).join(", ")}. Explicit failure — no silent fallback.`,
-  );
+  if (hint === "stub_ocr") return stubOcrEngine;
+  return openaiVisionOcrEngine;
 }
 
 // ─── Normalize ────────────────────────────────────────────────────────────────
@@ -210,7 +215,9 @@ export function normalizeOcrDocument(result: OcrParseResult): OcrParseResult {
   const sortedRegions = [...result.regions].sort(
     (a, b) => a.pageNumber - b.pageNumber || a.regionIndex - b.regionIndex,
   );
-  return { ...result, regions: sortedRegions };
+  const normalized = { ...result, regions: sortedRegions };
+  normalized.textChecksum = computeOcrTextChecksum(normalized);
+  return normalized;
 }
 
 // ─── Top-level parse function ─────────────────────────────────────────────────
@@ -224,7 +231,8 @@ export async function parseImageDocumentVersion(
   mimeType: string,
   options?: OcrParseOptions,
 ): Promise<OcrParseResult> {
-  const parser = selectOcrParser(mimeType);
+  const engineHint = options?.engineHint;
+  const parser = selectOcrParser(mimeType, engineHint);
   const raw = await parser.parse(content, mimeType, options);
   return normalizeOcrDocument(raw);
 }
