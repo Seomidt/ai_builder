@@ -24,6 +24,11 @@
  *   - Invalid transitions throw
  *   - updated_at maintained on every transition
  *   - payment_events row recorded for each state change
+ *
+ * Atomicity:
+ *   - Every state mutation + event insert is wrapped in a single
+ *     db.transaction() — if event insert fails, the state change
+ *     is rolled back, ensuring no audit gaps.
  */
 
 import { eq, and, desc } from "drizzle-orm";
@@ -43,25 +48,6 @@ const VALID_TRANSITIONS: Record<string, string[]> = {
   refunded: [],
   void: [],
 };
-
-async function recordPaymentEvent(
-  invoicePaymentId: string | null,
-  invoiceId: string,
-  tenantId: string,
-  eventType: string,
-  eventSource: "internal" | "stripe_webhook" | "manual" = "internal",
-  metadata?: Record<string, unknown> | null,
-): Promise<void> {
-  await db.insert(paymentEvents).values({
-    invoicePaymentId,
-    invoiceId,
-    tenantId,
-    eventType,
-    eventSource,
-    eventStatus: "recorded",
-    metadata: metadata ?? null,
-  });
-}
 
 async function loadInvoice(invoiceId: string): Promise<Invoice> {
   const rows = await db
@@ -112,31 +98,36 @@ export async function createInvoicePayment(
     );
   }
 
-  const inserted = await db
-    .insert(invoicePayments)
-    .values({
+  const payment = await db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(invoicePayments)
+      .values({
+        invoiceId,
+        tenantId: invoice.tenantId,
+        paymentProvider: "stripe",
+        paymentStatus: "pending",
+        amountUsd: String(invoice.totalUsd),
+        currency: invoice.currency,
+        metadata: metadata ?? null,
+      })
+      .returning();
+    const p = inserted[0];
+
+    await tx.insert(paymentEvents).values({
+      invoicePaymentId: p.id,
       invoiceId,
       tenantId: invoice.tenantId,
-      paymentProvider: "stripe",
-      paymentStatus: "pending",
-      amountUsd: String(invoice.totalUsd),
-      currency: invoice.currency,
-      metadata: metadata ?? null,
-    })
-    .returning();
-  const payment = inserted[0];
+      eventType: "payment_created",
+      eventSource: "internal",
+      eventStatus: "recorded",
+      metadata: {
+        amountUsd: String(invoice.totalUsd),
+        invoiceNumber: invoice.invoiceNumber,
+      },
+    });
 
-  await recordPaymentEvent(
-    payment.id,
-    invoiceId,
-    invoice.tenantId,
-    "payment_created",
-    "internal",
-    {
-      amountUsd: String(invoice.totalUsd),
-      invoiceNumber: invoice.invoiceNumber,
-    },
-  );
+    return p;
+  });
 
   console.log(
     `[ai/invoice-payments] Payment created: ${payment.id} for invoice ${invoice.invoiceNumber}`,
@@ -151,26 +142,29 @@ export async function markInvoicePaymentProcessing(
   const payment = await loadPayment(paymentId);
   assertValidTransition(payment.paymentStatus, "processing", paymentId);
 
-  const updated = await db
-    .update(invoicePayments)
-    .set({
-      paymentStatus: "processing",
-      updatedAt: new Date(),
-      metadata: metadata ?? payment.metadata,
-    })
-    .where(eq(invoicePayments.id, paymentId))
-    .returning();
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(invoicePayments)
+      .set({
+        paymentStatus: "processing",
+        updatedAt: new Date(),
+        metadata: metadata ?? payment.metadata,
+      })
+      .where(eq(invoicePayments.id, paymentId))
+      .returning();
 
-  await recordPaymentEvent(
-    paymentId,
-    payment.invoiceId,
-    payment.tenantId,
-    "payment_processing",
-    "internal",
-    metadata,
-  );
+    await tx.insert(paymentEvents).values({
+      invoicePaymentId: paymentId,
+      invoiceId: payment.invoiceId,
+      tenantId: payment.tenantId,
+      eventType: "payment_processing",
+      eventSource: "internal",
+      eventStatus: "recorded",
+      metadata: metadata ?? null,
+    });
 
-  return updated[0];
+    return updated[0];
+  });
 }
 
 export async function markInvoicePaymentPaid(
@@ -182,30 +176,34 @@ export async function markInvoicePaymentPaid(
   assertValidTransition(payment.paymentStatus, "paid", paymentId);
 
   const now = paidAt ?? new Date();
-  const updated = await db
-    .update(invoicePayments)
-    .set({
-      paymentStatus: "paid",
-      paidAt: now,
-      providerPaymentReference: providerReference ?? payment.providerPaymentReference,
-      updatedAt: new Date(),
-    })
-    .where(eq(invoicePayments.id, paymentId))
-    .returning();
 
-  await recordPaymentEvent(
-    paymentId,
-    payment.invoiceId,
-    payment.tenantId,
-    "payment_paid",
-    "internal",
-    {
-      providerReference: providerReference ?? null,
-      paidAt: now.toISOString(),
-    },
-  );
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(invoicePayments)
+      .set({
+        paymentStatus: "paid",
+        paidAt: now,
+        providerPaymentReference: providerReference ?? payment.providerPaymentReference,
+        updatedAt: new Date(),
+      })
+      .where(eq(invoicePayments.id, paymentId))
+      .returning();
 
-  return updated[0];
+    await tx.insert(paymentEvents).values({
+      invoicePaymentId: paymentId,
+      invoiceId: payment.invoiceId,
+      tenantId: payment.tenantId,
+      eventType: "payment_paid",
+      eventSource: "internal",
+      eventStatus: "recorded",
+      metadata: {
+        providerReference: providerReference ?? null,
+        paidAt: now.toISOString(),
+      },
+    });
+
+    return updated[0];
+  });
 }
 
 export async function markInvoicePaymentFailed(
@@ -217,29 +215,33 @@ export async function markInvoicePaymentFailed(
   assertValidTransition(payment.paymentStatus, "failed", paymentId);
 
   const now = failedAt ?? new Date();
-  const updated = await db
-    .update(invoicePayments)
-    .set({
-      paymentStatus: "failed",
-      failedAt: now,
-      updatedAt: new Date(),
-    })
-    .where(eq(invoicePayments.id, paymentId))
-    .returning();
 
-  await recordPaymentEvent(
-    paymentId,
-    payment.invoiceId,
-    payment.tenantId,
-    "payment_failed",
-    "internal",
-    {
-      error: error ?? null,
-      failedAt: now.toISOString(),
-    },
-  );
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(invoicePayments)
+      .set({
+        paymentStatus: "failed",
+        failedAt: now,
+        updatedAt: new Date(),
+      })
+      .where(eq(invoicePayments.id, paymentId))
+      .returning();
 
-  return updated[0];
+    await tx.insert(paymentEvents).values({
+      invoicePaymentId: paymentId,
+      invoiceId: payment.invoiceId,
+      tenantId: payment.tenantId,
+      eventType: "payment_failed",
+      eventSource: "internal",
+      eventStatus: "recorded",
+      metadata: {
+        error: error ?? null,
+        failedAt: now.toISOString(),
+      },
+    });
+
+    return updated[0];
+  });
 }
 
 export async function markInvoicePaymentRefunded(
@@ -251,30 +253,34 @@ export async function markInvoicePaymentRefunded(
   assertValidTransition(payment.paymentStatus, "refunded", paymentId);
 
   const now = refundedAt ?? new Date();
-  const updated = await db
-    .update(invoicePayments)
-    .set({
-      paymentStatus: "refunded",
-      refundedAt: now,
-      providerPaymentReference: providerReference ?? payment.providerPaymentReference,
-      updatedAt: new Date(),
-    })
-    .where(eq(invoicePayments.id, paymentId))
-    .returning();
 
-  await recordPaymentEvent(
-    paymentId,
-    payment.invoiceId,
-    payment.tenantId,
-    "payment_refunded",
-    "internal",
-    {
-      providerReference: providerReference ?? null,
-      refundedAt: now.toISOString(),
-    },
-  );
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(invoicePayments)
+      .set({
+        paymentStatus: "refunded",
+        refundedAt: now,
+        providerPaymentReference: providerReference ?? payment.providerPaymentReference,
+        updatedAt: new Date(),
+      })
+      .where(eq(invoicePayments.id, paymentId))
+      .returning();
 
-  return updated[0];
+    await tx.insert(paymentEvents).values({
+      invoicePaymentId: paymentId,
+      invoiceId: payment.invoiceId,
+      tenantId: payment.tenantId,
+      eventType: "payment_refunded",
+      eventSource: "internal",
+      eventStatus: "recorded",
+      metadata: {
+        providerReference: providerReference ?? null,
+        refundedAt: now.toISOString(),
+      },
+    });
+
+    return updated[0];
+  });
 }
 
 export async function markInvoicePaymentVoid(
@@ -283,24 +289,28 @@ export async function markInvoicePaymentVoid(
   const payment = await loadPayment(paymentId);
   assertValidTransition(payment.paymentStatus, "void", paymentId);
 
-  const updated = await db
-    .update(invoicePayments)
-    .set({
-      paymentStatus: "void",
-      updatedAt: new Date(),
-    })
-    .where(eq(invoicePayments.id, paymentId))
-    .returning();
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(invoicePayments)
+      .set({
+        paymentStatus: "void",
+        updatedAt: new Date(),
+      })
+      .where(eq(invoicePayments.id, paymentId))
+      .returning();
 
-  await recordPaymentEvent(
-    paymentId,
-    payment.invoiceId,
-    payment.tenantId,
-    "payment_voided",
-    "internal",
-  );
+    await tx.insert(paymentEvents).values({
+      invoicePaymentId: paymentId,
+      invoiceId: payment.invoiceId,
+      tenantId: payment.tenantId,
+      eventType: "payment_voided",
+      eventSource: "internal",
+      eventStatus: "recorded",
+      metadata: null,
+    });
 
-  return updated[0];
+    return updated[0];
+  });
 }
 
 export async function getInvoicePaymentByInvoiceId(

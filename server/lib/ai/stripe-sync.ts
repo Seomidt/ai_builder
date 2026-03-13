@@ -16,6 +16,11 @@
  * Sync lifecycle:
  *   not_synced → (markStripeSyncStarted) → (markStripeSyncSucceeded → synced)
  *                                         → (markStripeSyncFailed → sync_failed)
+ *
+ * Atomicity:
+ *   - Every sync state mutation + event insert is wrapped in a single
+ *     db.transaction() — if event insert fails, the state change
+ *     is rolled back, ensuring no audit gaps.
  */
 
 import { eq, and, desc } from "drizzle-orm";
@@ -26,23 +31,6 @@ import {
   paymentEvents,
 } from "@shared/schema";
 import type { StripeInvoiceLink } from "@shared/schema";
-
-async function recordSyncEvent(
-  invoiceId: string,
-  tenantId: string,
-  eventType: string,
-  metadata?: Record<string, unknown> | null,
-): Promise<void> {
-  await db.insert(paymentEvents).values({
-    invoicePaymentId: null,
-    invoiceId,
-    tenantId,
-    eventType,
-    eventSource: "internal",
-    eventStatus: "recorded",
-    metadata: metadata ?? null,
-  });
-}
 
 export interface StripeIds {
   stripeCustomerId?: string | null;
@@ -65,21 +53,42 @@ export async function createStripeInvoiceLink(
   }
   const invoice = invoiceRows[0];
 
-  const inserted = await db
-    .insert(stripeInvoiceLinks)
-    .values({
+  const result = await db.transaction(async (tx) => {
+    const inserted = await tx
+      .insert(stripeInvoiceLinks)
+      .values({
+        invoiceId,
+        tenantId: invoice.tenantId,
+        stripeCustomerId: stripeIds?.stripeCustomerId ?? null,
+        stripeInvoiceId: stripeIds?.stripeInvoiceId ?? null,
+        stripePaymentIntentId: stripeIds?.stripePaymentIntentId ?? null,
+        stripeCheckoutSessionId: stripeIds?.stripeCheckoutSessionId ?? null,
+        syncStatus: "not_synced",
+      })
+      .onConflictDoNothing({ target: stripeInvoiceLinks.invoiceId })
+      .returning();
+
+    if (inserted.length === 0) {
+      return null;
+    }
+
+    await tx.insert(paymentEvents).values({
+      invoicePaymentId: null,
       invoiceId,
       tenantId: invoice.tenantId,
-      stripeCustomerId: stripeIds?.stripeCustomerId ?? null,
-      stripeInvoiceId: stripeIds?.stripeInvoiceId ?? null,
-      stripePaymentIntentId: stripeIds?.stripePaymentIntentId ?? null,
-      stripeCheckoutSessionId: stripeIds?.stripeCheckoutSessionId ?? null,
-      syncStatus: "not_synced",
-    })
-    .onConflictDoNothing({ target: stripeInvoiceLinks.invoiceId })
-    .returning();
+      eventType: "stripe_link_created",
+      eventSource: "internal",
+      eventStatus: "recorded",
+      metadata: {
+        invoiceNumber: invoice.invoiceNumber,
+        stripeCustomerId: stripeIds?.stripeCustomerId ?? null,
+      },
+    });
 
-  if (inserted.length === 0) {
+    return inserted[0];
+  });
+
+  if (result === null) {
     const existing = await db
       .select()
       .from(stripeInvoiceLinks)
@@ -92,7 +101,7 @@ export async function createStripeInvoiceLink(
   console.log(
     `[ai/stripe-sync] Stripe link created for invoice ${invoice.invoiceNumber}`,
   );
-  return inserted[0];
+  return result;
 }
 
 export async function markStripeSyncStarted(
@@ -105,15 +114,25 @@ export async function markStripeSyncStarted(
     );
   }
 
-  const updated = await db
-    .update(stripeInvoiceLinks)
-    .set({ updatedAt: new Date() })
-    .where(eq(stripeInvoiceLinks.id, link.id))
-    .returning();
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(stripeInvoiceLinks)
+      .set({ updatedAt: new Date() })
+      .where(eq(stripeInvoiceLinks.id, link.id))
+      .returning();
 
-  await recordSyncEvent(invoiceId, link.tenantId, "stripe_sync_started");
+    await tx.insert(paymentEvents).values({
+      invoicePaymentId: null,
+      invoiceId,
+      tenantId: link.tenantId,
+      eventType: "stripe_sync_started",
+      eventSource: "internal",
+      eventStatus: "recorded",
+      metadata: null,
+    });
 
-  return updated[0];
+    return updated[0];
+  });
 }
 
 export async function markStripeSyncSucceeded(
@@ -127,27 +146,37 @@ export async function markStripeSyncSucceeded(
     );
   }
 
-  const updated = await db
-    .update(stripeInvoiceLinks)
-    .set({
-      syncStatus: "synced",
-      lastSyncedAt: new Date(),
-      lastSyncError: null,
-      stripeCustomerId: stripeIds?.stripeCustomerId ?? link.stripeCustomerId,
-      stripeInvoiceId: stripeIds?.stripeInvoiceId ?? link.stripeInvoiceId,
-      stripePaymentIntentId: stripeIds?.stripePaymentIntentId ?? link.stripePaymentIntentId,
-      stripeCheckoutSessionId: stripeIds?.stripeCheckoutSessionId ?? link.stripeCheckoutSessionId,
-      updatedAt: new Date(),
-    })
-    .where(eq(stripeInvoiceLinks.id, link.id))
-    .returning();
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(stripeInvoiceLinks)
+      .set({
+        syncStatus: "synced",
+        lastSyncedAt: new Date(),
+        lastSyncError: null,
+        stripeCustomerId: stripeIds?.stripeCustomerId ?? link.stripeCustomerId,
+        stripeInvoiceId: stripeIds?.stripeInvoiceId ?? link.stripeInvoiceId,
+        stripePaymentIntentId: stripeIds?.stripePaymentIntentId ?? link.stripePaymentIntentId,
+        stripeCheckoutSessionId: stripeIds?.stripeCheckoutSessionId ?? link.stripeCheckoutSessionId,
+        updatedAt: new Date(),
+      })
+      .where(eq(stripeInvoiceLinks.id, link.id))
+      .returning();
 
-  await recordSyncEvent(invoiceId, link.tenantId, "stripe_sync_succeeded", {
-    stripeInvoiceId: stripeIds?.stripeInvoiceId ?? link.stripeInvoiceId,
-    stripePaymentIntentId: stripeIds?.stripePaymentIntentId ?? link.stripePaymentIntentId,
+    await tx.insert(paymentEvents).values({
+      invoicePaymentId: null,
+      invoiceId,
+      tenantId: link.tenantId,
+      eventType: "stripe_sync_succeeded",
+      eventSource: "internal",
+      eventStatus: "recorded",
+      metadata: {
+        stripeInvoiceId: stripeIds?.stripeInvoiceId ?? link.stripeInvoiceId,
+        stripePaymentIntentId: stripeIds?.stripePaymentIntentId ?? link.stripePaymentIntentId,
+      },
+    });
+
+    return updated[0];
   });
-
-  return updated[0];
 }
 
 export async function markStripeSyncFailed(
@@ -161,21 +190,29 @@ export async function markStripeSyncFailed(
     );
   }
 
-  const updated = await db
-    .update(stripeInvoiceLinks)
-    .set({
-      syncStatus: "sync_failed",
-      lastSyncError: error,
-      updatedAt: new Date(),
-    })
-    .where(eq(stripeInvoiceLinks.id, link.id))
-    .returning();
+  return db.transaction(async (tx) => {
+    const updated = await tx
+      .update(stripeInvoiceLinks)
+      .set({
+        syncStatus: "sync_failed",
+        lastSyncError: error,
+        updatedAt: new Date(),
+      })
+      .where(eq(stripeInvoiceLinks.id, link.id))
+      .returning();
 
-  await recordSyncEvent(invoiceId, link.tenantId, "stripe_sync_failed", {
-    error,
+    await tx.insert(paymentEvents).values({
+      invoicePaymentId: null,
+      invoiceId,
+      tenantId: link.tenantId,
+      eventType: "stripe_sync_failed",
+      eventSource: "internal",
+      eventStatus: "recorded",
+      metadata: { error },
+    });
+
+    return updated[0];
   });
-
-  return updated[0];
 }
 
 export async function getStripeInvoiceLink(
