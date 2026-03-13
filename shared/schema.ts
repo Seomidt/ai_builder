@@ -3315,6 +3315,165 @@ export const insertStripeWebhookEventSchema = createInsertSchema(stripeWebhookEv
 export type InsertStripeWebhookEvent = z.infer<typeof insertStripeWebhookEventSchema>;
 export type StripeWebhookEvent = typeof stripeWebhookEvents.$inferSelect;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4N — Subscription Plans & Entitlements
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * subscription_plans — SaaS plan catalog.
+ *
+ * Plans are immutable commercial snapshots: never edit a row in place.
+ * Archive old plans and create new ones. Historical invoices reference
+ * tenant_subscriptions → subscription_plans, preserving historical truth.
+ */
+export const subscriptionPlans = pgTable(
+  "subscription_plans",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    planCode: text("plan_code").notNull(),
+    planName: text("plan_name").notNull(),
+    status: text("status").notNull().default("active"),
+    billingInterval: text("billing_interval").notNull(),
+    basePriceUsd: numeric("base_price_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    currency: text("currency").notNull().default("USD"),
+    effectiveFrom: timestamp("effective_from").notNull(),
+    effectiveTo: timestamp("effective_to"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("sp_status_check", sql`${t.status} IN ('active','archived')`),
+    check("sp_billing_interval_check", sql`${t.billingInterval} IN ('monthly','yearly')`),
+    check("sp_base_price_check", sql`${t.basePriceUsd} >= 0`),
+    check("sp_effective_dates_check", sql`${t.effectiveTo} IS NULL OR ${t.effectiveTo} > ${t.effectiveFrom}`),
+    uniqueIndex("sp_plan_code_effective_from_unique").on(t.planCode, t.effectiveFrom),
+    index("sp_status_created_idx").on(t.status, t.createdAt),
+    index("sp_plan_code_idx").on(t.planCode),
+  ],
+);
+
+export const insertSubscriptionPlanSchema = createInsertSchema(subscriptionPlans).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertSubscriptionPlan = z.infer<typeof insertSubscriptionPlanSchema>;
+export type SubscriptionPlan = typeof subscriptionPlans.$inferSelect;
+
+/**
+ * plan_entitlements — structured entitlement definitions per plan.
+ *
+ * Each entitlement_key is a named capability (e.g. included_ai_usd,
+ * allow_overage_ai). Values are typed: numeric, text, or boolean.
+ * entitlement_type governs interpretation: limit, included_usage,
+ * feature_flag, or overage_rule.
+ */
+export const planEntitlements = pgTable(
+  "plan_entitlements",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    subscriptionPlanId: varchar("subscription_plan_id")
+      .notNull()
+      .references(() => subscriptionPlans.id),
+    entitlementKey: text("entitlement_key").notNull(),
+    entitlementType: text("entitlement_type").notNull(),
+    numericValue: numeric("numeric_value", { precision: 18, scale: 8 }),
+    textValue: text("text_value"),
+    booleanValue: boolean("boolean_value"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "pe2_entitlement_type_check",
+      sql`${t.entitlementType} IN ('limit','included_usage','feature_flag','overage_rule')`,
+    ),
+    index("pe2_subscription_plan_id_idx").on(t.subscriptionPlanId),
+    index("pe2_entitlement_key_idx").on(t.entitlementKey),
+  ],
+);
+
+export const insertPlanEntitlementSchema = createInsertSchema(planEntitlements).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertPlanEntitlement = z.infer<typeof insertPlanEntitlementSchema>;
+export type PlanEntitlement = typeof planEntitlements.$inferSelect;
+
+/**
+ * tenant_subscriptions — explicit tenant→plan mapping.
+ *
+ * Exactly one active subscription per tenant at any point in time.
+ * Non-overlapping windows enforced at DB level via trigger.
+ * Multiple rows may exist for history; effective_to=NULL means current.
+ */
+export const tenantSubscriptions = pgTable(
+  "tenant_subscriptions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    subscriptionPlanId: varchar("subscription_plan_id")
+      .notNull()
+      .references(() => subscriptionPlans.id),
+    status: text("status").notNull().default("active"),
+    currentPeriodStart: timestamp("current_period_start").notNull(),
+    currentPeriodEnd: timestamp("current_period_end").notNull(),
+    effectiveFrom: timestamp("effective_from").notNull(),
+    effectiveTo: timestamp("effective_to"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "ts_status_check",
+      sql`${t.status} IN ('trialing','active','past_due','paused','cancelled')`,
+    ),
+    check("ts_period_check", sql`${t.currentPeriodEnd} > ${t.currentPeriodStart}`),
+    check("ts_effective_dates_check", sql`${t.effectiveTo} IS NULL OR ${t.effectiveTo} > ${t.effectiveFrom}`),
+    index("ts_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("ts_tenant_status_idx").on(t.tenantId, t.status),
+    index("ts_tenant_effective_from_idx").on(t.tenantId, t.effectiveFrom),
+  ],
+);
+
+export const insertTenantSubscriptionSchema = createInsertSchema(tenantSubscriptions).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertTenantSubscription = z.infer<typeof insertTenantSubscriptionSchema>;
+export type TenantSubscription = typeof tenantSubscriptions.$inferSelect;
+
+/**
+ * tenant_subscription_events — durable event history for subscription changes.
+ *
+ * Every major subscription action records an event here.
+ * This is the audit trail, not the state source of truth.
+ */
+export const tenantSubscriptionEvents = pgTable(
+  "tenant_subscription_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantSubscriptionId: varchar("tenant_subscription_id")
+      .notNull()
+      .references(() => tenantSubscriptions.id),
+    tenantId: text("tenant_id").notNull(),
+    eventType: text("event_type").notNull(),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("tse_subscription_created_idx").on(t.tenantSubscriptionId, t.createdAt),
+    index("tse_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("tse_event_type_created_idx").on(t.eventType, t.createdAt),
+  ],
+);
+
+export const insertTenantSubscriptionEventSchema = createInsertSchema(tenantSubscriptionEvents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertTenantSubscriptionEvent = z.infer<typeof insertTenantSubscriptionEventSchema>;
+export type TenantSubscriptionEvent = typeof tenantSubscriptionEvents.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
