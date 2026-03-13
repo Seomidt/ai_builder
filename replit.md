@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5B.1 complete)
+# AI Builder Platform — V1 (Phase 5B.2 complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -643,3 +643,45 @@ CSV/TSV structured parse pipeline with `table_rows` chunking strategy. 21 column
 ### Validation: 16/16 scenarios passed
 
 S1 CSV parse (sheetCount=1 rowCount=5), S2 TSV parse (rowCount=3 cols=3), S3 XLSX explicit fail, S4 unsupported mime explicit fail, S5 chunk parsed version (indexState=pending NOT indexed), S6 chunk rebuild deactivates prior chunks (audit trail), S7 parse fail doesn't mutate current retrieval, S8 chunk transaction safe (no mixed state), S9 non-current version no affect on current, S10 cross-tenant rejected, S11 archived KB/doc blocked, S12 deterministic chunk keys and hashes, S13 changed config causes stale+replacement, S14 job lock safety (second acquire rejected), S15 inspection helpers work, S16 Phase 5A.1 invariants still hold.
+
+## Phase 5B.2 — Image Ingestion & OCR Pipeline (branch: feature/image-ingestion-ocr)
+
+OCR parser abstraction + image-aware chunking. 22 columns added across 3 tables.
+
+### New files
+
+- `server/lib/ai/image-ocr-parsers.ts` — `selectOcrParser()`, `parseImageDocumentVersion()`, `normalizeOcrDocument()`, `computeOcrTextChecksum()`, `summarizeOcrParseResult()`. stub_ocr v1.0 engine (deterministic placeholder). Supported: image/png, image/jpeg, image/webp. Explicit fail for unsupported + oversized (INV-IMG11).
+- `server/lib/ai/image-ocr-chunking.ts` — `ocr_regions` strategy, `buildOcrChunkKey()`, `buildOcrChunkHash()`, `normalizeOcrChunkText()`, `chunkOcrDocument()` with region windowing + bbox merging + page context, `summarizeOcrChunks()`
+- `server/lib/ai/migrate-phase5b2.ts` — raw SQL migration for 22 new DB columns, CHECK constraints, indexes
+- `server/lib/ai/validate-phase5b2.ts` — 15 validation scenarios (all passing)
+
+### Extended files
+
+- `server/lib/ai/knowledge-processing.ts` — `runOcrParseForDocumentVersion`, `runOcrChunkingForDocumentVersion`, `markOcrParseFailed/Completed`, `explainOcrParseState/ChunkState`, `previewOcrChunkReplacement`, `listOcrProcessingJobs`, `summarizeOcrChunkingResult`, `syncIndexStateAfterOcrChunking`, `markIndexStateStaleAfterOcrChunkReplace`
+- `shared/schema.ts` — 10 OCR columns on knowledge_document_versions, 10 image chunk columns on knowledge_chunks, 2 OCR processor columns on knowledge_processing_jobs
+- `server/routes/admin.ts` — 12 new endpoints under `/api/admin/knowledge/image-ocr/`
+
+### DB schema additions
+
+- `knowledge_document_versions`: +10 columns (`ocr_status`, `ocr_started_at`, `ocr_completed_at`, `ocr_engine_name`, `ocr_engine_version`, `ocr_text_checksum`, `ocr_block_count`, `ocr_line_count`, `ocr_average_confidence`, `ocr_failure_reason`)
+- `knowledge_chunks`: +10 columns (`image_chunk`, `image_chunk_strategy`, `image_chunk_version`, `image_region_index`, `bbox_left`, `bbox_top`, `bbox_width`, `bbox_height`, `ocr_confidence`, `source_page_number`)
+- `knowledge_processing_jobs`: +2 columns (`ocr_processor_name`, `ocr_processor_version`); job_type CHECK updated to include `ocr_parse` and `ocr_chunk`
+
+### Invariants enforced (INV-IMG1 through INV-IMG12)
+
+- INV-IMG1: Version must exist and belong to tenant
+- INV-IMG2: OCR chunking runs only on the explicitly requested version
+- INV-IMG3: OCR chunking requires ocrStatus='completed' or explicit content
+- INV-IMG4: OCR chunking NEVER sets index_state='indexed'
+- INV-IMG5: Archived/inactive KB or document blocks all OCR processing
+- INV-IMG6: Parse failure does NOT clear valid historical chunks
+- INV-IMG7: Failed chunk rebuild leaves no partial active chunk corruption (transactional)
+- INV-IMG8: Non-current version OCR processing does not alter current retrieval state
+- INV-IMG9: Cross-tenant linkage rejected in all OCR paths
+- INV-IMG10: OCR chunk keys and hashes are deterministic for same input + strategy/version
+- INV-IMG11: Unsupported, oversized, or malformed image inputs fail explicitly — no silent fallback
+- INV-IMG12: document_status='ready' still requires valid current version + index_state='indexed'
+
+### Validation: 15/15 scenarios passed
+
+S1 PNG OCR parse (blocks=3 lines=7 checksum ok), S2 unsupported mime explicit fail (INV-IMG11), S3 oversized image safe rejection, S4 chunk parsed version (indexState=pending NOT indexed), S5 rerun deactivates prior image chunks (audit trail), S6 parse fail doesn't mutate current retrieval, S7 chunk transaction safe (no mixed state), S8 non-current version no affect on current, S9 cross-tenant rejected, S10 archived KB/doc blocked, S11 deterministic OCR chunk keys and hashes, S12 changed config causes replacement+stale, S13 job lock safety (w2 rejected), S14 inspection helpers work (ocrStatus/chunks/jobs), S15 Phase 5A.1 invariants still hold.

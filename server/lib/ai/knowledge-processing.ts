@@ -27,7 +27,7 @@
  *           + index_state='indexed'. 5A.1 invariants are NOT weakened.
  */
 
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, gte, lt } from "drizzle-orm";
 import { db } from "../../db";
 import {
   knowledgeBases,
@@ -62,6 +62,19 @@ import {
   chunkStructuredDocument,
   type StructuredChunkingConfig,
 } from "./structured-document-chunking";
+import {
+  parseImageDocumentVersion,
+  type OcrParseResult,
+  type OcrParseOptions,
+  summarizeOcrParseResult,
+  selectOcrParser,
+} from "./image-ocr-parsers";
+import {
+  chunkOcrDocument,
+  summarizeOcrChunks,
+  type OcrChunkingConfig,
+  type OcrChunkCandidate,
+} from "./image-ocr-chunking";
 
 // ─── Internal tenant-assertion helpers ────────────────────────────────────────
 
@@ -2365,6 +2378,661 @@ export async function summarizeChunkingResult(
     strategy: (summary.strategy as string) ?? null,
     processorName: job.processorName,
     processorVersion: job.processorVersion,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    failureReason: job.failureReason,
+  };
+}
+
+// ─── Phase 5B.2: Image OCR Parse / Chunk Flows ────────────────────────────────
+
+export interface RunOcrParseOptions {
+  content?: string;
+  workerId?: string;
+  idempotencyKey?: string;
+  parseOptions?: OcrParseOptions;
+}
+
+export interface OcrParseExecutionResult {
+  jobId: string;
+  status: "completed" | "failed";
+  ocrStatus: "completed" | "failed";
+  blockCount?: number;
+  lineCount?: number;
+  averageConfidence?: number;
+  textChecksum?: string;
+  engineName?: string;
+  engineVersion?: string;
+  error?: string;
+  parseResult?: OcrParseResult;
+}
+
+export interface RunOcrChunkingOptions {
+  content?: string;
+  workerId?: string;
+  idempotencyKey?: string;
+  chunkingConfig?: OcrChunkingConfig;
+  parseOptions?: OcrParseOptions;
+}
+
+export interface OcrChunkingExecutionResult {
+  jobId: string;
+  status: "completed" | "failed";
+  chunkCount: number;
+  priorOcrChunksDeactivated: number;
+  error?: string;
+}
+
+/**
+ * runOcrParseForDocumentVersion — Phase 5B.2 OCR parse flow.
+ *
+ * INV-IMG1: validates version→document→KB chain + tenant.
+ * INV-IMG5: archived/inactive KB or document blocks processing.
+ * INV-IMG6: parse failure does NOT clear valid historical chunks.
+ * INV-IMG11: unsupported mime types fail explicitly.
+ * INV-IMG12: does NOT mark document_status='ready'.
+ */
+export async function runOcrParseForDocumentVersion(
+  versionId: string,
+  tenantId: string,
+  opts: RunOcrParseOptions = {},
+): Promise<OcrParseExecutionResult> {
+  const ctx = await assertFullVersionContext(versionId, tenantId, { requireActiveLifecycle: true });
+
+  const mimeType = ctx.version.mimeType ?? "";
+
+  if (!opts.content) {
+    const reason = `No image content provided for version ${versionId}. Storage-backed OCR parsing not yet wired — supply content directly (INV-IMG11).`;
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({ ocrStatus: "failed", ocrFailureReason: reason, ocrCompletedAt: new Date() })
+      .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+    const [failJob] = await db
+      .insert(knowledgeProcessingJobs)
+      .values({
+        tenantId,
+        knowledgeDocumentId: ctx.document.id,
+        knowledgeDocumentVersionId: versionId,
+        jobType: "ocr_parse",
+        status: "failed",
+        failureReason: reason,
+        ocrProcessorName: "ocr_parse_runner",
+        ocrProcessorVersion: "1.0",
+        idempotencyKey: opts.idempotencyKey ?? null,
+        startedAt: new Date(),
+        completedAt: new Date(),
+      })
+      .returning();
+    return { jobId: failJob.id, status: "failed", ocrStatus: "failed", error: reason };
+  }
+
+  const [job] = await db
+    .insert(knowledgeProcessingJobs)
+    .values({
+      tenantId,
+      knowledgeDocumentId: ctx.document.id,
+      knowledgeDocumentVersionId: versionId,
+      jobType: "ocr_parse",
+      status: "queued",
+      ocrProcessorName: "ocr_parse_runner",
+      ocrProcessorVersion: "1.0",
+      idempotencyKey: opts.idempotencyKey ?? null,
+    })
+    .returning();
+
+  const acquired = await acquireKnowledgeProcessingJob(job.id, tenantId, {
+    workerId: opts.workerId,
+    processorName: "ocr_parse_runner",
+    processorVersion: "1.0",
+  });
+  if (!acquired) {
+    return { jobId: job.id, status: "failed", ocrStatus: "failed", error: "Failed to acquire OCR parse job lock." };
+  }
+
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({ ocrStatus: "running", ocrStartedAt: new Date() })
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+  try {
+    const parseResult = await parseImageDocumentVersion(opts.content, mimeType, opts.parseOptions);
+
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({
+        ocrStatus: "completed",
+        ocrCompletedAt: new Date(),
+        ocrEngineName: parseResult.engineName,
+        ocrEngineVersion: parseResult.engineVersion,
+        ocrTextChecksum: parseResult.textChecksum,
+        ocrBlockCount: parseResult.blockCount,
+        ocrLineCount: parseResult.lineCount,
+        ocrAverageConfidence: String(parseResult.averageConfidence),
+        ocrFailureReason: null,
+      })
+      .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+    await db
+      .update(knowledgeProcessingJobs)
+      .set({
+        status: "completed",
+        completedAt: new Date(),
+        heartbeatAt: new Date(),
+        resultSummary: {
+          engineName: parseResult.engineName,
+          engineVersion: parseResult.engineVersion,
+          blockCount: parseResult.blockCount,
+          lineCount: parseResult.lineCount,
+          averageConfidence: parseResult.averageConfidence,
+          textChecksum: parseResult.textChecksum,
+          regionCount: parseResult.regions.length,
+          summary: summarizeOcrParseResult(parseResult),
+        },
+      })
+      .where(and(eq(knowledgeProcessingJobs.id, job.id), eq(knowledgeProcessingJobs.tenantId, tenantId)));
+
+    return {
+      jobId: job.id,
+      status: "completed",
+      ocrStatus: "completed",
+      blockCount: parseResult.blockCount,
+      lineCount: parseResult.lineCount,
+      averageConfidence: parseResult.averageConfidence,
+      textChecksum: parseResult.textChecksum,
+      engineName: parseResult.engineName,
+      engineVersion: parseResult.engineVersion,
+      parseResult,
+    };
+  } catch (err) {
+    const reason = (err as Error).message;
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({ ocrStatus: "failed", ocrCompletedAt: new Date(), ocrFailureReason: reason })
+      .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+    await failKnowledgeProcessingJob(job.id, tenantId, reason);
+    return { jobId: job.id, status: "failed", ocrStatus: "failed", error: reason };
+  }
+}
+
+/**
+ * markOcrParseFailed — explicitly mark OCR parse as failed.
+ */
+export async function markOcrParseFailed(
+  versionId: string,
+  tenantId: string,
+  reason: string,
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({ ocrStatus: "failed", ocrCompletedAt: new Date(), ocrFailureReason: reason })
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+}
+
+/**
+ * markOcrParseCompleted — mark OCR parse completed with explicit metadata.
+ */
+export async function markOcrParseCompleted(
+  versionId: string,
+  tenantId: string,
+  meta: {
+    blockCount: number;
+    lineCount: number;
+    averageConfidence: number;
+    textChecksum: string;
+    engineName: string;
+    engineVersion: string;
+  },
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({
+      ocrStatus: "completed",
+      ocrCompletedAt: new Date(),
+      ocrEngineName: meta.engineName,
+      ocrEngineVersion: meta.engineVersion,
+      ocrTextChecksum: meta.textChecksum,
+      ocrBlockCount: meta.blockCount,
+      ocrLineCount: meta.lineCount,
+      ocrAverageConfidence: String(meta.averageConfidence),
+      ocrFailureReason: null,
+    })
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+}
+
+/**
+ * runOcrChunkingForDocumentVersion — Phase 5B.2 OCR chunking flow.
+ *
+ * INV-IMG2: only the explicitly requested version is processed.
+ * INV-IMG3: requires successful OCR parse state or explicit content.
+ * INV-IMG4: does NOT mark index_state='indexed'.
+ * INV-IMG7: failed chunk rebuild leaves no partial active chunk corruption.
+ * INV-IMG8: non-current version processing does not alter current retrieval state.
+ */
+export async function runOcrChunkingForDocumentVersion(
+  versionId: string,
+  tenantId: string,
+  opts: RunOcrChunkingOptions = {},
+): Promise<OcrChunkingExecutionResult> {
+  const ctx = await assertFullVersionContext(versionId, tenantId, { requireActiveLifecycle: true });
+
+  const [verRow] = await db
+    .select()
+    .from(knowledgeDocumentVersions)
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+  if (!verRow) {
+    throw new KnowledgeInvariantError("INV-IMG1", `Version ${versionId} not found for tenant ${tenantId}`);
+  }
+
+  const hasCompletedOcr = verRow.ocrStatus === "completed";
+  if (!hasCompletedOcr && !opts.content) {
+    throw new KnowledgeInvariantError(
+      "INV-IMG3",
+      `OCR chunking requires ocrStatus='completed' or explicit content for version ${versionId}. Current ocrStatus: ${verRow.ocrStatus ?? "null"}.`,
+    );
+  }
+
+  const mimeType = verRow.mimeType ?? "image/png";
+  const contentForChunking = opts.content ?? "";
+
+  const [job] = await db
+    .insert(knowledgeProcessingJobs)
+    .values({
+      tenantId,
+      knowledgeDocumentId: ctx.document.id,
+      knowledgeDocumentVersionId: versionId,
+      jobType: "ocr_chunk",
+      status: "queued",
+      ocrProcessorName: "ocr_chunk_runner",
+      ocrProcessorVersion: "1.0",
+      idempotencyKey: opts.idempotencyKey ?? null,
+    })
+    .returning();
+
+  const acquired = await acquireKnowledgeProcessingJob(job.id, tenantId, {
+    workerId: opts.workerId,
+    processorName: "ocr_chunk_runner",
+    processorVersion: "1.0",
+  });
+  if (!acquired) {
+    return { jobId: job.id, status: "failed", chunkCount: 0, priorOcrChunksDeactivated: 0, error: "Failed to acquire OCR chunk job lock." };
+  }
+
+  let parseResult: OcrParseResult;
+  try {
+    if (hasCompletedOcr && !opts.content) {
+      throw new KnowledgeInvariantError(
+        "INV-IMG3",
+        `OCR chunking requires content or completed OCR parse result for version ${versionId}. Storage-backed OCR not yet wired — supply content directly.`,
+      );
+    }
+    parseResult = await parseImageDocumentVersion(contentForChunking, mimeType, opts.parseOptions);
+  } catch (err) {
+    const reason = (err as Error).message;
+    await failKnowledgeProcessingJob(job.id, tenantId, reason);
+    return { jobId: job.id, status: "failed", chunkCount: 0, priorOcrChunksDeactivated: 0, error: reason };
+  }
+
+  const candidates = chunkOcrDocument(
+    parseResult,
+    ctx.document.id,
+    versionId,
+    opts.chunkingConfig,
+  );
+
+  let newChunkCount = 0;
+  let priorDeactivated = 0;
+  let indexStateRow: typeof knowledgeIndexState.$inferSelect | null = null;
+
+  try {
+    await db.transaction(async (tx) => {
+      const now = new Date();
+      const priorActive = await tx
+        .update(knowledgeChunks)
+        .set({ chunkActive: false, replacedAt: now, replacedByJobId: job.id })
+        .where(
+          and(
+            eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+            eq(knowledgeChunks.tenantId, tenantId),
+            eq(knowledgeChunks.chunkActive, true),
+            eq(knowledgeChunks.imageChunk, true),
+          ),
+        )
+        .returning();
+      priorDeactivated = priorActive.length;
+
+      if (candidates.length > 0) {
+        const inserts = candidates.map((c) => ({
+          tenantId,
+          knowledgeBaseId: ctx.kb.id,
+          knowledgeDocumentId: ctx.document.id,
+          knowledgeDocumentVersionId: versionId,
+          chunkIndex: c.chunkIndex,
+          chunkKey: c.chunkKey,
+          chunkHash: c.chunkHash,
+          chunkText: c.chunkText,
+          imageChunk: true as const,
+          imageChunkStrategy: c.imageChunkStrategy,
+          imageChunkVersion: c.imageChunkVersion,
+          imageRegionIndex: c.imageRegionIndex,
+          bboxLeft: c.bboxLeft !== undefined ? String(c.bboxLeft) : null,
+          bboxTop: c.bboxTop !== undefined ? String(c.bboxTop) : null,
+          bboxWidth: c.bboxWidth !== undefined ? String(c.bboxWidth) : null,
+          bboxHeight: c.bboxHeight !== undefined ? String(c.bboxHeight) : null,
+          ocrConfidence: c.ocrConfidence !== undefined ? String(c.ocrConfidence) : null,
+          sourcePageNumber: c.sourcePageNumber,
+          tokenEstimate: c.tokenEstimate,
+          chunkActive: true as const,
+          metadata: null,
+        }));
+        await tx.insert(knowledgeChunks).values(inserts);
+        newChunkCount = candidates.length;
+      }
+
+      await tx
+        .update(knowledgeProcessingJobs)
+        .set({
+          status: "completed",
+          completedAt: now,
+          heartbeatAt: now,
+          resultSummary: {
+            chunkCount: newChunkCount,
+            priorOcrChunksDeactivated: priorDeactivated,
+            strategy: opts.chunkingConfig?.strategy ?? "ocr_regions",
+            engineName: parseResult.engineName,
+            summary: summarizeOcrChunks(candidates),
+          },
+        })
+        .where(and(eq(knowledgeProcessingJobs.id, job.id), eq(knowledgeProcessingJobs.tenantId, tenantId)));
+    });
+
+    indexStateRow = await syncIndexStateAfterOcrChunking(
+      versionId,
+      tenantId,
+      ctx.kb.id,
+      ctx.document.id,
+      newChunkCount,
+    );
+  } catch (err) {
+    await failKnowledgeProcessingJob(
+      job.id,
+      tenantId,
+      `OCR chunk transaction failed: ${(err as Error).message}`,
+    );
+    return {
+      jobId: job.id,
+      status: "failed",
+      chunkCount: 0,
+      priorOcrChunksDeactivated: 0,
+      error: `OCR chunk transaction failed: ${(err as Error).message}`,
+    };
+  }
+
+  return {
+    jobId: job.id,
+    status: "completed",
+    chunkCount: newChunkCount,
+    priorOcrChunksDeactivated: priorDeactivated,
+  };
+}
+
+/**
+ * syncIndexStateAfterOcrChunking — upsert index state after OCR chunking.
+ * INV-IMG4: does NOT set index_state='indexed'.
+ */
+export async function syncIndexStateAfterOcrChunking(
+  versionId: string,
+  tenantId: string,
+  knowledgeBaseId: string,
+  knowledgeDocumentId: string,
+  chunkCount: number,
+): Promise<typeof knowledgeIndexState.$inferSelect> {
+  const existing = await getIndexStateByVersion(versionId, tenantId);
+  const now = new Date();
+  if (!existing) {
+    const [row] = await db
+      .insert(knowledgeIndexState)
+      .values({
+        tenantId,
+        knowledgeBaseId,
+        knowledgeDocumentId,
+        knowledgeDocumentVersionId: versionId,
+        indexState: "pending",
+        chunkCount,
+        indexedChunkCount: 0,
+        embeddingCount: 0,
+      })
+      .returning();
+    return row;
+  }
+  const newState = existing.indexState === "indexed" ? "stale" : existing.indexState ?? "pending";
+  const [row] = await db
+    .update(knowledgeIndexState)
+    .set({ indexState: newState, chunkCount, updatedAt: now })
+    .where(
+      and(
+        eq(knowledgeIndexState.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeIndexState.tenantId, tenantId),
+      ),
+    )
+    .returning();
+  return row;
+}
+
+/**
+ * markIndexStateStaleAfterOcrChunkReplace — set stale after rebuild.
+ */
+export async function markIndexStateStaleAfterOcrChunkReplace(
+  versionId: string,
+  tenantId: string,
+  reason?: string,
+): Promise<void> {
+  await db
+    .update(knowledgeIndexState)
+    .set({ indexState: "stale", updatedAt: new Date() })
+    .where(
+      and(
+        eq(knowledgeIndexState.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeIndexState.tenantId, tenantId),
+      ),
+    );
+}
+
+/**
+ * explainOcrParseState — inspect the current OCR parse state for a version.
+ */
+export async function explainOcrParseState(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  versionId: string;
+  ocrStatus: string | null;
+  engineName: string | null;
+  engineVersion: string | null;
+  blockCount: number | null;
+  lineCount: number | null;
+  averageConfidence: string | null;
+  textChecksum: string | null;
+  failureReason: string | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  explanation: string;
+}> {
+  await assertVersionTenant(versionId, tenantId);
+  const [ver] = await db
+    .select()
+    .from(knowledgeDocumentVersions)
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+  if (!ver) throw new KnowledgeInvariantError("INV-IMG1", `Version ${versionId} not found`);
+
+  const explanation =
+    ver.ocrStatus === "completed"
+      ? `OCR parse completed. Engine: ${ver.ocrEngineName}@${ver.ocrEngineVersion}. Blocks: ${ver.ocrBlockCount}, Lines: ${ver.ocrLineCount}, AvgConf: ${ver.ocrAverageConfidence}.`
+      : ver.ocrStatus === "failed"
+        ? `OCR parse failed. Reason: ${ver.ocrFailureReason ?? "unknown"}`
+        : ver.ocrStatus === "running"
+          ? "OCR parse is currently running."
+          : "OCR parse has not been run for this version.";
+
+  return {
+    versionId,
+    ocrStatus: ver.ocrStatus ?? null,
+    engineName: ver.ocrEngineName ?? null,
+    engineVersion: ver.ocrEngineVersion ?? null,
+    blockCount: ver.ocrBlockCount ?? null,
+    lineCount: ver.ocrLineCount ?? null,
+    averageConfidence: ver.ocrAverageConfidence ?? null,
+    textChecksum: ver.ocrTextChecksum ?? null,
+    failureReason: ver.ocrFailureReason ?? null,
+    startedAt: ver.ocrStartedAt ?? null,
+    completedAt: ver.ocrCompletedAt ?? null,
+    explanation,
+  };
+}
+
+/**
+ * explainOcrChunkState — inspect the current OCR chunk state for a version.
+ */
+export async function explainOcrChunkState(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  versionId: string;
+  activeImageChunkCount: number;
+  totalImageChunkCount: number;
+  replacedImageChunkCount: number;
+  indexState: string | null;
+  sheets: string[];
+  pages: number[];
+  explanation: string;
+}> {
+  await assertVersionTenant(versionId, tenantId);
+  const allChunks = await db
+    .select()
+    .from(knowledgeChunks)
+    .where(
+      and(
+        eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeChunks.tenantId, tenantId),
+        eq(knowledgeChunks.imageChunk, true),
+      ),
+    );
+
+  const active = allChunks.filter((c) => c.chunkActive);
+  const replaced = allChunks.filter((c) => !c.chunkActive);
+  const pages = Array.from(new Set(active.map((c) => c.sourcePageNumber).filter(Boolean) as number[]));
+  const idxState = await getIndexStateByVersion(versionId, tenantId);
+
+  const explanation =
+    active.length === 0
+      ? "No active OCR-derived image chunks for this version."
+      : `${active.length} active OCR-derived chunk(s) exist. Pages: ${pages.join(",")}. Index state: ${idxState?.indexState ?? "none"}.`;
+
+  return {
+    versionId,
+    activeImageChunkCount: active.length,
+    totalImageChunkCount: allChunks.length,
+    replacedImageChunkCount: replaced.length,
+    indexState: idxState?.indexState ?? null,
+    sheets: [],
+    pages,
+    explanation,
+  };
+}
+
+/**
+ * previewOcrChunkReplacement — what would happen if OCR chunking ran again.
+ */
+export async function previewOcrChunkReplacement(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  currentActiveImageChunkCount: number;
+  currentIndexState: string | null;
+  wouldDeactivate: number;
+  explanation: string;
+}> {
+  await assertVersionTenant(versionId, tenantId);
+  const active = await db
+    .select()
+    .from(knowledgeChunks)
+    .where(
+      and(
+        eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeChunks.tenantId, tenantId),
+        eq(knowledgeChunks.chunkActive, true),
+        eq(knowledgeChunks.imageChunk, true),
+      ),
+    );
+  const idxState = await getIndexStateByVersion(versionId, tenantId);
+
+  const explanation =
+    active.length === 0
+      ? "No active OCR image chunks to replace. OCR chunking would insert fresh chunks."
+      : `Re-running OCR chunking would deactivate ${active.length} existing active image chunk(s) and insert new ones. Index state would transition to '${idxState?.indexState === "indexed" ? "stale" : "pending"}'.`;
+
+  return {
+    currentActiveImageChunkCount: active.length,
+    currentIndexState: idxState?.indexState ?? null,
+    wouldDeactivate: active.length,
+    explanation,
+  };
+}
+
+/**
+ * listOcrProcessingJobs — list OCR processing jobs for a document.
+ */
+export async function listOcrProcessingJobs(
+  documentId: string,
+  tenantId: string,
+): Promise<KnowledgeProcessingJob[]> {
+  await assertDocumentTenant(documentId, tenantId);
+  return db
+    .select()
+    .from(knowledgeProcessingJobs)
+    .where(
+      and(
+        eq(knowledgeProcessingJobs.knowledgeDocumentId, documentId),
+        eq(knowledgeProcessingJobs.tenantId, tenantId),
+        sql`${knowledgeProcessingJobs.jobType} IN ('ocr_parse','ocr_chunk')`,
+      ),
+    )
+    .orderBy(desc(knowledgeProcessingJobs.createdAt));
+}
+
+/**
+ * summarizeOcrChunkingResult — human-readable summary from a completed OCR chunk job.
+ */
+export async function summarizeOcrChunkingResult(
+  jobId: string,
+  tenantId: string,
+): Promise<{
+  jobId: string;
+  status: string;
+  chunkCount: number;
+  priorOcrChunksDeactivated: number;
+  strategy: string | null;
+  engineName: string | null;
+  processorName: string | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  failureReason: string | null;
+}> {
+  const job = await getProcessingJob(jobId, tenantId);
+  if (!job) throw new KnowledgeInvariantError("INV-IMG1", `Processing job ${jobId} not found`);
+  const summary = (job.resultSummary ?? {}) as Record<string, unknown>;
+  return {
+    jobId: job.id,
+    status: job.status,
+    chunkCount: (summary.chunkCount as number) ?? 0,
+    priorOcrChunksDeactivated: (summary.priorOcrChunksDeactivated as number) ?? 0,
+    strategy: (summary.strategy as string) ?? null,
+    engineName: (summary.engineName as string) ?? null,
+    processorName: job.ocrProcessorName ?? null,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
     failureReason: job.failureReason,
