@@ -1,5 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
+import { registerAdminRoutes } from "./routes/admin";
 import { storage } from "./storage";
 import { dbProvider } from "./db";
 import { previewCommit } from "./lib/github-commit-format";
@@ -520,6 +521,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       handleError(res, err);
     }
   });
+
+  // Phase 4P — Admin Pricing & Plan Management routes
+  registerAdminRoutes(app);
 
   return httpServer;
 }

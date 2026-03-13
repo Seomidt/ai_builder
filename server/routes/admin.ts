@@ -1,0 +1,512 @@
+/**
+ * Admin Routes — Phase 4P
+ *
+ * INTERNAL/ADMIN ONLY — These routes must never be exposed to tenants.
+ *
+ * Provides the minimal route foundation for:
+ *   - Pricing version previews and apply
+ *   - Plan previews and apply
+ *   - Tenant subscription previews and apply
+ *   - Admin change request listing and inspection
+ *
+ * All routes are prefixed with /api/admin/
+ * Input validation uses Zod before passing to helpers.
+ * Errors propagate as 400/500 with structured JSON.
+ */
+
+import { type Express, type Request, type Response } from "express";
+import { z } from "zod";
+import {
+  previewCreateProviderPricingVersion,
+  applyCreateProviderPricingVersion,
+  previewCreateCustomerPricingVersion,
+  applyCreateCustomerPricingVersion,
+  previewCreateStoragePricingVersion,
+  applyCreateStoragePricingVersion,
+  previewCreateCustomerStoragePricingVersion,
+  applyCreateCustomerStoragePricingVersion,
+} from "../lib/ai/admin-pricing";
+import {
+  previewCreateSubscriptionPlan,
+  applyCreateSubscriptionPlan,
+  previewReplacePlanEntitlements,
+  applyReplacePlanEntitlements,
+  archiveSubscriptionPlan,
+  listAdminSubscriptionPlans,
+  explainPlanDefinition,
+} from "../lib/ai/admin-plans";
+import {
+  previewTenantPlanChange,
+  applyTenantPlanChange,
+  previewTenantPlanCancellation,
+  applyTenantPlanCancellation,
+  listTenantSubscriptionHistory,
+} from "../lib/ai/admin-tenant-subscriptions";
+import {
+  previewPricingImpactForTenant,
+  previewPlanImpactForTenant,
+  previewGlobalPricingWindowChange,
+  explainAdminChangePreview,
+} from "../lib/ai/admin-commercial-preview";
+import {
+  listAdminChangeRequests,
+  getAdminChangeRequestById,
+  listAdminChangeEvents,
+  explainAdminChangeResult,
+} from "../lib/ai/admin-change-summary";
+import {
+  explainAdminChangeRetentionPolicy,
+  previewPendingAdminChangesOlderThan,
+  previewFailedAdminChangesOlderThan,
+  previewAppliedAdminChangesWithoutEvents,
+  previewPlanRowsStillReferencedHistorically,
+} from "../lib/ai/admin-change-retention";
+
+// ─── Zod Schemas ──────────────────────────────────────────────────────────────
+
+const createProviderPricingVersionSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  pricingVersion: z.string().min(1),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  effectiveTo: z.string().transform((s) => new Date(s)).nullable().optional(),
+  inputTokenPriceUsd: z.string(),
+  outputTokenPriceUsd: z.string(),
+  cachedInputTokenPriceUsd: z.string().optional(),
+  reasoningTokenPriceUsd: z.string().optional(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const createCustomerPricingVersionSchema = z.object({
+  tenantId: z.string().min(1),
+  feature: z.string().min(1),
+  provider: z.string().min(1),
+  model: z.string().nullable().optional(),
+  pricingVersion: z.string().min(1),
+  pricingMode: z.string().min(1),
+  pricingSource: z.string().optional(),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  effectiveTo: z.string().transform((s) => new Date(s)).nullable().optional(),
+  multiplier: z.string().nullable().optional(),
+  flatMarkupUsd: z.string().nullable().optional(),
+  perRequestMarkupUsd: z.string().nullable().optional(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const createStoragePricingVersionSchema = z.object({
+  storageProvider: z.string().optional(),
+  storageProduct: z.string().optional(),
+  metricType: z.string().min(1),
+  pricingVersion: z.string().min(1),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  effectiveTo: z.string().transform((s) => new Date(s)).nullable().optional(),
+  includedUsage: z.string().nullable().optional(),
+  unitPriceUsd: z.string(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const createCustomerStoragePricingVersionSchema = z.object({
+  tenantId: z.string().min(1),
+  storageProvider: z.string().optional(),
+  storageProduct: z.string().optional(),
+  metricType: z.string().min(1),
+  pricingVersion: z.string().min(1),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  effectiveTo: z.string().transform((s) => new Date(s)).nullable().optional(),
+  multiplier: z.string().nullable().optional(),
+  flatMarkupUsd: z.string().nullable().optional(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const createSubscriptionPlanSchema = z.object({
+  planCode: z.string().min(1),
+  planName: z.string().min(1),
+  billingInterval: z.enum(["monthly", "yearly"]),
+  basePriceUsd: z.string(),
+  currency: z.string().optional(),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  effectiveTo: z.string().transform((s) => new Date(s)).nullable().optional(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const entitlementInputSchema = z.object({
+  entitlementKey: z.string().min(1),
+  entitlementType: z.enum(["limit", "included_usage", "feature_flag", "overage_rule"]),
+  numericValue: z.string().nullable().optional(),
+  textValue: z.string().nullable().optional(),
+  booleanValue: z.boolean().nullable().optional(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+});
+
+const replacePlanEntitlementsSchema = z.object({
+  entitlementSet: z.array(entitlementInputSchema),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const tenantPlanChangeSchema = z.object({
+  newPlanId: z.string().min(1),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const tenantPlanCancellationSchema = z.object({
+  effectiveTo: z.string().transform((s) => new Date(s)),
+  requestedBy: z.string().nullable().optional(),
+});
+
+// ─── Route Registration ───────────────────────────────────────────────────────
+
+export function registerAdminRoutes(app: Express): void {
+
+  // ── Pricing: Provider ──────────────────────────────────────────────────────
+  app.post("/api/admin/pricing/provider/preview", async (req: Request, res: Response) => {
+    try {
+      const input = createProviderPricingVersionSchema.parse(req.body);
+      const result = await previewCreateProviderPricingVersion(input);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/pricing/provider/apply", async (req: Request, res: Response) => {
+    try {
+      const input = createProviderPricingVersionSchema.parse(req.body);
+      const result = await applyCreateProviderPricingVersion(input);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Pricing: Customer ──────────────────────────────────────────────────────
+  app.post("/api/admin/pricing/customer/preview", async (req: Request, res: Response) => {
+    try {
+      const input = createCustomerPricingVersionSchema.parse(req.body);
+      const result = await previewCreateCustomerPricingVersion(input);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/pricing/customer/apply", async (req: Request, res: Response) => {
+    try {
+      const input = createCustomerPricingVersionSchema.parse(req.body);
+      const result = await applyCreateCustomerPricingVersion(input);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Pricing: Storage ───────────────────────────────────────────────────────
+  app.post("/api/admin/pricing/storage/preview", async (req: Request, res: Response) => {
+    try {
+      const input = createStoragePricingVersionSchema.parse(req.body);
+      const result = await previewCreateStoragePricingVersion(input);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/pricing/storage/apply", async (req: Request, res: Response) => {
+    try {
+      const input = createStoragePricingVersionSchema.parse(req.body);
+      const result = await applyCreateStoragePricingVersion(input);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Pricing: Customer Storage ──────────────────────────────────────────────
+  app.post("/api/admin/pricing/customer-storage/preview", async (req: Request, res: Response) => {
+    try {
+      const input = createCustomerStoragePricingVersionSchema.parse(req.body);
+      const result = await previewCreateCustomerStoragePricingVersion(input);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/pricing/customer-storage/apply", async (req: Request, res: Response) => {
+    try {
+      const input = createCustomerStoragePricingVersionSchema.parse(req.body);
+      const result = await applyCreateCustomerStoragePricingVersion(input);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Plans ──────────────────────────────────────────────────────────────────
+  app.get("/api/admin/plans", async (_req: Request, res: Response) => {
+    try {
+      const plans = await listAdminSubscriptionPlans(100);
+      res.json(plans);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/plans/preview", async (req: Request, res: Response) => {
+    try {
+      const input = createSubscriptionPlanSchema.parse(req.body);
+      const result = await previewCreateSubscriptionPlan(input);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/plans/apply", async (req: Request, res: Response) => {
+    try {
+      const input = createSubscriptionPlanSchema.parse(req.body);
+      const result = await applyCreateSubscriptionPlan(input);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/plans/:planId/explain", async (req: Request, res: Response) => {
+    try {
+      const planId = String(req.params.planId);
+      const result = await explainPlanDefinition(planId);
+      res.json(result);
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/plans/:planId/entitlements/preview", async (req: Request, res: Response) => {
+    try {
+      const planId = String(req.params.planId);
+      const body = replacePlanEntitlementsSchema.parse(req.body);
+      const result = await previewReplacePlanEntitlements(planId, body.entitlementSet);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/plans/:planId/entitlements/apply", async (req: Request, res: Response) => {
+    try {
+      const planId = String(req.params.planId);
+      const body = replacePlanEntitlementsSchema.parse(req.body);
+      const result = await applyReplacePlanEntitlements(planId, body.entitlementSet, body.requestedBy ?? null);
+      res.status(200).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/plans/:planId/archive", async (req: Request, res: Response) => {
+    try {
+      const planId = String(req.params.planId);
+      const requestedBy = (req.body as Record<string, string>)?.requestedBy ?? null;
+      const result = await archiveSubscriptionPlan(planId, requestedBy);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Tenant Subscriptions ───────────────────────────────────────────────────
+  app.get("/api/admin/tenants/:tenantId/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const history = await listTenantSubscriptionHistory(tenantId);
+      res.json(history);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/tenants/:tenantId/subscriptions/change/preview", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const body = tenantPlanChangeSchema.parse(req.body);
+      const result = await previewTenantPlanChange(tenantId, body.newPlanId, body.effectiveFrom);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/tenants/:tenantId/subscriptions/change/apply", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const body = tenantPlanChangeSchema.parse(req.body);
+      const result = await applyTenantPlanChange(tenantId, body.newPlanId, body.effectiveFrom, body.requestedBy ?? null);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/tenants/:tenantId/subscriptions/cancel/preview", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const body = tenantPlanCancellationSchema.parse(req.body);
+      const result = await previewTenantPlanCancellation(tenantId, body.effectiveTo);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/tenants/:tenantId/subscriptions/cancel/apply", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const body = tenantPlanCancellationSchema.parse(req.body);
+      const result = await applyTenantPlanCancellation(tenantId, body.effectiveTo, body.requestedBy ?? null);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Commercial Preview ─────────────────────────────────────────────────────
+  app.post("/api/admin/preview/pricing-impact/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const atTime = req.body.atTime ? new Date(req.body.atTime as string) : new Date();
+      const result = await previewPricingImpactForTenant(tenantId, atTime, req.body.proposedChanges ?? {});
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/preview/plan-impact/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const atTime = req.body.atTime ? new Date(req.body.atTime as string) : new Date();
+      const proposedPlanId = (req.body as Record<string, string>).proposedPlanId;
+      if (!proposedPlanId) return res.status(400).json({ error: "proposedPlanId required" });
+      const result = await previewPlanImpactForTenant(tenantId, atTime, proposedPlanId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/preview/global-pricing-window", async (req: Request, res: Response) => {
+    try {
+      const body = req.body as Record<string, string>;
+      const result = await previewGlobalPricingWindowChange({
+        provider: body.provider,
+        model: body.model,
+        proposedEffectiveFrom: new Date(body.proposedEffectiveFrom),
+        proposedEffectiveTo: body.proposedEffectiveTo ? new Date(body.proposedEffectiveTo) : null,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/preview/change/:changeRequestId", async (req: Request, res: Response) => {
+    try {
+      const changeRequestId = String(req.params.changeRequestId);
+      const result = await explainAdminChangePreview(changeRequestId);
+      res.json(result);
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Admin Change Requests ──────────────────────────────────────────────────
+  app.get("/api/admin/changes", async (req: Request, res: Response) => {
+    try {
+      const limit = req.query.limit ? Number(req.query.limit) : 50;
+      const changes = await listAdminChangeRequests(limit);
+      res.json(changes);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/changes/:id", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const change = await getAdminChangeRequestById(id);
+      if (!change) return res.status(404).json({ error: "Admin change request not found" });
+      res.json(change);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/changes/:id/events", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const events = await listAdminChangeEvents(id);
+      res.json(events);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/changes/:id/explain", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const result = await explainAdminChangeResult(id);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Retention & Operational Safety ────────────────────────────────────────
+  app.get("/api/admin/retention/policy", (_req: Request, res: Response) => {
+    res.json(explainAdminChangeRetentionPolicy());
+  });
+
+  app.get("/api/admin/retention/pending-older-than/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewPendingAdminChangesOlderThan(days);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/retention/failed-older-than/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewFailedAdminChangesOlderThan(days);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/retention/applied-without-events", async (_req: Request, res: Response) => {
+    try {
+      const result = await previewAppliedAdminChangesWithoutEvents();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/retention/historically-referenced-plans", async (_req: Request, res: Response) => {
+    try {
+      const result = await previewPlanRowsStillReferencedHistorically();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+}

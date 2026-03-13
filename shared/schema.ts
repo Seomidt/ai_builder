@@ -3603,6 +3603,102 @@ export const insertTenantStorageAllowanceUsageSchema = createInsertSchema(tenant
 export type InsertTenantStorageAllowanceUsage = z.infer<typeof insertTenantStorageAllowanceUsageSchema>;
 export type TenantStorageAllowanceUsage = typeof tenantStorageAllowanceUsage.$inferSelect;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4P — Admin Pricing & Plan Management System
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * admin_change_requests — durable audit log for all admin pricing/plan operations.
+ *
+ * Every admin operation (preview or apply) in Phase 4P creates a row here.
+ * Rows are append-only — never mutate after creation except to update status,
+ * applied_result, error_message, and applied_at upon completion.
+ *
+ * change_type covers all admin-managed commercial operations.
+ * status tracks the lifecycle: pending → applied | rejected | failed.
+ */
+export const adminChangeRequests = pgTable(
+  "admin_change_requests",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    changeType: text("change_type").notNull(),
+    targetScope: text("target_scope").notNull(),
+    targetId: text("target_id"),
+    requestedBy: text("requested_by"),
+    status: text("status").notNull().default("pending"),
+    dryRunSummary: jsonb("dry_run_summary"),
+    requestPayload: jsonb("request_payload").notNull(),
+    appliedResult: jsonb("applied_result"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    appliedAt: timestamp("applied_at"),
+  },
+  (t) => [
+    check(
+      "acr_status_check",
+      sql`${t.status} IN ('pending','applied','rejected','failed')`,
+    ),
+    check(
+      "acr_change_type_check",
+      sql`${t.changeType} IN (
+        'provider_pricing_version_create',
+        'customer_pricing_version_create',
+        'storage_pricing_version_create',
+        'customer_storage_pricing_version_create',
+        'subscription_plan_create',
+        'plan_entitlement_replace',
+        'tenant_subscription_change',
+        'tenant_subscription_cancel'
+      )`,
+    ),
+    check(
+      "acr_target_scope_check",
+      sql`${t.targetScope} IN ('global','tenant','plan')`,
+    ),
+    index("acr_status_created_idx").on(t.status, t.createdAt),
+    index("acr_change_type_created_idx").on(t.changeType, t.createdAt),
+    index("acr_target_scope_created_idx").on(t.targetScope, t.createdAt),
+    index("acr_target_id_idx").on(t.targetId),
+  ],
+);
+
+export const insertAdminChangeRequestSchema = createInsertSchema(adminChangeRequests).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertAdminChangeRequest = z.infer<typeof insertAdminChangeRequestSchema>;
+export type AdminChangeRequest = typeof adminChangeRequests.$inferSelect;
+
+/**
+ * admin_change_events — append-only timeline for admin change request lifecycle.
+ *
+ * One row per significant state transition or workflow step.
+ * Never updated or deleted after creation.
+ */
+export const adminChangeEvents = pgTable(
+  "admin_change_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    adminChangeRequestId: varchar("admin_change_request_id")
+      .notNull()
+      .references(() => adminChangeRequests.id),
+    eventType: text("event_type").notNull(),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ace_request_created_idx").on(t.adminChangeRequestId, t.createdAt),
+    index("ace_event_type_created_idx").on(t.eventType, t.createdAt),
+  ],
+);
+
+export const insertAdminChangeEventSchema = createInsertSchema(adminChangeEvents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertAdminChangeEvent = z.infer<typeof insertAdminChangeEventSchema>;
+export type AdminChangeEvent = typeof adminChangeEvents.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
