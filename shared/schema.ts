@@ -3818,6 +3818,161 @@ export const insertBillingAlertSchema = createInsertSchema(billingAlerts).omit({
 export type InsertBillingAlert = z.infer<typeof insertBillingAlertSchema>;
 export type BillingAlert = typeof billingAlerts.$inferSelect;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4R — Automated Billing Operations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * billing_job_definitions — durable catalog of automated billing jobs.
+ *
+ * Each row defines one logical recurring operation the platform can execute.
+ * Definitions are the configuration authority — job_runs records the execution history.
+ *
+ * Design rules:
+ *   - singleton_mode=true → only one active run per job at a time
+ *   - schedule_expression is null for manual-only jobs
+ *   - archived definitions are preserved for history; their runs are retained
+ *   - job_key must be globally unique — it is the stable identity across deploys
+ *
+ * job_category:
+ *   'snapshot'        — billing metrics snapshot jobs
+ *   'monitoring'      — health monitoring scans
+ *   'anomaly'         — anomaly detection sweeps
+ *   'reconciliation'  — provider reconciliation runs
+ *   'audit'           — billing audit runs
+ *   'payment'         — payment health checks
+ *   'maintenance'     — operational maintenance tasks
+ *
+ * schedule_type:
+ *   'manual'   — triggered only via admin/API
+ *   'interval' — run every N seconds (schedule_expression = "3600")
+ *   'cron'     — run on cron expression (schedule_expression = "0 * * * *")
+ */
+export const billingJobDefinitions = pgTable(
+  "billing_job_definitions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    jobKey: text("job_key").notNull(),
+    jobName: text("job_name").notNull(),
+    jobCategory: text("job_category").notNull(),
+    status: text("status").notNull().default("active"),
+    scheduleType: text("schedule_type").notNull().default("manual"),
+    scheduleExpression: text("schedule_expression"),
+    singletonMode: boolean("singleton_mode").notNull().default(true),
+    retryLimit: integer("retry_limit").notNull().default(3),
+    timeoutSeconds: integer("timeout_seconds").notNull().default(300),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "bjd_job_category_check",
+      sql`${t.jobCategory} IN ('snapshot','monitoring','anomaly','reconciliation','audit','payment','maintenance')`,
+    ),
+    check(
+      "bjd_status_check",
+      sql`${t.status} IN ('active','paused','archived')`,
+    ),
+    check(
+      "bjd_schedule_type_check",
+      sql`${t.scheduleType} IN ('manual','interval','cron')`,
+    ),
+    check("bjd_retry_limit_check", sql`${t.retryLimit} >= 0`),
+    check("bjd_timeout_seconds_check", sql`${t.timeoutSeconds} > 0`),
+    uniqueIndex("bjd_job_key_unique").on(t.jobKey),
+    index("bjd_status_created_idx").on(t.status, t.createdAt),
+    index("bjd_category_created_idx").on(t.jobCategory, t.createdAt),
+  ],
+);
+
+export const insertBillingJobDefinitionSchema = createInsertSchema(billingJobDefinitions).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertBillingJobDefinition = z.infer<typeof insertBillingJobDefinitionSchema>;
+export type BillingJobDefinition = typeof billingJobDefinitions.$inferSelect;
+
+/**
+ * billing_job_runs — durable execution log for all automated billing jobs.
+ *
+ * Every job invocation creates one row here — success, failure, or skip.
+ * This is the operational audit trail. NOT accounting truth.
+ *
+ * Design rules:
+ *   - Rows are append-only; completed/failed rows are never mutated
+ *   - duration_ms is recorded on completion
+ *   - lock_acquired records whether singleton exclusivity was obtained
+ *   - result_summary is a structured JSONB (not raw payloads)
+ *   - skipped rows indicate a safe no-op (lock contention or already-up-to-date)
+ *
+ * run_status lifecycle: started → completed | failed | timed_out | skipped
+ *
+ * trigger_type:
+ *   'manual'    — triggered via admin API or CLI
+ *   'scheduled' — triggered by scheduler/cron
+ *   'retry'     — triggered as a retry of a prior failed run
+ *   'system'    — triggered internally by platform logic
+ */
+export const billingJobRuns = pgTable(
+  "billing_job_runs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    billingJobDefinitionId: varchar("billing_job_definition_id")
+      .notNull()
+      .references(() => billingJobDefinitions.id),
+    jobKey: text("job_key").notNull(),
+    triggerType: text("trigger_type").notNull(),
+    runStatus: text("run_status").notNull().default("started"),
+    scopeType: text("scope_type"),
+    scopeId: text("scope_id"),
+    attemptNumber: integer("attempt_number").notNull().default(1),
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+    durationMs: integer("duration_ms"),
+    lockAcquired: boolean("lock_acquired").notNull().default(false),
+    resultSummary: jsonb("result_summary"),
+    errorMessage: text("error_message"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "bjr_trigger_type_check",
+      sql`${t.triggerType} IN ('manual','scheduled','retry','system')`,
+    ),
+    check(
+      "bjr_run_status_check",
+      sql`${t.runStatus} IN ('started','completed','failed','timed_out','skipped')`,
+    ),
+    check("bjr_attempt_number_check", sql`${t.attemptNumber} > 0`),
+    check(
+      "bjr_duration_ms_check",
+      sql`${t.durationMs} IS NULL OR ${t.durationMs} >= 0`,
+    ),
+    check(
+      "bjr_scope_type_check",
+      sql`${t.scopeType} IS NULL OR ${t.scopeType} IN ('global','tenant','billing_period')`,
+    ),
+    index("bjr_job_key_created_idx").on(t.jobKey, t.createdAt),
+    index("bjr_run_status_created_idx").on(t.runStatus, t.createdAt),
+    index("bjr_definition_created_idx").on(t.billingJobDefinitionId, t.createdAt),
+    index("bjr_scope_created_idx").on(t.scopeType, t.scopeId, t.createdAt),
+    index("bjr_started_at_idx").on(t.startedAt),
+  ],
+);
+
+export const insertBillingJobRunSchema = createInsertSchema(billingJobRuns).omit({
+  id: true,
+  createdAt: true,
+  completedAt: true,
+  durationMs: true,
+  startedAt: true,
+});
+export type InsertBillingJobRun = z.infer<typeof insertBillingJobRunSchema>;
+export type BillingJobRun = typeof billingJobRuns.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });

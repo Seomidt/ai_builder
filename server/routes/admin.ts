@@ -96,6 +96,30 @@ import {
   previewTenantsWithoutRecentMetricsSnapshots,
 } from "../lib/ai/billing-monitoring-retention";
 
+// Phase 4R: Automated Billing Operations
+import { ensureBillingJobDefinitions } from "../lib/ai/billing-jobs";
+import { runBillingJob, retryBillingJobRun } from "../lib/ai/billing-operations";
+import {
+  listBillingJobDefinitions,
+  listRecentBillingJobRuns,
+  getBillingJobRunById,
+  getBillingJobHealthSummary,
+  previewStaleBillingJobRuns,
+  previewFailedBillingJobs,
+} from "../lib/ai/billing-job-health";
+import {
+  triggerDueBillingJobs,
+  getSchedulerStatus,
+} from "../lib/ai/billing-scheduler";
+import {
+  explainBillingOpsRetentionPolicy,
+  previewCompletedJobRunsOlderThan,
+  previewFailedJobRunsOlderThan,
+  previewTimedOutJobRunsOlderThan,
+  previewJobDefinitionsWithoutRuns,
+  previewDuplicateStartedRuns,
+} from "../lib/ai/billing-ops-retention";
+
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
 const createProviderPricingVersionSchema = z.object({
@@ -872,6 +896,188 @@ export function registerAdminRoutes(app: Express): void {
       res.json(result);
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 4R: Automated Billing Operations Routes ───────────────────────────
+
+  // Job definitions
+  app.get("/api/admin/billing-ops/jobs", async (_req: Request, res: Response) => {
+    try {
+      const definitions = await listBillingJobDefinitions();
+      res.json({ definitions });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Seed predefined job definitions
+  app.post("/api/admin/billing-ops/jobs/seed", async (_req: Request, res: Response) => {
+    try {
+      const result = await ensureBillingJobDefinitions();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Job runs list
+  app.get("/api/admin/billing-ops/runs", async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(Number(req.query.limit as string || "50"), 200);
+      const runs = await listRecentBillingJobRuns(isNaN(limit) ? 50 : limit);
+      res.json({ runs });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Get a specific run
+  app.get("/api/admin/billing-ops/runs/:runId", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const run = await getBillingJobRunById(runId);
+      if (!run) return res.status(404).json({ error: `Run not found: ${runId}` });
+      res.json({ run });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Manually run a job
+  app.post("/api/admin/billing-ops/jobs/:jobKey/run", async (req: Request, res: Response) => {
+    try {
+      const jobKey = String(req.params.jobKey);
+      const { scopeType, scopeId, metadata } = req.body as {
+        scopeType?: string;
+        scopeId?: string;
+        metadata?: Record<string, unknown>;
+      };
+      const result = await runBillingJob(jobKey, {
+        triggerType: "manual",
+        scopeType: scopeType as "global" | "tenant" | "billing_period" | undefined,
+        scopeId,
+        metadata,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retry a failed run
+  app.post("/api/admin/billing-ops/runs/:runId/retry", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const result = await retryBillingJobRun(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Health summary
+  app.get("/api/admin/billing-ops/health", async (req: Request, res: Response) => {
+    try {
+      const windowHours = Math.max(1, Number(req.query.windowHours as string || "24"));
+      const summary = await getBillingJobHealthSummary(isNaN(windowHours) ? 24 : windowHours);
+      res.json(summary);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Stale/failed job inspection
+  app.get("/api/admin/billing-ops/inspections/stale-runs", async (req: Request, res: Response) => {
+    try {
+      const olderThanMinutes = Number(req.query.olderThanMinutes as string || "0");
+      const result = await previewStaleBillingJobRuns(isNaN(olderThanMinutes) ? 0 : olderThanMinutes);
+      res.json({ staleRuns: result });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/billing-ops/inspections/failed-runs/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewFailedBillingJobs(days > 0 ? days : 50);
+      res.json({ failedRuns: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Scheduler trigger (internal only)
+  app.post("/api/admin/billing-ops/scheduler/trigger", async (_req: Request, res: Response) => {
+    try {
+      const result = await triggerDueBillingJobs();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Scheduler status
+  app.get("/api/admin/billing-ops/scheduler/status", async (_req: Request, res: Response) => {
+    try {
+      const status = await getSchedulerStatus();
+      res.json(status);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention inspection helpers
+  app.get("/api/admin/billing-ops/retention/policy", (_req: Request, res: Response) => {
+    res.json(explainBillingOpsRetentionPolicy());
+  });
+
+  app.get("/api/admin/billing-ops/retention/completed-runs/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewCompletedJobRunsOlderThan(days);
+      res.json({ completedRuns: result, count: result.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/billing-ops/retention/failed-runs/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewFailedJobRunsOlderThan(days);
+      res.json({ failedRuns: result, count: result.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/billing-ops/retention/timed-out-runs/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewTimedOutJobRunsOlderThan(days);
+      res.json({ timedOutRuns: result, count: result.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/billing-ops/retention/definitions-without-runs", async (_req: Request, res: Response) => {
+    try {
+      const result = await previewJobDefinitionsWithoutRuns();
+      res.json({ definitions: result, count: result.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/billing-ops/retention/duplicate-started-runs", async (_req: Request, res: Response) => {
+    try {
+      const result = await previewDuplicateStartedRuns();
+      res.json({ duplicateGroups: result, count: result.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
     }
   });
 }
