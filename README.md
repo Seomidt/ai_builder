@@ -1,350 +1,466 @@
-# AI Builder Platform — V1
+# AI Builder Platform
 
-Internal control plane for AI-driven software generation. Built on Express + React + Drizzle ORM + Supabase.
+Enterprise multi-tenant AI SaaS backend platform providing AI runtime orchestration, usage metering, a complete billing engine, wallet ledger, subscription plans, Stripe payments, automated billing operations, and a billing integrity and recovery system.
 
-## Stack
+---
+
+## 1. Project Overview
+
+This repository implements the control plane for an AI-driven software generation platform. It is designed for production operation at scale:
+
+- 1 000+ tenants
+- 50 000+ users
+- Millions of AI requests per billing period
+
+The platform separates concerns cleanly across an AI runtime pipeline, a multi-layer billing engine, a wallet credit system, a subscription entitlement layer, a Stripe payment integration, and an automated operations layer with integrity scanning and recovery workflows.
+
+---
+
+## 2. System Architecture
+
+```
+Client / Tenant App
+        │
+        ▼
+  Express API Server (server/)
+        │
+   ┌────┴──────────────────────────────────────────┐
+   │              Admin API Routes                 │
+   │   /api/admin/* — internal operations only     │
+   └──────────────────────┬────────────────────────┘
+                          │
+   ┌──────────────────────┼───────────────────────┐
+   │                      │                       │
+   ▼                      ▼                       ▼
+AI Runtime           Billing Engine         Billing Operations
+(lib/ai/runner.ts)   (lib/ai/billing-*)     (lib/ai/billing-jobs*)
+   │                      │                       │
+   │               ┌──────┴──────────┐            │
+   │               │                 │            │
+   ▼               ▼                 ▼            ▼
+ai_usage     ai_billing_usage   invoices    billing_job_runs
+             wallet ledger      payments    recovery_runs
+             snapshots          stripe sync actions
+```
+
+All persistent state lives in Supabase Postgres accessed through Drizzle ORM. There is no in-process billing state. Every financial mutation is written to the database before being considered applied.
+
+---
+
+## 3. Technology Stack
 
 | Layer | Technology |
-|-------|-----------|
-| Frontend | React 19, Wouter, TanStack Query, Shadcn UI, Tailwind CSS |
-| Backend | Express.js, TypeScript, Zod validation |
-| Database | Supabase Postgres (PostgreSQL 17.6) via Drizzle ORM + connection pooler |
-| Auth | Supabase Auth (JWT middleware wired, demo fallback for dev) |
-| AI | OpenAI (Responses API) — provider-abstracted, fully replaceable |
-| GitHub | PAT-based integration, commit/branch/PR format utilities |
+|---|---|
+| Runtime | Node.js + TypeScript |
+| Framework | Express 5 |
+| Frontend | React 19 + Vite (Wouter routing, TanStack Query v5, Shadcn UI, Tailwind CSS) |
+| ORM | Drizzle ORM |
+| Database | Supabase Postgres (PostgreSQL 17.6) via connection pooler |
+| Auth | Supabase Auth (JWT middleware) |
+| AI Providers | OpenAI (Responses API) — provider-abstracted |
+| Payments | Stripe |
+| Schema validation | Zod + drizzle-zod |
+| GitHub integration | PAT-based, commit / branch / PR utilities |
 
 ---
 
-## Architecture Documentation
+## 4. Multi-Tenant Design
 
-| Document | Description |
-|----------|-------------|
-| [docs/SYSTEM_ROADMAP.md](docs/SYSTEM_ROADMAP.md) | Full phase roadmap — Phase 3 through Phase 8 |
-| [docs/SYSTEM_ARCHITECTURE.md](docs/SYSTEM_ARCHITECTURE.md) | Core runtime pipeline, data ledgers, security and financial integrity layers |
-| [docs/MONETIZATION_ARCHITECTURE.md](docs/MONETIZATION_ARCHITECTURE.md) | Billing ledger, wallet ledger, snapshots and audit system |
+Every data-bearing table carries a `tenant_id` column. Tenant isolation is enforced at the application layer: all queries filter by `tenant_id` before returning results.
+
+Key isolation guarantees:
+
+- `ai_usage` — per-tenant AI call records, unique constraint on `(tenant_id, request_id)` where `request_id IS NOT NULL`
+- `ai_billing_usage` — one billing row per usage row, scoped to tenant
+- `tenant_credit_ledger` — append-only wallet per tenant, no cross-tenant reads
+- `billing_period_tenant_snapshots` — unique per `(billing_period_id, tenant_id)` pair
+- All subscription, invoice, payment, and allowance tables carry `tenant_id`
+
+There are no shared financial aggregates across tenants. Every financial rollup is computed and stored per tenant.
+
+Tenant identification is via `x-organization-id` request header. In production, the organization is resolved from the Supabase JWT.
 
 ---
 
-## Project Structure
+## 5. AI Runtime Pipeline
+
+Every AI call made by any tenant follows this sequence:
 
 ```
-client/src/
-  components/layout/     AppShell, Sidebar
-  pages/                 dashboard, projects, architectures, runs, integrations, settings
-  lib/                   queryClient, utils
-
-server/
-  lib/
-    ai/
-      config.ts                  AI_MODEL_ROUTES, AiProviderKey, runtime limits, cache policies
-      runner.ts                  runAiCall() — single entry point for all AI features (15 steps)
-      router.ts                  resolveRoute() — async, tenant/global override-aware
-      overrides.ts               loadOverride() — DB override loader with TTL cache
-      types.ts                   AiCallContext, AiCallResult
-      errors.ts                  Typed error hierarchy — AiError + 10 subclasses
-      usage.ts                   logAiUsage() → ai_usage + tenant_ai_usage_periods + anomaly trigger
-      usage-periods.ts           getCurrentPeriod() — calendar month boundary helper
-      pricing.ts                 loadPricing() — DB first, code default fallback + TTL cache
-      costs.ts                   estimateAiCost() — token × rate calculation
-      guards.ts                  AI usage guardrails — budget mode, blocked state, thresholds
-      usage-summary.ts           getAiUsageSummary() — normalized tenant usage contract
-      request-safety.ts          Token cap, rate limit, concurrency guard
-      request-safety-summary.ts  getRequestSafetySummary() — backend summary
-      response-cache.ts          Tenant-isolated AI response cache (SHA-256 fingerprint)
-      cache-summary.ts           getCacheSummary() — hit/miss/write counts
-      cache-retention.ts         Batch cleanup SQL for expired ai_response_cache rows
-      idempotency.ts             2-layer duplicate suppression (in-process + DB)
-      request-state-summary.ts   getAiRequestStateSummary() — idempotency state counts
-      request-state-retention.ts Cleanup SQL for ai_request_states + ai_request_state_events
-      anomaly-detector.ts        runAnomalyDetection() — per-request + window anomalies (Phase 3K)
-      anomaly-summary.ts         getAnomalySummary() — recent anomaly event counts
-      anomaly-retention.ts       Cleanup SQL for ai_anomaly_events (90-day retention)
-      step-budget.ts             acquireAiStep() — per-request AI call limit (Phase 3L)
-      step-budget-summary.ts     getStepBudgetSummary() — active/exhausted/completed requests
-      step-budget-retention.ts   Cleanup SQL for step states + events
-      billing.ts                 loadEffectiveCustomerPricingConfig(), calculateCustomerPrice(), maybeRecordAiBillingUsage() (Phase 4A)
-      billing-summary.ts         getAiBillingSummary() — provider cost / customer price / margin
-      billing-retention.ts       SQL foundation for ai_billing_usage cleanup (24-month retention)
-      retention.ts               Cleanup SQL for ai_usage rows (90-day window)
-      providers/
-        provider.ts              AiProvider interface
-        openai-provider.ts       OpenAI Responses API adapter
-        registry.ts              ACTIVE_PROVIDERS map, getProvider()
-      prompts/
-        summarize.ts             getSummarizePrompt()
-    supabase.ts
-    github.ts
-    github-commit-format.ts
-  features/
-    ai-summarize/
-      summarize.service.ts       summarize() — first real AI feature
-  middleware/
-    auth.ts                      JWT → req.user
-  repositories/                  projects, architectures, runs, integrations, knowledge
-  services/                      projects, architectures, runs, integrations, run-executor
-  routes.ts                      Thin API handlers
-  storage.ts                     IStorage + DatabaseStorage
-  db.ts                          Drizzle + pg pool
-
-shared/
-  schema.ts                      All Drizzle tables + insert schemas + TypeScript types
+1.  Tenant request arrives
+2.  AI Runtime resolves model route (code default → DB override → tenant override)
+3.  Idempotency check (in-process Set + ai_request_states)
+4.  Request safety checks (token cap, rate limit, concurrency guard)
+5.  Budget / usage guard (blocked state, budget mode)
+6.  Response cache lookup (SHA-256 fingerprint, TTL 3600s)
+7.  Step budget acquire (max 5 AI calls per request_id)
+8.  Provider call (OpenAI Responses API)
+9.  ai_usage row inserted:
+      tenant_id, feature, provider, model,
+      prompt_tokens, completion_tokens, total_tokens,
+      estimated_cost_usd, pricing_source, pricing_version,
+      cached_input_tokens, reasoning_tokens
+10. Billing engine triggered:
+      ai_billing_usage row inserted with customer_price_usd,
+      provider_cost_usd, margin_usd, pricing_mode
+11. Wallet debit applied:
+      tenant_credit_ledger row inserted (append-only)
+      wallet_status on ai_billing_usage set to 'debited'
+12. Entitlement classification recorded:
+      entitlement_treatment, included_amount_usd, overage_amount_usd
 ```
+
+`ai_usage` is the canonical source of raw provider interactions. `ai_billing_usage` is the canonical source of billing truth. These two tables are never merged or mutated after creation (with the exception of the three wallet delivery fields on `ai_billing_usage`).
 
 ---
 
-## Database Schema (31 tables)
+## 6. Monetization Engine
 
-| Domain | Tables |
-|--------|--------|
-| Identity | `profiles` |
-| Multi-tenancy | `organizations`, `organization_members` |
-| Projects | `projects` |
-| Architectures | `architecture_profiles`, `architecture_versions`, `architecture_agent_configs`, `architecture_capability_configs`, `architecture_template_bindings`, `architecture_policy_bindings` |
-| AI Runs | `ai_runs`, `ai_steps`, `ai_artifacts`, `ai_tool_calls`, `ai_approvals`, `artifact_dependencies` |
-| Integrations | `integrations`, `organization_secrets` |
-| Knowledge | `knowledge_documents` |
-| AI Infrastructure | `ai_usage`, `ai_model_overrides`, `ai_model_pricing`, `ai_usage_limits`, `usage_threshold_events`, `tenant_ai_usage_periods`, `tenant_rate_limits`, `request_safety_events`, `ai_response_cache`, `ai_cache_events`, `ai_request_states`, `ai_request_state_events`, `ai_anomaly_configs`, `ai_anomaly_events`, `ai_request_step_states`, `ai_request_step_events` |
-| AI Billing | `ai_customer_pricing_configs`, `ai_billing_usage` |
+The monetization engine spans Phases 4A through 4S.
 
-### AI Infrastructure Tables
+### 6.1 Billing Calculations
+
+Pricing is resolved in a layered hierarchy:
+
+```
+tenant-specific customer pricing config
+         ↓
+global customer pricing config
+         ↓
+code default pricing
+```
+
+Three pricing modes are supported: `cost_plus_multiplier`, `fixed_markup`, `per_1k_tokens`.
+
+Provider cost is always recorded from the resolved `ai_model_pricing` row or code defaults. Customer price is computed independently. The margin is `customer_price_usd - provider_cost_usd`.
+
+### 6.2 Pricing Versions
+
+All pricing changes are versioned:
+
+- `provider_pricing_versions` — provider cost per model, effective date range
+- `customer_pricing_versions` — customer price per tenant / feature / provider, effective date range
+
+Both `ai_billing_usage` and `storage_billing_usage` store the resolved pricing version IDs at time of billing. This enables historical reconstruction of any billing record.
+
+### 6.3 Billing Periods
+
+`billing_periods` records the calendar boundary of each billing cycle. Status lifecycle: `open → closing → closed`.
+
+Closing a billing period:
+1. Marks the period as `closing`
+2. Aggregates all `ai_billing_usage` and `storage_billing_usage` rows into `billing_period_tenant_snapshots`
+3. Marks the period as `closed`
+
+Closed periods are immutable. Snapshots for closed periods are never modified outside explicit recovery workflows.
+
+Note: `ai_billing_usage` has no `billing_period_id` foreign key. Period attribution is computed via a date-range join on `billing_periods.period_start / period_end`.
+
+### 6.4 Storage Billing
+
+Storage usage is metered through `storage_usage` (raw measurements) and `storage_billing_usage` (billing records). Metric types: `gb_stored`, `gb_egress`, `class_a_ops`, `class_b_ops`. Storage billing totals are included in `billing_period_tenant_snapshots`.
+
+### 6.5 Anomaly Detection
+
+`billing_anomaly_runs` records each anomaly scan pass. Detectors scan for: usage spikes relative to tenant rolling baseline, zero-cost successful calls, margin violations, and token-to-cost ratio anomalies. Anomalies are surfaced for human review. No automatic remediation.
+
+### 6.6 Margin Tracking
+
+`billing_margin_snapshots` records computed margin at global, provider, and tenant scope. Used for operational margin dashboards and trend detection.
+
+### 6.7 Provider Reconciliation
+
+`provider_reconciliation_runs` and `provider_reconciliation_findings` track discrepancies between platform-recorded usage and provider-reported usage. Findings are classified by severity and require manual resolution.
+
+---
+
+## 7. Wallet Ledger
+
+The wallet is an append-only credit ledger per tenant.
+
+```
+tenant_credit_ledger
+  └── entry_type: credit | debit | adjustment | refund
+  └── amount_usd (positive = credit, negative = debit)
+  └── reference_id → ai_billing_usage.id or invoice_payment.id
+  └── balance_after (running balance maintained at insert time)
+```
+
+Design rules:
+- No row is ever updated or deleted
+- Every debit is linked to a specific `ai_billing_usage` row
+- Wallet status on `ai_billing_usage` tracks debit confirmation: `pending → debited | failed`
+- Failed debits are replayable via `billing_usage_id`
+
+---
+
+## 8. Subscription System
+
+### 8.1 Plans and Entitlements
+
+`subscription_plans` defines commercial tiers. Each plan has `plan_entitlements` rows defining:
+- `entitlement_type`: `ai_allowance_usd`, `storage_allowance_gb`, `feature_flag`, `rate_limit`, `seat_limit`
+- Allowance amounts for the billing period
+
+`tenant_subscriptions` links a tenant to a plan with a lifecycle: `active → cancelled | expired`.
+
+### 8.2 Allowance Accounting
+
+At billing time, each `ai_billing_usage` row is classified against the tenant's active plan allowance:
+
+- `entitlement_treatment`: `standard | included | partial_included | overage | blocked`
+- `included_amount_usd`: portion covered by the plan
+- `overage_amount_usd`: portion billed as overage
+
+Allowance consumption is recorded in:
+- `tenant_ai_allowance_usage` — one row per `ai_billing_usage` (unique constraint)
+- `tenant_storage_allowance_usage` — one row per `storage_billing_usage` (unique constraint)
+
+Both allowance tables are immutable after insert.
+
+---
+
+## 9. Invoice & Payment System
+
+### 9.1 Invoices
+
+`invoices` has a status lifecycle: `draft → finalized → void`.
+
+`invoice_line_items` records summary lines per invoice. Line types: `ai_usage_summary`, `wallet_debit_summary`, `margin_summary`, `storage_usage`, `adjustment`.
+
+Rules:
+- Finalized invoices are never mutated by application code
+- `subtotal_usd` must equal the sum of `line_total_usd` across line items
+- One invoice per `(tenant_id, billing_period_id)` — enforced by unique index
+
+### 9.2 Payments
+
+`invoice_payments` tracks payment attempts per invoice. Status lifecycle: `pending → processing → paid | failed | refunded | void`.
+
+`stripe_invoice_links` holds the mapping between internal invoice IDs and Stripe invoice IDs. `stripe_webhook_events` records every inbound Stripe webhook for idempotent processing.
+
+### 9.3 Stripe Integration
+
+The Stripe integration layer handles:
+- Checkout session creation for initial subscription
+- Subscription sync from Stripe to platform subscription tables
+- Webhook event ingestion and idempotent processing
+- Payment confirmation and reconciliation
+
+---
+
+## 10. Automated Billing Operations (Phase 4R)
+
+The automated operations layer provides a durable, scheduled execution system for recurring billing maintenance jobs.
+
+### 10.1 Tables
 
 | Table | Purpose |
-|-------|---------|
-| `ai_usage` | Every AI call — tokens, cost, status, requestId, latency |
-| `ai_model_overrides` | Route-level model/provider overrides (tenant or global) |
-| `ai_model_pricing` | Token pricing per provider+model — DB first, code fallback |
-| `ai_usage_limits` | Per-tenant budget limits and hard stop thresholds |
-| `usage_threshold_events` | Budget warning/blocked events (deduplicated 24h window) |
-| `tenant_ai_usage_periods` | Aggregate cost summary per tenant+period (guardrail source of truth) |
-| `tenant_rate_limits` | Per-tenant RPM/RPH overrides |
-| `request_safety_events` | Token cap, rate limit, concurrency block events |
-| `ai_response_cache` | Cached successful AI responses (TTL 1h, tenant-scoped) |
-| `ai_cache_events` | Cache hit/miss/write/skip event log |
-| `ai_request_states` | Idempotency state per (tenant, request_id) — 24h TTL |
-| `ai_request_state_events` | Idempotency lifecycle events — 30-day retention |
-| `ai_anomaly_configs` | Anomaly detection thresholds (global or per-tenant scope) |
-| `ai_anomaly_events` | Detected cost/token/rate anomaly signals — 90-day retention |
-| `ai_request_step_states` | Per-request AI call counter — max 5 calls per request_id |
-| `ai_request_step_events` | Step lifecycle events — 30-day retention |
-| `ai_customer_pricing_configs` | Customer-facing pricing config (global or per-tenant) — multiplier, markup, per-token |
-| `ai_billing_usage` | Immutable billing ledger — one row per successful ai_usage, provider cost + customer price + margin |
+|---|---|
+| `billing_job_definitions` | Job catalog with schedule, singleton mode, retry config, priority, duration warning |
+| `billing_job_runs` | Execution audit trail — one row per invocation |
 
----
+### 10.2 Job Definitions
 
-## AI Stack (Phase 3)
+13 predefined jobs are seeded on startup via `ensureBillingJobDefinitions()`. Jobs are idempotent — safe to re-run. Categories: `snapshot`, `monitoring`, `anomaly`, `reconciliation`, `audit`, `payment`, `maintenance`.
 
-All AI calls flow through a single orchestration pipeline in `runner.ts`:
+**Phase 4R jobs (10):** global billing metrics snapshot, tenant billing metrics snapshot, billing period metrics snapshot, billing anomaly scan, provider reconciliation scan, billing audit scan, margin tracking scan, pending payment health scan, stale webhook health scan, stale admin change health scan.
+
+**Phase 4S jobs (3):** billing integrity scan, snapshot rebuild health scan, repeated recovery failure scan. All three are scan-and-detect only — they never auto-repair.
+
+### 10.3 Execution Model
 
 ```
-feature code
-  → runAiCall(context, input)
-      1.  Resolve route (provider + model)
-      2.  Get provider adapter
-      3.  Idempotency check [if request_id present]
-          ├─ duplicate_inflight  → 409 Conflict (no provider call)
-          ├─ duplicate_replay    → return stored result (no cost row, no step)
-          └─ owned               → proceed
-      4.  Resolve effective safety config (tenant override → global defaults)
-      5.  Token cap precheck (413 if exceeded)
-      6.  Rate limit check (429 if exceeded)
-      7.  Concurrency guard acquire (429 if exceeded)
-      8.  Budget/usage guard
-          ├─ blocked    → 402 Budget Exceeded (no provider call)
-          └─ budget_mode → apply BUDGET_MODE_POLICY (reduced tokens + prefix)
-      9.  Cache lookup [if route cacheable + tenantId present]
-          ├─ HIT  → return cached result (no provider call, no cost row, no step consumed)
-          └─ MISS → continue
-     10.  Step budget acquire [if tenantId + requestId present]
-          ├─ exceeded   → 429 Step Budget Exceeded (no provider call)
-          └─ within limit → increment counter, record step_started
-     11.  Provider call (OpenAI Responses API)
-     12.  Usage logging → ai_usage + tenant_ai_usage_periods + anomaly detection [fire-and-forget]
-     13.  Cache write (success only)
-     14.  Mark request completed (idempotency state)
-     15.  Release concurrency slot + idempotency ownership (always, in finally)
+runBillingJob(jobKey, options)
+  1. Check distributed lock (pg_try_advisory_xact_lock + started-row guard)
+  2. Create billing_job_runs row (status: started)
+  3. Execute registered job executor function
+  4. Update run row (status: completed | failed | timed_out | skipped)
 ```
 
-### Model Routes (code defaults)
+Singleton enforcement uses two layers:
+- **Layer 1:** `pg_try_advisory_xact_lock` — prevents concurrent execution
+- **Layer 2:** started-row check — prevents self-blocking across transactions
 
-| Key | Provider | Model | Use case |
-|-----|----------|-------|----------|
-| `default` | openai | gpt-4.1-mini | Fast, cost-efficient |
-| `heavy` | openai | gpt-4.1 | Complex reasoning |
-| `nano` | openai | gpt-4.1-nano | Trivial tasks |
-| `coding` | openai | gpt-4.1 | Code generation |
-| `cheap` | google | gemini-2.0-flash | Placeholder |
-| `reasoning` | anthropic | claude-opus-4-5 | Placeholder |
+The lock check happens before the run row is created. This prevents a job from blocking itself on retry.
 
-### Idempotency
+### 10.4 Scheduler
 
-Duplicate requests are suppressed at two layers:
-1. **In-process Set** — same-process concurrent duplicates blocked immediately
-2. **DB `ai_request_states`** — cross-request/process duplicates and replay
+`billing-scheduler.ts` provides an interval-based trigger. It checks which interval jobs are due (based on `schedule_expression` in seconds and the most recent completed run timestamp) and calls `runBillingJob` for each due job. Only `interval` jobs are auto-triggered; `manual` and `cron` jobs require explicit invocation.
 
-| Scenario | Behavior | HTTP |
-|----------|----------|------|
-| No `request_id` | Normal execution | 200 |
-| First request | Execute + store result | 200 |
-| Duplicate while in-flight | Blocked | 409 + Retry-After: 5 |
-| Duplicate after success | Replay stored result (no cost row) | 200 |
-| Duplicate after failure | New execution allowed (retryable) | 200 |
+### 10.5 Priority and Duration Monitoring (Phase 4S hardening)
 
-### Response Cache
-
-Enabled for `"default"` route only. TTL: 3600s. Fingerprint:
-`SHA-256(v1:{tenantId}:{routeKey}:{provider}:{model}:{maxOutputTokens}:{contentHash})`
-
-Cache hits produce **no ai_usage provider-cost rows** and **no step budget consumption**.
-
-### Anomaly Detection (Phase 3K)
-
-Detection-only — no runtime blocking. Fires after every successful ai_usage write.
-
-| Signal | Threshold (default) |
-|--------|---------------------|
-| `cost_per_request_exceeded` | > $0.10 per call |
-| `tokens_per_request_exceeded` | > 12,000 total tokens |
-| `output_tokens_per_request_exceeded` | > 4,000 output tokens |
-| `requests_per_5m_exceeded` | > 60 requests in 5 minutes |
-| `cost_per_5m_exceeded` | > $3.00 in 5 minutes |
-| `requests_per_1h_exceeded` | > 500 requests in 1 hour |
-| `cost_per_1h_exceeded` | > $20.00 in 1 hour |
-
-Config resolution: tenant-specific → global → code defaults. Cooldown: 15 minutes per anomaly key.
-
-### Step Budget (Phase 3L)
-
-Prevents cost amplification loops from a single logical request spawning too many AI calls.
-
-| What counts as a step | Counts? |
-|-----------------------|---------|
-| Successful provider call | Yes |
-| Failed provider call (error after attempt) | Yes |
-| Cache HIT | No |
-| Duplicate replay | No |
-| Pre-flight block (token cap, rate limit, budget) | No |
-| No `request_id` | Not enforced |
-
-Default limit: **5 AI calls per request_id**. 6th call → HTTP 429 `step_budget_exceeded`.
-
-### HTTP Error Semantics
-
-| Error | HTTP | Code | Retry-After |
-|-------|------|------|-------------|
-| Token cap exceeded | 413 | `token_cap_exceeded` | — |
-| Rate limit exceeded | 429 | `rate_limit_exceeded` | 60s / 3600s |
-| Concurrency exceeded | 429 | `concurrency_limit_exceeded` | 5s |
-| Budget exceeded | 402 | `ai_budget_exceeded` | — |
-| Duplicate inflight | 409 | `duplicate_inflight` | 5s |
-| Step budget exceeded | 429 | `step_budget_exceeded` | — |
-| Provider quota | 429 | `ai_quota_exceeded` | 60s |
-| Provider error | 502 | `ai_service_error` | — |
-| Timeout | 504 | `ai_timeout` | — |
-| Unavailable | 503 | `ai_unavailable` | — |
+- `billing_job_definitions.priority` (integer 1–10, default 5, lower = higher priority) — records intended scheduling priority for future priority-based queuing
+- `billing_job_definitions.job_duration_warning_ms` (nullable integer) — slow-run warning threshold per job
+- `billing_job_runs.worker_id` (nullable text) — identifies the executing worker node for distributed debugging
 
 ---
 
-## API Routes
+## 11. Billing Integrity & Recovery (Phase 4S)
 
-### Projects
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/projects` | List active projects |
-| POST | `/api/projects` | Create project |
-| GET | `/api/projects/:id` | Get project |
-| PATCH | `/api/projects/:id` | Update project |
-| POST | `/api/projects/:id/archive` | Archive (soft delete) |
+The integrity and recovery layer provides read-only scan capabilities and controlled write-recovery workflows for the billing data layer.
 
-### Architectures
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/architectures` | List profiles |
-| POST | `/api/architectures` | Create profile |
-| GET | `/api/architectures/:id` | Get profile + versions |
-| PATCH | `/api/architectures/:id` | Update profile |
-| POST | `/api/architectures/:id/archive` | Archive |
-| POST | `/api/architectures/:id/versions` | Create version (draft) |
-| POST | `/api/architectures/:id/versions/:versionId/publish` | Publish version |
-| PUT | `/api/architectures/:id/versions/:versionId/agents` | Upsert agent configs |
-| PUT | `/api/architectures/:id/versions/:versionId/capabilities` | Upsert capability configs |
+### 11.1 Tables
 
-### Runs
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/runs` | List runs |
-| POST | `/api/runs` | Create run |
-| GET | `/api/runs/:id` | Get run + steps + artifacts |
-| PATCH | `/api/runs/:id/status` | Update status |
-| POST | `/api/runs/:id/execute` | Start AI pipeline (async, 202) |
-| POST | `/api/runs/:id/steps` | Append step |
-| POST | `/api/runs/:id/artifacts` | Append artifact |
-| POST | `/api/runs/:id/tool-calls` | Append tool call |
-| POST | `/api/runs/:id/approvals` | Append approval |
-| PATCH | `/api/runs/:id/approvals/:approvalId` | Resolve approval |
-| GET | `/api/runs/:id/commit-preview` | GitHub commit preview |
+| Table | Purpose |
+|---|---|
+| `billing_recovery_runs` | Audit log for all recovery attempts — dry-run and apply |
+| `billing_recovery_actions` | Detailed step log per recovery run — one row per action |
 
-### Integrations
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/api/integrations` | List all 5 providers |
-| POST | `/api/integrations` | Upsert integration |
-| GET | `/api/integrations/:provider` | Get by provider |
+Both tables are append-only. `billing_recovery_runs` records overall intent, scope, and result. `billing_recovery_actions` records each individual mutation planned or executed within a run.
 
-### AI
-| Method | Path | Description |
-|--------|------|-------------|
-| POST | `/api/ai/summarize` | Summarize text (min 20 chars) |
+### 11.2 Integrity Scan Engine
 
----
+`billing-integrity.ts` implements five independent checks:
 
-## Phase History
+| Check | What it detects |
+|---|---|
+| `ai_usage_gaps` | Successful `ai_usage` rows without a corresponding `ai_billing_usage` row |
+| `storage_usage_gaps` | `storage_usage` rows without a corresponding `storage_billing_usage` row |
+| `snapshot_drift` | `billing_period_tenant_snapshots` totals deviating from live `ai_billing_usage` aggregates |
+| `invoice_arithmetic` | Invoice `subtotal_usd` not matching the sum of `invoice_line_items.line_total_usd` |
+| `stuck_wallet_debits` | `ai_billing_usage` rows with `wallet_status='pending'` beyond a configurable time threshold |
 
-| Phase | Branch | Description | Status |
-|-------|--------|-------------|--------|
-| 1 | `main` | Core platform: schema, repositories, services, UI | Complete |
-| 2 | `main` | AI run pipeline: 4-agent chain, run executor, GitHub commit format | Complete |
-| 3A | `main` | AI foundation: config, service, ai_usage table, logAiUsage() | Complete |
-| 3B | `main` | AI orchestration: runAiCall(), AiCallContext, typed errors, requestId tracing | Complete |
-| 3C | `feature/ai-router` | Provider abstraction: AiProvider interface, OpenAI adapter, registry, router | Complete |
-| 3D | `feature/ai-summarize` | First AI feature: summarize prompt, service, POST /api/ai/summarize | Complete |
-| 3E | `feature/ai-route-overrides` | Model routing overrides: ai_model_overrides table, loadOverride(), async router | Complete |
-| 3F | `feature/ai-pricing-registry` | AI Pricing Registry: ai_model_pricing, loadPricing(), estimateAiCost(), estimated_cost_usd | Complete |
-| 3G | `feature/ai-usage-guardrails` | AI Usage Guardrails: ai_usage_limits, usage_threshold_events, guards.ts, budget mode, hard stop | Complete |
-| 3G.1 | `feature/ai-usage-hardening` | Usage Hardening: tenant_ai_usage_periods aggregate, getCurrentPeriod(), aggregate-first guardrails | Complete |
-| 3H | `feature/ai-usage-final-hardening` | Request Safety: token cap (413), rate limit (429), concurrency guard (429), request_safety_events | Complete |
-| 3H.1 | `feature/http-error-semantics` | HTTP Error Semantics: httpStatus + errorCode + Retry-After on all AiError subclasses | Complete |
-| 3I | `feature/ai-response-cache` | AI Response Cache: SHA-256 fingerprint, TTL, tenant isolation, cache hit/miss/write events | Complete |
-| 3I.1 | `feature/ai-response-cache` | Cache Key Hardening: maxOutputTokens in fingerprint to prevent cross-config collisions | Complete |
-| 3I.2 | `feature/cache-cleanup-foundation` | Cache Cleanup Foundation: preview + batch cleanup SQL for ai_response_cache | Complete |
-| 3I.3 | `feature/cache-batch-cleanup` | Batch Cache Cleanup: oldest-first deletion, configurable CACHE_CLEANUP_BATCH_SIZE | Complete |
-| 3J | `feature/ai-idempotency-layer` | AI Idempotency: 2-layer duplicate suppression, in-flight 409, completed replay, failed retry | Complete |
-| 3J.1 | `feature/request-state-retention` | Request State Retention: expires_at states cleanup, 30-day events cleanup SQL | Complete |
-| 3K | `feature/ai-cost-anomaly-detection` | AI Cost Anomaly Detection: per-request + window signals, tenant config override, 15m cooldown | Complete |
-| 3L | `feature/ai-step-budget-guard` | AI Step Budget Guard: max 5 AI calls per request_id, step events, 429 on exceeded | Complete |
-| 4A | `feature/ai-billing-engine` | AI Billing Engine: ai_customer_pricing_configs + ai_billing_usage, 3 pricing modes, immutable ledger, margin tracking | Complete |
+Scans are always read-only. They return structured findings with severity classification (`critical`, `high`, `medium`, `low`, `info`), affected counts, and sample IDs.
+
+Snapshot drift computation uses a date-range join against `billing_periods.period_start / period_end` because `ai_billing_usage` has no `billing_period_id` foreign key.
+
+### 11.3 Recovery Engine
+
+`billing-recovery.ts` provides preview and apply functions for two recovery types:
+
+**`billing_snapshot_rebuild`** — Recomputes `billing_period_tenant_snapshots` from live `ai_billing_usage` data for a given billing period. Inserts missing snapshots, updates drifted snapshots.
+
+**`invoice_totals_rebuild`** — Recalculates `subtotal_usd` and `total_usd` on draft invoices where the stored total does not match the sum of line items. Finalized invoices are never touched.
+
+Preview functions are always read-only. Apply functions create a `billing_recovery_runs` row and one `billing_recovery_actions` row per step. All apply operations are idempotent.
+
+### 11.4 Recovery Audit Trail
+
+Every recovery attempt — dry-run or real — creates a `billing_recovery_runs` row with:
+- `dry_run` flag (true = no canonical billing table was modified)
+- `recovery_type` (9 supported values), `scope_type` (6 values), `scope_id`
+- `status` lifecycle: `started → completed | failed | skipped`
+- `result_summary` JSONB (counts of executed / skipped / failed actions)
+
+Every step creates a `billing_recovery_actions` row with `action_status` (`planned | executed | skipped | failed`), `before_state`, and `after_state` JSONB diffs.
+
+### 11.5 Retention and Inspection
+
+`billing-recovery-retention.ts` provides read-only helpers:
+- Age report (run distribution by age bucket and type)
+- Action statistics (counts by status and target table)
+- Retention candidates (runs older than N days in terminal states)
+- Stuck run detection (runs in `started` status beyond timeout)
+- Daily trend (per-day run counts for dashboards)
+
+`billing-recovery-summary.ts` provides:
+- `listRecoveryRuns` — filterable list with aggregate action counts
+- `getRecoveryRunDetail` — full run with all action rows
+- `explainRecoveryRun` — structured human-readable run explanation
+- `getRecoveryRunStats` — aggregate stats by recovery type and status
 
 ---
 
-## Local Setup
+## 12. Operational Safety Rules
+
+These rules are enforced at the application layer and must not be violated in future development:
+
+1. **Immutable billing truth** — `ai_billing_usage` financial columns (costs, prices, margins, pricing version IDs) are never updated after insert. Only `wallet_status`, `wallet_error_message`, and `wallet_debited_at` may be updated.
+
+2. **Append-only wallet** — `tenant_credit_ledger` rows are never deleted or updated. Every balance adjustment creates a new row.
+
+3. **Finalized invoice protection** — `invoices` with `status='finalized'` and their `invoice_line_items` are never mutated by application code.
+
+4. **Idempotent writes** — All billing inserts use `ON CONFLICT DO NOTHING` or unique constraint enforcement to prevent duplicate financial records.
+
+5. **Dry-run first** — Every recovery workflow exposes a preview function that is always read-only. Preview must be called and reviewed before apply.
+
+6. **Scan-only jobs** — Phase 4S automated jobs detect problems. They never auto-repair. Human review precedes any apply operation.
+
+7. **Provider cost always recorded** — `ai_usage.estimated_cost_usd` is populated for every successful AI call. Null means pricing was unavailable, not that the call was free.
+
+8. **Deterministic billing** — Given the same `ai_usage` row and the same pricing version, `ai_billing_usage` values are always reproducible. This enables recovery without guessing.
+
+9. **No cross-tenant financial reads** — All financial queries filter by `tenant_id`. No aggregate across tenants is exposed to tenant-scoped API consumers.
+
+10. **Distributed lock before execution** — All singleton billing jobs check `pg_try_advisory_xact_lock` before creating a run row. This prevents concurrent execution and self-blocking.
+
+---
+
+## 13. Admin Operations API
+
+All admin routes are internal. They must never be exposed to tenants.
+
+### Billing Recovery (`/api/admin/billing-recovery/`)
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/scan` | Run integrity scan (read-only) |
+| POST | `/preview/snapshot-rebuild` | Preview snapshot rebuild (dry-run) |
+| POST | `/preview/invoice-totals-rebuild` | Preview invoice totals rebuild (dry-run) |
+| POST | `/apply/snapshot-rebuild` | Apply snapshot rebuild |
+| POST | `/apply/invoice-totals-rebuild` | Apply invoice totals rebuild |
+| GET | `/runs` | List recovery runs (filterable by type, scope, status, dry_run) |
+| GET | `/runs/:runId` | Recovery run full detail with all action rows |
+| GET | `/runs/:runId/explain` | Human-readable explanation of run outcome |
+| GET | `/runs/stats/summary` | Aggregate stats by type and status |
+| GET | `/retention/age-report` | Run age distribution by bucket and type |
+| GET | `/retention/action-stats` | Action counts by status and target table |
+| GET | `/retention/candidates/:days` | Runs eligible for archival (read-only) |
+| GET | `/retention/stuck-runs` | Runs stuck in started state beyond threshold |
+| GET | `/retention/daily-trend` | Per-day run count trend |
+
+### Automated Billing Jobs (`/api/admin/billing-ops/`)
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/jobs` | List all job definitions |
+| POST | `/jobs/seed` | Seed predefined job definitions (idempotent) |
+| POST | `/jobs/:jobKey/run` | Trigger a job manually |
+| GET | `/runs` | List job runs |
+| GET | `/runs/:runId` | Job run detail |
+| POST | `/runs/:runId/retry` | Retry a failed run |
+| GET | `/health` | Job health summary |
+| POST | `/scheduler/trigger` | Trigger scheduler pass |
+| GET | `/scheduler/status` | Scheduler status |
+| GET | `/retention/*` | Retention inspection helpers |
+
+Additional admin route groups: `/api/admin/pricing/`, `/api/admin/plans/`, `/api/admin/subscriptions/`, `/api/admin/invoices/`, `/api/admin/billing/`, `/api/admin/monitoring/`.
+
+---
+
+## 14. Development Workflow
+
+### Starting the application
 
 ```bash
-# 1. Install dependencies
-npm install
-
-# 2. Set environment variables (see below)
-
-# 3. Push schema to database
-npm run db:push
-
-# 4. Start dev server
 npm run dev
 ```
 
-## Environment Variables
+This starts the Express backend and the Vite frontend dev server on the same port.
+
+### Database schema changes
+
+Edit `shared/schema.ts`, then push the schema:
+
+```bash
+echo "yes" | DATABASE_URL="$DATABASE_URL" npx drizzle-kit push --config=drizzle.config.ts
+```
+
+### Key conventions
+
+- **ID convention** — All primary keys use `varchar("id").primaryKey().default(sql\`gen_random_uuid()\`)`. Never use native `uuid` type or `serial` for new tables.
+- **Express 5 params** — `req.params` values are typed as `string | string[]`. Always coerce with `String(req.params.x)`.
+- **Node validation** — `node --import tsx/esm -e "..."`
+- **All new routes** must include Zod body / query validation before passing to service functions.
+
+### Environment variables
 
 | Variable | Required | Notes |
-|----------|----------|-------|
+|---|---|---|
 | `SUPABASE_DB_POOL_URL` | Yes | Supabase pooler connection string |
+| `DATABASE_URL` | Yes | Direct database URL for migrations |
 | `SUPABASE_URL` | Yes | Supabase project URL |
 | `SUPABASE_ANON_KEY` | Yes | Public anon key |
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Server-side only |
@@ -352,38 +468,105 @@ npm run dev
 | `OPENAI_API_KEY` | Yes | Server-side only, never client |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | Yes | PAT with repo scope |
 
----
+### Adding a new billing job
 
-## Multi-tenancy
-
-All requests use `x-organization-id` header to identify the tenant. Defaults to `demo-org` in development. In production, the organization is resolved from the Supabase JWT.
-
----
-
-## Design Rules
-
-- **No hard delete** — `projects`, `architecture_profiles`, `ai_runs` use `status` field
-- **Architecture versioning is first-class** — `current_version_id` + `is_published` on versions
-- **AI Runs as lifecycle** — dedicated append operations for steps, artifacts, tool calls, approvals
-- **All AI calls go through `runAiCall()`** — never call generateText() or logAiUsage() directly
-- **Overrides are route_key-based** — features map to route keys, route keys map to overrides
-- **Server-side secrets only** — GitHub/OpenAI/Supabase service role never reach the client
-- **Idempotency requires request_id** — duplicate suppression only activates when `X-Request-Id` is present
-- **Cache hits produce no cost rows** — observable via ai_cache_events only
-- **Failed request_ids are retryable** — transient errors do not permanently block a request_id
-- **Anomaly detection is observational** — Phase 3K detects only, never blocks runtime
-- **Step budget is per request_id** — cache hits, replays, and pre-flight blocks never consume a step
-- **Retention is manual** — no scheduler; cleanup SQL provided in retention foundation files
+1. Add a `BillingJobSeed` entry to `PREDEFINED_JOBS` in `server/lib/ai/billing-jobs.ts`
+2. Register an executor with `registerJobExecutor(jobKey, async (run, def) => { ... })`
+3. The executor must return a plain structured object (no circular refs)
+4. Call `POST /api/admin/billing-ops/jobs/seed` to seed — idempotent
 
 ---
 
-## Next
+## 15. Completed Platform Phases
 
-- [ ] Phase 3M+: Next infrastructure phase
-- [ ] Phase 4: Admin UI for model routing overrides + usage dashboard
-- [ ] Real Supabase Auth session (frontend login/signup)
-- [ ] GitHub tool execution (create branch, write files, open PR)
-- [ ] `knowledge_chunks` + `knowledge_vectors` tables
-- [ ] Full RLS policies on all tenant tables
-- [ ] Vercel deployment automation
-- [ ] Retention cron jobs for all ai_* tables
+| Phase | Name | Key deliverable |
+|---|---|---|
+| 1 | Core Platform | Schema, repositories, services, frontend shell |
+| 2 | AI Run Pipeline | 4-agent chain, run executor, GitHub commit format |
+| 3A | AI Foundation | `ai_usage` table, `logAiUsage()`, token / cost recording |
+| 3B | AI Orchestration | `runAiCall()`, typed errors, requestId tracing |
+| 3C | Provider Abstraction | `AiProvider` interface, OpenAI adapter, registry, router |
+| 3D | Summarize Feature | First AI feature — `POST /api/ai/summarize` |
+| 3E | Route Overrides | `ai_model_overrides`, `loadOverride()`, async router |
+| 3F | Pricing Registry | `ai_model_pricing`, `loadPricing()`, `estimateAiCost()` |
+| 3G | Usage Guardrails | `ai_usage_limits`, budget mode, hard stop, aggregate guardrails |
+| 3H | Request Safety | Token cap (413), rate limit (429), concurrency guard (429) |
+| 3I | Response Cache | SHA-256 fingerprint, TTL, tenant isolation, cache events |
+| 3J | Idempotency | 2-layer duplicate suppression, in-flight 409, completed replay |
+| 3K | Anomaly Detection | Per-request + window signals, tenant config override, cooldown |
+| 3L | Step Budget Guard | Max 5 AI calls per request_id, 429 on exceeded |
+| **4A** | AI Billing Engine | `ai_billing_usage`, provider / customer price split, margin |
+| **4B** | Wallet Credit Ledger | `tenant_credit_ledger`, append-only debits, wallet status |
+| **4C** | Billing Replay & Financial Safety | Replay guards, orphaned usage detection, health summaries |
+| **4D** | Billing Period Locking | `billing_periods`, period open / closing / closed lifecycle |
+| **4E** | Provider Reconciliation | `provider_reconciliation_runs`, discrepancy findings |
+| **4F** | Invoice System | `invoices`, `invoice_line_items`, draft / finalized / void |
+| **4G** | Invoice Snapshot Integrity | `billing_period_tenant_snapshots`, period close aggregation |
+| **4H** | Billing Anomaly Detection | `billing_anomaly_runs`, spike and margin detectors |
+| **4I** | Margin Tracking | `billing_margin_snapshots`, global / provider / tenant scope |
+| **4J** | Stripe Payment Foundations | `invoice_payments`, payment status lifecycle |
+| **4K** | Payment Event System | `stripe_webhook_events`, idempotent webhook processing |
+| **4L** | Stripe Sync Layer | `stripe_invoice_links`, invoice-to-Stripe mapping |
+| **4M** | Stripe Checkout & Webhooks | Checkout session creation, subscription webhook handling |
+| **4N** | Subscription Plans & Entitlements | `subscription_plans`, `plan_entitlements`, plan lifecycle |
+| **4O** | Subscription Usage Accounting | Allowance classification, `tenant_ai_allowance_usage` |
+| **4P** | Invoice Automation | `admin_change_requests`, pricing / plan admin change audit |
+| **4Q** | Margin Monitoring | `billing_metrics_snapshots`, monitoring summaries, alerts |
+| **4R** | Automated Billing Operations | `billing_job_definitions`, `billing_job_runs`, 13 predefined jobs, scheduler |
+| **4S** | Billing Integrity & Recovery | `billing_recovery_runs`, `billing_recovery_actions`, scan engine, recovery engine |
+
+---
+
+## 16. Next Development Phases
+
+### Phase 5A — Document Registry & Storage Foundation
+
+Phase 5A introduces a document management subsystem to the platform. The following tables are planned:
+
+| Table | Purpose |
+|---|---|
+| `knowledge_documents` | Document registry — metadata, source, owner, lifecycle status |
+| `knowledge_document_versions` | Immutable version history per document |
+| `knowledge_storage_objects` | Reference to stored binary objects (Cloudflare R2 or equivalent) |
+| `knowledge_processing_jobs` | Processing pipeline execution log (extract, chunk, embed) |
+| `knowledge_chunks` | Text chunks produced from document versions |
+| `knowledge_embeddings` | Embedding vectors per chunk with model metadata |
+| `knowledge_index_state` | Vector index build state per document version |
+
+These components enable:
+
+- **Document versioning** — every upload creates a new immutable version; previous versions are retained and addressable
+- **Processing pipelines** — extraction, chunking, and embedding are tracked as durable jobs with status lifecycles (`pending → processing → completed | failed`)
+- **Embedding metadata** — model identifier, vector dimension, and pricing version are recorded at embedding time to support future re-indexing
+- **Vector index management** — index build state is tracked independently from embedding generation, allowing partial rebuilds without re-embedding
+- **Document lifecycle management** — documents can be in `draft`, `processing`, `indexed`, `archived`, or `failed` states with full audit trail
+
+The document system follows the same architectural principles as the billing engine: immutable records, durable audit logs, idempotent operations, and strict per-tenant isolation.
+
+---
+
+## 17. Long-Term Platform Vision
+
+The platform is designed to grow through clearly scoped phases, each adding a production-grade subsystem without breaking existing contracts.
+
+Planned future areas:
+
+- **Phase 5 — Knowledge & Document System** — document ingestion, chunking, embedding, and vector index management
+- **Phase 6 — Agent Orchestration Layer** — durable multi-step agent execution with state persistence and retry
+- **Phase 7 — Plan Marketplace** — self-serve plan selection, upgrade / downgrade flows, prorated billing
+- **Phase 8 — Tenant Analytics** — usage dashboards, cost breakdown, anomaly history per tenant
+- **Phase 9 — Compliance & Audit Export** — GDPR data export, billing audit exports, SOC 2 log retention
+
+Each phase is additive. No phase modifies canonical financial data in a way that invalidates prior billing records.
+
+---
+
+## 18. Summary
+
+This platform implements a complete enterprise monetization engine for a multi-tenant AI SaaS product. Every AI call is metered, priced, billed, and debited to a wallet. Every billing record is immutable. Every financial mutation is deterministic and recoverable.
+
+The automated operations layer (Phase 4R) provides scheduled execution of 13 billing maintenance jobs with distributed locking, retry logic, and a full execution audit trail.
+
+The integrity and recovery layer (Phase 4S) provides a read-only scan engine across five integrity dimensions and controlled write-recovery workflows for snapshot and invoice repair, with full before/after audit trails for every action taken.
+
+The platform is prepared for Phase 5A which will extend it with a document registry, versioning, processing pipelines, embedding metadata, and vector index management — following the same architectural principles of immutability, idempotency, and per-tenant isolation that underpin the billing engine.
