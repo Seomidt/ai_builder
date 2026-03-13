@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5A complete)
+# AI Builder Platform — V1 (Phase 5B.1 complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -603,3 +603,43 @@ S1 parse supported text/markdown, S2 parse unsupported format (PDF) fails explic
 - Both partial unique indexes (WHERE chunk_active=true) verified in pg_indexes
 - All 3 CHECK constraints verified in pg_constraint
 - Real rows confirmed: parsed versions with parser metadata, chunks with strategy/overlap/replacement audit trail, processing jobs with processor_name/locked_at
+
+## Phase 5B.1 — Structured Document Processing (branch: feature/structured-document-processing)
+
+CSV/TSV structured parse pipeline with `table_rows` chunking strategy. 21 columns added to 3 tables.
+
+### New files
+
+- `server/lib/ai/structured-document-parsers.ts` — CSV parser (RFC-4180, quoted fields), TSV parser (tab delimited reuse), XLSX explicit fail (INV-SP11), `selectStructuredDocumentParser()` factory, `parseStructuredDocumentVersion()`, `normalizeStructuredDocument()`, `computeStructuredContentChecksum()`
+- `server/lib/ai/structured-document-chunking.ts` — `table_rows` strategy, `buildStructuredChunkKey()`, `buildStructuredChunkHash()`, `normalizeStructuredChunkText()`, `chunkStructuredDocument()` with sheet boundary preservation and row windowing, `summarizeStructuredChunks()`
+- `server/lib/ai/migrate-phase5b1.ts` — raw SQL migration for 21 new DB columns, CHECK constraints, indexes
+- `server/lib/ai/validate-phase5b1.ts` — 16 validation scenarios (all passing)
+
+### Extended files
+
+- `server/lib/ai/knowledge-processing.ts` — `runStructuredParseForDocumentVersion`, `runStructuredChunkingForDocumentVersion`, `markStructuredParseFailed/Completed`, `explainStructuredParseState/ChunkState`, `previewStructuredChunkReplacement`, `listStructuredProcessingJobs`, `summarizeStructuredChunkingResult`, `syncIndexStateAfterStructuredChunking`, `markIndexStateStaleAfterStructuredChunkReplace`
+- `server/routes/admin.ts` — 14 new endpoints under `/api/admin/knowledge/structured/`
+
+### DB schema additions
+
+- `knowledge_document_versions`: +12 columns (`structured_parse_status`, `structured_parse_job_id`, `structured_parse_started_at`, `structured_parse_completed_at`, `structured_parse_failed_at`, `structured_parse_error`, `sheet_count`, `row_count`, `column_count`, `raw_structured_content`, `structured_content_checksum`, `structured_parse_options`)
+- `knowledge_chunks`: +9 columns (`table_chunk`, `sheet_name`, `row_start`, `row_end`, `table_chunk_key`, `table_chunk_hash`, `table_chunk_strategy`, `table_chunk_strategy_version`, `replaced_by_job_id`)
+- `knowledge_processing_jobs`: +2 columns (`structured_processor_name`, `structured_processor_version`); job_type CHECK updated to include `structured_parse` and `structured_chunk`
+
+### Invariants enforced (INV-SP1 through INV-SP11)
+
+- INV-SP1: Version must exist and belong to tenant
+- INV-SP2: Document must exist and belong to tenant
+- INV-SP3: Structured chunking requires `structured_parse_status='completed'`
+- INV-SP4: Structured chunking NEVER sets `index_state='indexed'` — only 'pending' or 'stale'
+- INV-SP5: Archived KB or document blocks all structured processing
+- INV-SP6: Chunk replacement is atomic — old table_chunks deactivated before new inserted
+- INV-SP7: replacedByJobId must reference a real job row
+- INV-SP8: Job acquire uses CAS — prevents double-acquire
+- INV-SP9: Cross-tenant access raises KnowledgeInvariantError immediately
+- INV-SP10: parse_status transitions: null → running → completed/failed
+- INV-SP11: XLSX and unknown mime types fail explicitly — no silent fallback
+
+### Validation: 16/16 scenarios passed
+
+S1 CSV parse (sheetCount=1 rowCount=5), S2 TSV parse (rowCount=3 cols=3), S3 XLSX explicit fail, S4 unsupported mime explicit fail, S5 chunk parsed version (indexState=pending NOT indexed), S6 chunk rebuild deactivates prior chunks (audit trail), S7 parse fail doesn't mutate current retrieval, S8 chunk transaction safe (no mixed state), S9 non-current version no affect on current, S10 cross-tenant rejected, S11 archived KB/doc blocked, S12 deterministic chunk keys and hashes, S13 changed config causes stale+replacement, S14 job lock safety (second acquire rejected), S15 inspection helpers work, S16 Phase 5A.1 invariants still hold.

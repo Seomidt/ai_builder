@@ -52,6 +52,16 @@ import {
 import { KnowledgeInvariantError } from "./knowledge-bases";
 import { parseDocumentVersion, computeTextChecksum, type ParsedDocument } from "./document-parsers";
 import { chunkParsedDocument, type ChunkingConfig } from "./document-chunking";
+import {
+  parseStructuredDocumentVersion,
+  normalizeStructuredDocument,
+  type StructuredParseResult,
+  type StructuredParseOptions,
+} from "./structured-document-parsers";
+import {
+  chunkStructuredDocument,
+  type StructuredChunkingConfig,
+} from "./structured-document-chunking";
 
 // ─── Internal tenant-assertion helpers ────────────────────────────────────────
 
@@ -1629,6 +1639,699 @@ export async function listDocumentProcessingJobs(
     .from(knowledgeProcessingJobs)
     .where(and(...conditions))
     .orderBy(desc(knowledgeProcessingJobs.createdAt));
+}
+
+// ─── Phase 5B.1: Structured Parse / Chunk Flows ───────────────────────────────
+
+export interface RunStructuredParseOptions {
+  content?: string;
+  workerId?: string;
+  idempotencyKey?: string;
+  parseOptions?: StructuredParseOptions;
+}
+
+export interface StructuredParseExecutionResult {
+  jobId: string;
+  status: "completed" | "failed";
+  structuredParseStatus: "completed" | "failed";
+  sheetCount?: number;
+  rowCount?: number;
+  columnCount?: number;
+  contentChecksum?: string;
+  error?: string;
+  parseResult?: StructuredParseResult;
+}
+
+/**
+ * runStructuredParseForDocumentVersion — Phase 5B.1 structured parse flow.
+ *
+ * INV-SP1: validates version→document→KB chain + tenant (same tenant).
+ * INV-SP5: archived/inactive KB or document blocks processing.
+ * INV-SP6: parse failure does NOT clear valid historical chunks.
+ * INV-SP9: cross-tenant linkage rejected.
+ * INV-SP11: unsupported/malformed formats fail explicitly.
+ * INV-SP12: does NOT mark document_status='ready'.
+ */
+export async function runStructuredParseForDocumentVersion(
+  versionId: string,
+  tenantId: string,
+  opts: RunStructuredParseOptions = {},
+): Promise<StructuredParseExecutionResult> {
+  const ctx = await assertFullVersionContext(versionId, tenantId, { requireActiveLifecycle: true });
+
+  const mimeType = ctx.version.mimeType ?? "";
+
+  if (!opts.content) {
+    const reason = `No structured content provided for version ${versionId}. Storage-backed structured parsing not yet wired — supply content directly (INV-SP11).`;
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({
+        structuredParseStatus: "failed",
+        structuredParseFailureReason: reason,
+        structuredParseCompletedAt: new Date(),
+      })
+      .where(
+        and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)),
+      );
+
+    const [failJob] = await db
+      .insert(knowledgeProcessingJobs)
+      .values({
+        tenantId,
+        knowledgeDocumentId: ctx.document.id,
+        knowledgeDocumentVersionId: versionId,
+        jobType: "structured_parse",
+        status: "failed",
+        failureReason: reason,
+        structuredProcessorName: "structured_parse_runner",
+        structuredProcessorVersion: "1.0",
+        idempotencyKey: opts.idempotencyKey ?? null,
+        startedAt: new Date(),
+        completedAt: new Date(),
+      })
+      .returning();
+    return { jobId: failJob.id, status: "failed", structuredParseStatus: "failed", error: reason };
+  }
+
+  const [job] = await db
+    .insert(knowledgeProcessingJobs)
+    .values({
+      tenantId,
+      knowledgeDocumentId: ctx.document.id,
+      knowledgeDocumentVersionId: versionId,
+      jobType: "structured_parse",
+      status: "queued",
+      structuredProcessorName: "structured_parse_runner",
+      structuredProcessorVersion: "1.0",
+      idempotencyKey: opts.idempotencyKey ?? null,
+    })
+    .returning();
+
+  const acquired = await acquireKnowledgeProcessingJob(job.id, tenantId, {
+    workerId: opts.workerId,
+    processorName: "structured_parse_runner",
+    processorVersion: "1.0",
+  });
+
+  if (!acquired) {
+    return {
+      jobId: job.id,
+      status: "failed",
+      structuredParseStatus: "failed",
+      error: "Failed to acquire structured parse job — may have been taken by another worker.",
+    };
+  }
+
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({ structuredParseStatus: "running", structuredParseStartedAt: new Date(), structuredParseFailureReason: null })
+    .where(
+      and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)),
+    );
+
+  let parseResult: StructuredParseResult;
+
+  try {
+    const raw = parseStructuredDocumentVersion(opts.content, mimeType, opts.parseOptions);
+    parseResult = normalizeStructuredDocument(raw);
+  } catch (err) {
+    const reason = (err as Error).message;
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({
+        structuredParseStatus: "failed",
+        structuredParseCompletedAt: new Date(),
+        structuredParseFailureReason: reason,
+      })
+      .where(
+        and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)),
+      );
+    await failKnowledgeProcessingJob(job.id, tenantId, reason);
+    return { jobId: job.id, status: "failed", structuredParseStatus: "failed", error: reason };
+  }
+
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({
+      structuredParseStatus: "completed",
+      structuredParseCompletedAt: new Date(),
+      structuredParseFailureReason: null,
+      structuredSheetCount: parseResult.totalSheetCount,
+      structuredRowCount: parseResult.totalRowCount,
+      structuredColumnCount: parseResult.totalColumnCount,
+      structuredContentChecksum: parseResult.contentChecksum,
+    })
+    .where(
+      and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)),
+    );
+
+  await completeKnowledgeProcessingJob(job.id, tenantId, {
+    parserName: parseResult.parserName,
+    parserVersion: parseResult.parserVersion,
+    sheetCount: parseResult.totalSheetCount,
+    rowCount: parseResult.totalRowCount,
+    columnCount: parseResult.totalColumnCount,
+    contentChecksum: parseResult.contentChecksum,
+    warnings: parseResult.warnings,
+  });
+
+  return {
+    jobId: job.id,
+    status: "completed",
+    structuredParseStatus: "completed",
+    sheetCount: parseResult.totalSheetCount,
+    rowCount: parseResult.totalRowCount,
+    columnCount: parseResult.totalColumnCount,
+    contentChecksum: parseResult.contentChecksum,
+    parseResult,
+  };
+}
+
+export async function markStructuredParseFailed(
+  versionId: string,
+  tenantId: string,
+  reason: string,
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({ structuredParseStatus: "failed", structuredParseCompletedAt: new Date(), structuredParseFailureReason: reason })
+    .where(
+      and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)),
+    );
+}
+
+export async function markStructuredParseCompleted(
+  versionId: string,
+  tenantId: string,
+  meta: {
+    sheetCount: number;
+    rowCount: number;
+    columnCount: number;
+    contentChecksum: string;
+  },
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({
+      structuredParseStatus: "completed",
+      structuredParseCompletedAt: new Date(),
+      structuredParseFailureReason: null,
+      structuredSheetCount: meta.sheetCount,
+      structuredRowCount: meta.rowCount,
+      structuredColumnCount: meta.columnCount,
+      structuredContentChecksum: meta.contentChecksum,
+    })
+    .where(
+      and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)),
+    );
+}
+
+// ─── Structured Index State Integration ──────────────────────────────────────
+
+/**
+ * syncIndexStateAfterStructuredChunking
+ *
+ * INV-SP4: does NOT mark index_state='indexed'.
+ * If prior state was 'indexed', transitions to 'stale'. Otherwise 'pending'.
+ */
+export async function syncIndexStateAfterStructuredChunking(
+  versionId: string,
+  tenantId: string,
+  knowledgeBaseId: string,
+  knowledgeDocumentId: string,
+  newChunkCount: number,
+): Promise<KnowledgeIndexStateRow> {
+  const existing = await getIndexStateByVersion(versionId, tenantId);
+  const priorState = existing?.indexState ?? null;
+  const newIndexState = priorState === "indexed" ? "stale" : "pending";
+  const staleReason =
+    priorState === "indexed" ? "Structured chunks rebuilt — embeddings and index are now stale." : undefined;
+
+  const [row] = await db
+    .insert(knowledgeIndexState)
+    .values({
+      tenantId,
+      knowledgeBaseId,
+      knowledgeDocumentId,
+      knowledgeDocumentVersionId: versionId,
+      indexState: newIndexState,
+      chunkCount: newChunkCount,
+      indexedChunkCount: 0,
+      embeddingCount: 0,
+      staleReason: staleReason ?? null,
+      failureReason: null,
+    })
+    .onConflictDoUpdate({
+      target: knowledgeIndexState.knowledgeDocumentVersionId,
+      set: {
+        indexState: newIndexState,
+        chunkCount: newChunkCount,
+        indexedChunkCount: 0,
+        embeddingCount: 0,
+        staleReason: staleReason ?? null,
+        failureReason: null,
+        updatedAt: new Date(),
+      },
+    })
+    .returning();
+  return row;
+}
+
+export async function markIndexStateStaleAfterStructuredChunkReplace(
+  versionId: string,
+  tenantId: string,
+  reason?: string,
+): Promise<void> {
+  await db
+    .update(knowledgeIndexState)
+    .set({
+      indexState: "stale",
+      staleReason: reason ?? "Structured chunks were replaced — index is now stale.",
+      indexedChunkCount: 0,
+      embeddingCount: 0,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(knowledgeIndexState.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeIndexState.tenantId, tenantId),
+      ),
+    );
+}
+
+// ─── Structured Chunk Execution Flow ─────────────────────────────────────────
+
+export interface RunStructuredChunkingOptions {
+  content?: string;
+  parseResult?: StructuredParseResult;
+  chunkingConfig?: Partial<StructuredChunkingConfig>;
+  workerId?: string;
+  idempotencyKey?: string;
+}
+
+export interface StructuredChunkingExecutionResult {
+  jobId: string;
+  status: "completed" | "failed";
+  chunkCount: number;
+  priorStructuredChunksDeactivated: number;
+  indexState?: string;
+  error?: string;
+}
+
+/**
+ * runStructuredChunkingForDocumentVersion — Phase 5B.1 structured chunk flow.
+ *
+ * INV-SP2: chunks only the explicitly requested version.
+ * INV-SP3: requires successful structured_parse_status='completed' or explicit parseResult.
+ * INV-SP4: does NOT mark document retrievable (indexState never set to 'indexed').
+ * INV-SP7: transactional deactivation + insert — no partial active chunk corruption.
+ * INV-SP8: non-current version chunking does not alter current version retrieval state.
+ * INV-SP9: cross-tenant rejected.
+ * INV-SP10: chunk keys and hashes are deterministic.
+ * INV-SP12: 5A.1 invariants preserved.
+ */
+export async function runStructuredChunkingForDocumentVersion(
+  versionId: string,
+  tenantId: string,
+  opts: RunStructuredChunkingOptions = {},
+): Promise<StructuredChunkingExecutionResult> {
+  const ctx = await assertFullVersionContext(versionId, tenantId, { requireActiveLifecycle: true });
+
+  const [ver] = await db
+    .select({
+      id: knowledgeDocumentVersions.id,
+      structuredParseStatus: knowledgeDocumentVersions.structuredParseStatus,
+      mimeType: knowledgeDocumentVersions.mimeType,
+    })
+    .from(knowledgeDocumentVersions)
+    .where(
+      and(
+        eq(knowledgeDocumentVersions.id, versionId),
+        eq(knowledgeDocumentVersions.tenantId, tenantId),
+      ),
+    );
+
+  if (!ver) throw new KnowledgeInvariantError("INV-SP2", `version ${versionId} not found`);
+
+  if (ver.structuredParseStatus !== "completed" && !opts.parseResult && !opts.content) {
+    const error = `Cannot structured-chunk version ${versionId}: structured_parse_status is '${ver.structuredParseStatus ?? "null"}'. Run structured parse first or supply parseResult/content. (INV-SP3)`;
+    return { jobId: "none", status: "failed", chunkCount: 0, priorStructuredChunksDeactivated: 0, error };
+  }
+
+  const [job] = await db
+    .insert(knowledgeProcessingJobs)
+    .values({
+      tenantId,
+      knowledgeDocumentId: ctx.document.id,
+      knowledgeDocumentVersionId: versionId,
+      jobType: "structured_chunk",
+      status: "queued",
+      structuredProcessorName: "structured_chunk_runner",
+      structuredProcessorVersion: "1.0",
+      idempotencyKey: opts.idempotencyKey ?? null,
+    })
+    .returning();
+
+  const acquired = await acquireKnowledgeProcessingJob(job.id, tenantId, {
+    workerId: opts.workerId,
+    processorName: "structured_chunk_runner",
+    processorVersion: "1.0",
+  });
+
+  if (!acquired) {
+    return {
+      jobId: job.id,
+      status: "failed",
+      chunkCount: 0,
+      priorStructuredChunksDeactivated: 0,
+      error: "Failed to acquire structured chunk job — may have been taken by another worker.",
+    };
+  }
+
+  let structuredParseResult: StructuredParseResult;
+
+  if (opts.parseResult) {
+    structuredParseResult = opts.parseResult;
+  } else if (opts.content) {
+    const mimeType = ver.mimeType ?? "text/csv";
+    try {
+      const raw = parseStructuredDocumentVersion(opts.content, mimeType);
+      structuredParseResult = normalizeStructuredDocument(raw);
+    } catch (err) {
+      const reason = `Structured parse step failed during chunking: ${(err as Error).message}`;
+      await failKnowledgeProcessingJob(job.id, tenantId, reason);
+      return { jobId: job.id, status: "failed", chunkCount: 0, priorStructuredChunksDeactivated: 0, error: reason };
+    }
+  } else {
+    const reason = "No parseResult or content provided for structured chunking.";
+    await failKnowledgeProcessingJob(job.id, tenantId, reason);
+    return { jobId: job.id, status: "failed", chunkCount: 0, priorStructuredChunksDeactivated: 0, error: reason };
+  }
+
+  const candidates = chunkStructuredDocument(
+    structuredParseResult,
+    ctx.document.id,
+    versionId,
+    opts.chunkingConfig,
+  );
+
+  let priorDeactivated = 0;
+  let newChunkCount = 0;
+  let indexStateRow: KnowledgeIndexStateRow | undefined;
+
+  try {
+    await db.transaction(async (tx) => {
+      const now = new Date();
+
+      const priorActive = await tx
+        .update(knowledgeChunks)
+        .set({ chunkActive: false, replacedAt: now, replacedByJobId: job.id })
+        .where(
+          and(
+            eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+            eq(knowledgeChunks.tenantId, tenantId),
+            eq(knowledgeChunks.chunkActive, true),
+            eq(knowledgeChunks.tableChunk, true),
+          ),
+        )
+        .returning();
+      priorDeactivated = priorActive.length;
+
+      if (candidates.length > 0) {
+        const inserts = candidates.map((c) => ({
+          tenantId,
+          knowledgeBaseId: ctx.kb.id,
+          knowledgeDocumentId: ctx.document.id,
+          knowledgeDocumentVersionId: versionId,
+          chunkIndex: c.chunkIndex,
+          chunkKey: c.chunkKey,
+          chunkHash: c.chunkHash,
+          chunkText: c.chunkText,
+          sheetName: c.sheetName,
+          rowStart: c.rowStart,
+          rowEnd: c.rowEnd,
+          columnHeaders: c.columnHeaders as unknown as Record<string, unknown>,
+          tableChunk: true as const,
+          tableChunkStrategy: c.tableChunkStrategy,
+          tableChunkVersion: c.tableChunkVersion,
+          tokenEstimate: c.tokenEstimate,
+          chunkActive: true as const,
+          metadata: null,
+        }));
+        await tx.insert(knowledgeChunks).values(inserts);
+        newChunkCount = candidates.length;
+      }
+
+      await tx
+        .update(knowledgeProcessingJobs)
+        .set({
+          status: "completed",
+          completedAt: now,
+          heartbeatAt: now,
+          resultSummary: {
+            chunkCount: newChunkCount,
+            priorStructuredChunksDeactivated: priorDeactivated,
+            strategy: opts.chunkingConfig?.strategy ?? "table_rows",
+            sheetCount: structuredParseResult.totalSheetCount,
+          },
+        })
+        .where(
+          and(
+            eq(knowledgeProcessingJobs.id, job.id),
+            eq(knowledgeProcessingJobs.tenantId, tenantId),
+          ),
+        );
+    });
+
+    indexStateRow = await syncIndexStateAfterStructuredChunking(
+      versionId,
+      tenantId,
+      ctx.kb.id,
+      ctx.document.id,
+      newChunkCount,
+    );
+  } catch (err) {
+    await failKnowledgeProcessingJob(
+      job.id,
+      tenantId,
+      `Structured chunk transaction failed: ${(err as Error).message}`,
+    );
+    return {
+      jobId: job.id,
+      status: "failed",
+      chunkCount: 0,
+      priorStructuredChunksDeactivated: 0,
+      error: `Structured chunk transaction failed: ${(err as Error).message}`,
+    };
+  }
+
+  return {
+    jobId: job.id,
+    status: "completed",
+    chunkCount: newChunkCount,
+    priorStructuredChunksDeactivated: priorDeactivated,
+    indexState: indexStateRow?.indexState,
+  };
+}
+
+export async function markStructuredChunkingFailed(
+  versionId: string,
+  tenantId: string,
+  _reason: string,
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+}
+
+export async function markStructuredChunkingCompleted(
+  versionId: string,
+  tenantId: string,
+  _meta: { chunkCount: number },
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+}
+
+// ─── Phase 5B.1 Inspection Helpers ───────────────────────────────────────────
+
+export async function explainStructuredParseState(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  versionId: string;
+  structuredParseStatus: string | null;
+  sheetCount: number | null;
+  rowCount: number | null;
+  columnCount: number | null;
+  contentChecksum: string | null;
+  failureReason: string | null;
+  parsedAt: Date | null;
+}> {
+  await assertVersionTenant(versionId, tenantId);
+  const [ver] = await db
+    .select({
+      structuredParseStatus: knowledgeDocumentVersions.structuredParseStatus,
+      structuredSheetCount: knowledgeDocumentVersions.structuredSheetCount,
+      structuredRowCount: knowledgeDocumentVersions.structuredRowCount,
+      structuredColumnCount: knowledgeDocumentVersions.structuredColumnCount,
+      structuredContentChecksum: knowledgeDocumentVersions.structuredContentChecksum,
+      structuredParseFailureReason: knowledgeDocumentVersions.structuredParseFailureReason,
+      structuredParseCompletedAt: knowledgeDocumentVersions.structuredParseCompletedAt,
+    })
+    .from(knowledgeDocumentVersions)
+    .where(
+      and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)),
+    );
+
+  return {
+    versionId,
+    structuredParseStatus: ver?.structuredParseStatus ?? null,
+    sheetCount: ver?.structuredSheetCount ?? null,
+    rowCount: ver?.structuredRowCount ?? null,
+    columnCount: ver?.structuredColumnCount ?? null,
+    contentChecksum: ver?.structuredContentChecksum ?? null,
+    failureReason: ver?.structuredParseFailureReason ?? null,
+    parsedAt: ver?.structuredParseCompletedAt ?? null,
+  };
+}
+
+export async function explainStructuredChunkState(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  versionId: string;
+  activeTableChunkCount: number;
+  totalTableChunkCount: number;
+  replacedTableChunkCount: number;
+  strategy: string | null;
+  sheets: string[];
+  indexState: string | null;
+}> {
+  await assertVersionTenant(versionId, tenantId);
+
+  const allChunks = await db
+    .select({
+      chunkActive: knowledgeChunks.chunkActive,
+      tableChunk: knowledgeChunks.tableChunk,
+      sheetName: knowledgeChunks.sheetName,
+      tableChunkStrategy: knowledgeChunks.tableChunkStrategy,
+    })
+    .from(knowledgeChunks)
+    .where(
+      and(
+        eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeChunks.tenantId, tenantId),
+        eq(knowledgeChunks.tableChunk, true),
+      ),
+    );
+
+  const active = allChunks.filter((c) => c.chunkActive);
+  const replaced = allChunks.filter((c) => !c.chunkActive);
+  const sheets = Array.from(new Set(active.map((c) => c.sheetName).filter(Boolean) as string[]));
+  const strategy = active[0]?.tableChunkStrategy ?? null;
+
+  const idxState = await getIndexStateByVersion(versionId, tenantId);
+
+  return {
+    versionId,
+    activeTableChunkCount: active.length,
+    totalTableChunkCount: allChunks.length,
+    replacedTableChunkCount: replaced.length,
+    strategy,
+    sheets,
+    indexState: idxState?.indexState ?? null,
+  };
+}
+
+export async function previewStructuredChunkReplacement(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  currentActiveTableChunkCount: number;
+  currentIndexState: string | null;
+  wouldDeactivate: number;
+  explanation: string;
+}> {
+  await assertVersionTenant(versionId, tenantId);
+
+  const active = await db
+    .select({ id: knowledgeChunks.id })
+    .from(knowledgeChunks)
+    .where(
+      and(
+        eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeChunks.tenantId, tenantId),
+        eq(knowledgeChunks.chunkActive, true),
+        eq(knowledgeChunks.tableChunk, true),
+      ),
+    );
+
+  const idxState = await getIndexStateByVersion(versionId, tenantId);
+  const explanation =
+    active.length === 0
+      ? "No active table chunks to replace. Structured chunking would insert new table chunks fresh."
+      : `Re-running structured chunking would deactivate ${active.length} existing active table chunks and insert new ones. Index state would transition to '${idxState?.indexState === "indexed" ? "stale" : "pending"}'.`;
+
+  return {
+    currentActiveTableChunkCount: active.length,
+    currentIndexState: idxState?.indexState ?? null,
+    wouldDeactivate: active.length,
+    explanation,
+  };
+}
+
+export async function listStructuredProcessingJobs(
+  documentId: string,
+  tenantId: string,
+): Promise<KnowledgeProcessingJob[]> {
+  await assertDocumentTenant(documentId, tenantId);
+  return db
+    .select()
+    .from(knowledgeProcessingJobs)
+    .where(
+      and(
+        eq(knowledgeProcessingJobs.knowledgeDocumentId, documentId),
+        eq(knowledgeProcessingJobs.tenantId, tenantId),
+        sql`${knowledgeProcessingJobs.jobType} IN ('structured_parse','structured_chunk')`,
+      ),
+    )
+    .orderBy(desc(knowledgeProcessingJobs.createdAt));
+}
+
+export async function summarizeStructuredChunkingResult(
+  jobId: string,
+  tenantId: string,
+): Promise<{
+  jobId: string;
+  status: string;
+  chunkCount: number;
+  priorStructuredChunksDeactivated: number;
+  strategy: string | null;
+  sheetCount: number | null;
+  processorName: string | null;
+  processorVersion: string | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  failureReason: string | null;
+}> {
+  const job = await getProcessingJob(jobId, tenantId);
+  if (!job) throw new KnowledgeInvariantError("INV-SP1", `processing job ${jobId} not found`);
+
+  const summary = (job.resultSummary ?? {}) as Record<string, unknown>;
+
+  return {
+    jobId: job.id,
+    status: job.status,
+    chunkCount: (summary.chunkCount as number) ?? 0,
+    priorStructuredChunksDeactivated: (summary.priorStructuredChunksDeactivated as number) ?? 0,
+    strategy: (summary.strategy as string) ?? null,
+    sheetCount: (summary.sheetCount as number) ?? null,
+    processorName: job.structuredProcessorName,
+    processorVersion: job.structuredProcessorVersion,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    failureReason: job.failureReason,
+  };
 }
 
 /**

@@ -134,6 +134,17 @@ import {
   summarizeChunkingResult,
   acquireKnowledgeProcessingJob,
   failKnowledgeProcessingJob,
+  runStructuredParseForDocumentVersion,
+  runStructuredChunkingForDocumentVersion,
+  markStructuredParseFailed,
+  markStructuredParseCompleted,
+  explainStructuredParseState,
+  explainStructuredChunkState,
+  previewStructuredChunkReplacement,
+  listStructuredProcessingJobs,
+  summarizeStructuredChunkingResult,
+  syncIndexStateAfterStructuredChunking,
+  markIndexStateStaleAfterStructuredChunkReplace,
 } from "../lib/ai/knowledge-processing";
 import { selectDocumentParser } from "../lib/ai/document-parsers";
 import { getVectorAdapterInfo } from "../lib/ai/vector-adapter";
@@ -1963,6 +1974,235 @@ export function registerAdminRoutes(app: Express): void {
       const idxState = await getIndexStateByVersion(versionId, tenantId);
       const retrievable = await isVersionRetrievable(versionId, tenantId);
       res.json({ indexState: idxState, retrievable });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.1: Structured Parse Routes ────────────────────────────────────
+
+  app.post("/api/admin/knowledge/structured/parse/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().min(1),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        parseOptions: z.object({
+          sheetName: z.string().optional(),
+          hasHeader: z.boolean().optional(),
+          delimiter: z.string().optional(),
+          maxRows: z.number().int().positive().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runStructuredParseForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+        parseOptions: body.parseOptions,
+      });
+      res.json({ result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/structured/parse/mark-failed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().min(1),
+      }).parse(req.body);
+      await markStructuredParseFailed(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/structured/parse/mark-completed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        sheetCount: z.number().int().min(0),
+        rowCount: z.number().int().min(0),
+        columnCount: z.number().int().min(0),
+        contentChecksum: z.string().min(1),
+      }).parse(req.body);
+      await markStructuredParseCompleted(body.versionId, body.tenantId, {
+        sheetCount: body.sheetCount,
+        rowCount: body.rowCount,
+        columnCount: body.columnCount,
+        contentChecksum: body.contentChecksum,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/structured/parse/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainStructuredParseState(versionId, tenantId);
+      res.json({ structuredParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.1: Structured Chunk Routes ────────────────────────────────────
+
+  app.post("/api/admin/knowledge/structured/chunk/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        chunkingConfig: z.object({
+          strategy: z.string().optional(),
+          version: z.string().optional(),
+          rowWindowSize: z.number().int().positive().optional(),
+          includeHeaders: z.boolean().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runStructuredChunkingForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+        chunkingConfig: body.chunkingConfig,
+      });
+      res.json({ result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/structured/chunk/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainStructuredChunkState(versionId, tenantId);
+      res.json({ structuredChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/structured/chunk/preview-replacement/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewStructuredChunkReplacement(versionId, tenantId);
+      res.json({ preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/structured/chunk/list/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const chunks = await listChunksByVersion(versionId, tenantId, false);
+      const tableChunks = chunks.filter((c) => (c as Record<string, unknown>).tableChunk === true);
+      res.json({ chunks: tableChunks, total: tableChunks.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.1: Structured Jobs & Inspection Routes ─────────────────────────
+
+  app.get("/api/admin/knowledge/structured/jobs/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listStructuredProcessingJobs(documentId, tenantId);
+      res.json({ jobs, total: jobs.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/structured/jobs/:jobId/summarize", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeStructuredChunkingResult(jobId, tenantId);
+      res.json({ summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/structured-parse-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainStructuredParseState(versionId, tenantId);
+      res.json({ structuredParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/structured-chunk-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainStructuredChunkState(versionId, tenantId);
+      res.json({ structuredChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/structured/index-state/sync", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        chunkCount: z.number().int().min(0),
+      }).parse(req.body);
+      const row = await syncIndexStateAfterStructuredChunking(
+        body.versionId,
+        body.tenantId,
+        body.knowledgeBaseId,
+        body.knowledgeDocumentId,
+        body.chunkCount,
+      );
+      res.json({ indexState: row });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/structured/index-state/mark-stale", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().optional(),
+      }).parse(req.body);
+      await markIndexStateStaleAfterStructuredChunkReplace(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }
