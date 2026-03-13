@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 4Q complete)
+# AI Builder Platform — V1 (Phase 4S complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -30,7 +30,14 @@ Internal control plane for AI-driven software generation. Express + React + Driz
 - **Idempotency requires request_id**: duplicate suppression only activates when `X-Request-Id` is present
 - **Cache hits produce no cost rows**: observable via ai_cache_events only
 - **Failed request_ids are retryable**: transient provider errors do not permanently block a request_id
-- **Retention is manual**: no scheduler; cleanup SQL provided in retention foundation files
+- **Retention is manual**: no scheduler in Phases 3–4; cleanup SQL provided in retention foundation files
+- **Billing jobs use distributed locking**: pg_try_advisory_xact_lock (Layer 1) + started-row singleton check (Layer 2). Lock check before run row creation — prevents self-blocking on retry
+- **Scan-only jobs never auto-repair**: Phase 4S jobs detect, never fix. Human review precedes any apply call
+- **Recovery preview is always read-only**: preview functions never write to canonical billing tables — enforced in billing-recovery.ts
+- **ai_billing_usage has NO billing_period_id FK**: period attribution via date-range join on billing_periods.period_start/period_end. NEVER assume a direct FK
+- **storage_usage timestamp column is created_at**: NOT recorded_at — critical for retention and gap queries
+- **Finalized invoices never mutated by recovery**: invoice_totals_rebuild only touches draft invoices
+- **All recovery operations are idempotent**: apply functions safe to re-run on same scope/period
 - **Anomaly detection is observational only**: no runtime blocking in Phase 3K — events only
 - **Step budget is per request_id**: cache hits, replays, and pre-flight blocks never consume a step
 - **Step budget fail-open**: DB errors in step-budget.ts allow the call through — observability must not block runtime
@@ -115,8 +122,21 @@ server/
   storage.ts                     IStorage + DatabaseStorage
   db.ts                          Drizzle + pg pool
 
+    lib/
+      ai/
+        billing-job-locks.ts           pg_try_advisory_xact_lock + started-row singleton guard (Phase 4R)
+        billing-operations.ts          runBillingJob() — job engine, lifecycle, executor registry (Phase 4R)
+        billing-jobs.ts                13 predefined jobs + executor registrations (Phase 4R+4S)
+        billing-job-health.ts          health summary, stale run detection, job state explanation (Phase 4R)
+        billing-scheduler.ts           interval-based scheduler, due-job detection (Phase 4R)
+        billing-ops-retention.ts       inspection helpers for job runs — read-only (Phase 4R)
+        billing-integrity.ts           read-only scan engine: 5 checks across billing tables (Phase 4S)
+        billing-recovery.ts            preview + apply for snapshot rebuild + invoice totals rebuild (Phase 4S)
+        billing-recovery-summary.ts    listRecoveryRuns, getRecoveryRunDetail, explainRecoveryRun, stats (Phase 4S)
+        billing-recovery-retention.ts  age report, action stats, stuck runs, daily trend — read-only (Phase 4S)
+
 shared/
-  schema.ts                      All Drizzle tables + insert schemas + TypeScript types (33 tables)
+  schema.ts                      All Drizzle tables + insert schemas + TypeScript types (77 tables after Phase 4S)
 ```
 
 ## Phase History
@@ -145,6 +165,23 @@ shared/
 | 3L | `feature/ai-step-budget-guard` | AI Step Budget Guard — ai_request_step_states + ai_request_step_events, max 5 AI calls per request_id |
 | 4A | `feature/ai-billing-engine` | AI Billing Engine — ai_customer_pricing_configs + ai_billing_usage, 3 pricing modes, immutable ledger, margin tracking |
 | 4B | `feature/wallet-credit-ledger` | Wallet/Credit Ledger — tenant_credit_accounts + tenant_credit_ledger, immutable ledger, gross/available balance, billing-driven debit, expiration-ready, fail-open |
+| 4C | `feature/billing-replay-safety` | Billing Replay & Financial Safety — replay guards, orphaned usage detection, health summaries |
+| 4D | `feature/billing-period-locking` | Billing Period Locking — billing_periods, period open/closing/closed lifecycle |
+| 4E | `feature/provider-reconciliation` | Provider Reconciliation — provider_reconciliation_runs, discrepancy findings |
+| 4F | `feature/invoice-system` | Invoice System — invoices, invoice_line_items, draft/finalized/void |
+| 4G | `feature/invoice-snapshot-integrity` | Invoice Snapshot Integrity — billing_period_tenant_snapshots, period close aggregation |
+| 4H | `feature/billing-anomaly-detection` | Billing Anomaly Detection — billing_anomaly_runs, spike and margin detectors |
+| 4I | `feature/margin-tracking` | Margin Tracking — billing_margin_snapshots, global/provider/tenant scope |
+| 4J | `feature/stripe-payment-foundations` | Stripe Payment Foundations — invoice_payments, payment status lifecycle |
+| 4K | `feature/payment-event-system` | Payment Event System — stripe_webhook_events, idempotent webhook processing |
+| 4L | `feature/stripe-sync-layer` | Stripe Sync Layer — stripe_invoice_links, invoice-to-Stripe mapping |
+| 4M | `feature/stripe-checkout-webhooks` | Stripe Checkout & Webhooks — checkout session creation, subscription webhook handling |
+| 4N | `feature/subscription-plans-entitlements` | Subscription Plans & Entitlements — subscription_plans, plan_entitlements, plan lifecycle |
+| 4O | `feature/subscription-usage-accounting` | Subscription Usage Accounting — allowance classification, tenant_ai_allowance_usage |
+| 4P | `feature/admin-pricing-plan-management` | Invoice Automation — admin_change_requests, pricing/plan admin change audit |
+| 4Q | `feature/billing-observability-monitoring` | Margin Monitoring — billing_metrics_snapshots, monitoring summaries, alerts |
+| 4R | `feature/automated-billing-operations` | Automated Billing Operations — billing_job_definitions, billing_job_runs, 13 predefined jobs, scheduler |
+| 4S | `feature/billing-recovery-integrity` | Billing Integrity & Recovery — billing_recovery_runs, billing_recovery_actions, scan engine, recovery engine |
 
 ## AI Stack — Full Pipeline (runner.ts)
 
@@ -210,6 +247,17 @@ runAiCall(context, input)
 - `server/lib/ai/wallet-retention.ts` — getWalletRetentionSql() (24-month default)
 - `server/lib/ai/retention.ts` — PREVIEW/DELETE SQL for ai_usage (90-day window)
 - `server/lib/ai/errors.ts` — AiError + 10 typed subclasses with httpStatus + errorCode + retryAfterSeconds
+- `server/lib/ai/billing-job-locks.ts` — acquireBillingJobLock() via pg_try_advisory_xact_lock + started-row guard (Phase 4R)
+- `server/lib/ai/billing-operations.ts` — runBillingJob(), createJobRun(), completeJobRun(), failJobRun(), registerJobExecutor() (Phase 4R)
+- `server/lib/ai/billing-jobs.ts` — PREDEFINED_JOBS (13), ensureBillingJobDefinitions() (Phase 4R+4S)
+- `server/lib/ai/billing-job-health.ts` — getBillingJobHealthSummary(), detectStaleRuns() (Phase 4R)
+- `server/lib/ai/billing-scheduler.ts` — triggerScheduler(), getDueJobs() (Phase 4R)
+- `server/lib/ai/billing-ops-retention.ts` — read-only inspection helpers for job runs (Phase 4R)
+- `server/lib/ai/billing-integrity.ts` — runBillingIntegrityScan() — 5 checks, always read-only (Phase 4S)
+- `server/lib/ai/billing-recovery.ts` — previewSnapshotRebuild(), applySnapshotRebuild(), previewInvoiceTotalsRebuild(), applyInvoiceTotalsRebuild() (Phase 4S)
+- `server/lib/ai/billing-recovery-summary.ts` — listRecoveryRuns(), getRecoveryRunDetail(), explainRecoveryRun(), getRecoveryRunStats() (Phase 4S)
+- `server/lib/ai/billing-recovery-retention.ts` — age report, action stats, stuck runs, daily trend — read-only (Phase 4S)
+- `server/routes/admin.ts` — all /api/admin/* routes including billing-ops (17 routes) and billing-recovery (14 routes)
 
 ## Database Notes
 
@@ -242,17 +290,24 @@ npm run dev       # Start dev server (port 5000)
 npm run db:push   # Sync schema to DB
 ```
 
-## V2 / Next TODO
+## Current Status & Next TODO
 
-- [x] Phase 4B: Wallet/Credit Ledger — tenant credit accounts + immutable ledger + billing-driven debit
-- [ ] Phase 4C: Stripe metered billing sync
-- [ ] Phase 4: Admin UI for model routing overrides + usage dashboard
+### Completed (Phase 4S, commit 2abe180, branch feature/billing-recovery-integrity)
+- [x] Phase 4A–4S: Full monetization engine — billing, wallet, subscriptions, invoices, Stripe, jobs, integrity, recovery
+- [x] README.md updated to reflect Phase 4S architecture
+
+### Next phase
+- [ ] **Phase 5A: Document Registry & Storage Foundation**
+  - New tables: knowledge_documents, knowledge_document_versions, knowledge_storage_objects, knowledge_processing_jobs, knowledge_chunks, knowledge_embeddings, knowledge_index_state
+  - Branch: feature/document-registry (from Phase 4S tip commit 2abe180)
+  - Declaration uploaded — ready to implement
+
+### Future work
+- [ ] Admin UI for billing operations dashboard
 - [ ] Real Supabase Auth session (frontend login/signup)
 - [ ] GitHub tool execution (create branch, write files, open PR)
-- [ ] `knowledge_chunks` + `knowledge_vectors` tables
 - [ ] Full RLS policies on all tenant tables
-- [ ] Vercel deployment automation
-- [ ] Retention cron jobs for all ai_* tables
+- [ ] Retention cron jobs (billing_job_runs integration in Phase 5+)
 
 ## Phase 4P — Admin Pricing & Plan Management System (complete, branch: feature/admin-pricing-plan-management)
 
