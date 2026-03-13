@@ -3191,7 +3191,7 @@ export const stripeInvoiceLinks = pgTable(
       "sil_sync_status_check",
       sql`${t.syncStatus} IN ('not_synced','synced','sync_failed')`,
     ),
-    index("sil_invoice_id_idx").on(t.invoiceId),
+    uniqueIndex("sil_invoice_id_unique").on(t.invoiceId),
     index("sil_tenant_created_idx").on(t.tenantId, t.createdAt),
     index("sil_sync_status_created_idx").on(t.syncStatus, t.createdAt),
     uniqueIndex("sil_stripe_invoice_id_unique").on(t.stripeInvoiceId),

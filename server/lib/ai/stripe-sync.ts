@@ -65,16 +65,6 @@ export async function createStripeInvoiceLink(
   }
   const invoice = invoiceRows[0];
 
-  const existing = await db
-    .select()
-    .from(stripeInvoiceLinks)
-    .where(eq(stripeInvoiceLinks.invoiceId, invoiceId))
-    .limit(1);
-  if (existing.length > 0) {
-    console.log(`[ai/stripe-sync] Stripe link already exists for invoice ${invoiceId}`);
-    return existing[0];
-  }
-
   const inserted = await db
     .insert(stripeInvoiceLinks)
     .values({
@@ -86,7 +76,18 @@ export async function createStripeInvoiceLink(
       stripeCheckoutSessionId: stripeIds?.stripeCheckoutSessionId ?? null,
       syncStatus: "not_synced",
     })
+    .onConflictDoNothing({ target: stripeInvoiceLinks.invoiceId })
     .returning();
+
+  if (inserted.length === 0) {
+    const existing = await db
+      .select()
+      .from(stripeInvoiceLinks)
+      .where(eq(stripeInvoiceLinks.invoiceId, invoiceId))
+      .limit(1);
+    console.log(`[ai/stripe-sync] Stripe link already exists for invoice ${invoiceId}`);
+    return existing[0];
+  }
 
   console.log(
     `[ai/stripe-sync] Stripe link created for invoice ${invoice.invoiceNumber}`,
