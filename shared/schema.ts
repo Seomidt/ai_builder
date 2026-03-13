@@ -1711,6 +1711,13 @@ export const aiBillingUsage = pgTable(
     walletErrorMessage: text("wallet_error_message"),
     /** Timestamp when wallet debit was confirmed — null until debited */
     walletDebitedAt: timestamp("wallet_debited_at"),
+    // ─── Phase 4O: Entitlement classification fields ─────────────────────────
+    /** Commercial treatment applied at billing time. Default 'standard' = no plan entitlements applied. */
+    entitlementTreatment: text("entitlement_treatment").notNull().default("standard"),
+    /** USD amount covered by tenant's included plan allowance. 0 for standard treatment. */
+    includedAmountUsd: numeric("included_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** USD amount exceeding the included allowance (billed as overage). 0 for standard or fully-included. */
+    overageAmountUsd: numeric("overage_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [
@@ -1730,6 +1737,12 @@ export const aiBillingUsage = pgTable(
       "ai_billing_usage_wallet_status_check",
       sql`wallet_status IN ('pending','debited','failed')`,
     ),
+    check(
+      "ai_billing_usage_entitlement_treatment_check",
+      sql`${t.entitlementTreatment} IN ('standard','included','partial_included','overage','blocked')`,
+    ),
+    check("ai_billing_usage_included_amount_check", sql`${t.includedAmountUsd} >= 0`),
+    check("ai_billing_usage_overage_amount_check", sql`${t.overageAmountUsd} >= 0`),
     // Composite index for per-tenant billing range queries (billing summary, wallet queries)
     index("ai_billing_usage_tenant_created_idx").on(t.tenantId, t.createdAt),
     // Analytics indexes: per-feature and per-model cost breakdowns
@@ -1737,6 +1750,8 @@ export const aiBillingUsage = pgTable(
     index("ai_billing_usage_tenant_model_idx").on(t.tenantId, t.model),
     // Wallet replay queries: find pending/failed rows for a tenant sorted by time
     index("ai_billing_usage_tenant_wallet_status_idx").on(t.tenantId, t.walletStatus, t.createdAt),
+    // Entitlement treatment queries
+    index("ai_billing_usage_entitlement_treatment_idx").on(t.entitlementTreatment, t.createdAt),
   ],
 );
 
@@ -2155,6 +2170,15 @@ export const billingPeriodTenantSnapshots = pgTable(
     storageMarginUsd: numeric("storage_margin_usd", { precision: 14, scale: 8 }).notNull().default("0"),
     /** Sum of storage_billing_usage.billable_usage_amount in period (Phase 4K) */
     storageBillableUsage: numeric("storage_billable_usage", { precision: 18, scale: 8 }).notNull().default("0"),
+    // ─── Phase 4O: Included vs overage breakdown totals ──────────────────────
+    /** Sum of ai_billing_usage.included_amount_usd in period */
+    aiIncludedAmountUsd: numeric("ai_included_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** Sum of ai_billing_usage.overage_amount_usd in period */
+    aiOverageAmountUsd: numeric("ai_overage_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** Sum of storage_billing_usage.included_amount_usd in period */
+    storageIncludedAmountUsd: numeric("storage_included_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** Sum of storage_billing_usage.overage_amount_usd in period */
+    storageOverageAmountUsd: numeric("storage_overage_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [
@@ -3075,6 +3099,17 @@ export const storageBillingUsage = pgTable(
     customerPriceUsd: numeric("customer_price_usd", { precision: 14, scale: 8 }).notNull().default("0"),
     marginUsd: numeric("margin_usd", { precision: 14, scale: 8 }).notNull().default("0"),
     pricingVersion: text("pricing_version").notNull(),
+    // ─── Phase 4O: Entitlement classification fields ─────────────────────────
+    /** Commercial treatment applied at billing time. Default 'standard'. */
+    entitlementTreatment: text("entitlement_treatment").notNull().default("standard"),
+    /** Storage usage amount (GB-hours etc) covered by included plan allowance. Prefixed ent_ to avoid conflict with pricing-based included_usage_amount. */
+    entIncludedUsageAmount: numeric("ent_included_usage_amount", { precision: 18, scale: 8 }).notNull().default("0"),
+    /** Storage usage amount exceeding included plan allowance. */
+    entOverageUsageAmount: numeric("ent_overage_usage_amount", { precision: 18, scale: 8 }).notNull().default("0"),
+    /** USD amount covered by included plan allowance. */
+    includedAmountUsd: numeric("included_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /** USD amount as overage (exceeding included allowance). */
+    overageAmountUsd: numeric("overage_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [
@@ -3083,10 +3118,19 @@ export const storageBillingUsage = pgTable(
     check("sbu_billable_usage_check", sql`${t.billableUsageAmount} >= 0`),
     check("sbu_provider_cost_check", sql`${t.providerCostUsd} >= 0`),
     check("sbu_customer_price_check", sql`${t.customerPriceUsd} >= 0`),
+    check(
+      "sbu_entitlement_treatment_check",
+      sql`${t.entitlementTreatment} IN ('standard','included','partial_included','overage','blocked')`,
+    ),
+    check("sbu_ent_included_usage_check", sql`${t.entIncludedUsageAmount} >= 0`),
+    check("sbu_ent_overage_usage_check", sql`${t.entOverageUsageAmount} >= 0`),
+    check("sbu_included_amount_usd_check", sql`${t.includedAmountUsd} >= 0`),
+    check("sbu_overage_amount_usd_check", sql`${t.overageAmountUsd} >= 0`),
     uniqueIndex("sbu_storage_usage_id_unique").on(t.storageUsageId),
     index("sbu_tenant_created_idx").on(t.tenantId, t.createdAt),
     index("sbu_metric_created_idx").on(t.metricType, t.createdAt),
     index("sbu_tenant_metric_created_idx").on(t.tenantId, t.metricType, t.createdAt),
+    index("sbu_entitlement_treatment_idx").on(t.entitlementTreatment, t.createdAt),
   ],
 );
 
@@ -3473,6 +3517,91 @@ export const insertTenantSubscriptionEventSchema = createInsertSchema(tenantSubs
 });
 export type InsertTenantSubscriptionEvent = z.infer<typeof insertTenantSubscriptionEventSchema>;
 export type TenantSubscriptionEvent = typeof tenantSubscriptionEvents.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4O — Entitlement Enforcement & Overage Application
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * tenant_ai_allowance_usage — canonical AI allowance consumption ledger.
+ *
+ * One row per ai_billing_usage row (UNIQUE on source_billing_usage_id).
+ * Records exactly how much of the AI usage was covered by included plan
+ * allowance vs charged as overage. Immutable after insert.
+ *
+ * Source of truth rules:
+ *   - included_amount_usd + overage_amount_usd = customer_price_usd of source row
+ *   - Do not recompute from plan entitlements — use ledger for history
+ *   - Historical rows must never be updated after creation
+ */
+export const tenantAiAllowanceUsage = pgTable(
+  "tenant_ai_allowance_usage",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    billingPeriodId: text("billing_period_id"),
+    sourceBillingUsageId: varchar("source_billing_usage_id").notNull(),
+    includedAmountUsd: numeric("included_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    overageAmountUsd: numeric("overage_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    pricingVersion: text("pricing_version"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("taau_included_check", sql`${t.includedAmountUsd} >= 0`),
+    check("taau_overage_check", sql`${t.overageAmountUsd} >= 0`),
+    uniqueIndex("taau_source_billing_usage_id_unique").on(t.sourceBillingUsageId),
+    index("taau_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("taau_billing_period_idx").on(t.billingPeriodId),
+    index("taau_tenant_period_created_idx").on(t.tenantId, t.billingPeriodId, t.createdAt),
+  ],
+);
+
+export const insertTenantAiAllowanceUsageSchema = createInsertSchema(tenantAiAllowanceUsage).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertTenantAiAllowanceUsage = z.infer<typeof insertTenantAiAllowanceUsageSchema>;
+export type TenantAiAllowanceUsage = typeof tenantAiAllowanceUsage.$inferSelect;
+
+/**
+ * tenant_storage_allowance_usage — canonical storage allowance consumption ledger.
+ *
+ * One row per storage_billing_usage row (UNIQUE on source_storage_billing_usage_id).
+ * Records exactly how much of the storage billing was covered by included plan
+ * allowance vs charged as overage. Immutable after insert.
+ */
+export const tenantStorageAllowanceUsage = pgTable(
+  "tenant_storage_allowance_usage",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    billingPeriodId: text("billing_period_id"),
+    sourceStorageBillingUsageId: varchar("source_storage_billing_usage_id").notNull(),
+    includedUsageAmount: numeric("included_usage_amount", { precision: 18, scale: 8 }).notNull().default("0"),
+    overageUsageAmount: numeric("overage_usage_amount", { precision: 18, scale: 8 }).notNull().default("0"),
+    includedAmountUsd: numeric("included_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    overageAmountUsd: numeric("overage_amount_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    pricingVersion: text("pricing_version"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("tsau_included_usage_check", sql`${t.includedUsageAmount} >= 0`),
+    check("tsau_overage_usage_check", sql`${t.overageUsageAmount} >= 0`),
+    check("tsau_included_usd_check", sql`${t.includedAmountUsd} >= 0`),
+    check("tsau_overage_usd_check", sql`${t.overageAmountUsd} >= 0`),
+    uniqueIndex("tsau_source_storage_billing_usage_id_unique").on(t.sourceStorageBillingUsageId),
+    index("tsau_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("tsau_billing_period_idx").on(t.billingPeriodId),
+    index("tsau_tenant_period_created_idx").on(t.tenantId, t.billingPeriodId, t.createdAt),
+  ],
+);
+
+export const insertTenantStorageAllowanceUsageSchema = createInsertSchema(tenantStorageAllowanceUsage).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertTenantStorageAllowanceUsage = z.infer<typeof insertTenantStorageAllowanceUsageSchema>;
+export type TenantStorageAllowanceUsage = typeof tenantStorageAllowanceUsage.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;

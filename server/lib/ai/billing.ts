@@ -41,6 +41,7 @@ import {
   resolveProviderPricingVersionBestEffort,
   resolveCustomerPricingVersionBestEffort,
 } from "./pricing-versioning";
+import { applyAiAllowanceToBillingUsage } from "./allowance-application";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -385,6 +386,12 @@ export async function maybeRecordAiBillingUsage(input: BillingUsageInput): Promi
     // Only attempt wallet debit when a new billing row was actually created.
     // Duplicate/replay paths return null — no second debit attempt, no status update.
     if (result !== null) {
+      // Phase 4O: Apply plan allowance classification after confirmed billing insert.
+      // Fire-and-forget — never breaks billing flow if allowance resolution fails.
+      void applyAiAllowanceToBillingUsage(result.id).catch((err) =>
+        console.error("[ai/billing] Allowance application failed (suppressed):", err instanceof Error ? err.message : err),
+      );
+
       // Phase 4F: billing_usage_created event after confirmed ai_billing_usage insert.
       recordBillingUsageCreatedEvent({
         tenantId: input.tenantId,

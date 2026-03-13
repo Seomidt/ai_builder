@@ -44,6 +44,7 @@ import {
   billingPeriods,
   billingPeriodTenantSnapshots,
   aiBillingUsage,
+  storageBillingUsage,
 } from "@shared/schema";
 import type { BillingPeriod, BillingPeriodTenantSnapshot } from "@shared/schema";
 import {
@@ -64,6 +65,15 @@ export interface TenantAggregateRow {
   marginUsd: string;
   requestCount: number;
   debitedAmountUsd: string;
+  // Phase 4O: allowance classification totals
+  aiIncludedAmountUsd: string;
+  aiOverageAmountUsd: string;
+}
+
+export interface TenantStorageAllowanceRow {
+  tenantId: string;
+  storageIncludedAmountUsd: string;
+  storageOverageAmountUsd: string;
 }
 
 export interface PeriodSummary {
@@ -108,6 +118,9 @@ export async function aggregateBillingUsageForPeriod(
       marginUsd: sql<string>`COALESCE(SUM(margin_usd), 0)`,
       requestCount: sql<number>`COUNT(*)::integer`,
       debitedAmountUsd: sql<string>`COALESCE(SUM(CASE WHEN wallet_status = 'debited' THEN customer_price_usd ELSE 0 END), 0)`,
+      // Phase 4O: allowance classification totals from inline columns
+      aiIncludedAmountUsd: sql<string>`COALESCE(SUM(included_amount_usd), 0)`,
+      aiOverageAmountUsd: sql<string>`COALESCE(SUM(overage_amount_usd), 0)`,
     })
     .from(aiBillingUsage)
     .where(
@@ -119,6 +132,32 @@ export async function aggregateBillingUsageForPeriod(
     .groupBy(aiBillingUsage.tenantId);
 
   return rows as TenantAggregateRow[];
+}
+
+/**
+ * Aggregate storage_billing_usage included/overage amounts for a period window, grouped by tenant_id.
+ * Phase 4O: used alongside aggregateBillingUsageForPeriod to populate snapshot storage allowance fields.
+ */
+export async function aggregateStorageAllowanceForPeriod(
+  periodStart: Date,
+  periodEnd: Date,
+): Promise<TenantStorageAllowanceRow[]> {
+  const rows = await db
+    .select({
+      tenantId: storageBillingUsage.tenantId,
+      storageIncludedAmountUsd: sql<string>`COALESCE(SUM(included_amount_usd), 0)`,
+      storageOverageAmountUsd: sql<string>`COALESCE(SUM(overage_amount_usd), 0)`,
+    })
+    .from(storageBillingUsage)
+    .where(
+      and(
+        gte(storageBillingUsage.createdAt, periodStart),
+        lt(storageBillingUsage.createdAt, periodEnd),
+      ),
+    )
+    .groupBy(storageBillingUsage.tenantId);
+
+  return rows as TenantStorageAllowanceRow[];
 }
 
 // ─── Snapshot Creation ────────────────────────────────────────────────────────
@@ -146,22 +185,38 @@ export async function createTenantBillingSnapshots(periodId: string): Promise<nu
     );
   }
 
-  const aggregates = await aggregateBillingUsageForPeriod(period.periodStart, period.periodEnd);
+  const [aggregates, storageAllowances] = await Promise.all([
+    aggregateBillingUsageForPeriod(period.periodStart, period.periodEnd),
+    aggregateStorageAllowanceForPeriod(period.periodStart, period.periodEnd),
+  ]);
 
   if (aggregates.length === 0) {
     console.info(`[billing-period-snapshots] No usage found for period ${periodId} — no snapshots created`);
     return 0;
   }
 
-  const values = aggregates.map((row) => ({
-    billingPeriodId: periodId,
-    tenantId: row.tenantId,
-    providerCostUsd: row.providerCostUsd,
-    customerPriceUsd: row.customerPriceUsd,
-    marginUsd: row.marginUsd,
-    requestCount: row.requestCount,
-    debitedAmountUsd: row.debitedAmountUsd,
-  }));
+  // Build a lookup map for storage allowance rows — O(1) per tenant during values construction.
+  const storageAllowanceByTenant = new Map(
+    storageAllowances.map((r) => [r.tenantId, r]),
+  );
+
+  const values = aggregates.map((row) => {
+    const storageRow = storageAllowanceByTenant.get(row.tenantId);
+    return {
+      billingPeriodId: periodId,
+      tenantId: row.tenantId,
+      providerCostUsd: row.providerCostUsd,
+      customerPriceUsd: row.customerPriceUsd,
+      marginUsd: row.marginUsd,
+      requestCount: row.requestCount,
+      debitedAmountUsd: row.debitedAmountUsd,
+      // Phase 4O: allowance classification totals
+      aiIncludedAmountUsd: row.aiIncludedAmountUsd,
+      aiOverageAmountUsd: row.aiOverageAmountUsd,
+      storageIncludedAmountUsd: storageRow?.storageIncludedAmountUsd ?? "0",
+      storageOverageAmountUsd: storageRow?.storageOverageAmountUsd ?? "0",
+    };
+  });
 
   const inserted = await db
     .insert(billingPeriodTenantSnapshots)

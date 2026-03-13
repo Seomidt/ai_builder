@@ -29,6 +29,7 @@
 
 import { and, eq, gte, gt, isNull, lt, lte, or } from "drizzle-orm";
 import { db } from "../../db";
+import { applyStorageAllowanceToBillingUsage } from "./allowance-application";
 import {
   storageUsage,
   storagePricingVersions,
@@ -220,6 +221,13 @@ export async function createStorageBillingUsage(
   console.log(
     `[ai/storage-billing] Created billing row for storageUsageId=${storageUsageId}: billable=${billableUsageAmount}, customer_price=${customerPriceUsd.toFixed(8)}`,
   );
+
+  // Phase 4O: Apply plan allowance classification after confirmed storage billing insert.
+  // Fire-and-forget — never breaks storage billing flow if allowance resolution fails.
+  void applyStorageAllowanceToBillingUsage(inserted[0].id).catch((err) =>
+    console.error("[ai/storage-billing] Allowance application failed (suppressed):", err instanceof Error ? err.message : err),
+  );
+
   return inserted[0];
 }
 

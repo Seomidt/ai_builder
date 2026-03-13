@@ -100,6 +100,7 @@ import {
 } from "./errors";
 import { checkWalletHardLimit } from "./wallet";
 import { acquireAiStep, recordStepCompleted } from "./step-budget";
+import { assertTenantFeatureEntitled } from "./entitlement-enforcement";
 import {
   recordRequestStartedEvent,
   recordProviderCallStartedEvent,
@@ -338,6 +339,17 @@ export async function runAiCall(
     if (tenantId) {
       const walletMeta: AiErrorMeta = { feature, model: route.model, latencyMs: Date.now() - startMs };
       await checkWalletHardLimit({ tenantId, meta: walletMeta });
+    }
+
+    // ── Step 8.7: Feature entitlement enforcement (Phase 4O) ─────────────────────
+    // Placement: after wallet hard-limit (step 8.5), before cache lookup / provider call.
+    // Only runs for tenant-scoped calls. Anonymous calls skip entitlement check.
+    //
+    // If feature flag is disabled on the tenant's active plan, throws EntitlementBlockedError.
+    // No provider call, no ai_usage row, no billing row for blocked features.
+    // No active subscription = fail-open (existing tenants not blocked during migration).
+    if (tenantId && feature) {
+      await assertTenantFeatureEntitled(tenantId, feature);
     }
 
     // ── Step 9: Budget mode policy ──────────────────────────────────────────────
