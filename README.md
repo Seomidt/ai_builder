@@ -1,6 +1,6 @@
 # AI Builder Platform
 
-Enterprise multi-tenant AI SaaS backend platform providing AI runtime orchestration, usage metering, a complete billing engine, wallet ledger, subscription plans, Stripe payments, automated billing operations, and a billing integrity and recovery system.
+Enterprise multi-tenant AI SaaS backend platform providing AI runtime orchestration, usage metering, a complete billing engine, wallet ledger, subscription plans, Stripe payments, automated billing operations, a billing integrity and recovery system, and a document registry with versioning, processing pipelines, embedding metadata, and vector index management.
 
 ---
 
@@ -514,32 +514,43 @@ echo "yes" | DATABASE_URL="$DATABASE_URL" npx drizzle-kit push --config=drizzle.
 | **4Q** | Margin Monitoring | `billing_metrics_snapshots`, monitoring summaries, alerts |
 | **4R** | Automated Billing Operations | `billing_job_definitions`, `billing_job_runs`, 13 predefined jobs, scheduler |
 | **4S** | Billing Integrity & Recovery | `billing_recovery_runs`, `billing_recovery_actions`, scan engine, recovery engine |
+| **5A** | Document Registry & Storage Foundation | `knowledge_bases`, `knowledge_documents`, `knowledge_document_versions`, `knowledge_storage_objects`, `knowledge_processing_jobs`, `knowledge_chunks`, `knowledge_embeddings`, `knowledge_index_state` |
 
 ---
 
-## 16. Next Development Phases
+## 16. Phase 5A — Document Registry & Storage Foundation
 
-### Phase 5A — Document Registry & Storage Foundation
+Phase 5A introduces a production-grade document management subsystem with 8 new tables (total: 85 tables), 4 lib files, and 20 admin routes.
 
-Phase 5A introduces a document management subsystem to the platform. The following tables are planned:
+### New tables
 
 | Table | Purpose |
 |---|---|
-| `knowledge_documents` | Document registry — metadata, source, owner, lifecycle status |
-| `knowledge_document_versions` | Immutable version history per document |
-| `knowledge_storage_objects` | Reference to stored binary objects (Cloudflare R2 or equivalent) |
-| `knowledge_processing_jobs` | Processing pipeline execution log (extract, chunk, embed) |
-| `knowledge_chunks` | Text chunks produced from document versions |
-| `knowledge_embeddings` | Embedding vectors per chunk with model metadata |
-| `knowledge_index_state` | Vector index build state per document version |
+| `knowledge_bases` | Tenant-isolated KB registry with slug, lifecycle_state, visibility, default_retrieval_k |
+| `knowledge_documents` | Enterprise document registry — knowledge_base_id FK, source_type, document_status, current_version_id (no FK — enforced at service layer), soft-delete |
+| `knowledge_document_versions` | Immutable version chain — version_number, is_current flag, content_checksum, language_code, processing timestamps |
+| `knowledge_storage_objects` | Binary object references — storage_provider, bucket_name, object_key, upload_status, soft-delete |
+| `knowledge_processing_jobs` | Async job queue — job_type, status lifecycle, priority, idempotency_key (UNIQUE), worker_id, payload/result JSONB |
+| `knowledge_chunks` | Text chunks — chunk_key (NOT NULL, content-addressable), chunk_index, source ranges, token_estimate |
+| `knowledge_embeddings` | Embedding metadata — embedding_provider (NOT NULL), embedding_model (NOT NULL), vector_backend, vector_status, dimensions |
+| `knowledge_index_state` | Per-document-version index tracker — index_state, chunk_count, indexed_chunk_count, embedding_count, last_indexed_at |
 
-These components enable:
+### Key capabilities
 
-- **Document versioning** — every upload creates a new immutable version; previous versions are retained and addressable
-- **Processing pipelines** — extraction, chunking, and embedding are tracked as durable jobs with status lifecycles (`pending → processing → completed | failed`)
-- **Embedding metadata** — model identifier, vector dimension, and pricing version are recorded at embedding time to support future re-indexing
-- **Vector index management** — index build state is tracked independently from embedding generation, allowing partial rebuilds without re-embedding
-- **Document lifecycle management** — documents can be in `draft`, `processing`, `indexed`, `archived`, or `failed` states with full audit trail
+- **Knowledge base management** — tenant-scoped KBs with lifecycle control (draft → active → archived) and configurable retrieval settings
+- **Document versioning** — every upload creates a new immutable version; `current_version_id` is managed at the service layer (no FK due to circular dependency)
+- **Processing pipelines** — durable job queue tracks extract, chunk, and embed operations with `pending → running → completed | failed | retrying` lifecycle
+- **Embedding metadata** — provider, model, dimensions, and vector backend recorded at embedding time for future re-indexing and cost attribution
+- **Vector index management** — index build state tracked independently from embedding generation, enabling partial rebuilds without re-embedding
+- **Soft-delete support** — documents and storage objects use `deleted_at` for non-destructive removal
+
+### Design invariants
+
+- `knowledge_documents.current_version_id` has **no FK** — circular dependency with `knowledge_document_versions`; validity enforced by `setCurrentDocumentVersion()` at service layer
+- `knowledge_index_state.knowledge_document_id` is **NOT NULL** — state scoped to a specific document, not just KB
+- `chunk_key` is **NOT NULL** — content-addressable identifier set at ingestion time
+- `embedding_provider` and `embedding_model` are **NOT NULL** — required for cost attribution and re-indexing
+- `knowledge_bases.slug` is **NOT NULL** — URL-safe tenant-unique identifier
 
 The document system follows the same architectural principles as the billing engine: immutable records, durable audit logs, idempotent operations, and strict per-tenant isolation.
 
@@ -551,7 +562,7 @@ The platform is designed to grow through clearly scoped phases, each adding a pr
 
 Planned future areas:
 
-- **Phase 5 — Knowledge & Document System** — document ingestion, chunking, embedding, and vector index management
+- **Phase 5B — Vector Search & Retrieval** — vector similarity search, hybrid BM25+vector retrieval, relevance scoring
 - **Phase 6 — Agent Orchestration Layer** — durable multi-step agent execution with state persistence and retry
 - **Phase 7 — Plan Marketplace** — self-serve plan selection, upgrade / downgrade flows, prorated billing
 - **Phase 8 — Tenant Analytics** — usage dashboards, cost breakdown, anomaly history per tenant
@@ -563,10 +574,12 @@ Each phase is additive. No phase modifies canonical financial data in a way that
 
 ## 18. Summary
 
-This platform implements a complete enterprise monetization engine for a multi-tenant AI SaaS product. Every AI call is metered, priced, billed, and debited to a wallet. Every billing record is immutable. Every financial mutation is deterministic and recoverable.
+This platform implements a complete enterprise AI control plane for a multi-tenant SaaS product. Every AI call is metered, priced, billed, and debited to a wallet. Every billing record is immutable. Every financial mutation is deterministic and recoverable.
 
 The automated operations layer (Phase 4R) provides scheduled execution of 13 billing maintenance jobs with distributed locking, retry logic, and a full execution audit trail.
 
 The integrity and recovery layer (Phase 4S) provides a read-only scan engine across five integrity dimensions and controlled write-recovery workflows for snapshot and invoice repair, with full before/after audit trails for every action taken.
 
-The platform is prepared for Phase 5A which will extend it with a document registry, versioning, processing pipelines, embedding metadata, and vector index management — following the same architectural principles of immutability, idempotency, and per-tenant isolation that underpin the billing engine.
+The document registry layer (Phase 5A) extends the platform with 8 new tables for knowledge base management, document versioning, binary storage tracking, async processing pipelines, text chunking, embedding metadata, and vector index state — all following the same architectural principles of immutability, idempotency, and per-tenant isolation that underpin the billing engine.
+
+**Total schema: 85 tables across 5 major subsystems.**

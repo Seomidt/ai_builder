@@ -96,6 +96,34 @@ import {
   previewTenantsWithoutRecentMetricsSnapshots,
 } from "../lib/ai/billing-monitoring-retention";
 
+// Phase 5A: Document Registry & Storage Foundation
+import {
+  createKnowledgeBase,
+  getKnowledgeBase,
+  listKnowledgeBases,
+  archiveKnowledgeBase,
+  createKnowledgeDocument,
+  getKnowledgeDocument,
+  listKnowledgeDocuments,
+  createKnowledgeDocumentVersion,
+  getKnowledgeDocumentVersion,
+  listKnowledgeDocumentVersions,
+  setCurrentDocumentVersion,
+  verifyCurrentVersionInvariant,
+} from "../lib/ai/knowledge-bases";
+import {
+  attachStorageObject,
+  getStorageObjectsByVersion,
+  createKnowledgeProcessingJob,
+  getProcessingJob,
+  listProcessingJobs,
+  getIndexStateByVersion,
+  listIndexStateByKnowledgeBase,
+  updateKnowledgeIndexState,
+  isVersionRetrievable,
+} from "../lib/ai/knowledge-processing";
+import { getVectorAdapterInfo } from "../lib/ai/vector-adapter";
+
 // Phase 4S: Billing Recovery & Integrity
 import { runBillingIntegrityScan } from "../lib/ai/billing-integrity";
 import {
@@ -1324,6 +1352,326 @@ export function registerAdminRoutes(app: Express): void {
       const windowDays = req.query.windowDays ? Number(String(req.query.windowDays)) : 14;
       const trend = await getRecoveryRunDailyTrend(windowDays);
       res.json({ trend, windowDays });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5A: Document Registry & Storage Foundation ───────────────────────
+
+  // Knowledge Bases
+  app.post("/api/admin/knowledge-bases", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        tenantId: z.string().min(1),
+        name: z.string().min(1),
+        slug: z.string().min(1).regex(/^[a-z0-9-]+$/),
+        description: z.string().optional(),
+        lifecycleState: z.enum(["active", "archived", "deleted"]).optional(),
+        visibility: z.enum(["private", "internal"]).optional(),
+        defaultRetrievalK: z.number().int().positive().optional(),
+        metadata: z.record(z.unknown()).optional(),
+        createdBy: z.string().optional(),
+      }).parse(req.body);
+      const kb = await createKnowledgeBase(body);
+      res.status(201).json({ knowledgeBase: kb });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-bases", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const lifecycleState = req.query.lifecycleState ? String(req.query.lifecycleState) : undefined;
+      const bases = await listKnowledgeBases(tenantId, lifecycleState);
+      res.json({ knowledgeBases: bases, count: bases.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-bases/:id", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const kb = await getKnowledgeBase(id, tenantId);
+      if (!kb) return res.status(404).json({ error: "knowledge base not found" });
+      res.json({ knowledgeBase: kb });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge-bases/:id/archive", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const body = z.object({ tenantId: z.string().min(1), updatedBy: z.string().optional() }).parse(req.body);
+      const kb = await archiveKnowledgeBase(id, body.tenantId, body.updatedBy);
+      if (!kb) return res.status(404).json({ error: "knowledge base not found" });
+      res.json({ knowledgeBase: kb });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Knowledge Documents
+  app.post("/api/admin/knowledge-documents", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        title: z.string().min(1),
+        documentType: z.string().optional(),
+        sourceType: z.enum(["upload", "api", "manual", "import"]).optional(),
+        externalReference: z.string().optional(),
+        tags: z.record(z.unknown()).optional(),
+        metadata: z.record(z.unknown()).optional(),
+        createdBy: z.string().optional(),
+      }).parse(req.body);
+      const doc = await createKnowledgeDocument(body);
+      res.status(201).json({ document: doc });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-documents", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const knowledgeBaseId = req.query.knowledgeBaseId ? String(req.query.knowledgeBaseId) : undefined;
+      const documentStatus = req.query.documentStatus ? String(req.query.documentStatus) : undefined;
+      const docs = await listKnowledgeDocuments(tenantId, knowledgeBaseId, documentStatus);
+      res.json({ documents: docs, count: docs.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-documents/:id", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const doc = await getKnowledgeDocument(id, tenantId);
+      if (!doc) return res.status(404).json({ error: "document not found" });
+      res.json({ document: doc });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Document Versions
+  app.post("/api/admin/knowledge-documents/:documentId/versions", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const body = z.object({
+        tenantId: z.string().min(1),
+        versionNumber: z.number().int().positive(),
+        sourceLabel: z.string().optional(),
+        mimeType: z.string().optional(),
+        fileSizeBytes: z.number().int().nonnegative().optional(),
+        characterCount: z.number().int().nonnegative().optional(),
+        pageCount: z.number().int().nonnegative().optional(),
+        languageCode: z.string().optional(),
+        contentChecksum: z.string().optional(),
+        metadata: z.record(z.unknown()).optional(),
+        createdBy: z.string().optional(),
+      }).parse(req.body);
+      const version = await createKnowledgeDocumentVersion({ ...body, knowledgeDocumentId: documentId });
+      res.status(201).json({ version });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-documents/:documentId/versions", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const versions = await listKnowledgeDocumentVersions(documentId, tenantId);
+      res.json({ versions, count: versions.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-versions/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const version = await getKnowledgeDocumentVersion(versionId, tenantId);
+      if (!version) return res.status(404).json({ error: "version not found" });
+      res.json({ version });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge-documents/:documentId/set-current-version", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const body = z.object({ tenantId: z.string().min(1), versionId: z.string().min(1) }).parse(req.body);
+      const result = await setCurrentDocumentVersion(documentId, body.versionId, body.tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-documents/:documentId/version-invariant", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const check = await verifyCurrentVersionInvariant(documentId, tenantId);
+      res.json(check);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Storage Objects
+  app.post("/api/admin/knowledge-storage-objects", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        tenantId: z.string().min(1),
+        knowledgeDocumentVersionId: z.string().min(1),
+        storageProvider: z.enum(["r2", "supabase_storage", "local"]),
+        objectKey: z.string().min(1),
+        bucketName: z.string().optional(),
+        originalFilename: z.string().optional(),
+        mimeType: z.string().optional(),
+        fileSizeBytes: z.number().int().nonnegative().optional(),
+        checksum: z.string().optional(),
+        metadata: z.record(z.unknown()).optional(),
+      }).parse(req.body);
+      const obj = await attachStorageObject(body);
+      res.status(201).json({ storageObject: obj });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-versions/:versionId/storage-objects", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const objects = await getStorageObjectsByVersion(versionId, tenantId);
+      res.json({ storageObjects: objects, count: objects.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Processing Jobs
+  app.post("/api/admin/knowledge-processing-jobs", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        tenantId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        knowledgeDocumentVersionId: z.string().optional(),
+        jobType: z.enum(["upload_verify", "parse", "chunk", "embed", "index", "reindex", "delete_index", "lifecycle_sync"]),
+        priority: z.number().int().nonnegative().optional(),
+        maxAttempts: z.number().int().positive().optional(),
+        idempotencyKey: z.string().optional(),
+        payload: z.record(z.unknown()).optional(),
+        workerId: z.string().optional(),
+      }).parse(req.body);
+      const job = await createKnowledgeProcessingJob(body);
+      res.status(201).json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-processing-jobs", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const documentId = req.query.documentId ? String(req.query.documentId) : undefined;
+      const status = req.query.status ? String(req.query.status) : undefined;
+      const jobs = await listProcessingJobs(tenantId, documentId, status);
+      res.json({ jobs, count: jobs.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-processing-jobs/:id", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const job = await getProcessingJob(id, tenantId);
+      if (!job) return res.status(404).json({ error: "processing job not found" });
+      res.json({ job });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Index State
+  app.get("/api/admin/knowledge-index-state/by-version/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await getIndexStateByVersion(versionId, tenantId);
+      if (!state) return res.status(404).json({ error: "index state not found" });
+      const retrievable = await isVersionRetrievable(versionId, tenantId);
+      res.json({ indexState: state, retrievable });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-index-state", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      const knowledgeBaseId = String(req.query.knowledgeBaseId ?? "");
+      if (!tenantId || !knowledgeBaseId) return res.status(400).json({ error: "tenantId and knowledgeBaseId required" });
+      const indexStateFilter = req.query.indexState ? String(req.query.indexState) : undefined;
+      const states = await listIndexStateByKnowledgeBase(knowledgeBaseId, tenantId, indexStateFilter);
+      res.json({ indexStates: states, count: states.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge-index-state", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        knowledgeDocumentVersionId: z.string().min(1),
+        indexState: z.enum(["pending", "indexing", "indexed", "failed", "stale", "deleted"]),
+        chunkCount: z.number().int().nonnegative().optional(),
+        indexedChunkCount: z.number().int().nonnegative().optional(),
+        embeddingCount: z.number().int().nonnegative().optional(),
+        staleReason: z.string().optional(),
+        failureReason: z.string().optional(),
+        metadata: z.record(z.unknown()).optional(),
+      }).parse(req.body);
+      const state = await updateKnowledgeIndexState(body);
+      res.json({ indexState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Vector adapter info
+  app.get("/api/admin/knowledge-vector-adapter/info", async (_req: Request, res: Response) => {
+    try {
+      const info = getVectorAdapterInfo();
+      res.json({ vectorAdapter: info });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

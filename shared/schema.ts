@@ -541,7 +541,54 @@ export const organizationSecrets = pgTable(
   ],
 );
 
-// ─── Knowledge Documents (RAG foundation) ────────────────────────────────────
+// ─── Phase 5A — Document Registry & Storage Foundation ──────────────────────
+//
+// Architecture rules (enforced at service layer):
+//   • All tables are tenant-scoped — tenant_id is required everywhere
+//   • knowledge_documents.current_version_id is NOT a FK (circular dependency with
+//     knowledge_document_versions.knowledge_document_id). Invariant enforced by service layer.
+//   • Chunks, embeddings, and index state are derived/rebuildable artifacts
+//   • Original document identity and version history are canonical and immutable
+
+// ─── knowledge_bases ─────────────────────────────────────────────────────────
+
+export const knowledgeBases = pgTable(
+  "knowledge_bases",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    name: text("name").notNull(),
+    slug: text("slug").notNull(),
+    description: text("description"),
+    lifecycleState: text("lifecycle_state").notNull().default("active"),
+    visibility: text("visibility").notNull().default("private"),
+    defaultRetrievalK: integer("default_retrieval_k"),
+    metadata: jsonb("metadata"),
+    createdBy: text("created_by"),
+    updatedBy: text("updated_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT kb_lifecycle_check CHECK (${t.lifecycleState} IN ('active','archived','deleted'))`,
+    sql`CONSTRAINT kb_visibility_check CHECK (${t.visibility} IN ('private','internal'))`,
+    uniqueIndex("kb_tenant_slug_unique").on(t.tenantId, t.slug),
+    index("kb_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("kb_tenant_lifecycle_idx").on(t.tenantId, t.lifecycleState, t.createdAt),
+  ],
+);
+
+export const insertKnowledgeBaseSchema = createInsertSchema(knowledgeBases).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertKnowledgeBase = z.infer<typeof insertKnowledgeBaseSchema>;
+export type KnowledgeBase = typeof knowledgeBases.$inferSelect;
+
+// ─── knowledge_documents ─────────────────────────────────────────────────────
 
 export const knowledgeDocuments = pgTable(
   "knowledge_documents",
@@ -549,24 +596,341 @@ export const knowledgeDocuments = pgTable(
     id: varchar("id")
       .primaryKey()
       .default(sql`gen_random_uuid()`),
-    organizationId: varchar("organization_id")
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeBaseId: varchar("knowledge_base_id")
       .notNull()
-      .references(() => organizations.id),
-    projectId: varchar("project_id").references(() => projects.id),
+      .references(() => knowledgeBases.id),
+    externalReference: text("external_reference"),
     title: text("title").notNull(),
-    sourceType: knowledgeSourceTypeEnum("source_type").notNull().default("manual"),
-    sourceRef: text("source_ref"), // URL, GitHub path, etc.
+    documentType: text("document_type").notNull().default("other"),
+    sourceType: text("source_type").notNull().default("upload"),
+    lifecycleState: text("lifecycle_state").notNull().default("active"),
+    documentStatus: text("document_status").notNull().default("draft"),
+    // NOTE: no FK here — circular dependency with knowledge_document_versions.
+    // Invariant enforced at service layer: must reference a version from this document where is_current=true
+    currentVersionId: varchar("current_version_id"),
+    latestVersionNumber: integer("latest_version_number").notNull().default(0),
+    tags: jsonb("tags"),
+    metadata: jsonb("metadata"),
+    createdBy: text("created_by"),
+    updatedBy: text("updated_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+    deletedAt: timestamp("deleted_at"),
+  },
+  (t) => [
+    sql`CONSTRAINT kd_lifecycle_check CHECK (${t.lifecycleState} IN ('active','archived','deleted'))`,
+    sql`CONSTRAINT kd_status_check CHECK (${t.documentStatus} IN ('draft','processing','ready','failed','superseded'))`,
+    sql`CONSTRAINT kd_version_number_check CHECK (${t.latestVersionNumber} >= 0)`,
+    index("kd_tenant_kb_created_idx").on(t.tenantId, t.knowledgeBaseId, t.createdAt),
+    index("kd_tenant_lifecycle_status_idx").on(t.tenantId, t.lifecycleState, t.documentStatus, t.createdAt),
+    index("kd_tenant_kb_title_idx").on(t.tenantId, t.knowledgeBaseId, t.title),
+  ],
+);
+
+export const insertKnowledgeDocumentSchema = createInsertSchema(knowledgeDocuments).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
+});
+export type InsertKnowledgeDocument = z.infer<typeof insertKnowledgeDocumentSchema>;
+export type KnowledgeDocument = typeof knowledgeDocuments.$inferSelect;
+
+// ─── knowledge_document_versions ─────────────────────────────────────────────
+
+export const knowledgeDocumentVersions = pgTable(
+  "knowledge_document_versions",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeDocumentId: varchar("knowledge_document_id")
+      .notNull()
+      .references(() => knowledgeDocuments.id),
+    versionNumber: integer("version_number").notNull(),
+    sourceLabel: text("source_label"),
+    versionStatus: text("version_status").notNull().default("pending"),
+    isCurrent: boolean("is_current").notNull().default(false),
+    contentChecksum: text("content_checksum"),
+    mimeType: text("mime_type"),
+    fileSizeBytes: bigint("file_size_bytes", { mode: "number" }),
+    characterCount: integer("character_count"),
+    pageCount: integer("page_count"),
+    languageCode: text("language_code"),
+    uploadedAt: timestamp("uploaded_at"),
+    processingStartedAt: timestamp("processing_started_at"),
+    processingCompletedAt: timestamp("processing_completed_at"),
+    failureReason: text("failure_reason"),
+    metadata: jsonb("metadata"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT kdv_version_number_check CHECK (${t.versionNumber} > 0)`,
+    sql`CONSTRAINT kdv_version_status_check CHECK (${t.versionStatus} IN ('pending','uploaded','processing','indexed','failed','superseded'))`,
+    sql`CONSTRAINT kdv_file_size_check CHECK (${t.fileSizeBytes} IS NULL OR ${t.fileSizeBytes} >= 0)`,
+    sql`CONSTRAINT kdv_char_count_check CHECK (${t.characterCount} IS NULL OR ${t.characterCount} >= 0)`,
+    sql`CONSTRAINT kdv_page_count_check CHECK (${t.pageCount} IS NULL OR ${t.pageCount} >= 0)`,
+    uniqueIndex("kdv_doc_version_unique").on(t.knowledgeDocumentId, t.versionNumber),
+    index("kdv_tenant_doc_version_idx").on(t.tenantId, t.knowledgeDocumentId, t.versionNumber),
+    index("kdv_tenant_is_current_idx").on(t.tenantId, t.isCurrent, t.createdAt),
+    index("kdv_tenant_status_idx").on(t.tenantId, t.versionStatus, t.createdAt),
+  ],
+);
+
+export const insertKnowledgeDocumentVersionSchema = createInsertSchema(knowledgeDocumentVersions).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeDocumentVersion = z.infer<typeof insertKnowledgeDocumentVersionSchema>;
+export type KnowledgeDocumentVersion = typeof knowledgeDocumentVersions.$inferSelect;
+
+// ─── knowledge_storage_objects ────────────────────────────────────────────────
+
+export const knowledgeStorageObjects = pgTable(
+  "knowledge_storage_objects",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeDocumentVersionId: varchar("knowledge_document_version_id")
+      .notNull()
+      .references(() => knowledgeDocumentVersions.id),
+    storageProvider: text("storage_provider").notNull(),
+    bucketName: text("bucket_name"),
+    objectKey: text("object_key").notNull(),
+    originalFilename: text("original_filename"),
+    mimeType: text("mime_type"),
+    fileSizeBytes: bigint("file_size_bytes", { mode: "number" }),
+    checksum: text("checksum"),
+    uploadStatus: text("upload_status").notNull().default("pending"),
+    uploadedAt: timestamp("uploaded_at"),
+    verifiedAt: timestamp("verified_at"),
+    deletedAt: timestamp("deleted_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT kso_provider_check CHECK (${t.storageProvider} IN ('r2','supabase_storage','local'))`,
+    sql`CONSTRAINT kso_upload_status_check CHECK (${t.uploadStatus} IN ('pending','uploaded','verified','failed','deleted'))`,
+    sql`CONSTRAINT kso_file_size_check CHECK (${t.fileSizeBytes} IS NULL OR ${t.fileSizeBytes} >= 0)`,
+    index("kso_tenant_version_created_idx").on(t.tenantId, t.knowledgeDocumentVersionId, t.createdAt),
+    index("kso_tenant_provider_status_idx").on(t.tenantId, t.storageProvider, t.uploadStatus, t.createdAt),
+    index("kso_tenant_object_key_idx").on(t.tenantId, t.objectKey),
+  ],
+);
+
+export const insertKnowledgeStorageObjectSchema = createInsertSchema(knowledgeStorageObjects).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeStorageObject = z.infer<typeof insertKnowledgeStorageObjectSchema>;
+export type KnowledgeStorageObject = typeof knowledgeStorageObjects.$inferSelect;
+
+// ─── knowledge_processing_jobs ────────────────────────────────────────────────
+
+export const knowledgeProcessingJobs = pgTable(
+  "knowledge_processing_jobs",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeDocumentId: varchar("knowledge_document_id")
+      .notNull()
+      .references(() => knowledgeDocuments.id),
+    knowledgeDocumentVersionId: varchar("knowledge_document_version_id")
+      .references(() => knowledgeDocumentVersions.id),
+    jobType: text("job_type").notNull(),
+    status: text("status").notNull().default("queued"),
+    priority: integer("priority").notNull().default(100),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    idempotencyKey: text("idempotency_key"),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+    failureReason: text("failure_reason"),
+    payload: jsonb("payload"),
+    resultSummary: jsonb("result_summary"),
+    workerId: text("worker_id"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT kpj_job_type_check CHECK (${t.jobType} IN ('upload_verify','parse','chunk','embed','index','reindex','delete_index','lifecycle_sync'))`,
+    sql`CONSTRAINT kpj_status_check CHECK (${t.status} IN ('queued','running','completed','failed','cancelled','skipped'))`,
+    sql`CONSTRAINT kpj_priority_check CHECK (${t.priority} >= 0)`,
+    sql`CONSTRAINT kpj_attempt_count_check CHECK (${t.attemptCount} >= 0)`,
+    sql`CONSTRAINT kpj_max_attempts_check CHECK (${t.maxAttempts} > 0)`,
+    index("kpj_tenant_status_priority_idx").on(t.tenantId, t.status, t.priority, t.createdAt),
+    index("kpj_tenant_doc_created_idx").on(t.tenantId, t.knowledgeDocumentId, t.createdAt),
+    index("kpj_tenant_version_created_idx").on(t.tenantId, t.knowledgeDocumentVersionId, t.createdAt),
+    index("kpj_tenant_type_status_idx").on(t.tenantId, t.jobType, t.status, t.createdAt),
+    index("kpj_idempotency_key_idx").on(t.idempotencyKey),
+  ],
+);
+
+export const insertKnowledgeProcessingJobSchema = createInsertSchema(knowledgeProcessingJobs).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeProcessingJob = z.infer<typeof insertKnowledgeProcessingJobSchema>;
+export type KnowledgeProcessingJob = typeof knowledgeProcessingJobs.$inferSelect;
+
+// ─── knowledge_chunks ────────────────────────────────────────────────────────
+
+export const knowledgeChunks = pgTable(
+  "knowledge_chunks",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeBaseId: varchar("knowledge_base_id")
+      .notNull()
+      .references(() => knowledgeBases.id),
+    knowledgeDocumentId: varchar("knowledge_document_id")
+      .notNull()
+      .references(() => knowledgeDocuments.id),
+    knowledgeDocumentVersionId: varchar("knowledge_document_version_id")
+      .notNull()
+      .references(() => knowledgeDocumentVersions.id),
+    chunkIndex: integer("chunk_index").notNull(),
+    chunkKey: text("chunk_key").notNull(),
+    sourcePageStart: integer("source_page_start"),
+    sourcePageEnd: integer("source_page_end"),
+    characterStart: integer("character_start"),
+    characterEnd: integer("character_end"),
+    tokenEstimate: integer("token_estimate"),
+    chunkText: text("chunk_text"),
+    chunkHash: text("chunk_hash"),
+    chunkActive: boolean("chunk_active").notNull().default(true),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT kc_chunk_index_check CHECK (${t.chunkIndex} >= 0)`,
+    sql`CONSTRAINT kc_page_start_check CHECK (${t.sourcePageStart} IS NULL OR ${t.sourcePageStart} >= 0)`,
+    sql`CONSTRAINT kc_page_end_check CHECK (${t.sourcePageEnd} IS NULL OR ${t.sourcePageEnd} >= 0)`,
+    sql`CONSTRAINT kc_char_start_check CHECK (${t.characterStart} IS NULL OR ${t.characterStart} >= 0)`,
+    sql`CONSTRAINT kc_char_end_check CHECK (${t.characterEnd} IS NULL OR ${t.characterEnd} >= 0)`,
+    sql`CONSTRAINT kc_token_estimate_check CHECK (${t.tokenEstimate} IS NULL OR ${t.tokenEstimate} >= 0)`,
+    uniqueIndex("kc_version_chunk_index_unique").on(t.knowledgeDocumentVersionId, t.chunkIndex),
+    uniqueIndex("kc_version_chunk_key_unique").on(t.knowledgeDocumentVersionId, t.chunkKey),
+    index("kc_tenant_kb_doc_idx").on(t.tenantId, t.knowledgeBaseId, t.knowledgeDocumentId),
+    index("kc_tenant_version_active_idx").on(t.tenantId, t.knowledgeDocumentVersionId, t.chunkActive, t.chunkIndex),
+  ],
+);
+
+export const insertKnowledgeChunkSchema = createInsertSchema(knowledgeChunks).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeChunk = z.infer<typeof insertKnowledgeChunkSchema>;
+export type KnowledgeChunk = typeof knowledgeChunks.$inferSelect;
+
+// ─── knowledge_embeddings ────────────────────────────────────────────────────
+
+export const knowledgeEmbeddings = pgTable(
+  "knowledge_embeddings",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeBaseId: varchar("knowledge_base_id")
+      .notNull()
+      .references(() => knowledgeBases.id),
+    knowledgeDocumentId: varchar("knowledge_document_id")
+      .notNull()
+      .references(() => knowledgeDocuments.id),
+    knowledgeDocumentVersionId: varchar("knowledge_document_version_id")
+      .notNull()
+      .references(() => knowledgeDocumentVersions.id),
+    knowledgeChunkId: varchar("knowledge_chunk_id")
+      .notNull()
+      .references(() => knowledgeChunks.id),
+    embeddingProvider: text("embedding_provider").notNull(),
+    embeddingModel: text("embedding_model").notNull(),
+    vectorBackend: text("vector_backend").notNull().default("pgvector"),
+    vectorStatus: text("vector_status").notNull().default("pending"),
+    vectorNamespace: text("vector_namespace"),
+    vectorReference: text("vector_reference"),
+    dimensions: integer("dimensions"),
     contentHash: text("content_hash"),
-    status: knowledgeStatusEnum("status").notNull().default("pending"),
+    indexedAt: timestamp("indexed_at"),
+    failureReason: text("failure_reason"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT ke_vector_backend_check CHECK (${t.vectorBackend} IN ('pgvector','pinecone','weaviate','qdrant','custom'))`,
+    sql`CONSTRAINT ke_vector_status_check CHECK (${t.vectorStatus} IN ('pending','indexed','failed','deleted'))`,
+    sql`CONSTRAINT ke_dimensions_check CHECK (${t.dimensions} IS NULL OR ${t.dimensions} > 0)`,
+    index("ke_tenant_kb_status_idx").on(t.tenantId, t.knowledgeBaseId, t.vectorStatus, t.createdAt),
+    index("ke_tenant_version_idx").on(t.tenantId, t.knowledgeDocumentVersionId, t.createdAt),
+    index("ke_tenant_chunk_idx").on(t.tenantId, t.knowledgeChunkId, t.createdAt),
+    index("ke_tenant_backend_status_idx").on(t.tenantId, t.vectorBackend, t.vectorStatus),
+  ],
+);
+
+export const insertKnowledgeEmbeddingSchema = createInsertSchema(knowledgeEmbeddings).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeEmbedding = z.infer<typeof insertKnowledgeEmbeddingSchema>;
+export type KnowledgeEmbedding = typeof knowledgeEmbeddings.$inferSelect;
+
+// ─── knowledge_index_state ────────────────────────────────────────────────────
+
+export const knowledgeIndexState = pgTable(
+  "knowledge_index_state",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeBaseId: varchar("knowledge_base_id")
+      .notNull()
+      .references(() => knowledgeBases.id),
+    knowledgeDocumentId: varchar("knowledge_document_id")
+      .notNull()
+      .references(() => knowledgeDocuments.id),
+    knowledgeDocumentVersionId: varchar("knowledge_document_version_id")
+      .notNull()
+      .references(() => knowledgeDocumentVersions.id),
+    indexState: text("index_state").notNull().default("pending"),
+    chunkCount: integer("chunk_count").notNull().default(0),
+    indexedChunkCount: integer("indexed_chunk_count").notNull().default(0),
+    embeddingCount: integer("embedding_count").notNull().default(0),
+    lastIndexedAt: timestamp("last_indexed_at"),
+    staleReason: text("stale_reason"),
+    failureReason: text("failure_reason"),
+    metadata: jsonb("metadata"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (t) => [
-    index("knowledge_docs_org_idx").on(t.organizationId),
-    index("knowledge_docs_project_idx").on(t.projectId),
-    index("knowledge_docs_status_idx").on(t.status),
+    sql`CONSTRAINT kis_index_state_check CHECK (${t.indexState} IN ('pending','indexing','indexed','failed','stale','deleted'))`,
+    sql`CONSTRAINT kis_chunk_count_check CHECK (${t.chunkCount} >= 0)`,
+    sql`CONSTRAINT kis_indexed_chunk_count_check CHECK (${t.indexedChunkCount} >= 0)`,
+    sql`CONSTRAINT kis_embedding_count_check CHECK (${t.embeddingCount} >= 0)`,
+    uniqueIndex("kis_version_unique").on(t.knowledgeDocumentVersionId),
+    index("kis_tenant_kb_state_idx").on(t.tenantId, t.knowledgeBaseId, t.indexState, t.updatedAt),
+    index("kis_tenant_doc_idx").on(t.tenantId, t.knowledgeDocumentId, t.updatedAt),
+    index("kis_tenant_version_idx").on(t.tenantId, t.knowledgeDocumentVersionId),
   ],
 );
+
+export const insertKnowledgeIndexStateSchema = createInsertSchema(knowledgeIndexState).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertKnowledgeIndexState = z.infer<typeof insertKnowledgeIndexStateSchema>;
+export type KnowledgeIndexStateRow = typeof knowledgeIndexState.$inferSelect;
 
 // ─── Artifact Dependencies ───────────────────────────────────────────────────
 
@@ -770,10 +1134,6 @@ export const insertIntegrationSchema = createInsertSchema(integrations).omit({
   updatedAt: true,
 });
 
-export const insertKnowledgeDocumentSchema = createInsertSchema(
-  knowledgeDocuments,
-).omit({ id: true, createdAt: true, updatedAt: true });
-
 export const insertArtifactDependencySchema = createInsertSchema(
   artifactDependencies,
 ).omit({ id: true, createdAt: true });
@@ -815,9 +1175,6 @@ export type AiApproval = typeof aiApprovals.$inferSelect;
 
 export type InsertIntegration = z.infer<typeof insertIntegrationSchema>;
 export type Integration = typeof integrations.$inferSelect;
-
-export type InsertKnowledgeDocument = z.infer<typeof insertKnowledgeDocumentSchema>;
-export type KnowledgeDocument = typeof knowledgeDocuments.$inferSelect;
 
 export type InsertArtifactDependency = z.infer<typeof insertArtifactDependencySchema>;
 export type ArtifactDependency = typeof artifactDependencies.$inferSelect;

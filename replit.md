@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 4S complete)
+# AI Builder Platform — V1 (Phase 5A complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -38,6 +38,11 @@ Internal control plane for AI-driven software generation. Express + React + Driz
 - **storage_usage timestamp column is created_at**: NOT recorded_at — critical for retention and gap queries
 - **Finalized invoices never mutated by recovery**: invoice_totals_rebuild only touches draft invoices
 - **All recovery operations are idempotent**: apply functions safe to re-run on same scope/period
+- **knowledge_documents.current_version_id has NO FK**: circular dependency — invariant enforced at service layer via setCurrentDocumentVersion()
+- **knowledge_index_state has knowledge_document_id NOT NULL**: each index_state row scoped to a specific document version, not only to kb
+- **chunk_key is NOT NULL**: unique content-addressable identifier per chunk — set at ingestion time
+- **embedding_provider is NOT NULL**: 'openai', 'cohere', etc. — required for re-indexing and cost attribution
+- **knowledge_bases.slug is NOT NULL**: URL-safe unique identifier within tenant; set at creation time
 - **Anomaly detection is observational only**: no runtime blocking in Phase 3K — events only
 - **Step budget is per request_id**: cache hits, replays, and pre-flight blocks never consume a step
 - **Step budget fail-open**: DB errors in step-budget.ts allow the call through — observability must not block runtime
@@ -453,3 +458,54 @@ npm run db:push   # Sync schema to DB
 - Scheduler only triggers interval jobs — manual/cron jobs never auto-triggered
 - No in-memory locks — all state in billing_job_runs
 - No destructive cleanup in Phase 4R — retention helpers are inspection-only
+
+## Phase 5A — Document Registry & Storage Foundation (branch: feature/document-registry-foundation)
+
+### New tables (8) — total schema: 85 tables
+
+- **knowledge_bases** — tenant-isolated knowledge base registry. slug (NOT NULL, unique per tenant), lifecycle_state, visibility, default_retrieval_k, metadata. 5 indexes
+- **knowledge_documents** — enterprise document registry replacing legacy stub. knowledge_base_id FK, title, source_type, document_type, lifecycle_state, document_status, current_version_id (NO FK — circular; enforced at service layer), latest_version_number, tags JSONB, soft-delete via deleted_at. 6 indexes
+- **knowledge_document_versions** — immutable version chain per document. version_number, version_status, is_current flag, content_checksum, mime_type, file_size_bytes, language_code, processing timestamps. 4 indexes
+- **knowledge_storage_objects** — storage backend objects scoped to a document version. storage_provider, bucket_name, object_key (NOT NULL), upload_status, checksum, soft-delete via deleted_at. 4 indexes
+- **knowledge_processing_jobs** — async processing job queue. job_type, status lifecycle (pending/running/completed/failed/retrying/cancelled), priority, attempt_count, max_attempts, idempotency_key (UNIQUE), worker_id, payload/result_summary JSONB. 5 indexes
+- **knowledge_chunks** — text chunks derived from a document version. chunk_key (NOT NULL, content-addressable), chunk_index, source_page/character ranges, token_estimate, chunk_hash, chunk_active. 5 indexes
+- **knowledge_embeddings** — embedding metadata per chunk. embedding_provider (NOT NULL), embedding_model (NOT NULL), vector_backend, vector_status, vector_namespace, vector_reference, dimensions, content_hash, indexed_at. 5 indexes
+- **knowledge_index_state** — per-document-version index state tracker. knowledge_document_id + knowledge_document_version_id both NOT NULL, index_state, chunk_count, indexed_chunk_count, embedding_count, last_indexed_at, stale_reason. 4 indexes
+
+### New lib files (4)
+- `server/lib/ai/vector-adapter.ts` — abstract VectorAdapter interface + PgVectorAdapter stub + getVectorAdapter() factory
+- `server/lib/ai/knowledge-bases.ts` — KB CRUD: createKnowledgeBase, getKnowledgeBase, listKnowledgeBases, updateKnowledgeBase, archiveKnowledgeBase
+- `server/lib/ai/knowledge-documents.ts` — document lifecycle: createDocument, getDocument, listDocuments, setCurrentDocumentVersion, softDeleteDocument, getDocumentWithVersion
+- `server/lib/ai/knowledge-processing.ts` — processing pipeline: createProcessingJob, claimProcessingJob, completeProcessingJob, failProcessingJob, retryProcessingJob, getJobStatus, getProcessingQueue
+
+### Updated repository
+- `server/repositories/knowledge.repository.ts` — extended with Phase 5A type exports and insert schemas for all 8 tables
+
+### New admin routes (20 endpoints)
+- /api/admin/knowledge/bases — GET list, POST create
+- /api/admin/knowledge/bases/:id — GET detail, PATCH update, DELETE archive
+- /api/admin/knowledge/bases/:id/documents — GET list, POST create
+- /api/admin/knowledge/bases/:id/documents/:docId — GET detail, DELETE soft-delete
+- /api/admin/knowledge/bases/:id/documents/:docId/versions — GET list versions
+- /api/admin/knowledge/bases/:id/documents/:docId/versions/:verId/set-current — POST set current
+- /api/admin/knowledge/processing/jobs — GET list
+- /api/admin/knowledge/processing/jobs/:jobId — GET detail
+- /api/admin/knowledge/processing/jobs/:jobId/claim — POST claim (worker)
+- /api/admin/knowledge/processing/jobs/:jobId/complete — POST complete
+- /api/admin/knowledge/processing/jobs/:jobId/fail — POST fail
+- /api/admin/knowledge/processing/jobs/:jobId/retry — POST retry
+- /api/admin/knowledge/bases/:id/chunks — GET list chunks for KB
+- /api/admin/knowledge/bases/:id/embeddings — GET list embeddings for KB
+
+### Key design invariants
+- knowledge_documents.current_version_id has NO FK — circular dependency; setCurrentDocumentVersion() enforces validity at service layer
+- knowledge_index_state.knowledge_document_id is NOT NULL — state always scoped to a document, not just KB
+- chunk_key is NOT NULL — content-addressable identifier set at ingestion time
+- embedding_provider + embedding_model are NOT NULL — required for cost attribution and re-indexing
+- knowledge_bases.slug is NOT NULL — URL-safe tenant-unique identifier
+- Old enums knowledge_source_type / knowledge_status kept in schema for backward compatibility (no longer used by any table column)
+- All 14 validation scenarios passed
+
+### Migration notes
+- Old stub knowledge_documents table and its legacy enums (knowledge_source_type, knowledge_status) were dropped via raw SQL before drizzle-kit push — no data loss (stub only)
+- Duplicate insertKnowledgeDocumentSchema export removed from shared/schema.ts (old legacy export at line ~1137)

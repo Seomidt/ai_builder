@@ -2,14 +2,16 @@ import { eq, and, desc } from "drizzle-orm";
 import { db } from "../db";
 import {
   knowledgeDocuments,
+  knowledgeBases,
   type KnowledgeDocument,
   type InsertKnowledgeDocument,
+  type KnowledgeBase,
 } from "@shared/schema";
 
 export const knowledgeRepository = {
-  async list(organizationId: string, projectId?: string): Promise<KnowledgeDocument[]> {
-    const conditions = [eq(knowledgeDocuments.organizationId, organizationId)];
-    if (projectId) conditions.push(eq(knowledgeDocuments.projectId, projectId));
+  async list(tenantId: string, knowledgeBaseId?: string): Promise<KnowledgeDocument[]> {
+    const conditions = [eq(knowledgeDocuments.tenantId, tenantId)];
+    if (knowledgeBaseId) conditions.push(eq(knowledgeDocuments.knowledgeBaseId, knowledgeBaseId));
 
     return db
       .select()
@@ -18,14 +20,14 @@ export const knowledgeRepository = {
       .orderBy(desc(knowledgeDocuments.createdAt));
   },
 
-  async getById(id: string, organizationId: string): Promise<KnowledgeDocument | undefined> {
+  async getById(id: string, tenantId: string): Promise<KnowledgeDocument | undefined> {
     const [doc] = await db
       .select()
       .from(knowledgeDocuments)
       .where(
         and(
           eq(knowledgeDocuments.id, id),
-          eq(knowledgeDocuments.organizationId, organizationId),
+          eq(knowledgeDocuments.tenantId, tenantId),
         ),
       );
     return doc;
@@ -38,14 +40,22 @@ export const knowledgeRepository = {
 
   async updateStatus(
     id: string,
-    status: KnowledgeDocument["status"],
-    contentHash?: string,
+    documentStatus: KnowledgeDocument["documentStatus"],
+    tenantId: string,
   ): Promise<KnowledgeDocument | undefined> {
     const [updated] = await db
       .update(knowledgeDocuments)
-      .set({ status, contentHash, updatedAt: new Date() })
-      .where(eq(knowledgeDocuments.id, id))
+      .set({ documentStatus, updatedAt: new Date() })
+      .where(and(eq(knowledgeDocuments.id, id), eq(knowledgeDocuments.tenantId, tenantId)))
       .returning();
     return updated;
+  },
+
+  async listBases(tenantId: string): Promise<KnowledgeBase[]> {
+    return db
+      .select()
+      .from(knowledgeBases)
+      .where(eq(knowledgeBases.tenantId, tenantId))
+      .orderBy(desc(knowledgeBases.createdAt));
   },
 };
