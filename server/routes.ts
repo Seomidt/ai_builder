@@ -8,6 +8,18 @@ import { summarize } from "./features/ai-summarize/summarize.service";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 import { AiError } from "./lib/ai/errors";
+import {
+  createStripeCheckoutForInvoice,
+  createStripePaymentIntentForInvoice,
+  getStripeCheckoutState,
+} from "./lib/ai/stripe-checkout";
+import { handleStripeWebhook } from "./lib/ai/stripe-webhooks";
+import {
+  listStripeWebhookEvents,
+  getStripeWebhookEventByStripeEventId,
+  getInvoiceStripeLifecycle,
+  explainStripeWebhookOutcome,
+} from "./lib/ai/stripe-webhook-summary";
 
 /**
  * Central error → HTTP response mapper.
@@ -406,6 +418,106 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err) {
       const reqId = req.headers["x-request-id"] as string | undefined ?? null;
       handleError(res, err, reqId);
+    }
+  });
+
+  // ─── Stripe Checkout & Webhook Routes (Phase 4M) ────────────────────────────
+
+  app.post("/api/stripe/checkout/:invoiceId", async (req: Request, res: Response) => {
+    try {
+      const invoiceId = String(req.params.invoiceId);
+      const body = req.body as { successUrl?: string; cancelUrl?: string };
+      const successUrl = body.successUrl;
+      const cancelUrl = body.cancelUrl;
+      if (!successUrl || !cancelUrl) {
+        return res.status(400).json({ error: "successUrl and cancelUrl are required" });
+      }
+      const result = await createStripeCheckoutForInvoice(invoiceId, successUrl, cancelUrl);
+      return res.json(result);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.post("/api/stripe/payment-intent/:invoiceId", async (req: Request, res: Response) => {
+    try {
+      const invoiceId = String(req.params.invoiceId);
+      const result = await createStripePaymentIntentForInvoice(invoiceId);
+      return res.json(result);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get("/api/stripe/state/:invoiceId", async (req: Request, res: Response) => {
+    try {
+      const invoiceId = String(req.params.invoiceId);
+      const state = await getStripeCheckoutState(invoiceId);
+      if (!state) return res.status(404).json({ error: "Invoice not found" });
+      return res.json(state);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.post("/api/stripe/webhook", async (req: Request, res: Response) => {
+    try {
+      const rawSig = req.headers["stripe-signature"];
+      const sig = Array.isArray(rawSig) ? rawSig[0] : rawSig;
+      if (!sig) {
+        return res.status(400).json({ error: "Missing stripe-signature header" });
+      }
+      const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+      if (!rawBody) {
+        return res.status(400).json({ error: "Missing raw request body" });
+      }
+      const result = await handleStripeWebhook(rawBody, sig);
+      return res.json({ received: true, outcome: result.outcome, reason: result.reason });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get("/api/stripe/webhook-events", async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(Number(req.query.limit ?? 100), 500);
+      const events = await listStripeWebhookEvents(limit);
+      return res.json({ events, count: events.length });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get("/api/stripe/webhook-events/:stripeEventId", async (req: Request, res: Response) => {
+    try {
+      const stripeEventId = String(req.params.stripeEventId);
+      const event = await getStripeWebhookEventByStripeEventId(stripeEventId);
+      if (!event) return res.status(404).json({ error: "Event not found" });
+      return res.json(event);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get("/api/stripe/webhook-events/:stripeEventId/explain", async (req: Request, res: Response) => {
+    try {
+      const stripeEventId = String(req.params.stripeEventId);
+      const explanation = await explainStripeWebhookOutcome(stripeEventId);
+      if (!explanation) return res.status(404).json({ error: "Event not found" });
+      return res.json(explanation);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get("/api/stripe/invoice-lifecycle/:invoiceId", async (req: Request, res: Response) => {
+    try {
+      const invoiceId = String(req.params.invoiceId);
+      const lifecycle = await getInvoiceStripeLifecycle(invoiceId);
+      if (!lifecycle) return res.status(404).json({ error: "Invoice not found" });
+      return res.json(lifecycle);
+    } catch (err) {
+      handleError(res, err);
     }
   });
 

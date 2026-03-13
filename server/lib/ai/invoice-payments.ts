@@ -73,17 +73,26 @@ async function loadPayment(paymentId: string): Promise<InvoicePayment> {
   return rows[0];
 }
 
+/**
+ * Validate a state transition.
+ * Returns 'ok' if transition is valid, 'idempotent' if already in target state,
+ * or throws if the transition is invalid.
+ */
 function assertValidTransition(
   current: string,
   target: string,
   paymentId: string,
-): void {
+): "ok" | "idempotent" {
+  if (current === target) {
+    return "idempotent";
+  }
   const allowed = VALID_TRANSITIONS[current];
   if (!allowed || !allowed.includes(target)) {
     throw new Error(
       `[ai/invoice-payments] Invalid transition: ${current} → ${target} for payment ${paymentId}. Allowed from '${current}': [${(allowed ?? []).join(", ")}]`,
     );
   }
+  return "ok";
 }
 
 export async function createInvoicePayment(
@@ -140,7 +149,8 @@ export async function markInvoicePaymentProcessing(
   metadata?: Record<string, unknown> | null,
 ): Promise<InvoicePayment> {
   const payment = await loadPayment(paymentId);
-  assertValidTransition(payment.paymentStatus, "processing", paymentId);
+  const guard = assertValidTransition(payment.paymentStatus, "processing", paymentId);
+  if (guard === "idempotent") return payment;
 
   return db.transaction(async (tx) => {
     const updated = await tx
@@ -173,7 +183,8 @@ export async function markInvoicePaymentPaid(
   paidAt?: Date | null,
 ): Promise<InvoicePayment> {
   const payment = await loadPayment(paymentId);
-  assertValidTransition(payment.paymentStatus, "paid", paymentId);
+  const guard = assertValidTransition(payment.paymentStatus, "paid", paymentId);
+  if (guard === "idempotent") return payment;
 
   const now = paidAt ?? new Date();
 
@@ -212,7 +223,8 @@ export async function markInvoicePaymentFailed(
   failedAt?: Date | null,
 ): Promise<InvoicePayment> {
   const payment = await loadPayment(paymentId);
-  assertValidTransition(payment.paymentStatus, "failed", paymentId);
+  const guard = assertValidTransition(payment.paymentStatus, "failed", paymentId);
+  if (guard === "idempotent") return payment;
 
   const now = failedAt ?? new Date();
 
@@ -250,7 +262,8 @@ export async function markInvoicePaymentRefunded(
   refundedAt?: Date | null,
 ): Promise<InvoicePayment> {
   const payment = await loadPayment(paymentId);
-  assertValidTransition(payment.paymentStatus, "refunded", paymentId);
+  const guard = assertValidTransition(payment.paymentStatus, "refunded", paymentId);
+  if (guard === "idempotent") return payment;
 
   const now = refundedAt ?? new Date();
 
@@ -287,7 +300,8 @@ export async function markInvoicePaymentVoid(
   paymentId: string,
 ): Promise<InvoicePayment> {
   const payment = await loadPayment(paymentId);
-  assertValidTransition(payment.paymentStatus, "void", paymentId);
+  const guard = assertValidTransition(payment.paymentStatus, "void", paymentId);
+  if (guard === "idempotent") return payment;
 
   return db.transaction(async (tx) => {
     const updated = await tx

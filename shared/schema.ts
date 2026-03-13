@@ -3262,6 +3262,59 @@ export const insertPaymentEventSchema = createInsertSchema(paymentEvents).omit({
 export type InsertPaymentEvent = z.infer<typeof insertPaymentEventSchema>;
 export type PaymentEvent = typeof paymentEvents.$inferSelect;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 4M — Stripe Checkout & Webhook Engine
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * stripe_webhook_events — deduplication and audit table for incoming Stripe webhooks.
+ *
+ * Every Stripe webhook received is stored here before/during processing.
+ * The UNIQUE(stripe_event_id) constraint ensures idempotent processing:
+ * processing_status tracks lifecycle from 'received' → 'processed'/'ignored'/'failed'.
+ *
+ * Source of truth rules:
+ *   - payload stores the raw parsed Stripe event body
+ *   - internal invoice totals are NOT modified based on Stripe data
+ *   - this table is the webhook audit trail, not financial truth
+ */
+export const stripeWebhookEvents = pgTable(
+  "stripe_webhook_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    stripeEventId: text("stripe_event_id").notNull(),
+    eventType: text("event_type").notNull(),
+    invoiceId: text("invoice_id").references(() => invoices.id),
+    invoicePaymentId: text("invoice_payment_id").references(() => invoicePayments.id),
+    tenantId: text("tenant_id"),
+    processingStatus: text("processing_status").notNull().default("received"),
+    receivedAt: timestamp("received_at").notNull().defaultNow(),
+    processedAt: timestamp("processed_at"),
+    lastError: text("last_error"),
+    payload: jsonb("payload").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check(
+      "swe_processing_status_check",
+      sql`${t.processingStatus} IN ('received','processed','ignored','failed')`,
+    ),
+    uniqueIndex("swe_stripe_event_id_unique").on(t.stripeEventId),
+    index("swe_event_type_received_idx").on(t.eventType, t.receivedAt),
+    index("swe_processing_status_received_idx").on(t.processingStatus, t.receivedAt),
+    index("swe_invoice_id_idx").on(t.invoiceId),
+    index("swe_invoice_payment_id_idx").on(t.invoicePaymentId),
+    index("swe_tenant_id_idx").on(t.tenantId),
+  ],
+);
+
+export const insertStripeWebhookEventSchema = createInsertSchema(stripeWebhookEvents).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertStripeWebhookEvent = z.infer<typeof insertStripeWebhookEventSchema>;
+export type StripeWebhookEvent = typeof stripeWebhookEvents.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
