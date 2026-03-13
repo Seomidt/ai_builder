@@ -52,23 +52,15 @@ async function recordPaymentEvent(
   eventSource: "internal" | "stripe_webhook" | "manual" = "internal",
   metadata?: Record<string, unknown> | null,
 ): Promise<void> {
-  try {
-    await db.insert(paymentEvents).values({
-      invoicePaymentId,
-      invoiceId,
-      tenantId,
-      eventType,
-      eventSource,
-      eventStatus: "recorded",
-      metadata: metadata ?? null,
-    });
-  } catch (err) {
-    console.error(
-      "[ai/invoice-payments] Failed to record payment event (suppressed):",
-      eventType,
-      err instanceof Error ? err.message : err,
-    );
-  }
+  await db.insert(paymentEvents).values({
+    invoicePaymentId,
+    invoiceId,
+    tenantId,
+    eventType,
+    eventSource,
+    eventStatus: "recorded",
+    metadata: metadata ?? null,
+  });
 }
 
 async function loadInvoice(invoiceId: string): Promise<Invoice> {

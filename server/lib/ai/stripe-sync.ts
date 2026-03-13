@@ -33,23 +33,15 @@ async function recordSyncEvent(
   eventType: string,
   metadata?: Record<string, unknown> | null,
 ): Promise<void> {
-  try {
-    await db.insert(paymentEvents).values({
-      invoicePaymentId: null,
-      invoiceId,
-      tenantId,
-      eventType,
-      eventSource: "internal",
-      eventStatus: "recorded",
-      metadata: metadata ?? null,
-    });
-  } catch (err) {
-    console.error(
-      "[ai/stripe-sync] Failed to record sync event (suppressed):",
-      eventType,
-      err instanceof Error ? err.message : err,
-    );
-  }
+  await db.insert(paymentEvents).values({
+    invoicePaymentId: null,
+    invoiceId,
+    tenantId,
+    eventType,
+    eventSource: "internal",
+    eventStatus: "recorded",
+    metadata: metadata ?? null,
+  });
 }
 
 export interface StripeIds {
