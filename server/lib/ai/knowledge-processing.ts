@@ -1,23 +1,36 @@
 /**
- * knowledge-processing.ts — Phase 5A
+ * knowledge-processing.ts — Phase 5A (hardened)
  *
- * Service helpers for the document processing pipeline foundation:
+ * Service helpers for the document processing pipeline:
  *   - knowledge_storage_objects
  *   - knowledge_processing_jobs
- *   - knowledge_chunks (metadata foundation)
- *   - knowledge_embeddings (metadata foundation)
+ *   - knowledge_chunks
+ *   - knowledge_embeddings
  *   - knowledge_index_state
  *
- * Design invariants:
- *   - Processing jobs are append-oriented — never mutate a past job row, create a new one
- *   - Index state is a single row per document version (UNIQUE on knowledge_document_version_id)
- *   - Storage object metadata is immutable after upload — no silent overwrites
- *   - Chunk + embedding tables are derived artifacts — rebuildable without corrupting canonical truth
+ * Enforced invariants (service layer):
+ *   INV-5  Cross-tenant linkage rejected at every write path. Each insert
+ *          validates that all referenced parent rows (KB, document, version,
+ *          chunk) share the caller-supplied tenantId via explicit field
+ *          comparison — not just query filters.
+ *   INV-4  isVersionRetrievable() enforces that retrieval readiness requires
+ *          both a valid index_state='indexed' row AND the document being in
+ *          'ready' status with an active lifecycle_state. The function is the
+ *          authoritative gate for retrieval paths.
+ *
+ * Additional invariants:
+ *   - Processing jobs are append-oriented — never mutate a past job row.
+ *   - Index state is upserted (one row per document version).
+ *   - Storage object metadata is immutable after upload.
+ *   - Chunk + embedding tables are derived artifacts.
  */
 
 import { eq, and, desc, sql } from "drizzle-orm";
 import { db } from "../../db";
 import {
+  knowledgeBases,
+  knowledgeDocuments,
+  knowledgeDocumentVersions,
   knowledgeStorageObjects,
   knowledgeProcessingJobs,
   knowledgeChunks,
@@ -34,12 +47,121 @@ import {
   type KnowledgeIndexStateRow,
   type InsertKnowledgeIndexState,
 } from "@shared/schema";
+import { KnowledgeInvariantError } from "./knowledge-bases";
+
+// ─── Internal tenant-assertion helpers ────────────────────────────────────────
+
+async function assertVersionTenant(
+  versionId: string,
+  tenantId: string,
+  label = "version",
+): Promise<{ id: string; tenantId: string; knowledgeDocumentId: string }> {
+  const [row] = await db
+    .select({
+      id: knowledgeDocumentVersions.id,
+      tenantId: knowledgeDocumentVersions.tenantId,
+      knowledgeDocumentId: knowledgeDocumentVersions.knowledgeDocumentId,
+    })
+    .from(knowledgeDocumentVersions)
+    .where(eq(knowledgeDocumentVersions.id, versionId));
+
+  if (!row) {
+    throw new KnowledgeInvariantError("INV-5", `${label} ${versionId} not found`);
+  }
+  if (row.tenantId !== tenantId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `cross-tenant linkage rejected: ${label} ${versionId} belongs to tenant ${row.tenantId}, caller is tenant ${tenantId}`,
+    );
+  }
+  return row;
+}
+
+async function assertDocumentTenant(
+  documentId: string,
+  tenantId: string,
+  label = "document",
+): Promise<{ id: string; tenantId: string; knowledgeBaseId: string }> {
+  const [row] = await db
+    .select({
+      id: knowledgeDocuments.id,
+      tenantId: knowledgeDocuments.tenantId,
+      knowledgeBaseId: knowledgeDocuments.knowledgeBaseId,
+    })
+    .from(knowledgeDocuments)
+    .where(eq(knowledgeDocuments.id, documentId));
+
+  if (!row) {
+    throw new KnowledgeInvariantError("INV-5", `${label} ${documentId} not found`);
+  }
+  if (row.tenantId !== tenantId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `cross-tenant linkage rejected: ${label} ${documentId} belongs to tenant ${row.tenantId}, caller is tenant ${tenantId}`,
+    );
+  }
+  return row;
+}
+
+async function assertKnowledgeBaseTenant(
+  kbId: string,
+  tenantId: string,
+): Promise<{ id: string; tenantId: string }> {
+  const [row] = await db
+    .select({ id: knowledgeBases.id, tenantId: knowledgeBases.tenantId })
+    .from(knowledgeBases)
+    .where(eq(knowledgeBases.id, kbId));
+
+  if (!row) {
+    throw new KnowledgeInvariantError("INV-5", `knowledge_base ${kbId} not found`);
+  }
+  if (row.tenantId !== tenantId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `cross-tenant linkage rejected: knowledge_base ${kbId} belongs to tenant ${row.tenantId}, caller is tenant ${tenantId}`,
+    );
+  }
+  return row;
+}
+
+async function assertChunkTenant(
+  chunkId: string,
+  tenantId: string,
+): Promise<{ id: string; tenantId: string; knowledgeBaseId: string; knowledgeDocumentId: string }> {
+  const [row] = await db
+    .select({
+      id: knowledgeChunks.id,
+      tenantId: knowledgeChunks.tenantId,
+      knowledgeBaseId: knowledgeChunks.knowledgeBaseId,
+      knowledgeDocumentId: knowledgeChunks.knowledgeDocumentId,
+    })
+    .from(knowledgeChunks)
+    .where(eq(knowledgeChunks.id, chunkId));
+
+  if (!row) {
+    throw new KnowledgeInvariantError("INV-5", `chunk ${chunkId} not found`);
+  }
+  if (row.tenantId !== tenantId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `cross-tenant linkage rejected: chunk ${chunkId} belongs to tenant ${row.tenantId}, caller is tenant ${tenantId}`,
+    );
+  }
+  return row;
+}
 
 // ─── Storage Object Operations ────────────────────────────────────────────────
 
+/**
+ * attachStorageObject
+ *
+ * INV-5: Validates that the referenced version belongs to input.tenantId
+ *        before inserting the storage object.
+ */
 export async function attachStorageObject(
   input: InsertKnowledgeStorageObject,
 ): Promise<KnowledgeStorageObject> {
+  await assertVersionTenant(input.knowledgeDocumentVersionId, input.tenantId, "document_version");
   const [row] = await db.insert(knowledgeStorageObjects).values(input).returning();
   return row;
 }
@@ -101,9 +223,39 @@ export async function markStorageObjectVerified(
 
 // ─── Processing Job Operations ─────────────────────────────────────────────────
 
+/**
+ * createKnowledgeProcessingJob
+ *
+ * INV-5: Validates that the referenced document belongs to input.tenantId.
+ *        If a version is provided, also validates it belongs to the same tenant
+ *        and the same document.
+ */
 export async function createKnowledgeProcessingJob(
   input: InsertKnowledgeProcessingJob,
 ): Promise<KnowledgeProcessingJob> {
+  const doc = await assertDocumentTenant(input.knowledgeDocumentId, input.tenantId);
+
+  if (input.knowledgeDocumentVersionId) {
+    const ver = await assertVersionTenant(
+      input.knowledgeDocumentVersionId,
+      input.tenantId,
+      "document_version",
+    );
+    if (ver.knowledgeDocumentId !== input.knowledgeDocumentId) {
+      throw new KnowledgeInvariantError(
+        "INV-5",
+        `version ${input.knowledgeDocumentVersionId} belongs to document ${ver.knowledgeDocumentId}, not ${input.knowledgeDocumentId}`,
+      );
+    }
+  }
+
+  if (doc.knowledgeBaseId !== input.knowledgeBaseId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `document ${input.knowledgeDocumentId} belongs to knowledge_base ${doc.knowledgeBaseId}, not ${input.knowledgeBaseId}`,
+    );
+  }
+
   const [row] = await db.insert(knowledgeProcessingJobs).values(input).returning();
   return row;
 }
@@ -156,7 +308,7 @@ export async function startProcessingJob(
       and(
         eq(knowledgeProcessingJobs.id, id),
         eq(knowledgeProcessingJobs.tenantId, tenantId),
-        eq(knowledgeProcessingJobs.status, "queued"),
+        eq(knowledgeProcessingJobs.status, "pending"),
       ),
     )
     .returning();
@@ -199,11 +351,39 @@ export async function failProcessingJob(
   return row;
 }
 
-// ─── Chunk Operations (metadata foundation) ───────────────────────────────────
+// ─── Chunk Operations ─────────────────────────────────────────────────────────
 
+/**
+ * createKnowledgeChunk
+ *
+ * INV-5: Validates that KB, document, and version all share input.tenantId,
+ *        and that the document belongs to the referenced KB, and the version
+ *        belongs to the referenced document.
+ */
 export async function createKnowledgeChunk(
   input: InsertKnowledgeChunk,
 ): Promise<KnowledgeChunk> {
+  await assertKnowledgeBaseTenant(input.knowledgeBaseId, input.tenantId);
+  const doc = await assertDocumentTenant(input.knowledgeDocumentId, input.tenantId);
+  const ver = await assertVersionTenant(
+    input.knowledgeDocumentVersionId,
+    input.tenantId,
+    "document_version",
+  );
+
+  if (doc.knowledgeBaseId !== input.knowledgeBaseId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `document ${input.knowledgeDocumentId} belongs to knowledge_base ${doc.knowledgeBaseId}, not ${input.knowledgeBaseId}`,
+    );
+  }
+  if (ver.knowledgeDocumentId !== input.knowledgeDocumentId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `version ${input.knowledgeDocumentVersionId} belongs to document ${ver.knowledgeDocumentId}, not ${input.knowledgeDocumentId}`,
+    );
+  }
+
   const [row] = await db.insert(knowledgeChunks).values(input).returning();
   return row;
 }
@@ -243,11 +423,52 @@ export async function deactivateChunksByVersion(
   return result.length;
 }
 
-// ─── Embedding Operations (metadata foundation) ───────────────────────────────
+// ─── Embedding Operations ─────────────────────────────────────────────────────
 
+/**
+ * createKnowledgeEmbedding
+ *
+ * INV-5: Validates that KB, document, version, and chunk all share
+ *        input.tenantId, with explicit cross-field consistency checks
+ *        (chunk.knowledgeBaseId and chunk.knowledgeDocumentId must match).
+ */
 export async function createKnowledgeEmbedding(
   input: InsertKnowledgeEmbedding,
 ): Promise<KnowledgeEmbedding> {
+  await assertKnowledgeBaseTenant(input.knowledgeBaseId, input.tenantId);
+  const doc = await assertDocumentTenant(input.knowledgeDocumentId, input.tenantId);
+  const ver = await assertVersionTenant(
+    input.knowledgeDocumentVersionId,
+    input.tenantId,
+    "document_version",
+  );
+  const chunk = await assertChunkTenant(input.knowledgeChunkId, input.tenantId);
+
+  if (doc.knowledgeBaseId !== input.knowledgeBaseId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `document ${input.knowledgeDocumentId} belongs to knowledge_base ${doc.knowledgeBaseId}, not ${input.knowledgeBaseId}`,
+    );
+  }
+  if (ver.knowledgeDocumentId !== input.knowledgeDocumentId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `version ${input.knowledgeDocumentVersionId} belongs to document ${ver.knowledgeDocumentId}, not ${input.knowledgeDocumentId}`,
+    );
+  }
+  if (chunk.knowledgeBaseId !== input.knowledgeBaseId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `chunk ${input.knowledgeChunkId} belongs to knowledge_base ${chunk.knowledgeBaseId}, not ${input.knowledgeBaseId}`,
+    );
+  }
+  if (chunk.knowledgeDocumentId !== input.knowledgeDocumentId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `chunk ${input.knowledgeChunkId} belongs to document ${chunk.knowledgeDocumentId}, not ${input.knowledgeDocumentId}`,
+    );
+  }
+
   const [row] = await db.insert(knowledgeEmbeddings).values(input).returning();
   return row;
 }
@@ -270,9 +491,36 @@ export async function listEmbeddingsByVersion(
 
 // ─── Index State Operations ───────────────────────────────────────────────────
 
+/**
+ * updateKnowledgeIndexState (upsert)
+ *
+ * INV-5: Validates that KB, document, and version all share input.tenantId
+ *        with explicit cross-field consistency checks before upserting.
+ */
 export async function updateKnowledgeIndexState(
   input: InsertKnowledgeIndexState,
 ): Promise<KnowledgeIndexStateRow> {
+  await assertKnowledgeBaseTenant(input.knowledgeBaseId, input.tenantId);
+  const doc = await assertDocumentTenant(input.knowledgeDocumentId, input.tenantId);
+  const ver = await assertVersionTenant(
+    input.knowledgeDocumentVersionId,
+    input.tenantId,
+    "document_version",
+  );
+
+  if (doc.knowledgeBaseId !== input.knowledgeBaseId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `document ${input.knowledgeDocumentId} belongs to knowledge_base ${doc.knowledgeBaseId}, not ${input.knowledgeBaseId}`,
+    );
+  }
+  if (ver.knowledgeDocumentId !== input.knowledgeDocumentId) {
+    throw new KnowledgeInvariantError(
+      "INV-5",
+      `version ${input.knowledgeDocumentVersionId} belongs to document ${ver.knowledgeDocumentId}, not ${input.knowledgeDocumentId}`,
+    );
+  }
+
   const [row] = await db
     .insert(knowledgeIndexState)
     .values(input)
@@ -327,14 +575,18 @@ export async function listIndexStateByKnowledgeBase(
 }
 
 /**
- * isVersionRetrievable — Lifecycle-safe retrieval readiness check.
+ * isVersionRetrievable — INV-4 authoritative retrieval gate.
  *
- * A version is retrievable only when ALL three conditions are true:
- *   1. version.version_status = 'indexed'
+ * A version is retrievable only when ALL of the following are true:
+ *   1. A knowledge_index_state row exists for this version
  *   2. index_state.index_state = 'indexed'
- *   3. document.document_status = 'ready' AND document.lifecycle_state = 'active'
+ *   3. The parent document has document_status = 'ready'
+ *   4. The parent document has lifecycle_state = 'active'
+ *   5. The parent knowledge base has lifecycle_state = 'active'
  *
- * This prevents partial-indexed content from appearing in retrieval results.
+ * Condition 3+4 enforce that a document must have been explicitly
+ * transitioned to 'ready' via markDocumentReady() — mere version
+ * existence is not sufficient.
  */
 export async function isVersionRetrievable(
   versionId: string,
@@ -351,8 +603,49 @@ export async function isVersionRetrievable(
     reasons.push(`index_state is '${idxState.indexState}', expected 'indexed'`);
   }
 
-  return {
-    retrievable: reasons.length === 0,
-    reasons,
-  };
+  const [doc] = await db
+    .select({
+      id: knowledgeDocuments.id,
+      documentStatus: knowledgeDocuments.documentStatus,
+      lifecycleState: knowledgeDocuments.lifecycleState,
+      knowledgeBaseId: knowledgeDocuments.knowledgeBaseId,
+    })
+    .from(knowledgeDocuments)
+    .where(
+      and(
+        eq(knowledgeDocuments.id, idxState.knowledgeDocumentId),
+        eq(knowledgeDocuments.tenantId, tenantId),
+      ),
+    );
+
+  if (!doc) {
+    reasons.push(`parent document ${idxState.knowledgeDocumentId} not found for tenant ${tenantId}`);
+    return { retrievable: false, reasons };
+  }
+  if (doc.documentStatus !== "ready") {
+    reasons.push(
+      `document_status is '${doc.documentStatus}', must be 'ready' — call markDocumentReady() after indexing`,
+    );
+  }
+  if (doc.lifecycleState !== "active") {
+    reasons.push(`document lifecycle_state is '${doc.lifecycleState}', must be 'active'`);
+  }
+
+  const [kb] = await db
+    .select({ id: knowledgeBases.id, lifecycleState: knowledgeBases.lifecycleState })
+    .from(knowledgeBases)
+    .where(
+      and(
+        eq(knowledgeBases.id, doc.knowledgeBaseId),
+        eq(knowledgeBases.tenantId, tenantId),
+      ),
+    );
+
+  if (!kb) {
+    reasons.push(`parent knowledge_base ${doc.knowledgeBaseId} not found for tenant ${tenantId}`);
+  } else if (kb.lifecycleState !== "active") {
+    reasons.push(`knowledge_base lifecycle_state is '${kb.lifecycleState}', must be 'active'`);
+  }
+
+  return { retrievable: reasons.length === 0, reasons };
 }
