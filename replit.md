@@ -1475,3 +1475,40 @@ INV-EMB1 through INV-EMB12 all implemented and verified.
 
 ### Validation results
 24/24 scenarios PASSED — 109/109 assertions PASSED
+
+---
+
+## Phase 5M — Retrieval Explainability & Source Provenance (commit ffd6ce8)
+
+### New table
+- `knowledge_retrieval_candidates` — per-candidate retrieval explainability records (97th RLS table)
+  - filter_status (candidate/excluded/selected) + exclusion_reason + inclusion_reason + dedup_reason
+  - FK to retrieval_runs, chunks, asset_embeddings, assets, asset_versions
+  - RLS + 4 tenant policies, 5 indexes, 3 CHECK constraints
+
+### New service files
+- `server/lib/ai/retrieval-provenance.ts` — canonical provenance + explainability model (INV-PROV1–12)
+- `server/lib/ai/context-provenance.ts` — context window provenance + per-entry explainability
+
+### Modified files
+- `shared/schema.ts` — knowledgeRetrievalCandidates table + insert schema + types
+- `server/lib/ai/retrieval-orchestrator.ts` — best-effort per-candidate persistence when persistRun=true
+- `server/routes/admin.ts` — 9 new GET/no-write explain routes
+
+### Admin routes added (9 endpoints)
+- GET /api/admin/retrieval/runs/:runId/provenance
+- GET /api/admin/retrieval/runs/:runId/explain
+- GET /api/admin/retrieval/runs/:runId/context-provenance
+- GET /api/admin/retrieval/runs/:runId/sources
+- GET /api/admin/retrieval/chunks/:chunkId/provenance
+- GET /api/admin/retrieval/chunks/:chunkId/explain?runId=&action=included|excluded
+- GET /api/admin/retrieval/asset-versions/:assetVersionId/lineage
+- GET /api/admin/retrieval/runs/:runId/summary
+- GET /api/admin/retrieval/runs/:runId/context-sources-summary
+
+### RLS state after Phase 5M
+- Tables with RLS: 97 (+1 for knowledge_retrieval_candidates)
+- Total tenant policies: 236 (+4 for knowledge_retrieval_candidates)
+
+### Validation results
+24/24 scenarios PASSED — 129/129 assertions PASSED
