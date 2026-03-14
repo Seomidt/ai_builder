@@ -59,6 +59,7 @@ import {
   bigint,
   numeric,
   real,
+  doublePrecision,
   pgEnum,
   index,
   uniqueIndex,
@@ -1025,6 +1026,8 @@ export const knowledgeEmbeddings = pgTable(
     indexedAt: timestamp("indexed_at"),
     failureReason: text("failure_reason"),
     metadata: jsonb("metadata"),
+    isActive: boolean("is_active").notNull().default(true),
+    similarityMetric: text("similarity_metric"),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
@@ -1035,11 +1038,13 @@ export const knowledgeEmbeddings = pgTable(
     sql`CONSTRAINT ke_dimensions_check CHECK (${t.dimensions} IS NULL OR ${t.dimensions} > 0)`,
     sql`CONSTRAINT ke_embedding_dimensions_check CHECK (${t.embeddingDimensions} IS NULL OR ${t.embeddingDimensions} > 0)`,
     sql`CONSTRAINT ke_token_usage_check CHECK (${t.tokenUsage} IS NULL OR ${t.tokenUsage} >= 0)`,
+    sql`CONSTRAINT ke_similarity_metric_check CHECK (${t.similarityMetric} IS NULL OR ${t.similarityMetric} IN ('cosine','l2','inner_product'))`,
     index("ke_tenant_kb_status_idx").on(t.tenantId, t.knowledgeBaseId, t.vectorStatus, t.createdAt),
     index("ke_tenant_version_idx").on(t.tenantId, t.knowledgeDocumentVersionId, t.createdAt),
     index("ke_tenant_chunk_idx").on(t.tenantId, t.knowledgeChunkId, t.createdAt),
     index("ke_tenant_backend_status_idx").on(t.tenantId, t.vectorBackend, t.vectorStatus),
     index("ke_tenant_embedding_status_idx").on(t.tenantId, t.embeddingStatus, t.createdAt),
+    index("ke_tenant_is_active_idx").on(t.tenantId, t.isActive, t.embeddingStatus),
   ],
 );
 
@@ -1099,6 +1104,83 @@ export const insertKnowledgeIndexStateSchema = createInsertSchema(knowledgeIndex
 });
 export type InsertKnowledgeIndexState = z.infer<typeof insertKnowledgeIndexStateSchema>;
 export type KnowledgeIndexStateRow = typeof knowledgeIndexState.$inferSelect;
+
+// ─── knowledge_search_runs ────────────────────────────────────────────────────
+// Append-only observability log for vector search execution.
+// Records which filters were applied, how many results came back, and timing.
+
+export const knowledgeSearchRuns = pgTable(
+  "knowledge_search_runs",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeBaseId: varchar("knowledge_base_id")
+      .notNull()
+      .references(() => knowledgeBases.id),
+    queryHash: text("query_hash").notNull(),
+    embeddingModel: text("embedding_model"),
+    topKRequested: integer("top_k_requested").notNull(),
+    topKReturned: integer("top_k_returned").notNull(),
+    filterSummary: jsonb("filter_summary"),
+    searchDurationMs: integer("search_duration_ms"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT ksr_top_k_requested_check CHECK (${t.topKRequested} > 0)`,
+    sql`CONSTRAINT ksr_top_k_returned_check CHECK (${t.topKReturned} >= 0)`,
+    index("ksr_tenant_kb_idx").on(t.tenantId, t.knowledgeBaseId, t.createdAt),
+    index("ksr_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+
+export const insertKnowledgeSearchRunSchema = createInsertSchema(knowledgeSearchRuns).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeSearchRun = z.infer<typeof insertKnowledgeSearchRunSchema>;
+export type KnowledgeSearchRun = typeof knowledgeSearchRuns.$inferSelect;
+
+// ─── knowledge_search_candidates ─────────────────────────────────────────────
+// Append-only log of ranked candidates returned per search run.
+
+export const knowledgeSearchCandidates = pgTable(
+  "knowledge_search_candidates",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    knowledgeSearchRunId: varchar("knowledge_search_run_id")
+      .notNull()
+      .references(() => knowledgeSearchRuns.id),
+    knowledgeChunkId: varchar("knowledge_chunk_id")
+      .notNull()
+      .references(() => knowledgeChunks.id),
+    knowledgeDocumentId: varchar("knowledge_document_id")
+      .notNull()
+      .references(() => knowledgeDocuments.id),
+    knowledgeDocumentVersionId: varchar("knowledge_document_version_id")
+      .notNull()
+      .references(() => knowledgeDocumentVersions.id),
+    tenantId: varchar("tenant_id").notNull(),
+    rank: integer("rank").notNull(),
+    similarityScore: doublePrecision("similarity_score").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT ksc_rank_check CHECK (${t.rank} > 0)`,
+    index("ksc_run_idx").on(t.knowledgeSearchRunId, t.rank),
+    index("ksc_tenant_chunk_idx").on(t.tenantId, t.knowledgeChunkId),
+  ],
+);
+
+export const insertKnowledgeSearchCandidateSchema = createInsertSchema(knowledgeSearchCandidates).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeSearchCandidate = z.infer<typeof insertKnowledgeSearchCandidateSchema>;
+export type KnowledgeSearchCandidate = typeof knowledgeSearchCandidates.$inferSelect;
 
 // ─── Artifact Dependencies ───────────────────────────────────────────────────
 

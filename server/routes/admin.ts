@@ -188,6 +188,16 @@ import {
   listEmbeddingsForDocument,
 } from "../lib/ai/embedding-processing";
 import { selectDocumentParser } from "../lib/ai/document-parsers";
+import {
+  runVectorSearch,
+  explainVectorSearch,
+  previewRetrievalSafeFilterSet,
+  explainWhyChunkWasExcluded,
+  explainWhyChunkWasReturned,
+  summarizeVectorSearchRun,
+  listVectorSearchCandidates,
+  VectorSearchInvariantError,
+} from "../lib/ai/vector-search";
 import { getVectorAdapterInfo } from "../lib/ai/vector-adapter";
 
 // Phase 4S: Billing Recovery & Integrity
@@ -3032,6 +3042,96 @@ export function registerAdminRoutes(app: Express): void {
       if (!tenantId) return res.status(400).json({ error: "tenantId required" });
       const state = await explainEmbeddingState(versionId, tenantId);
       res.json({ embeddingState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5D: Vector Search Admin Routes ─────────────────────────────────
+
+  const VectorSearchRunSchema = z.object({
+    tenantId: z.string().min(1),
+    knowledgeBaseId: z.string().min(1),
+    queryEmbedding: z.array(z.number()).min(1),
+    topK: z.number().int().min(1).max(200).optional(),
+    metric: z.enum(["cosine", "l2", "inner_product"]).optional(),
+    similarityThreshold: z.number().min(0).max(1).optional(),
+    persistDebugRun: z.boolean().optional(),
+    embeddingModel: z.string().optional(),
+  });
+
+  app.post("/api/admin/knowledge/vector-search/run", async (req: Request, res: Response) => {
+    try {
+      const parsed = VectorSearchRunSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const results = await runVectorSearch(parsed.data);
+      res.json(results);
+    } catch (err) {
+      const status = err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/vector-search/explain", async (req: Request, res: Response) => {
+    try {
+      const parsed = VectorSearchRunSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const explanation = await explainVectorSearch(parsed.data);
+      res.json({ explanation });
+    } catch (err) {
+      const status = err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/vector-search/filter-preview", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      const knowledgeBaseId = String(req.query.knowledgeBaseId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      if (!knowledgeBaseId) return res.status(400).json({ error: "knowledgeBaseId required" });
+      const topK = req.query.topK ? Number(req.query.topK) : 10;
+      const metric = (req.query.metric as "cosine" | "l2" | "inner_product") ?? "cosine";
+      const filters = previewRetrievalSafeFilterSet({ tenantId, knowledgeBaseId, topK, metric });
+      res.json({ filters });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/vector-search/run/:runId", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeVectorSearchRun(runId, tenantId);
+      res.json({ searchRun: summary });
+    } catch (err) {
+      const status = err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/vector-search/candidates/:runId", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const candidates = await listVectorSearchCandidates(runId, tenantId);
+      res.json({ candidates, count: candidates.length });
+    } catch (err) {
+      const status = err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/vector-search/chunk-explain/:chunkId", async (req: Request, res: Response) => {
+    try {
+      const chunkId = String(req.params.chunkId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const explanation = await explainWhyChunkWasExcluded(chunkId, tenantId);
+      res.json({ explanation });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }

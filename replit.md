@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5C complete)
+# AI Builder Platform — V1 (Phase 5D complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -822,3 +822,43 @@ run, retry, state/:versionId, jobs/document/:documentId, jobs/:jobId/summarize, 
 
 ### Validation: 46/46 assertions passed (10 scenarios)
 S1 ke new columns (6), S2 kpj embedding columns (4), S3 job_type CHECK (embedding_generate+retry), S4 provider abstraction (openai_small/large/stub routing + unknown provider throws), S5 stub provider determinism (1536-dim vectors, same text → same vector), S6 embed 5 chunks → 5 DB rows with vectors in DB, S7 embedding_count updated + index_state NOT 'indexed' (INV-EMB4), S8 deterministic replacement (5 prior deactivated + 5 new created) INV-EMB3/7, S9 cross-tenant rejected INV-EMB1, S10 batch size handling + splitIntoBatches utility.
+
+## Phase 5D — Vector Search Engine (branch: feature/vector-search-engine)
+
+### Purpose
+Enterprise-safe semantic vector search over knowledge embeddings. Strict tenant isolation, current-version safety, lifecycle+index-state filtering, deterministic ranking, search observability. pgvector-backed. Zero raw pgvector SQL in application logic.
+
+### New files
+- `server/lib/ai/vector-search-provider.ts` — pgvector search provider: searchPgvector() (3 metric variants: cosine/l2/inner_product), checkChunkExclusion(), explainPgvectorSearch(), normalizeSimilarityScore(), buildVectorSearchFilterSummary(), computeQueryHash(). All pgvector SQL isolated here.
+- `server/lib/ai/vector-search.ts` — Application-level execution flow: runVectorSearch() (7-step pipeline), explainVectorSearch(), previewRetrievalSafeFilterSet(), explainWhyChunkWasReturned(), explainWhyChunkWasExcluded(), summarizeVectorSearchRun(), listVectorSearchCandidates(), VectorSearchInvariantError
+- `server/lib/ai/migrate-phase5d.ts` — Raw SQL migration (ran successfully)
+- `server/lib/ai/validate-phase5d.ts` — 15 scenarios, 62/62 assertions passed
+
+### Modified files
+- `shared/schema.ts` — doublePrecision added to imports; knowledge_embeddings: +is_active (bool not null default true) + similarity_metric (text, CHECK IN cosine/l2/inner_product) + ke_similarity_metric_check + ke_tenant_is_active_idx; new tables: knowledgeSearchRuns (8 cols + 2 CHECKs + 2 indexes) + knowledgeSearchCandidates (9 cols + 1 CHECK + 2 indexes)
+- `server/lib/ai/vector-adapter.ts` — PgvectorProvider stub replaced with real implementation delegating to searchPgvector()
+- `server/routes/admin.ts` — 6 new endpoints under /api/admin/knowledge/vector-search/
+
+### DB changes (10 items)
+- `knowledge_embeddings`: is_active (bool), similarity_metric (text), ke_similarity_metric_check, ke_tenant_is_active_idx
+- New table `knowledge_search_runs`: 8 cols, ksr_top_k_requested_check, ksr_top_k_returned_check, ksr_tenant_kb_idx, ksr_tenant_created_idx
+- New table `knowledge_search_candidates`: 9 cols, ksc_rank_check, ksc_run_idx, ksc_tenant_chunk_idx
+
+### Admin routes (6 endpoints)
+POST /run, POST /explain, GET /filter-preview, GET /run/:runId, GET /candidates/:runId, GET /chunk-explain/:chunkId
+
+### Invariants enforced
+- INV-VEC1: tenantId + knowledgeBaseId required and validated
+- INV-VEC2: Only current_version_id chunks returned
+- INV-VEC3: chunk_active=true required
+- INV-VEC4: index_state=indexed required
+- INV-VEC5: embedding_status=completed + is_active=true required
+- INV-VEC6: KB lifecycle_state=active required
+- INV-VEC7: document_status=ready required
+- INV-VEC8: Empty result returned cleanly, no scope widening
+- INV-VEC9: Cross-tenant linkage rejected
+- INV-VEC11: Empty/NaN query embedding fails explicitly
+- INV-VEC12: Search never mutates lifecycle/billing state
+
+### Validation: 62/62 assertions passed (15 scenarios)
+S1 ke new cols, S2 new tables, S3 constraints+indexes, S4 fixture setup, S5 basic search returns 5 ranked candidates, S6 non-current version excluded, S7 archived KB rejected (INV-VEC6), S8 non-ready doc=0 results (INV-VEC7), S9 inactive chunk excluded (INV-VEC3), S10 stale index_state=0 results (INV-VEC4), S11 is_active=false=0 results (INV-VEC5), S12 empty KB=0 results (INV-VEC8), S13 cross-tenant rejected (INV-VEC1/9), S14 empty+NaN embedding rejected (INV-VEC11), S15 explain/filter-preview/chunk-explain/debug-run helpers
