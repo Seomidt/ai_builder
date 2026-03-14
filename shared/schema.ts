@@ -1028,6 +1028,7 @@ export const knowledgeEmbeddings = pgTable(
     metadata: jsonb("metadata"),
     isActive: boolean("is_active").notNull().default(true),
     similarityMetric: text("similarity_metric"),
+    embeddingVersion: text("embedding_version"),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
@@ -1197,6 +1198,8 @@ export const knowledgeRetrievalRuns = pgTable(
       .references(() => knowledgeBases.id),
     queryHash: text("query_hash").notNull(),
     embeddingModel: text("embedding_model"),
+    embeddingVersion: text("embedding_version"),
+    retrievalVersion: text("retrieval_version"),
     candidatesFound: integer("candidates_found").notNull().default(0),
     candidatesRanked: integer("candidates_ranked").notNull().default(0),
     chunksSelected: integer("chunks_selected").notNull().default(0),
@@ -1220,6 +1223,150 @@ export const insertKnowledgeRetrievalRunSchema = createInsertSchema(knowledgeRet
 });
 export type InsertKnowledgeRetrievalRun = z.infer<typeof insertKnowledgeRetrievalRunSchema>;
 export type KnowledgeRetrievalRun = typeof knowledgeRetrievalRuns.$inferSelect;
+
+// ─── retrieval_metrics ────────────────────────────────────────────────────────
+// Phase 5F — Retrieval quality telemetry. Append-only per retrieval run.
+
+export const retrievalMetrics = pgTable(
+  "retrieval_metrics",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    retrievalRunId: varchar("retrieval_run_id")
+      .notNull()
+      .references(() => knowledgeRetrievalRuns.id),
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeBaseId: varchar("knowledge_base_id").notNull(),
+    chunkCount: integer("chunk_count").notNull(),
+    uniqueDocumentCount: integer("unique_document_count").notNull(),
+    tokenUsed: integer("token_used").notNull(),
+    tokenBudget: integer("token_budget").notNull(),
+    dedupRemovedCount: integer("dedup_removed_count").notNull().default(0),
+    avgSimilarity: numeric("avg_similarity", { precision: 10, scale: 6 }),
+    topSimilarity: numeric("top_similarity", { precision: 10, scale: 6 }),
+    lowestSimilarity: numeric("lowest_similarity", { precision: 10, scale: 6 }),
+    diversityScore: numeric("diversity_score", { precision: 10, scale: 4 }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT rm_chunk_count_check CHECK (${t.chunkCount} >= 0)`,
+    sql`CONSTRAINT rm_unique_doc_count_check CHECK (${t.uniqueDocumentCount} >= 0)`,
+    sql`CONSTRAINT rm_token_used_check CHECK (${t.tokenUsed} >= 0)`,
+    sql`CONSTRAINT rm_token_budget_check CHECK (${t.tokenBudget} > 0)`,
+    sql`CONSTRAINT rm_dedup_removed_check CHECK (${t.dedupRemovedCount} >= 0)`,
+    index("rm_run_id_idx").on(t.retrievalRunId),
+    index("rm_tenant_kb_idx").on(t.tenantId, t.knowledgeBaseId, t.createdAt),
+  ],
+);
+
+export const insertRetrievalMetricsSchema = createInsertSchema(retrievalMetrics).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertRetrievalMetrics = z.infer<typeof insertRetrievalMetricsSchema>;
+export type RetrievalMetric = typeof retrievalMetrics.$inferSelect;
+
+// ─── retrieval_cache_entries ──────────────────────────────────────────────────
+// Phase 5F — Retrieval cache. Tenant+KB+query_hash+version-scoped. Append-only.
+
+export const retrievalCacheEntries = pgTable(
+  "retrieval_cache_entries",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeBaseId: varchar("knowledge_base_id").notNull(),
+    queryHash: text("query_hash").notNull(),
+    queryText: text("query_text").notNull(),
+    embeddingVersion: text("embedding_version"),
+    retrievalVersion: text("retrieval_version").notNull(),
+    cacheStatus: text("cache_status").notNull().default("active"),
+    resultChunkIds: jsonb("result_chunk_ids").notNull(),
+    resultSummary: jsonb("result_summary"),
+    expiresAt: timestamp("expires_at").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT rce_cache_status_check CHECK (${t.cacheStatus} IN ('active','expired','invalidated'))`,
+    index("rce_tenant_kb_hash_idx").on(t.tenantId, t.knowledgeBaseId, t.queryHash),
+    index("rce_status_expires_idx").on(t.cacheStatus, t.expiresAt),
+    index("rce_tenant_kb_status_idx").on(t.tenantId, t.knowledgeBaseId, t.cacheStatus),
+  ],
+);
+
+export const insertRetrievalCacheEntrySchema = createInsertSchema(retrievalCacheEntries).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertRetrievalCacheEntry = z.infer<typeof insertRetrievalCacheEntrySchema>;
+export type RetrievalCacheEntry = typeof retrievalCacheEntries.$inferSelect;
+
+// ─── document_trust_signals ───────────────────────────────────────────────────
+// Phase 5F — Lightweight probabilistic trust-signal log. Append-only. No definitive claims.
+
+export const documentTrustSignals = pgTable(
+  "document_trust_signals",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    documentId: varchar("document_id").notNull(),
+    documentVersionId: varchar("document_version_id"),
+    signalType: text("signal_type").notNull(),
+    signalSource: text("signal_source").notNull(),
+    confidenceScore: numeric("confidence_score", { precision: 5, scale: 4 }).notNull(),
+    rawEvidence: jsonb("raw_evidence"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("dts_tenant_doc_idx").on(t.tenantId, t.documentId, t.createdAt),
+    index("dts_tenant_signal_type_idx").on(t.tenantId, t.signalType, t.createdAt),
+  ],
+);
+
+export const insertDocumentTrustSignalSchema = createInsertSchema(documentTrustSignals).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertDocumentTrustSignal = z.infer<typeof insertDocumentTrustSignalSchema>;
+export type DocumentTrustSignal = typeof documentTrustSignals.$inferSelect;
+
+// ─── document_risk_scores ─────────────────────────────────────────────────────
+// Phase 5F — Derived risk score per document (+ version). Append-only.
+
+export const documentRiskScores = pgTable(
+  "document_risk_scores",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    documentId: varchar("document_id").notNull(),
+    documentVersionId: varchar("document_version_id"),
+    riskLevel: text("risk_level").notNull(),
+    riskScore: numeric("risk_score", { precision: 5, scale: 4 }).notNull(),
+    scoringVersion: text("scoring_version").notNull(),
+    contributingSignals: jsonb("contributing_signals").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT drs_risk_level_check CHECK (${t.riskLevel} IN ('low_risk','medium_risk','high_risk','unknown'))`,
+    index("drs_tenant_doc_idx").on(t.tenantId, t.documentId, t.createdAt),
+    index("drs_tenant_risk_idx").on(t.tenantId, t.riskLevel, t.createdAt),
+  ],
+);
+
+export const insertDocumentRiskScoreSchema = createInsertSchema(documentRiskScores).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertDocumentRiskScore = z.infer<typeof insertDocumentRiskScoreSchema>;
+export type DocumentRiskScore = typeof documentRiskScores.$inferSelect;
 
 // ─── Artifact Dependencies ───────────────────────────────────────────────────
 

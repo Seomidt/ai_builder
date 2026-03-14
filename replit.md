@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5E complete)
+# AI Builder Platform — V1 (Phase 5F complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -903,3 +903,59 @@ Converts Phase 5D vector search results into structured retrieval context for LL
 
 ### Validation: 92/92 assertions passed (20 scenarios)
 S01 token estimation, S02 greedy budget enforcement, S03 budget never exceeded (INV-RET5), S04 Jaccard duplicate suppression (INV-RET9), S05 content hash dedup, S06 context ordering (chunk_index), S07 document grouping, S08 per-doc limit, S09 similarity threshold, S10 plain format assembly, S11 cited format assembly, S12 full metadata per chunk (INV-RET10), S13 cross-tenant rejection (INV-RET7), S14 budget summary format, S15 context preview, S16 DB table present, S17 all columns present, S18 CHECK constraint enforced, S19 DB insert+lookup, S20 deterministic output (INV-RET8)
+
+## Phase 5F — Retrieval Quality, Cache & Trust Signals (branch: feature/retrieval-orchestration)
+
+### Purpose
+Builds the enterprise observability + cache + trust layer on top of the Phase 5E retrieval orchestration pipeline. Introduces retrieval quality telemetry, a tenant+KB-scoped retrieval cache, embedding version-awareness, and a probabilistic document trust-signal foundation.
+
+### New files (6)
+- `server/lib/ai/retrieval-metrics.ts` — recordRetrievalMetrics(), getRetrievalMetricsByRunId(), getRetrievalMetricsSummary()
+- `server/lib/ai/retrieval-cache.ts` — hashRetrievalQuery(), getCachedRetrieval(), storeCachedRetrieval(), invalidateRetrievalCacheForKnowledgeBase(), invalidateRetrievalCacheForDocument(), previewExpiredRetrievalCache()
+- `server/lib/ai/embedding-lifecycle.ts` — getCurrentEmbeddingVersion(), getCurrentRetrievalVersion(), markKnowledgeBaseForReindex(), previewStaleEmbeddingDocuments(), explainEmbeddingVersionState(). Constants: CURRENT_EMBEDDING_VERSION=v1.0, CURRENT_RETRIEVAL_VERSION=v1.0
+- `server/lib/ai/document-trust.ts` — recordDocumentTrustSignal(), calculateDocumentRiskScore(), getDocumentTrustSignals(), getDocumentRiskScore(), explainDocumentTrust()
+- `server/lib/ai/migrate-phase5f.ts` — Raw SQL migration (ran successfully)
+- `server/lib/ai/validate-phase5f.ts` — 25 scenarios, 84/84 assertions passed
+
+### Modified files (3)
+- `shared/schema.ts` — 4 new tables + 3 new columns on existing tables
+- `server/routes/admin.ts` — 14 new endpoints (metrics, cache, embedding version, trust signals) + imports
+- `replit.md` — Phase 5F documented
+
+### DB changes
+- `knowledge_embeddings`: +embedding_version (text nullable)
+- `knowledge_retrieval_runs`: +embedding_version (text nullable), +retrieval_version (text nullable)
+- New table `retrieval_metrics` (13 cols, 5 CHECKs, 2 indexes, FK → knowledge_retrieval_runs)
+- New table `retrieval_cache_entries` (12 cols, status CHECK, 3 indexes)
+- New table `document_trust_signals` (9 cols, 2 indexes)
+- New table `document_risk_scores` (9 cols, risk_level CHECK, 2 indexes)
+
+### Admin routes (14 endpoints)
+- POST /api/admin/knowledge/retrieval-metrics/record
+- GET /api/admin/knowledge/retrieval-metrics/:runId
+- GET /api/admin/knowledge/retrieval-metrics/summary
+- GET /api/admin/knowledge/retrieval-cache/lookup
+- POST /api/admin/knowledge/retrieval-cache/store
+- POST /api/admin/knowledge/retrieval-cache/invalidate-kb
+- POST /api/admin/knowledge/retrieval-cache/invalidate-doc
+- GET /api/admin/knowledge/retrieval-cache/expired-preview
+- GET /api/admin/knowledge/embedding-version/info
+- GET /api/admin/knowledge/embedding-version/explain
+- GET /api/admin/knowledge/embedding-version/stale-preview
+- POST /api/admin/knowledge/embedding-version/mark-reindex
+- POST /api/admin/document-trust/signal
+- POST /api/admin/document-trust/risk-score
+- GET /api/admin/document-trust/signals/:documentId
+- GET /api/admin/document-trust/risk-score/:documentId
+- GET /api/admin/document-trust/explain/:documentId
+
+### Invariants
+- Cache tenant isolation: getCachedRetrieval requires tenantId + knowledgeBaseId scoping
+- INV-TRUST1: confidence_score clamped to 0.0–1.0
+- INV-TRUST2: risk_level is always one of low_risk/medium_risk/high_risk/unknown
+- INV-TRUST3: explainDocumentTrust includes explicit advisory disclaimer
+- hashRetrievalQuery: SHA-256 with whitespace+case normalisation for stable cache keys
+- No forced re-embedding in Phase 5F — lifecycle awareness only
+
+### Validation: 84/84 assertions passed (25 scenarios)
+S01 metrics record+retrieve, S02 metrics summary, S03 cache store+hit, S04 tenant isolation, S05 expired cache ignored, S06 KB invalidation, S07 hash stability, S08-S09 version constants, S10 explainEmbeddingVersionState, S11 stale preview, S12 trust signal insert, S13-S16 risk score derivation (high/medium/low/unknown), S17 getDocumentTrustSignals, S18 getDocumentRiskScore, S19 explainDocumentTrust, S20 DB tables, S21 DB columns, S22 DB CHECK constraints, S23 FK constraint, S24 sample rows round-trip, S25 admin endpoint shapes
