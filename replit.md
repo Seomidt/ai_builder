@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5B.2.1 complete)
+# AI Builder Platform — V1 (Phase 5B.3 complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -718,3 +718,37 @@ Replaces stub_ocr v1.0 with real production OCR engine (openai_vision_ocr v1.0).
 ### Validation: 15/15 scenarios passed
 
 S1 selectOcrParser routes to openai_vision_ocr for all supported mime types, S2 stub_ocr hint override works, S3 engine properties correct (name/version/types/parse), S4 plain text fallback path produces correct output, S5 normalizeOcrDocument sets textChecksum correctly, S6 computeOcrTextChecksum is deterministic, S7 summarizeOcrParseResult includes engine name, S8 oversized content explicit rejection (INV-IMG11), S9 empty content explicit rejection (INV-IMG11), S10 5/5 unsupported mime types fail explicitly, S11 parseImageDocumentVersion returns full engine info, S12 engineHint=stub_ocr routes to legacy engine, S13 bounding boxes present and valid for plain text path, S14 OCR result integrates with chunkOcrDocument correctly, S15 image/jpg and image/jpeg both supported.
+
+## Phase 5B.3 — Audio/Video Ingestion Pipeline (branch: feature/audio-video-ingestion)
+
+### Purpose
+Transcript ingestion pipeline for audio files via OpenAI Whisper API. Video explicitly blocked (INV-MEDIA2). Parallel structure to Phase 5B.2 (OCR).
+
+### New files
+- `server/lib/ai/media-transcript-parsers.ts` — parser abstraction, SUPPORTED_AUDIO_MIME_TYPES, SUPPORTED_VIDEO_MIME_TYPES, INV-MEDIA1/2 invariants, stub_transcript engine, selectMediaTranscriptParser, parseMediaDocumentVersion
+- `server/lib/ai/openai-whisper-transcription.ts` — real Whisper API engine (whisper-1), verbose_json + segment timestamps, plain text fallback for tests, INV-MEDIA1 explicit rejections
+- `server/lib/ai/media-transcript-chunking.ts` — time_windows chunking strategy, deterministic chunkKey/chunkHash (INV-MEDIA10), speaker grouping, summarizeTranscriptChunks
+- `server/lib/ai/migrate-phase5b3.ts` — raw SQL migration (ran successfully)
+- `server/lib/ai/validate-phase5b3.ts` — 15 validation scenarios, 32/32 assertions passed
+
+### DB changes (23 new items)
+- `knowledge_document_versions`: 12 transcript columns (transcript_status, transcript_started_at, transcript_completed_at, transcript_engine_name, transcript_engine_version, transcript_text_checksum, transcript_segment_count, transcript_speaker_count, transcript_language_code, transcript_average_confidence, media_duration_ms, transcript_failure_reason) + 5 CHECK constraints
+- `knowledge_chunks`: 9 transcript chunk columns (transcript_chunk, transcript_chunk_strategy, transcript_chunk_version, segment_start_ms, segment_end_ms, transcript_segment_index, speaker_label, transcript_confidence, source_track) + 5 CHECK constraints
+- `knowledge_processing_jobs`: 2 transcript processor columns (transcript_processor_name, transcript_processor_version) + job_type CHECK updated (transcript_parse, transcript_chunk)
+- Indexes: kdv_tenant_transcript_status_idx, idx_kchk_transcript_chunk
+
+### knowledge-processing.ts additions
+12 exported functions: runTranscriptParseForDocumentVersion, markTranscriptParseFailed, markTranscriptParseCompleted, runTranscriptChunkingForDocumentVersion, syncIndexStateAfterTranscriptChunking, markIndexStateStaleAfterTranscriptChunkReplace, explainTranscriptParseState, explainTranscriptChunkState, previewTranscriptChunkReplacement, listTranscriptProcessingJobs, summarizeTranscriptChunkingResult + 4 new interfaces
+
+### Admin routes (14 endpoints under /api/admin/knowledge/media-transcript/)
+parse/run, parse/mark-failed, parse/mark-completed, parse/explain/:versionId, chunk/run, chunk/explain/:versionId, chunk/preview-replacement/:versionId, chunk/list/:versionId, jobs/document/:documentId, jobs/:jobId/summarize, index-state/sync, index-state/mark-stale + versions/:versionId/transcript-parse-state + versions/:versionId/transcript-chunk-state
+
+### Invariants enforced
+- INV-MEDIA1: Explicit failure for unsupported mime, oversized, empty, no-API-key+binary
+- INV-MEDIA2: Video transcription blocked (requires ffmpeg not wired)
+- INV-MEDIA3: Transcript chunking requires transcriptStatus='completed' or explicit content
+- INV-MEDIA4: Transcript chunking NEVER sets index_state='indexed'
+- INV-MEDIA10: Chunk keys and hashes are deterministic
+
+### Validation: 32/32 assertions passed (15 scenarios)
+S1 kdv transcript columns (12), S2 kc transcript chunk columns (9), S3 kpj processor columns (2), S4 job_type CHECK constraints, S5 SUPPORTED_AUDIO_MIME_TYPES (4 types), S6 SUPPORTED_VIDEO_MIME_TYPES (video/mp4, webm, quicktime), S7 video/mp4 rejects with INV-MEDIA2, S8 text/csv rejects with INV-MEDIA1, S9 default engine=openai_whisper_transcription (plain text fallback path), S10 normalizeTranscriptDocument recomputes checksum, S11 summarizeTranscriptParseResult format, S12 chunkTranscriptDocument time_windows strategy + deterministic keys/hashes, S13 buildTranscriptChunkKey determinism (INV-MEDIA10), S14 normalizeTranscriptChunkText collapses whitespace, S15 summarizeTranscriptChunks format.

@@ -156,6 +156,17 @@ import {
   summarizeOcrChunkingResult,
   syncIndexStateAfterOcrChunking,
   markIndexStateStaleAfterOcrChunkReplace,
+  runTranscriptParseForDocumentVersion,
+  runTranscriptChunkingForDocumentVersion,
+  markTranscriptParseFailed,
+  markTranscriptParseCompleted,
+  explainTranscriptParseState,
+  explainTranscriptChunkState,
+  previewTranscriptChunkReplacement,
+  listTranscriptProcessingJobs,
+  summarizeTranscriptChunkingResult,
+  syncIndexStateAfterTranscriptChunking,
+  markIndexStateStaleAfterTranscriptChunkReplace,
 } from "../lib/ai/knowledge-processing";
 import { selectDocumentParser } from "../lib/ai/document-parsers";
 import { getVectorAdapterInfo } from "../lib/ai/vector-adapter";
@@ -2446,6 +2457,233 @@ export function registerAdminRoutes(app: Express): void {
       }).parse(req.body);
       await markIndexStateStaleAfterOcrChunkReplace(body.versionId, body.tenantId, body.reason);
       res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.3: Media Transcript Admin Routes ─────────────────────────────
+
+  app.post("/api/admin/knowledge/media-transcript/parse/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        workerId: z.string().optional(),
+      }).parse(req.body);
+      const result = await runTranscriptParseForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        idempotencyKey: body.idempotencyKey,
+        workerId: body.workerId,
+      });
+      res.json({ transcriptParse: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/media-transcript/parse/mark-failed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().min(1),
+      }).parse(req.body);
+      await markTranscriptParseFailed(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/media-transcript/parse/mark-completed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        segmentCount: z.number().int().min(0),
+        speakerCount: z.number().int().min(0),
+        durationMs: z.number().int().min(0),
+        averageConfidence: z.number().min(0).max(1),
+        textChecksum: z.string().min(1),
+        languageCode: z.string().min(1),
+        engineName: z.string().min(1),
+        engineVersion: z.string().min(1),
+      }).parse(req.body);
+      await markTranscriptParseCompleted(body.versionId, body.tenantId, {
+        segmentCount: body.segmentCount,
+        speakerCount: body.speakerCount,
+        durationMs: body.durationMs,
+        averageConfidence: body.averageConfidence,
+        textChecksum: body.textChecksum,
+        languageCode: body.languageCode,
+        engineName: body.engineName,
+        engineVersion: body.engineVersion,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/parse/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainTranscriptParseState(versionId, tenantId);
+      res.json({ transcriptParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/media-transcript/chunk/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        workerId: z.string().optional(),
+        chunkingConfig: z.object({
+          strategy: z.string().optional(),
+          version: z.string().optional(),
+          windowMs: z.number().int().optional(),
+          segmentWindowSize: z.number().int().optional(),
+          includeTimestamps: z.boolean().optional(),
+          includeSpeakerLabel: z.boolean().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runTranscriptChunkingForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        idempotencyKey: body.idempotencyKey,
+        workerId: body.workerId,
+        chunkingConfig: body.chunkingConfig,
+      });
+      res.json({ transcriptChunk: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/chunk/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainTranscriptChunkState(versionId, tenantId);
+      res.json({ transcriptChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/chunk/preview-replacement/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewTranscriptChunkReplacement(versionId, tenantId);
+      res.json({ preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/chunk/list/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainTranscriptChunkState(versionId, tenantId);
+      res.json({ transcriptChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/jobs/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listTranscriptProcessingJobs(documentId, tenantId);
+      res.json({ jobs });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/jobs/:jobId/summarize", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeTranscriptChunkingResult(jobId, tenantId);
+      res.json({ summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/media-transcript/index-state/sync", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        chunkCount: z.number().int().min(0),
+      }).parse(req.body);
+      const row = await syncIndexStateAfterTranscriptChunking(
+        body.versionId,
+        body.tenantId,
+        body.knowledgeBaseId,
+        body.knowledgeDocumentId,
+        body.chunkCount,
+      );
+      res.json({ indexState: row });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/media-transcript/index-state/mark-stale", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().optional(),
+      }).parse(req.body);
+      await markIndexStateStaleAfterTranscriptChunkReplace(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/transcript-parse-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainTranscriptParseState(versionId, tenantId);
+      res.json({ transcriptParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/transcript-chunk-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainTranscriptChunkState(versionId, tenantId);
+      res.json({ transcriptChunkState: state });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }

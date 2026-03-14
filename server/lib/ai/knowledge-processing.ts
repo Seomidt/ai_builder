@@ -75,6 +75,19 @@ import {
   type OcrChunkingConfig,
   type OcrChunkCandidate,
 } from "./image-ocr-chunking";
+import {
+  parseMediaDocumentVersion,
+  normalizeTranscriptDocument,
+  summarizeTranscriptParseResult,
+  type TranscriptParseResult,
+  type TranscriptParseOptions,
+} from "./media-transcript-parsers";
+import {
+  chunkTranscriptDocument,
+  summarizeTranscriptChunks,
+  type TranscriptChunkingConfig,
+  type TranscriptChunkCandidate,
+} from "./media-transcript-chunking";
 
 // ─── Internal tenant-assertion helpers ────────────────────────────────────────
 
@@ -3033,6 +3046,619 @@ export async function summarizeOcrChunkingResult(
     strategy: (summary.strategy as string) ?? null,
     engineName: (summary.engineName as string) ?? null,
     processorName: job.ocrProcessorName ?? null,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    failureReason: job.failureReason,
+  };
+}
+
+// ─── Phase 5B.3: Transcript Parse / Chunk Types ───────────────────────────────
+
+export interface RunTranscriptParseOptions {
+  content?: string;
+  workerId?: string;
+  idempotencyKey?: string;
+  parseOptions?: TranscriptParseOptions;
+}
+
+export interface TranscriptParseExecutionResult {
+  jobId: string;
+  status: "completed" | "failed";
+  transcriptStatus?: string;
+  segmentCount?: number;
+  speakerCount?: number;
+  durationMs?: number;
+  averageConfidence?: number;
+  textChecksum?: string;
+  languageCode?: string;
+  engineName?: string;
+  engineVersion?: string;
+  parseResult?: TranscriptParseResult;
+  error?: string;
+}
+
+export interface RunTranscriptChunkingOptions {
+  content?: string;
+  workerId?: string;
+  idempotencyKey?: string;
+  chunkingConfig?: TranscriptChunkingConfig;
+  parseOptions?: TranscriptParseOptions;
+}
+
+export interface TranscriptChunkingExecutionResult {
+  jobId: string;
+  status: "completed" | "failed";
+  chunkCount: number;
+  priorTranscriptChunksDeactivated: number;
+  error?: string;
+}
+
+// ─── Phase 5B.3: Transcript Parse Execution ───────────────────────────────────
+
+/**
+ * runTranscriptParseForDocumentVersion — Phase 5B.3 transcript parse flow.
+ *
+ * INV-MEDIA1: validates version→document→KB chain + tenant.
+ * INV-MEDIA5: archived/inactive KB or document blocks processing.
+ * INV-MEDIA6: parse failure does NOT clear valid historical chunks.
+ * INV-MEDIA11: unsupported mime types fail explicitly.
+ * INV-MEDIA12: does NOT mark document_status='ready'.
+ */
+export async function runTranscriptParseForDocumentVersion(
+  versionId: string,
+  tenantId: string,
+  opts: RunTranscriptParseOptions = {},
+): Promise<TranscriptParseExecutionResult> {
+  const ctx = await assertFullVersionContext(versionId, tenantId, { requireActiveLifecycle: true });
+  const mimeType = ctx.version.mimeType ?? "";
+
+  if (!opts.content) {
+    const reason = `No media content provided for version ${versionId}. Storage-backed transcript parsing not yet wired — supply content directly (INV-MEDIA1).`;
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({ transcriptStatus: "failed", transcriptFailureReason: reason, transcriptCompletedAt: new Date() })
+      .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+    const [failJob] = await db
+      .insert(knowledgeProcessingJobs)
+      .values({
+        tenantId,
+        knowledgeDocumentId: ctx.document.id,
+        knowledgeDocumentVersionId: versionId,
+        jobType: "transcript_parse",
+        status: "failed",
+        failureReason: reason,
+        transcriptProcessorName: "transcript_parse_runner",
+        transcriptProcessorVersion: "1.0",
+        idempotencyKey: opts.idempotencyKey ?? null,
+        startedAt: new Date(),
+        completedAt: new Date(),
+      })
+      .returning();
+    return { jobId: failJob.id, status: "failed", transcriptStatus: "failed", error: reason };
+  }
+
+  const [job] = await db
+    .insert(knowledgeProcessingJobs)
+    .values({
+      tenantId,
+      knowledgeDocumentId: ctx.document.id,
+      knowledgeDocumentVersionId: versionId,
+      jobType: "transcript_parse",
+      status: "queued",
+      transcriptProcessorName: "transcript_parse_runner",
+      transcriptProcessorVersion: "1.0",
+      idempotencyKey: opts.idempotencyKey ?? null,
+    })
+    .returning();
+
+  const acquired = await acquireKnowledgeProcessingJob(job.id, tenantId, {
+    workerId: opts.workerId,
+    processorName: "transcript_parse_runner",
+    processorVersion: "1.0",
+  });
+  if (!acquired) {
+    return { jobId: job.id, status: "failed", transcriptStatus: "failed", error: "Failed to acquire transcript parse job lock." };
+  }
+
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({ transcriptStatus: "running", transcriptStartedAt: new Date() })
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+  try {
+    const parseResult = await parseMediaDocumentVersion(opts.content, mimeType, opts.parseOptions);
+
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({
+        transcriptStatus: "completed",
+        transcriptCompletedAt: new Date(),
+        transcriptEngineName: parseResult.engineName,
+        transcriptEngineVersion: parseResult.engineVersion,
+        transcriptTextChecksum: parseResult.textChecksum,
+        transcriptSegmentCount: parseResult.segmentCount,
+        transcriptSpeakerCount: parseResult.speakerCount,
+        transcriptLanguageCode: parseResult.languageCode,
+        transcriptAverageConfidence: String(parseResult.averageConfidence),
+        mediaDurationMs: parseResult.durationMs,
+        transcriptFailureReason: null,
+      })
+      .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+    await db
+      .update(knowledgeProcessingJobs)
+      .set({
+        status: "completed",
+        completedAt: new Date(),
+        heartbeatAt: new Date(),
+        resultSummary: {
+          engineName: parseResult.engineName,
+          engineVersion: parseResult.engineVersion,
+          segmentCount: parseResult.segmentCount,
+          speakerCount: parseResult.speakerCount,
+          durationMs: parseResult.durationMs,
+          averageConfidence: parseResult.averageConfidence,
+          textChecksum: parseResult.textChecksum,
+          languageCode: parseResult.languageCode,
+          summary: summarizeTranscriptParseResult(parseResult),
+        },
+      })
+      .where(and(eq(knowledgeProcessingJobs.id, job.id), eq(knowledgeProcessingJobs.tenantId, tenantId)));
+
+    return {
+      jobId: job.id,
+      status: "completed",
+      transcriptStatus: "completed",
+      segmentCount: parseResult.segmentCount,
+      speakerCount: parseResult.speakerCount,
+      durationMs: parseResult.durationMs,
+      averageConfidence: parseResult.averageConfidence,
+      textChecksum: parseResult.textChecksum,
+      languageCode: parseResult.languageCode,
+      engineName: parseResult.engineName,
+      engineVersion: parseResult.engineVersion,
+      parseResult,
+    };
+  } catch (err) {
+    const reason = (err as Error).message;
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({ transcriptStatus: "failed", transcriptCompletedAt: new Date(), transcriptFailureReason: reason })
+      .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+    await failKnowledgeProcessingJob(job.id, tenantId, reason);
+    return { jobId: job.id, status: "failed", transcriptStatus: "failed", error: reason };
+  }
+}
+
+/**
+ * markTranscriptParseFailed — explicitly mark transcript parse as failed.
+ */
+export async function markTranscriptParseFailed(
+  versionId: string,
+  tenantId: string,
+  reason: string,
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({ transcriptStatus: "failed", transcriptCompletedAt: new Date(), transcriptFailureReason: reason })
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+}
+
+/**
+ * markTranscriptParseCompleted — mark transcript parse completed with explicit metadata.
+ */
+export async function markTranscriptParseCompleted(
+  versionId: string,
+  tenantId: string,
+  meta: {
+    segmentCount: number;
+    speakerCount: number;
+    durationMs: number;
+    averageConfidence: number;
+    textChecksum: string;
+    languageCode: string;
+    engineName: string;
+    engineVersion: string;
+  },
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({
+      transcriptStatus: "completed",
+      transcriptCompletedAt: new Date(),
+      transcriptEngineName: meta.engineName,
+      transcriptEngineVersion: meta.engineVersion,
+      transcriptTextChecksum: meta.textChecksum,
+      transcriptSegmentCount: meta.segmentCount,
+      transcriptSpeakerCount: meta.speakerCount,
+      transcriptLanguageCode: meta.languageCode,
+      transcriptAverageConfidence: String(meta.averageConfidence),
+      mediaDurationMs: meta.durationMs,
+      transcriptFailureReason: null,
+    })
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+}
+
+// ─── Phase 5B.3: Transcript Chunk Execution ───────────────────────────────────
+
+/**
+ * runTranscriptChunkingForDocumentVersion — Phase 5B.3 transcript chunking flow.
+ *
+ * INV-MEDIA2: only the explicitly requested version is processed.
+ * INV-MEDIA3: requires successful transcript parse state or explicit content.
+ * INV-MEDIA4: does NOT mark index_state='indexed'.
+ * INV-MEDIA7: failed chunk rebuild leaves no partial active chunk corruption.
+ * INV-MEDIA8: non-current version processing does not alter current retrieval state.
+ */
+export async function runTranscriptChunkingForDocumentVersion(
+  versionId: string,
+  tenantId: string,
+  opts: RunTranscriptChunkingOptions = {},
+): Promise<TranscriptChunkingExecutionResult> {
+  const ctx = await assertFullVersionContext(versionId, tenantId, { requireActiveLifecycle: true });
+
+  const [verRow] = await db
+    .select()
+    .from(knowledgeDocumentVersions)
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+  if (!verRow) {
+    throw new KnowledgeInvariantError("INV-MEDIA1", `Version ${versionId} not found for tenant ${tenantId}`);
+  }
+
+  const hasCompletedTranscript = verRow.transcriptStatus === "completed";
+  if (!hasCompletedTranscript && !opts.content) {
+    throw new KnowledgeInvariantError(
+      "INV-MEDIA3",
+      `Transcript chunking requires transcriptStatus='completed' or explicit content for version ${versionId}. Current transcriptStatus: ${verRow.transcriptStatus ?? "null"}.`,
+    );
+  }
+
+  const mimeType = verRow.mimeType ?? "audio/mpeg";
+  const contentForChunking = opts.content ?? "";
+
+  const [job] = await db
+    .insert(knowledgeProcessingJobs)
+    .values({
+      tenantId,
+      knowledgeDocumentId: ctx.document.id,
+      knowledgeDocumentVersionId: versionId,
+      jobType: "transcript_chunk",
+      status: "queued",
+      transcriptProcessorName: "transcript_chunk_runner",
+      transcriptProcessorVersion: "1.0",
+      idempotencyKey: opts.idempotencyKey ?? null,
+    })
+    .returning();
+
+  const acquired = await acquireKnowledgeProcessingJob(job.id, tenantId, {
+    workerId: opts.workerId,
+    processorName: "transcript_chunk_runner",
+    processorVersion: "1.0",
+  });
+  if (!acquired) {
+    return { jobId: job.id, status: "failed", chunkCount: 0, priorTranscriptChunksDeactivated: 0, error: "Failed to acquire transcript chunk job lock." };
+  }
+
+  let parseResult: TranscriptParseResult;
+  try {
+    if (!contentForChunking) {
+      throw new KnowledgeInvariantError(
+        "INV-MEDIA3",
+        `Transcript chunking requires content for version ${versionId}. Storage-backed transcript not yet wired — supply content directly.`,
+      );
+    }
+    parseResult = await parseMediaDocumentVersion(contentForChunking, mimeType, opts.parseOptions);
+  } catch (err) {
+    const reason = (err as Error).message;
+    await failKnowledgeProcessingJob(job.id, tenantId, reason);
+    return { jobId: job.id, status: "failed", chunkCount: 0, priorTranscriptChunksDeactivated: 0, error: reason };
+  }
+
+  const candidates = chunkTranscriptDocument(parseResult, ctx.document.id, versionId, opts.chunkingConfig);
+
+  let newChunkCount = 0;
+  let priorDeactivated = 0;
+
+  try {
+    await db.transaction(async (tx) => {
+      const now = new Date();
+      const priorActive = await tx
+        .update(knowledgeChunks)
+        .set({ chunkActive: false, replacedAt: now, replacedByJobId: job.id })
+        .where(
+          and(
+            eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+            eq(knowledgeChunks.tenantId, tenantId),
+            eq(knowledgeChunks.chunkActive, true),
+            eq(knowledgeChunks.transcriptChunk, true),
+          ),
+        )
+        .returning();
+      priorDeactivated = priorActive.length;
+
+      if (candidates.length > 0) {
+        const inserts = candidates.map((c: TranscriptChunkCandidate) => ({
+          tenantId,
+          knowledgeBaseId: ctx.kb.id,
+          knowledgeDocumentId: ctx.document.id,
+          knowledgeDocumentVersionId: versionId,
+          chunkIndex: c.chunkIndex,
+          chunkKey: c.chunkKey,
+          chunkHash: c.chunkHash,
+          chunkText: c.chunkText,
+          transcriptChunk: true as const,
+          transcriptChunkStrategy: c.transcriptChunkStrategy,
+          transcriptChunkVersion: c.transcriptChunkVersion,
+          segmentStartMs: c.segmentStartMs,
+          segmentEndMs: c.segmentEndMs,
+          transcriptSegmentIndex: c.transcriptSegmentIndex,
+          speakerLabel: c.speakerLabel ?? null,
+          transcriptConfidence: c.transcriptConfidence !== undefined ? String(c.transcriptConfidence) : null,
+          sourceTrack: c.sourceTrack ?? null,
+          tokenEstimate: c.tokenEstimate,
+          chunkActive: true,
+        }));
+        await tx.insert(knowledgeChunks).values(inserts);
+        newChunkCount = inserts.length;
+      }
+    });
+
+    const idxRows = await db
+      .select()
+      .from(knowledgeIndexState)
+      .where(and(eq(knowledgeIndexState.knowledgeDocumentVersionId, versionId), eq(knowledgeIndexState.tenantId, tenantId)));
+
+    if (idxRows.length > 0 && idxRows[0].indexState === "indexed" && priorDeactivated > 0) {
+      await markIndexStateStaleAfterTranscriptChunkReplace(versionId, tenantId, "transcript_chunk_rebuild");
+    }
+
+    await db
+      .update(knowledgeProcessingJobs)
+      .set({
+        status: "completed",
+        completedAt: new Date(),
+        heartbeatAt: new Date(),
+        resultSummary: {
+          chunkCount: newChunkCount,
+          priorTranscriptChunksDeactivated: priorDeactivated,
+          strategy: opts.chunkingConfig?.strategy ?? "time_windows",
+          engineName: parseResult.engineName,
+          summary: summarizeTranscriptChunks(candidates),
+        },
+      })
+      .where(and(eq(knowledgeProcessingJobs.id, job.id), eq(knowledgeProcessingJobs.tenantId, tenantId)));
+
+    return { jobId: job.id, status: "completed", chunkCount: newChunkCount, priorTranscriptChunksDeactivated: priorDeactivated };
+  } catch (err) {
+    const reason = (err as Error).message;
+    await failKnowledgeProcessingJob(job.id, tenantId, reason);
+    return { jobId: job.id, status: "failed", chunkCount: 0, priorTranscriptChunksDeactivated: 0, error: reason };
+  }
+}
+
+// ─── Phase 5B.3: Index State Sync ─────────────────────────────────────────────
+
+export async function syncIndexStateAfterTranscriptChunking(
+  versionId: string,
+  tenantId: string,
+  knowledgeBaseId: string,
+  knowledgeDocumentId: string,
+  chunkCount: number,
+): Promise<typeof knowledgeIndexState.$inferSelect> {
+  await assertVersionTenant(versionId, tenantId);
+  const existing = await getIndexStateByVersion(versionId, tenantId);
+  if (existing) {
+    const [updated] = await db
+      .update(knowledgeIndexState)
+      .set({
+        indexState: existing.indexState === "indexed" ? "stale" : "pending",
+        chunkCount,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(knowledgeIndexState.knowledgeDocumentVersionId, versionId), eq(knowledgeIndexState.tenantId, tenantId)))
+      .returning();
+    return updated;
+  }
+  const [inserted] = await db
+    .insert(knowledgeIndexState)
+    .values({
+      tenantId,
+      knowledgeBaseId,
+      knowledgeDocumentId,
+      knowledgeDocumentVersionId: versionId,
+      indexState: "pending",
+      chunkCount,
+    })
+    .returning();
+  return inserted;
+}
+
+export async function markIndexStateStaleAfterTranscriptChunkReplace(
+  versionId: string,
+  tenantId: string,
+  reason?: string,
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+  await db
+    .update(knowledgeIndexState)
+    .set({ indexState: "stale", updatedAt: new Date() })
+    .where(
+      and(
+        eq(knowledgeIndexState.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeIndexState.tenantId, tenantId),
+        eq(knowledgeIndexState.indexState, "indexed"),
+      ),
+    );
+}
+
+// ─── Phase 5B.3: Inspection Helpers ──────────────────────────────────────────
+
+export async function explainTranscriptParseState(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  transcriptStatus: string | null;
+  transcriptStartedAt: Date | null;
+  transcriptCompletedAt: Date | null;
+  transcriptEngineName: string | null;
+  transcriptEngineVersion: string | null;
+  transcriptSegmentCount: number | null;
+  transcriptSpeakerCount: number | null;
+  transcriptLanguageCode: string | null;
+  transcriptAverageConfidence: string | null;
+  mediaDurationMs: number | null;
+  transcriptFailureReason: string | null;
+}> {
+  await assertVersionTenant(versionId, tenantId);
+  const [row] = await db
+    .select()
+    .from(knowledgeDocumentVersions)
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+  if (!row) throw new KnowledgeInvariantError("INV-MEDIA1", `Version ${versionId} not found`);
+
+  return {
+    transcriptStatus: row.transcriptStatus ?? null,
+    transcriptStartedAt: row.transcriptStartedAt ?? null,
+    transcriptCompletedAt: row.transcriptCompletedAt ?? null,
+    transcriptEngineName: row.transcriptEngineName ?? null,
+    transcriptEngineVersion: row.transcriptEngineVersion ?? null,
+    transcriptSegmentCount: row.transcriptSegmentCount ?? null,
+    transcriptSpeakerCount: row.transcriptSpeakerCount ?? null,
+    transcriptLanguageCode: row.transcriptLanguageCode ?? null,
+    transcriptAverageConfidence: row.transcriptAverageConfidence ? String(row.transcriptAverageConfidence) : null,
+    mediaDurationMs: row.mediaDurationMs ?? null,
+    transcriptFailureReason: row.transcriptFailureReason ?? null,
+  };
+}
+
+export async function explainTranscriptChunkState(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  activeTranscriptChunkCount: number;
+  totalTranscriptChunkCount: number;
+  indexState: string | null;
+  segmentRangeMs: { minStartMs: number; maxEndMs: number } | null;
+  speakers: string[];
+  strategies: string[];
+}> {
+  await assertVersionTenant(versionId, tenantId);
+  const all = await db
+    .select()
+    .from(knowledgeChunks)
+    .where(
+      and(
+        eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeChunks.tenantId, tenantId),
+        eq(knowledgeChunks.transcriptChunk, true),
+      ),
+    );
+  const active = all.filter((c) => c.chunkActive);
+  const idxState = await getIndexStateByVersion(versionId, tenantId);
+  const activeMs = active.filter((c) => c.segmentStartMs !== null && c.segmentEndMs !== null);
+  const segmentRange = activeMs.length > 0
+    ? {
+        minStartMs: Math.min(...activeMs.map((c) => Number(c.segmentStartMs))),
+        maxEndMs: Math.max(...activeMs.map((c) => Number(c.segmentEndMs))),
+      }
+    : null;
+  const speakers = Array.from(new Set(active.map((c) => c.speakerLabel).filter(Boolean))) as string[];
+  const strategies = Array.from(new Set(active.map((c) => c.transcriptChunkStrategy).filter(Boolean))) as string[];
+
+  return {
+    activeTranscriptChunkCount: active.length,
+    totalTranscriptChunkCount: all.length,
+    indexState: idxState?.indexState ?? null,
+    segmentRangeMs: segmentRange,
+    speakers,
+    strategies,
+  };
+}
+
+export async function previewTranscriptChunkReplacement(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  currentActiveTranscriptChunkCount: number;
+  currentIndexState: string | null;
+  wouldDeactivate: number;
+  explanation: string;
+}> {
+  await assertVersionTenant(versionId, tenantId);
+  const active = await db
+    .select()
+    .from(knowledgeChunks)
+    .where(
+      and(
+        eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeChunks.tenantId, tenantId),
+        eq(knowledgeChunks.chunkActive, true),
+        eq(knowledgeChunks.transcriptChunk, true),
+      ),
+    );
+  const idxState = await getIndexStateByVersion(versionId, tenantId);
+
+  const explanation =
+    active.length === 0
+      ? "No active transcript chunks to replace. Transcript chunking would insert fresh chunks."
+      : `Re-running transcript chunking would deactivate ${active.length} existing active transcript chunk(s) and insert new ones. Index state would transition to '${idxState?.indexState === "indexed" ? "stale" : "pending"}'.`;
+
+  return {
+    currentActiveTranscriptChunkCount: active.length,
+    currentIndexState: idxState?.indexState ?? null,
+    wouldDeactivate: active.length,
+    explanation,
+  };
+}
+
+export async function listTranscriptProcessingJobs(
+  documentId: string,
+  tenantId: string,
+): Promise<KnowledgeProcessingJob[]> {
+  await assertDocumentTenant(documentId, tenantId);
+  return db
+    .select()
+    .from(knowledgeProcessingJobs)
+    .where(
+      and(
+        eq(knowledgeProcessingJobs.knowledgeDocumentId, documentId),
+        eq(knowledgeProcessingJobs.tenantId, tenantId),
+        sql`${knowledgeProcessingJobs.jobType} IN ('transcript_parse','transcript_chunk')`,
+      ),
+    )
+    .orderBy(desc(knowledgeProcessingJobs.createdAt));
+}
+
+export async function summarizeTranscriptChunkingResult(
+  jobId: string,
+  tenantId: string,
+): Promise<{
+  jobId: string;
+  status: string;
+  chunkCount: number;
+  priorTranscriptChunksDeactivated: number;
+  strategy: string | null;
+  engineName: string | null;
+  processorName: string | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  failureReason: string | null;
+}> {
+  const job = await getProcessingJob(jobId, tenantId);
+  if (!job) throw new KnowledgeInvariantError("INV-MEDIA1", `Processing job ${jobId} not found`);
+  const summary = (job.resultSummary ?? {}) as Record<string, unknown>;
+  return {
+    jobId: job.id,
+    status: job.status,
+    chunkCount: (summary.chunkCount as number) ?? 0,
+    priorTranscriptChunksDeactivated: (summary.priorTranscriptChunksDeactivated as number) ?? 0,
+    strategy: (summary.strategy as string) ?? null,
+    engineName: (summary.engineName as string) ?? null,
+    processorName: job.transcriptProcessorName ?? null,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
     failureReason: job.failureReason,
