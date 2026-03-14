@@ -358,6 +358,20 @@ import {
   previewStorageBinding,
   explainKnowledgeStorageObjectData,
 } from "../lib/ai/knowledge-storage";
+import {
+  previewGenerateEmbeddingsForAssetVersion,
+  generateEmbeddingsForAssetVersion,
+  previewReindexAssetVersion,
+  markAssetVersionIndexStale,
+  explainAssetVersionIndexState,
+  listStaleAssetVersions,
+  previewEmbeddingRebuildImpact,
+  explainWhyAssetVersionIsOrIsNotRetrievalReady,
+} from "../lib/ai/multimodal-embedding-lifecycle";
+import {
+  explainEmbeddingSourcesForAssetVersion,
+  summarizeEmbeddingSourceCoverage,
+} from "../lib/ai/multimodal-embedding-sources";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -4717,6 +4731,126 @@ export function registerAdminRoutes(app: Express): void {
         documented_at: "Phase 5K.1 / 5K.1.A",
         updated_at: new Date().toISOString(),
       });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 5L: Multimodal Embedding Index Lifecycle ─────────────────────────
+
+  // GET /api/admin/embeddings/asset-version/:versionId/sources
+  // INV-EMB12: read-only explain endpoint
+  app.get("/api/admin/embeddings/asset-version/:versionId/sources", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await explainEmbeddingSourcesForAssetVersion(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/asset-version/:versionId/preview-generate
+  // INV-EMB12: no writes
+  app.get("/api/admin/embeddings/asset-version/:versionId/preview-generate", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await previewGenerateEmbeddingsForAssetVersion(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/embeddings/asset-version/:versionId/generate
+  // INV-EMB1,2,3,4: real embedding generation with full provenance
+  app.post("/api/admin/embeddings/asset-version/:versionId/generate", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await generateEmbeddingsForAssetVersion(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/asset-version/:versionId/index-state
+  // INV-EMB12: read-only; explains current and derived lifecycle state
+  app.get("/api/admin/embeddings/asset-version/:versionId/index-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await explainAssetVersionIndexState(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/embeddings/asset-version/:versionId/mark-stale
+  // INV-EMB5,7: marks version + embeddings stale with explicit reason
+  app.post("/api/admin/embeddings/asset-version/:versionId/mark-stale", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const schema = z.object({ reason: z.string().min(1).max(500) });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return void res.status(400).json({ error: parsed.error.message });
+      await markAssetVersionIndexStale(versionId, parsed.data.reason);
+      res.json({ ok: true, assetVersionId: versionId, reason: parsed.data.reason });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/asset-version/:versionId/stale-reasons
+  // INV-EMB5,12: explain stale detection result — no writes
+  app.get("/api/admin/embeddings/asset-version/:versionId/stale-reasons", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await previewReindexAssetVersion(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/stale
+  // Returns list of asset versions with stale or failed index lifecycle state
+  app.get("/api/admin/embeddings/stale", async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(parseInt(String(req.query.limit ?? "50")), 200);
+      const result = await listStaleAssetVersions(limit);
+      res.json({ count: result.length, limit, items: result });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/asset-version/:versionId/rebuild-impact
+  // INV-EMB12: no writes — shows what a rebuild would do
+  app.get("/api/admin/embeddings/asset-version/:versionId/rebuild-impact", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await previewEmbeddingRebuildImpact(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/asset-version/:versionId/retrieval-readiness
+  // INV-EMB4,9,12: canonical retrieval readiness explainability — no writes
+  app.get("/api/admin/embeddings/asset-version/:versionId/retrieval-readiness", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await explainWhyAssetVersionIsOrIsNotRetrievalReady(versionId);
+      res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

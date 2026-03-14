@@ -1400,3 +1400,78 @@ A potential future maintenance phase may address:
 - Only proceed if real operational benefit outweighs risk
 
 **This phase does NOT exist yet. It must not be implemented without explicit planning and review.**
+
+---
+
+## Phase 5L — Multimodal Embedding Index Lifecycle (branch: feature/retrieval-orchestration)
+
+**Commit**: (pending)
+**Status**: COMPLETED ✓
+
+### What was implemented
+Phase 5L adds the full multimodal embedding lifecycle and asset-version-aware index state management on top of the Phase 5G–5K.1.A foundations.
+
+### Schema changes
+**knowledge_asset_versions** — 3 new nullable columns:
+- `embedding_status` text — CHECK IN ('not_ready','pending','indexed','stale','failed')
+- `index_lifecycle_state` text — CHECK IN ('not_ready','pending','indexed','stale','failed')
+- `index_lifecycle_updated_at` timestamp
+
+**knowledge_asset_embeddings** — new table (Phase 5L-specific):
+- Multimodal asset-version-level embeddings with full provenance
+- Columns: id, tenant_id, asset_id, asset_version_id, source_type, source_key, source_checksum, source_priority, text_length, embedding_provider, embedding_model, embedding_version, embedding_dimensions, embedding_vector, embedding_status, indexed_at, stale_reason, failure_reason, is_active, metadata, created_at, updated_at
+- CHECK constraints: source_type, embedding_status, source_priority
+- 5 performance indexes: kae_tenant_version_idx, kae_tenant_asset_idx, kae_tenant_source_type_idx, kae_tenant_status_active_idx, kae_tenant_version_status_idx
+- RLS enabled + FORCE ROW LEVEL SECURITY
+- 4 tenant-scoped policies: rls_tenant_select/insert/update/delete_knowledge_asset_embeddings
+
+### New files
+- `server/lib/ai/multimodal-embedding-sources.ts` — canonical source model (6 source types + deduplication + priority rules)
+- `server/lib/ai/multimodal-embedding-lifecycle.ts` — embedding generation, lifecycle state machine, stale detection, reindex scheduling, retrieval readiness
+- `server/lib/ai/migrate-phase5l.ts` — DB migration (idempotent)
+- `server/lib/ai/validate-phase5l.ts` — 24 scenarios / 109 assertions
+
+### Modified files
+- `shared/schema.ts` — 3 columns on knowledgeAssetVersions + new knowledgeAssetEmbeddings table
+- `server/routes/admin.ts` — 9 new admin embedding lifecycle routes
+
+### Source priority order (deterministic)
+1. parsed_text (priority 1) — direct document parsing
+2. ocr_text (priority 2) — metadata.ocr.extracted_text
+3. transcript_text (priority 3) — metadata.transcript.transcript_text
+4. caption_text (priority 4) — metadata.caption.caption_text
+5. video_frame_text (priority 5) — metadata.video_frames descriptors
+6. imported_text (priority 6) — metadata.imported_text
+
+### Source deduplication rules
+- ocr_text + caption_text: NEVER deduplicated (different semantic roles)
+- transcript_text + video_frame_text: NEVER deduplicated
+- All other pairs: deduplicated by SHA-256 checksum (highest priority kept)
+
+### Index lifecycle states
+- not_ready → no embeddable inputs
+- pending → inputs exist, not yet embedded
+- indexed → all active embeddings completed
+- stale → source changed / model upgraded
+- failed → embedding generation failed
+
+### Service-layer invariants enforced
+INV-EMB1 through INV-EMB12 all implemented and verified.
+
+### RLS regression after Phase 5L
+- Tables with RLS: 96 (was 95 before 5L — +1 for knowledge_asset_embeddings)
+- Total tenant policies: 232 (was 228 — +4 for knowledge_asset_embeddings)
+
+### Admin routes added (9 endpoints)
+- GET /api/admin/embeddings/asset-version/:versionId/sources
+- GET /api/admin/embeddings/asset-version/:versionId/preview-generate
+- POST /api/admin/embeddings/asset-version/:versionId/generate
+- GET /api/admin/embeddings/asset-version/:versionId/index-state
+- POST /api/admin/embeddings/asset-version/:versionId/mark-stale
+- GET /api/admin/embeddings/asset-version/:versionId/stale-reasons
+- GET /api/admin/embeddings/stale
+- GET /api/admin/embeddings/asset-version/:versionId/rebuild-impact
+- GET /api/admin/embeddings/asset-version/:versionId/retrieval-readiness
+
+### Validation results
+24/24 scenarios PASSED — 109/109 assertions PASSED

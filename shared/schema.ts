@@ -1446,14 +1446,22 @@ export const knowledgeAssetVersions = pgTable(
     metadata: jsonb("metadata"),
     createdBy: text("created_by"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
+    // Phase 5L — embedding & index lifecycle state
+    embeddingStatus: text("embedding_status"),
+    indexLifecycleState: text("index_lifecycle_state"),
+    indexLifecycleUpdatedAt: timestamp("index_lifecycle_updated_at"),
   },
   (t) => [
     sql`CONSTRAINT kav_version_number_check CHECK (${t.versionNumber} > 0)`,
     sql`CONSTRAINT kav_size_bytes_check CHECK (${t.sizeBytes} IS NULL OR ${t.sizeBytes} >= 0)`,
     sql`CONSTRAINT kav_ingest_status_check CHECK (${t.ingestStatus} IS NULL OR ${t.ingestStatus} IN ('pending','registered','processing','ready','failed'))`,
+    sql`CONSTRAINT kav_embedding_status_check CHECK (${t.embeddingStatus} IS NULL OR ${t.embeddingStatus} IN ('not_ready','pending','indexed','stale','failed'))`,
+    sql`CONSTRAINT kav_index_lifecycle_state_check CHECK (${t.indexLifecycleState} IS NULL OR ${t.indexLifecycleState} IN ('not_ready','pending','indexed','stale','failed'))`,
     uniqueIndex("kav_asset_version_uniq").on(t.assetId, t.versionNumber),
     index("kav_asset_created_idx").on(t.assetId, t.createdAt),
     index("kav_storage_object_idx").on(t.storageObjectId),
+    index("kav_tenant_lifecycle_idx").on(t.tenantId, t.indexLifecycleState),
+    index("kav_tenant_embedding_status_idx").on(t.tenantId, t.embeddingStatus),
   ],
 );
 
@@ -1463,6 +1471,60 @@ export const insertKnowledgeAssetVersionSchema = createInsertSchema(knowledgeAss
 });
 export type InsertKnowledgeAssetVersion = z.infer<typeof insertKnowledgeAssetVersionSchema>;
 export type KnowledgeAssetVersion = typeof knowledgeAssetVersions.$inferSelect;
+
+// ─── knowledge_asset_embeddings ──────────────────────────────────────────────
+// Phase 5L — multimodal asset-version-level embeddings with full provenance.
+// Separate from knowledge_embeddings (document/chunk-centric).
+// Each row represents one embedding derived from one multimodal source.
+export const knowledgeAssetEmbeddings = pgTable(
+  "knowledge_asset_embeddings",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    assetId: varchar("asset_id").notNull().references(() => knowledgeAssets.id),
+    assetVersionId: varchar("asset_version_id").notNull().references(() => knowledgeAssetVersions.id),
+    // source provenance
+    sourceType: text("source_type").notNull(),
+    sourceKey: text("source_key").notNull(),
+    sourceChecksum: text("source_checksum"),
+    sourcePriority: integer("source_priority").notNull().default(99),
+    textLength: integer("text_length"),
+    // embedding metadata
+    embeddingProvider: text("embedding_provider").notNull(),
+    embeddingModel: text("embedding_model").notNull(),
+    embeddingVersion: text("embedding_version"),
+    embeddingDimensions: integer("embedding_dimensions"),
+    embeddingVector: real("embedding_vector").array(),
+    // lifecycle
+    embeddingStatus: text("embedding_status").notNull().default("pending"),
+    indexedAt: timestamp("indexed_at"),
+    staleReason: text("stale_reason"),
+    failureReason: text("failure_reason"),
+    isActive: boolean("is_active").notNull().default(true),
+    // metadata / audit
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT kae_source_type_check CHECK (${t.sourceType} IN ('parsed_text','ocr_text','transcript_text','caption_text','video_frame_text','imported_text'))`,
+    sql`CONSTRAINT kae_embedding_status_check CHECK (${t.embeddingStatus} IN ('pending','completed','failed','stale'))`,
+    sql`CONSTRAINT kae_source_priority_check CHECK (${t.sourcePriority} >= 1 AND ${t.sourcePriority} <= 99)`,
+    index("kae_tenant_version_idx").on(t.tenantId, t.assetVersionId),
+    index("kae_tenant_asset_idx").on(t.tenantId, t.assetId),
+    index("kae_tenant_source_type_idx").on(t.tenantId, t.sourceType, t.embeddingStatus),
+    index("kae_tenant_status_active_idx").on(t.tenantId, t.embeddingStatus, t.isActive),
+    index("kae_tenant_version_status_idx").on(t.tenantId, t.assetVersionId, t.embeddingStatus),
+  ],
+);
+
+export const insertKnowledgeAssetEmbeddingSchema = createInsertSchema(knowledgeAssetEmbeddings).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertKnowledgeAssetEmbedding = z.infer<typeof insertKnowledgeAssetEmbeddingSchema>;
+export type KnowledgeAssetEmbedding = typeof knowledgeAssetEmbeddings.$inferSelect;
 
 // ─── asset_storage_objects ────────────────────────────────────────────────────
 // Phase 5G — Generic provider-agnostic storage registry for multimodal assets.
