@@ -1182,6 +1182,45 @@ export const insertKnowledgeSearchCandidateSchema = createInsertSchema(knowledge
 export type InsertKnowledgeSearchCandidate = z.infer<typeof insertKnowledgeSearchCandidateSchema>;
 export type KnowledgeSearchCandidate = typeof knowledgeSearchCandidates.$inferSelect;
 
+// ─── knowledge_retrieval_runs ─────────────────────────────────────────────────
+// Append-only observability log for retrieval orchestration runs.
+
+export const knowledgeRetrievalRuns = pgTable(
+  "knowledge_retrieval_runs",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull(),
+    knowledgeBaseId: varchar("knowledge_base_id")
+      .notNull()
+      .references(() => knowledgeBases.id),
+    queryHash: text("query_hash").notNull(),
+    embeddingModel: text("embedding_model"),
+    candidatesFound: integer("candidates_found").notNull().default(0),
+    candidatesRanked: integer("candidates_ranked").notNull().default(0),
+    chunksSelected: integer("chunks_selected").notNull().default(0),
+    chunksSkippedDuplicate: integer("chunks_skipped_duplicate").notNull().default(0),
+    chunksSkippedBudget: integer("chunks_skipped_budget").notNull().default(0),
+    contextTokensUsed: integer("context_tokens_used").notNull().default(0),
+    maxContextTokens: integer("max_context_tokens").notNull(),
+    documentCount: integer("document_count").notNull().default(0),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT krr_max_context_check CHECK (${t.maxContextTokens} > 0)`,
+    index("krr_tenant_kb_idx").on(t.tenantId, t.knowledgeBaseId, t.createdAt),
+    index("krr_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+
+export const insertKnowledgeRetrievalRunSchema = createInsertSchema(knowledgeRetrievalRuns).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeRetrievalRun = z.infer<typeof insertKnowledgeRetrievalRunSchema>;
+export type KnowledgeRetrievalRun = typeof knowledgeRetrievalRuns.$inferSelect;
+
 // ─── Artifact Dependencies ───────────────────────────────────────────────────
 
 export const artifactDependencies = pgTable(

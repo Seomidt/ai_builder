@@ -198,6 +198,13 @@ import {
   listVectorSearchCandidates,
   VectorSearchInvariantError,
 } from "../lib/ai/vector-search";
+import {
+  runRetrievalOrchestration,
+  explainRetrievalContext,
+  buildContextPreview,
+  getRetrievalRun,
+  RetrievalInvariantError,
+} from "../lib/ai/retrieval-orchestrator";
 import { getVectorAdapterInfo } from "../lib/ai/vector-adapter";
 
 // Phase 4S: Billing Recovery & Integrity
@@ -3134,6 +3141,115 @@ export function registerAdminRoutes(app: Express): void {
       res.json({ explanation });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5E: Retrieval Orchestration Admin Routes ───────────────────────
+
+  const RetrievalRunSchema = z.object({
+    tenantId: z.string().min(1),
+    knowledgeBaseId: z.string().min(1),
+    queryEmbedding: z.array(z.number()).min(1),
+    topKCandidates: z.number().int().min(1).max(200).optional(),
+    maxContextTokens: z.number().int().min(100).max(128000).optional(),
+    persistRun: z.boolean().optional(),
+    embeddingModel: z.string().optional(),
+    debugSearchRun: z.boolean().optional(),
+    rankingOptions: z.object({
+      similarityThreshold: z.number().min(0).max(1).optional(),
+      duplicateSimilarityThreshold: z.number().min(0).max(1).optional(),
+      groupByDocument: z.boolean().optional(),
+      maxChunksPerDocument: z.number().int().min(1).optional(),
+    }).optional(),
+    contextOptions: z.object({
+      maxTokens: z.number().int().min(100).optional(),
+      format: z.enum(["plain", "cited"]).optional(),
+      includeCitations: z.boolean().optional(),
+      deduplicateByContentHash: z.boolean().optional(),
+    }).optional(),
+  });
+
+  app.post("/api/admin/knowledge/retrieval/run", async (req: Request, res: Response) => {
+    try {
+      const parsed = RetrievalRunSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const result = await runRetrievalOrchestration(parsed.data);
+      res.json(result);
+    } catch (err) {
+      const status = err instanceof RetrievalInvariantError || err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/retrieval/explain", async (req: Request, res: Response) => {
+    try {
+      const parsed = RetrievalRunSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const explanation = await explainRetrievalContext(parsed.data);
+      res.json({ explanation });
+    } catch (err) {
+      const status = err instanceof RetrievalInvariantError || err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/retrieval/context-preview", async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        candidates: z.array(z.object({
+          rank: z.number(),
+          chunkId: z.string(),
+          documentId: z.string(),
+          documentVersionId: z.string(),
+          knowledgeBaseId: z.string(),
+          chunkText: z.string().nullable(),
+          chunkIndex: z.number(),
+          chunkKey: z.string(),
+          sourcePageStart: z.number().nullable(),
+          sourceHeadingPath: z.string().nullable(),
+          similarityScore: z.number(),
+          similarityMetric: z.string(),
+          contentHash: z.string().nullable(),
+        })),
+        maxContextTokens: z.number().int().min(100).max(128000).optional(),
+        rankingOptions: z.object({
+          similarityThreshold: z.number().min(0).max(1).optional(),
+          duplicateSimilarityThreshold: z.number().min(0).max(1).optional(),
+          groupByDocument: z.boolean().optional(),
+        }).optional(),
+        contextOptions: z.object({
+          format: z.enum(["plain", "cited"]).optional(),
+          includeCitations: z.boolean().optional(),
+        }).optional(),
+      });
+
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+
+      const { contextWindow, summary } = buildContextPreview(
+        parsed.data.candidates as any,
+        {
+          maxContextTokens: parsed.data.maxContextTokens,
+          rankingOptions: parsed.data.rankingOptions,
+          contextOptions: parsed.data.contextOptions,
+        },
+      );
+      res.json({ contextWindow, summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/retrieval/run/:runId", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const run = await getRetrievalRun(runId, tenantId);
+      res.json({ retrievalRun: run });
+    } catch (err) {
+      const status = err instanceof RetrievalInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
     }
   });
 }

@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5D complete)
+# AI Builder Platform — V1 (Phase 5E complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -862,3 +862,44 @@ POST /run, POST /explain, GET /filter-preview, GET /run/:runId, GET /candidates/
 
 ### Validation: 62/62 assertions passed (15 scenarios)
 S1 ke new cols, S2 new tables, S3 constraints+indexes, S4 fixture setup, S5 basic search returns 5 ranked candidates, S6 non-current version excluded, S7 archived KB rejected (INV-VEC6), S8 non-ready doc=0 results (INV-VEC7), S9 inactive chunk excluded (INV-VEC3), S10 stale index_state=0 results (INV-VEC4), S11 is_active=false=0 results (INV-VEC5), S12 empty KB=0 results (INV-VEC8), S13 cross-tenant rejected (INV-VEC1/9), S14 empty+NaN embedding rejected (INV-VEC11), S15 explain/filter-preview/chunk-explain/debug-run helpers
+
+## Phase 5E — Retrieval Orchestration Layer (branch: feature/retrieval-orchestration)
+
+### Purpose
+Converts Phase 5D vector search results into structured retrieval context for LLM consumption. Deterministic token-budget enforcement, Jaccard+hash duplicate suppression, document proximity grouping, chunk-index ordering, full traceable metadata per entry. Never calls LLMs; never mutates DB lifecycle state.
+
+### New files
+- `server/lib/ai/token-budget.ts` — estimateTokens(), estimateChunkTokens(), enforceTokenBudget() (greedy, INV-RET5), wouldExceedBudget(), formatBudgetSummary(). Default budget: 4000 tokens.
+- `server/lib/ai/chunk-ranking.ts` — rankChunks() (similarity threshold filter → Jaccard duplicate suppression → per-doc limits → doc proximity grouping → chunk_index ordering → rank assignment). Document group map tracking.
+- `server/lib/ai/context-window-builder.ts` — buildContextWindow() (token budget → content hash dedup → entry assembly with full metadata → plain/cited format → summarize). summarizeContextWindow().
+- `server/lib/ai/retrieval-orchestrator.ts` — runRetrievalOrchestration() (6-step pipeline), explainRetrievalContext() (selection+exclusion trace), buildContextPreview() (pre-searched candidates), getRetrievalRun() (DB lookup). RetrievalInvariantError class.
+- `server/lib/ai/migrate-phase5e.ts` — Raw SQL migration (ran successfully)
+- `server/lib/ai/validate-phase5e.ts` — 20 scenarios, 92/92 assertions passed
+
+### Modified files
+- `shared/schema.ts` — New table knowledgeRetrievalRuns (14 cols, max_context_tokens CHECK, 2 indexes); insertKnowledgeRetrievalRunSchema + types
+- `server/routes/admin.ts` — 4 new endpoints under /api/admin/knowledge/retrieval/ + imports
+
+### DB changes
+- New table `knowledge_retrieval_runs`: 14 cols, krr_max_context_check constraint, krr_tenant_kb_idx, krr_tenant_created_idx
+
+### Admin routes (4 endpoints)
+- POST /api/admin/knowledge/retrieval/run — full orchestration run
+- POST /api/admin/knowledge/retrieval/explain — selection + exclusion trace
+- POST /api/admin/knowledge/retrieval/context-preview — from pre-searched candidates
+- GET /api/admin/knowledge/retrieval/run/:runId — lookup persisted run
+
+### Invariants enforced
+- INV-RET1: tenantId + knowledgeBaseId required
+- INV-RET2: All Phase 5D safety filters enforced (current_version, lifecycle, index_state)
+- INV-RET3: Non-current document versions excluded via Phase 5D
+- INV-RET4: Inactive chunks excluded via Phase 5D
+- INV-RET5: Token budget never exceeded (greedy enforceTokenBudget)
+- INV-RET6: Retrieval never mutates DB lifecycle/billing state
+- INV-RET7: Cross-tenant retrieval impossible (tenantId required)
+- INV-RET8: Deterministic output for same input
+- INV-RET9: Jaccard similarity + content hash duplicate suppression
+- INV-RET10: Full traceable metadata per chunk (chunk_id, doc_id, doc_version_id, kb_id, chunk_index, page, heading, score, metric, hash, tokens)
+
+### Validation: 92/92 assertions passed (20 scenarios)
+S01 token estimation, S02 greedy budget enforcement, S03 budget never exceeded (INV-RET5), S04 Jaccard duplicate suppression (INV-RET9), S05 content hash dedup, S06 context ordering (chunk_index), S07 document grouping, S08 per-doc limit, S09 similarity threshold, S10 plain format assembly, S11 cited format assembly, S12 full metadata per chunk (INV-RET10), S13 cross-tenant rejection (INV-RET7), S14 budget summary format, S15 context preview, S16 DB table present, S17 all columns present, S18 CHECK constraint enforced, S19 DB insert+lookup, S20 deterministic output (INV-RET8)
