@@ -1526,6 +1526,59 @@ export const insertKnowledgeAssetEmbeddingSchema = createInsertSchema(knowledgeA
 export type InsertKnowledgeAssetEmbedding = z.infer<typeof insertKnowledgeAssetEmbeddingSchema>;
 export type KnowledgeAssetEmbedding = typeof knowledgeAssetEmbeddings.$inferSelect;
 
+// ─── knowledge_retrieval_candidates ──────────────────────────────────────────
+// Phase 5M — Per-candidate retrieval explainability records.
+// One row per candidate per retrieval run with filter_status + reason codes.
+// Append-only. Persisted when persistRun=true in retrieval orchestrator.
+export const knowledgeRetrievalCandidates = pgTable(
+  "knowledge_retrieval_candidates",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    retrievalRunId: varchar("retrieval_run_id")
+      .notNull()
+      .references(() => knowledgeRetrievalRuns.id),
+    chunkId: varchar("chunk_id").references(() => knowledgeChunks.id),
+    knowledgeAssetEmbeddingId: varchar("knowledge_asset_embedding_id").references(
+      () => knowledgeAssetEmbeddings.id,
+    ),
+    knowledgeAssetId: varchar("knowledge_asset_id").references(() => knowledgeAssets.id),
+    knowledgeAssetVersionId: varchar("knowledge_asset_version_id").references(
+      () => knowledgeAssetVersions.id,
+    ),
+    sourceType: text("source_type"),
+    sourceKey: text("source_key"),
+    similarityScore: numeric("similarity_score", { precision: 10, scale: 8 }),
+    rankingScore: numeric("ranking_score", { precision: 10, scale: 8 }),
+    filterStatus: text("filter_status").notNull().default("candidate"),
+    exclusionReason: text("exclusion_reason"),
+    inclusionReason: text("inclusion_reason"),
+    dedupReason: text("dedup_reason"),
+    candidateRank: integer("candidate_rank"),
+    finalRank: integer("final_rank"),
+    tokenCountEstimate: integer("token_count_estimate"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT krc_filter_status_check CHECK (${t.filterStatus} IN ('candidate','excluded','selected'))`,
+    sql`CONSTRAINT krc_similarity_check CHECK (${t.similarityScore} IS NULL OR (${t.similarityScore} >= 0 AND ${t.similarityScore} <= 1))`,
+    sql`CONSTRAINT krc_token_count_check CHECK (${t.tokenCountEstimate} IS NULL OR ${t.tokenCountEstimate} >= 0)`,
+    index("krc_tenant_run_idx").on(t.tenantId, t.retrievalRunId),
+    index("krc_tenant_chunk_idx").on(t.tenantId, t.chunkId),
+    index("krc_tenant_version_idx").on(t.tenantId, t.knowledgeAssetVersionId),
+    index("krc_tenant_status_idx").on(t.tenantId, t.filterStatus),
+    index("krc_tenant_source_type_idx").on(t.tenantId, t.sourceType),
+  ],
+);
+
+export const insertKnowledgeRetrievalCandidateSchema = createInsertSchema(
+  knowledgeRetrievalCandidates,
+).omit({ id: true, createdAt: true });
+export type InsertKnowledgeRetrievalCandidate = z.infer<
+  typeof insertKnowledgeRetrievalCandidateSchema
+>;
+export type KnowledgeRetrievalCandidate = typeof knowledgeRetrievalCandidates.$inferSelect;
+
 // ─── asset_storage_objects ────────────────────────────────────────────────────
 // Phase 5G — Generic provider-agnostic storage registry for multimodal assets.
 // Distinct from Phase 5B knowledge_storage_objects (document-version-linked).

@@ -372,6 +372,20 @@ import {
   explainEmbeddingSourcesForAssetVersion,
   summarizeEmbeddingSourceCoverage,
 } from "../lib/ai/multimodal-embedding-sources";
+import {
+  buildRetrievalProvenanceForRun,
+  buildChunkProvenance,
+  buildAssetVersionLineage,
+  explainChunkInclusionInRun,
+  explainChunkExclusionFromRun,
+  summarizeRetrievalProvenance,
+  listContextSourcesForRun,
+  summarizeRetrievalRunExplainability,
+} from "../lib/ai/retrieval-provenance";
+import {
+  buildContextWindowProvenance,
+  summarizeContextWindowSources,
+} from "../lib/ai/context-provenance";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -4850,6 +4864,134 @@ export function registerAdminRoutes(app: Express): void {
       const versionId = String(req.params.versionId);
       if (!versionId) return void res.status(400).json({ error: "versionId required" });
       const result = await explainWhyAssetVersionIsOrIsNotRetrievalReady(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5M: Retrieval Explainability & Source Provenance ──────────────────
+
+  // Route 1: GET /api/admin/retrieval/runs/:runId/provenance
+  // INV-PROV1,2,6: per-run provenance — no writes
+  app.get("/api/admin/retrieval/runs/:runId/provenance", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await buildRetrievalProvenanceForRun(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 2: GET /api/admin/retrieval/runs/:runId/explain
+  // INV-PROV5,6: full explainability summary — no writes
+  app.get("/api/admin/retrieval/runs/:runId/explain", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await summarizeRetrievalRunExplainability(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 3: GET /api/admin/retrieval/runs/:runId/context-provenance
+  // INV-PROV12,6: context window provenance — no writes
+  app.get("/api/admin/retrieval/runs/:runId/context-provenance", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await buildContextWindowProvenance(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 4: GET /api/admin/retrieval/runs/:runId/sources
+  // INV-PROV2,6: list context sources for a run — no writes
+  app.get("/api/admin/retrieval/runs/:runId/sources", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await listContextSourcesForRun(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5: GET /api/admin/retrieval/chunks/:chunkId/provenance
+  // INV-PROV2,6: chunk provenance — no writes
+  app.get("/api/admin/retrieval/chunks/:chunkId/provenance", async (req: Request, res: Response) => {
+    try {
+      const chunkId = String(req.params.chunkId);
+      if (!chunkId) return void res.status(400).json({ error: "chunkId required" });
+      const result = await buildChunkProvenance(chunkId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6: GET /api/admin/retrieval/chunks/:chunkId/explain?runId=&action=included|excluded
+  // INV-PROV3,4,6: explain chunk inclusion or exclusion — no writes
+  app.get("/api/admin/retrieval/chunks/:chunkId/explain", async (req: Request, res: Response) => {
+    try {
+      const chunkId = String(req.params.chunkId);
+      const runId = String(req.query.runId ?? "");
+      const action = String(req.query.action ?? "included");
+      if (!chunkId) return void res.status(400).json({ error: "chunkId required" });
+      if (!runId) return void res.status(400).json({ error: "runId query param required" });
+      if (action !== "included" && action !== "excluded") {
+        return void res.status(400).json({ error: "action must be 'included' or 'excluded'" });
+      }
+      const result =
+        action === "included"
+          ? await explainChunkInclusionInRun(runId, chunkId)
+          : await explainChunkExclusionFromRun(runId, chunkId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7: GET /api/admin/retrieval/asset-versions/:assetVersionId/lineage
+  // INV-PROV2,6: asset version lineage — no writes
+  app.get("/api/admin/retrieval/asset-versions/:assetVersionId/lineage", async (req: Request, res: Response) => {
+    try {
+      const assetVersionId = String(req.params.assetVersionId);
+      if (!assetVersionId) return void res.status(400).json({ error: "assetVersionId required" });
+      const result = await buildAssetVersionLineage(assetVersionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8: GET /api/admin/retrieval/runs/:runId/summary
+  // INV-PROV5,6: retrieval provenance summary — no writes
+  app.get("/api/admin/retrieval/runs/:runId/summary", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await summarizeRetrievalProvenance(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9: GET /api/admin/retrieval/runs/:runId/context-sources-summary
+  // INV-PROV7,6: context window source type summary — no writes
+  app.get("/api/admin/retrieval/runs/:runId/context-sources-summary", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await summarizeContextWindowSources(runId);
       res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });

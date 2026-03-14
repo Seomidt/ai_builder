@@ -25,7 +25,12 @@ import { eq, and } from "drizzle-orm";
 import { db } from "../../db";
 import {
   knowledgeRetrievalRuns,
+  knowledgeRetrievalCandidates,
 } from "@shared/schema";
+import {
+  EXCLUSION_REASONS,
+  INCLUSION_REASONS,
+} from "./retrieval-provenance";
 import {
   runVectorSearch,
   explainVectorSearch,
@@ -166,6 +171,74 @@ export async function runRetrievalOrchestration(
       })
       .returning();
     retrievalRunId = run.id;
+
+    // Phase 5M: Persist per-candidate provenance (best-effort, INV-PROV3/4/5)
+    try {
+      const selectedChunkIds = new Set(contextWindow.entries.map((e) => e.metadata.chunkId));
+      const dedupChunkIds = new Set(rankResult.skippedDuplicate.map((c) => c.chunkId));
+      const thresholdChunkIds = new Set(rankResult.skippedThreshold.map((c) => c.chunkId));
+
+      // Build rank lookup for selected entries
+      const selectedRankMap = new Map<string, { rank: number; tokens: number }>();
+      contextWindow.entries.forEach((e, idx) => {
+        selectedRankMap.set(e.metadata.chunkId, {
+          rank: idx + 1,
+          tokens: e.metadata.estimatedTokens,
+        });
+      });
+
+      const rows = candidates.map((cand, idx) => {
+        const isSelected = selectedChunkIds.has(cand.chunkId);
+        const isDedupExcluded = dedupChunkIds.has(cand.chunkId);
+        const isThresholdExcluded = thresholdChunkIds.has(cand.chunkId);
+
+        let filterStatus: "selected" | "excluded" = isSelected ? "selected" : "excluded";
+        let exclusionReason: string | null = null;
+        let inclusionReason: string | null = null;
+        let finalRank: number | null = null;
+        let tokenCountEstimate: number | null = null;
+
+        if (isSelected) {
+          const sel = selectedRankMap.get(cand.chunkId);
+          finalRank = sel?.rank ?? null;
+          tokenCountEstimate = sel?.tokens ?? null;
+          inclusionReason = [
+            INCLUSION_REASONS.PASSED_SCOPE_FILTERS,
+            INCLUSION_REASONS.PASSED_SIMILARITY_THRESHOLD,
+            INCLUSION_REASONS.SURVIVED_DEDUP,
+            INCLUSION_REASONS.INCLUDED_IN_CONTEXT_BUDGET,
+          ].join(",");
+        } else if (isDedupExcluded) {
+          exclusionReason = EXCLUSION_REASONS.DUPLICATE_CHUNK;
+        } else if (isThresholdExcluded) {
+          exclusionReason = EXCLUSION_REASONS.SIMILARITY_BELOW_THRESHOLD;
+        } else {
+          // Ranked but didn't fit in context window = budget exceeded
+          exclusionReason = EXCLUSION_REASONS.TOKEN_BUDGET_EXCEEDED;
+          filterStatus = "excluded";
+        }
+
+        return {
+          tenantId,
+          retrievalRunId: run.id,
+          chunkId: cand.chunkId,
+          sourceType: null as string | null,
+          similarityScore: cand.similarityScore.toFixed(8),
+          filterStatus,
+          exclusionReason,
+          inclusionReason,
+          candidateRank: idx + 1,
+          finalRank,
+          tokenCountEstimate,
+        };
+      });
+
+      if (rows.length > 0) {
+        await db.insert(knowledgeRetrievalCandidates).values(rows);
+      }
+    } catch {
+      // Best-effort: candidate persistence failure must never abort the retrieval run
+    }
   }
 
   return {
