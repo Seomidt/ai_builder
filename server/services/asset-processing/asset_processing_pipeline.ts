@@ -31,6 +31,11 @@ export const ASSET_PIPELINES: Record<string, PipelineDefinition> = {
     steps: ["transcribe_audio", "chunk_text", "embed_text", "index_asset"],
     description: "Audio transcription pipeline: transcribe → chunk → embed → index",
   },
+  // Phase 5K: video pipeline with real processors
+  video: {
+    steps: ["extract_video_metadata", "sample_video_frames", "index_asset"],
+    description: "Video processing: metadata extraction → frame sampling → index",
+  },
   webpage: {
     steps: ["parse_document", "chunk_text", "embed_text", "index_asset"],
     description: "Webpage processing (same as document): parse → chunk → embed → index",

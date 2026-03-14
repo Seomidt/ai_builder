@@ -16,6 +16,9 @@
 
 import { type Express, type Request, type Response } from "express";
 import { z } from "zod";
+import { eq, and } from "drizzle-orm";
+import { db } from "../db";
+import { knowledgeAssets, knowledgeAssetVersions } from "@shared/schema";
 import {
   previewCreateProviderPricingVersion,
   applyCreateProviderPricingVersion,
@@ -4232,6 +4235,215 @@ export function registerAdminRoutes(app: Express): void {
       if (!obj) return res.status(404).json({ error: "Storage object not found" });
       const explanation = explainKnowledgeStorageObjectData(obj);
       res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5K: Real Multimodal Processor Routes ───────────────────────────────
+
+  // GET /api/admin/asset-processing/processors/:jobType/explain
+  // Explain a specific registered processor's capabilities and MIME support
+  app.get("/api/admin/asset-processing/processors/:jobType/explain", async (req: Request, res: Response) => {
+    try {
+      const { jobType } = req.params as { jobType: string };
+      const { hasProcessor, listRegisteredProcessors: listProcs } = await import(
+        "../services/asset-processing/asset_processor_registry"
+      );
+      const { SUPPORTED_MIME_TYPES } = await import(
+        "../lib/ai/multimodal-processing-utils"
+      );
+      const { ASSET_PIPELINES } = await import(
+        "../services/asset-processing/asset_processing_pipeline"
+      );
+
+      if (!hasProcessor(jobType)) {
+        return res.status(404).json({ error: `No processor registered for job type: ${jobType}`, registeredTypes: listProcs() });
+      }
+
+      const supportedMimes = SUPPORTED_MIME_TYPES[jobType] ?? [];
+      const pipelines = Object.entries(ASSET_PIPELINES)
+        .filter(([, def]) => def.steps.includes(jobType))
+        .map(([assetType, def]) => ({
+          assetType,
+          position: def.steps.indexOf(jobType) + 1,
+          totalSteps: def.steps.length,
+          nextStep: def.steps[def.steps.indexOf(jobType) + 1] ?? null,
+        }));
+
+      res.json({
+        jobType,
+        registered: true,
+        isRealProcessor: ["ocr_image", "caption_image", "transcribe_audio", "extract_video_metadata", "sample_video_frames"].includes(jobType),
+        supportedMimeTypes: supportedMimes,
+        usedInPipelines: pipelines,
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/assets/:assetId/processor-output
+  // Return all processor output metadata from the current version of an asset
+  app.get("/api/admin/asset-processing/assets/:assetId/processor-output", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId query param required" });
+
+      const asset = await db
+        .select()
+        .from(knowledgeAssets)
+        .where(and(eq(knowledgeAssets.id, assetId), eq(knowledgeAssets.tenantId, tenantId)))
+        .limit(1);
+
+      if (!asset[0]) return res.status(404).json({ error: "Asset not found" });
+
+      const currentVersionId = asset[0].currentVersionId;
+      if (!currentVersionId) {
+        return res.json({ assetId, currentVersionId: null, processorOutputs: {}, message: "No current version set" });
+      }
+
+      const version = await db
+        .select()
+        .from(knowledgeAssetVersions)
+        .where(and(eq(knowledgeAssetVersions.id, currentVersionId), eq(knowledgeAssetVersions.tenantId, tenantId)))
+        .limit(1);
+
+      if (!version[0]) return res.status(404).json({ error: "Current version not found" });
+
+      const meta = (version[0].metadata ?? {}) as Record<string, unknown>;
+
+      res.json({
+        assetId,
+        versionId: currentVersionId,
+        processorOutputs: {
+          ocr: meta.ocr ?? null,
+          transcript: meta.transcript ?? null,
+          caption: meta.caption ?? null,
+          video: meta.video ?? null,
+          video_frames: meta.video_frames ?? null,
+        },
+        parsedText: meta.parsedText ?? null,
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/assets/:assetId/processing-metadata
+  // Full metadata for current version of an asset — including all processor sections
+  app.get("/api/admin/asset-processing/assets/:assetId/processing-metadata", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId query param required" });
+
+      const asset = await db
+        .select()
+        .from(knowledgeAssets)
+        .where(and(eq(knowledgeAssets.id, assetId), eq(knowledgeAssets.tenantId, tenantId)))
+        .limit(1);
+
+      if (!asset[0]) return res.status(404).json({ error: "Asset not found" });
+
+      const versions = await db
+        .select()
+        .from(knowledgeAssetVersions)
+        .where(and(eq(knowledgeAssetVersions.assetId, assetId), eq(knowledgeAssetVersions.tenantId, tenantId)))
+        .limit(20);
+
+      const processingJobs = await listAssetProcessingJobs(tenantId, { assetId, limit: 50 });
+
+      res.json({
+        assetId,
+        assetType: asset[0].assetType,
+        processingState: asset[0].processingState,
+        currentVersionId: asset[0].currentVersionId,
+        versionCount: versions.length,
+        versions: versions.map((v) => ({
+          id: v.id,
+          versionNumber: v.versionNumber,
+          ingestStatus: v.ingestStatus,
+          mimeType: v.mimeType,
+          isActive: v.isActive,
+          metadata: v.metadata,
+        })),
+        processingJobs: processingJobs.map((j) => ({
+          id: j.id,
+          jobType: j.jobType,
+          jobStatus: j.jobStatus,
+          attemptNumber: j.attemptNumber,
+          errorMessage: j.errorMessage,
+          createdAt: j.createdAt,
+          completedAt: j.completedAt,
+        })),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/dependencies
+  // Report all external dependencies and their availability
+  app.get("/api/admin/asset-processing/dependencies", async (_req: Request, res: Response) => {
+    try {
+      const { explainProcessingEnvironmentCapabilities } = await import(
+        "../lib/ai/multimodal-processing-utils"
+      );
+      const caps = explainProcessingEnvironmentCapabilities();
+      const registeredProcessors = listRegisteredProcessors();
+      const { ASSET_PIPELINES } = await import(
+        "../services/asset-processing/asset_processing_pipeline"
+      );
+
+      res.json({
+        capabilities: caps,
+        registeredProcessors,
+        pipelineCount: Object.keys(ASSET_PIPELINES).length,
+        pipelines: Object.entries(ASSET_PIPELINES).map(([assetType, def]) => ({
+          assetType,
+          steps: def.steps,
+          description: def.description,
+        })),
+        dependencies: {
+          openai: {
+            required_by: ["ocr_image", "caption_image", "transcribe_audio"],
+            available: caps.openai.available,
+          },
+          ffprobe: {
+            required_by: ["extract_video_metadata"],
+            available: caps.ffprobe.available,
+          },
+          ffmpeg: {
+            required_by: ["sample_video_frames"],
+            available: caps.ffmpeg.available,
+          },
+          local_storage: {
+            required_by: ["all multimodal processors"],
+            available: caps.localStorage.basePathExists,
+            base_path: caps.localStorage.basePath,
+          },
+        },
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/environment-capabilities
+  // Truthful runtime capability detection (INV-MPROC8)
+  app.get("/api/admin/asset-processing/environment-capabilities", async (_req: Request, res: Response) => {
+    try {
+      const { explainProcessingEnvironmentCapabilities } = await import(
+        "../lib/ai/multimodal-processing-utils"
+      );
+      const caps = explainProcessingEnvironmentCapabilities();
+      res.json({
+        ...caps,
+        detectedAt: new Date().toISOString(),
+        note: "Capability detection is truthful — no faking of availability (INV-MPROC8)",
+      });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

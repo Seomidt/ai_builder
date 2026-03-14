@@ -1147,3 +1147,58 @@ New indexes (5):
 
 ### Validation: 121/121 assertions passed (20 scenarios)
 S01 DB column verification, S02 DB index verification, S03 registerKnowledgeStorageObject (INV-ING5/6), S04 previewStorageBinding (INV-ING9/8), S05 deleted storage block (INV-ING10), S06 ingestKnowledgeAsset full flow, S07 explainAssetProcessingPlan, S08 previewKnowledgeAssetIngestion (INV-ING8), S09 version append-only (INV-ING3), S10 setCurrentAssetVersion cross-asset guard (INV-ING4), S11 setCurrentAssetVersion blocks deleted storage (INV-ING10), S12 cannot add version to deleted asset, S13 cross-tenant isolation (INV-ING1/6), S14 missing KB rejected (INV-ING2), S15 explainKnowledgeAssetIngestion observability, S16 explainKnowledgeStorageObjectData pure function, S17 multi-version flow, S18 ingestion without auto-enqueue, S19 storage reuse (INV-ING9), S20 Phase 5I/12 retrieval stack intact
+
+---
+
+## Phase 5K — Real Multimodal Processors (branch: feature/retrieval-orchestration)
+
+### Purpose
+Replaces all Phase 5I stub multimodal processors with real production implementations. OCR and image captioning use OpenAI vision API (GPT-4o). Audio transcription uses OpenAI Whisper. Video metadata extraction uses ffprobe (v6.1.2). Video frame sampling uses ffmpeg (v6.1.2). All processors fail explicitly when dependencies are unavailable. No silent fallbacks. No fake success.
+
+### New files (8)
+- `server/lib/ai/multimodal-processing-utils.ts` — Shared utilities: loadAssetBinaryForProcessing, assertSupportedMimeType, normalizeExtractedText/Caption/Transcript, summarizeProcessorFailure, safeEnqueueDownstreamJob (idempotent), explainProcessingEnvironmentCapabilities
+- `server/services/asset-processing/processors/real-ocr-image.ts` — Real OCR via OpenAI vision (gpt-4o), replaces stub
+- `server/services/asset-processing/processors/real-caption-image.ts` — Real captioning via OpenAI vision, does NOT overwrite OCR metadata
+- `server/services/asset-processing/processors/real-transcribe-audio.ts` — Real transcription via OpenAI Whisper (whisper-1)
+- `server/services/asset-processing/processors/real-extract-video-metadata.ts` — Real video metadata via ffprobe JSON output
+- `server/services/asset-processing/processors/real-sample-video-frames.ts` — Real frame sampling via ffmpeg (every 10s, max 20 frames)
+- `server/lib/ai/migrate-phase5k.ts` — Migration + environment capability verification (idempotent, no schema changes needed)
+- `server/lib/ai/validate-phase5k.ts` — 20 scenarios, 110/110 assertions passed
+
+### Modified files (3)
+- `server/services/asset-processing/asset_processing_pipeline.ts` — Added `video` pipeline: extract_video_metadata → sample_video_frames → index_asset
+- `server/services/asset-processing/asset_processor_registry.ts` — loadAllProcessors() now loads real processors (override stubs); loadStubProcessors() added for dev fallback
+- `server/routes/admin.ts` — 5 new Phase 5K admin endpoints (processor explain, processor-output, processing-metadata, dependencies, environment-capabilities)
+
+### Schema changes: NONE
+All processor outputs stored in existing `knowledge_asset_versions.metadata` JSONB column using nested keys: `metadata.ocr`, `metadata.transcript`, `metadata.caption`, `metadata.video`, `metadata.video_frames`.
+
+### Environment capabilities detected
+- OpenAI: package present + OPENAI_API_KEY configured → OCR/caption/transcription CAPABLE
+- ffprobe v6.1.2: AVAILABLE → video metadata extraction CAPABLE
+- ffmpeg v6.1.2: AVAILABLE → frame sampling CAPABLE
+- STORAGE_LOCAL_BASE: /tmp/asset-storage (configurable via env var)
+
+### Invariants enforced (12)
+- INV-MPROC1: Processor execution tenant-safe (storage loaded with tenantId)
+- INV-MPROC2: Processors require valid asset version (explicit failure without version)
+- INV-MPROC3: Unsupported MIME types fail with ExplicitProcessorFailure(UNSUPPORTED_MIME_TYPE)
+- INV-MPROC4: Empty output fails explicitly (NO_TEXT_EXTRACTED, EMPTY_TRANSCRIPT, EMPTY_CAPTION, NO_FRAMES_EXTRACTED)
+- INV-MPROC5: Processor metadata writes scoped to own key (ocr/transcript/caption/video/video_frames only; caption preserves ocr)
+- INV-MPROC6: Downstream job enqueue is idempotent (safeEnqueueDownstreamJob checks existing non-failed jobs)
+- INV-MPROC7: OCR/caption/transcription/video processors do NOT mark retrieval-ready (only index_asset does)
+- INV-MPROC8: Capability detection truthful (ffprobe/ffmpeg probed live; openai checked via filesystem)
+- INV-MPROC9: Retrieval tables (knowledge_retrieval_runs, retrieval_metrics, retrieval_cache_entries) intact
+- INV-MPROC10: Trust-signal tables (document_trust_signals, document_risk_scores) intact
+- INV-MPROC11: Failures observable and retryable (failure key written to metadata even on error)
+- INV-MPROC12: Cross-tenant storage access denied (storage objects validated by tenantId before load)
+
+### Admin endpoints (5 new, Phase 5K)
+- GET /api/admin/asset-processing/processors/:jobType/explain — processor capabilities + MIME types + pipeline membership
+- GET /api/admin/asset-processing/assets/:assetId/processor-output — all processor output from current version
+- GET /api/admin/asset-processing/assets/:assetId/processing-metadata — full metadata + job history
+- GET /api/admin/asset-processing/dependencies — all dependency availability report
+- GET /api/admin/asset-processing/environment-capabilities — truthful runtime capability detection (INV-MPROC8)
+
+### Validation: 110/110 assertions passed (20 scenarios)
+S01 Environment capability detection structure, S02 assertSupportedMimeType valid, S03 assertSupportedMimeType invalid (INV-MPROC3), S04 loadAssetBinaryForProcessing file-not-found, S05 cross-tenant access denied (INV-MPROC12), S06 non-local storage provider explicit failure, S07 text normalization helpers, S08 summarizeProcessorFailure structure, S09 safeEnqueueDownstreamJob first enqueue, S10 idempotent enqueue (INV-MPROC6), S11 OCR processor real/explicit-failure (INV-MPROC8), S12 caption preserves OCR metadata (INV-MPROC5), S13 transcription file-not-found failure path, S14 video metadata extraction (ffprobe), S15 video frame sampling (ffmpeg), S16 video pipeline structure, S17 all 9 processors registered, S18 SUPPORTED_MIME_TYPES complete, S19 processors do not mark retrieval-ready (INV-MPROC7), S20 retrieval/trust-signal stack intact (INV-MPROC9/10)

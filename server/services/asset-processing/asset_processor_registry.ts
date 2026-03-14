@@ -64,8 +64,32 @@ export function hasProcessor(jobType: string): boolean {
 /**
  * Load all processors — triggers self-registration via side effects.
  * Call once at application startup or before dispatching.
+ *
+ * Phase 5K: real processors are loaded AFTER stubs to ensure they
+ * override stub registrations for the same job types.
+ * Stub files remain for reference but are superseded by real processors.
  */
 export async function loadAllProcessors(): Promise<void> {
+  // Core pipeline processors (stubs — stable, no replacement needed)
+  await import("./processors/parse_document");
+  await import("./processors/chunk_text");
+  await import("./processors/embed_text");
+  await import("./processors/index_asset");
+
+  // Phase 5K: real multimodal processors (override Phase 5I stubs)
+  // Import real processors — they self-register, overriding any stub registration
+  await import("./processors/real-ocr-image");
+  await import("./processors/real-caption-image");
+  await import("./processors/real-transcribe-audio");
+  await import("./processors/real-extract-video-metadata");
+  await import("./processors/real-sample-video-frames");
+}
+
+/**
+ * Load stub processors only — for testing / fallback environments.
+ * Do NOT call this in production alongside loadAllProcessors().
+ */
+export async function loadStubProcessors(): Promise<void> {
   await import("./processors/parse_document");
   await import("./processors/chunk_text");
   await import("./processors/embed_text");
