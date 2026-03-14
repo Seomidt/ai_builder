@@ -243,6 +243,25 @@ export async function explainAssetProcessingState(
   };
 }
 
+// ─── getAssetProcessingJobById ────────────────────────────────────────────────
+
+export async function getAssetProcessingJobById(
+  jobId: string,
+  tenantId: string,
+): Promise<KnowledgeAssetProcessingJob | null> {
+  const [row] = await db
+    .select()
+    .from(knowledgeAssetProcessingJobs)
+    .where(
+      and(
+        eq(knowledgeAssetProcessingJobs.id, jobId),
+        eq(knowledgeAssetProcessingJobs.tenantId, tenantId),
+      ),
+    )
+    .limit(1);
+  return row ?? null;
+}
+
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
 async function _getJobById(

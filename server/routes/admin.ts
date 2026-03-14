@@ -314,6 +314,32 @@ import {
   explainCurrentRegistryState,
 } from "../lib/ai/knowledge-asset-compat";
 
+// Phase 5I: Asset Processing Engine
+import {
+  dispatchProcessingBatch,
+  getQueueHealthSummary,
+} from "../services/asset-processing/asset_processing_dispatcher";
+import {
+  processAssetJob,
+  retryAssetProcessingJob,
+  detectOrphanJobs,
+  explainJobExecution,
+  MAX_ATTEMPTS,
+} from "../services/asset-processing/process_asset_job";
+import {
+  getPipelineForAssetType,
+  explainPipeline,
+} from "../services/asset-processing/asset_processing_pipeline";
+import {
+  listRegisteredProcessors,
+  loadAllProcessors,
+} from "../services/asset-processing/asset_processor_registry";
+import {
+  enqueueAssetProcessingJob as enqueueAssetJob5I,
+  listAssetProcessingJobs as listJobs5I,
+  getAssetProcessingJobById,
+} from "../lib/ai/knowledge-asset-processing";
+
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
 const createProviderPricingVersionSchema = z.object({
@@ -3864,6 +3890,165 @@ export function registerAdminRoutes(app: Express): void {
     try {
       const result = await explainCurrentRegistryState();
       res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5I: Asset Processing Engine ──────────────────────────────────────
+
+  // GET /api/admin/asset-processing/processors — list all registered processors
+  app.get("/api/admin/asset-processing/processors", async (_req: Request, res: Response) => {
+    try {
+      await loadAllProcessors();
+      const processors = listRegisteredProcessors();
+      res.json({ processors, count: processors.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/pipeline/:assetType — explain pipeline for asset type
+  app.get("/api/admin/asset-processing/pipeline/:assetType", async (req: Request, res: Response) => {
+    try {
+      const { assetType } = req.params as { assetType: string };
+      const explanation = explainPipeline(assetType);
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/queue-health — queue health summary
+  app.get("/api/admin/asset-processing/queue-health", async (req: Request, res: Response) => {
+    try {
+      const tenantId = req.query.tenantId as string | undefined;
+      const summary = await getQueueHealthSummary(tenantId);
+      res.json(summary);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/asset-processing/dispatch — dispatch a processing batch
+  app.post("/api/admin/asset-processing/dispatch", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, batchSize, jobTypes } = req.body as {
+        tenantId?: string;
+        batchSize?: number;
+        jobTypes?: string[];
+      };
+      const result = await dispatchProcessingBatch({ tenantId, batchSize, jobTypes });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/asset-processing/jobs/:jobId/execute — execute a single job
+  app.post("/api/admin/asset-processing/jobs/:jobId/execute", async (req: Request, res: Response) => {
+    try {
+      const { jobId } = req.params as { jobId: string };
+      const { tenantId } = req.body as { tenantId: string };
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId required" });
+      }
+      const result = await processAssetJob(jobId, tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/asset-processing/jobs/:jobId/retry — retry a failed job
+  app.post("/api/admin/asset-processing/jobs/:jobId/retry", async (req: Request, res: Response) => {
+    try {
+      const { jobId } = req.params as { jobId: string };
+      const { tenantId } = req.body as { tenantId: string };
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId required" });
+      }
+      const newJob = await retryAssetProcessingJob(jobId, tenantId);
+      res.json(newJob);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/jobs/:jobId/explain — explain job execution state
+  app.get("/api/admin/asset-processing/jobs/:jobId/explain", async (req: Request, res: Response) => {
+    try {
+      const { jobId } = req.params as { jobId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId query param required" });
+      }
+      const job = await getAssetProcessingJobById(jobId, tenantId);
+      if (!job) {
+        return res.status(404).json({ error: "Job not found" });
+      }
+      const explanation = explainJobExecution(job);
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/orphans — detect orphan jobs
+  app.get("/api/admin/asset-processing/orphans", async (req: Request, res: Response) => {
+    try {
+      const tenantId = req.query.tenantId as string;
+      const timeoutMinutes = req.query.timeoutMinutes
+        ? parseInt(req.query.timeoutMinutes as string, 10)
+        : 30;
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId query param required" });
+      }
+      const orphans = await detectOrphanJobs(tenantId, timeoutMinutes);
+      res.json({ orphans, count: orphans.length, timeoutMinutes });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/assets/:assetId/processing-jobs — list all jobs for an asset
+  app.get("/api/admin/assets/:assetId/processing-jobs", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId query param required" });
+      }
+      const jobs = await listJobs5I(tenantId, { assetId });
+      res.json({ jobs, count: jobs.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/assets/:assetId/enqueue-processing — enqueue first pipeline job
+  app.post("/api/admin/assets/:assetId/enqueue-processing", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const { tenantId, assetType, assetVersionId, jobType } = req.body as {
+        tenantId: string;
+        assetType?: string;
+        assetVersionId?: string;
+        jobType?: string;
+      };
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId required" });
+      }
+      const pipeline = getPipelineForAssetType(assetType ?? "document");
+      const entryJobType = jobType ?? pipeline.steps[0];
+      const job = await enqueueAssetJob5I({
+        tenantId,
+        assetId,
+        assetVersionId: assetVersionId ?? null,
+        jobType: entryJobType,
+        metadata: { enqueuedVia: "admin-api", assetType: assetType ?? "document" },
+      });
+      res.status(201).json({ job, pipeline: pipeline.steps });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

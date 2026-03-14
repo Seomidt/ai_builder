@@ -1027,3 +1027,63 @@ Hardens and documents the retrieval orchestration layer originally built in Phas
 
 ### Validation: 116/116 assertions passed (20 scenarios)
 S01 context-window.ts re-export, S02 estimateTokens, S03 budget greedy cut-off, S04 budget never exceeded (50 chunks), S05 wouldExceedBudget predicate, S06 ranking order, S07 Jaccard dedup, S08 content-hash dedup, S09 maxChunksPerDocument, S10 similarity threshold, S11 context window assembly, S12 budget stop boundary, S13 metadata traceability, S14 empty tenantId rejected, S15 empty knowledgeBaseId rejected, S16 empty embedding rejected, S17 deterministic output, S18 RetrievalExplainOutput shape, S19 buildContextPreview, S20 DB migration artifacts
+
+---
+
+## Phase 5I — Asset Processing Engine (branch: feature/retrieval-orchestration)
+
+### Purpose
+Implements the full asset processing pipeline: a pluggable processor registry, deterministic per-asset-type pipelines, stub processors for all supported modalities, a job execution engine with retry/orphan detection, a batch dispatcher, and full admin observability endpoints.
+
+### New files (12)
+- `server/services/asset-processing/asset_processor_registry.ts` — Processor registry with registerProcessor/getProcessor/listRegisteredProcessors/loadAllProcessors
+- `server/services/asset-processing/asset_processing_pipeline.ts` — Pipeline definitions for document/image/audio/webpage/email; getNextJobType, getPipelineEntryJob, explainPipeline
+- `server/services/asset-processing/asset_processing_dispatcher.ts` — Batch dispatcher: dispatchProcessingBatch, getQueueHealthSummary
+- `server/services/asset-processing/process_asset_job.ts` — Job execution engine: processAssetJob, retryAssetProcessingJob, detectOrphanJobs, explainJobExecution, MAX_ATTEMPTS=3
+- `server/services/asset-processing/processors/parse_document.ts` — Stub document text extractor; stores parsedText in version metadata
+- `server/services/asset-processing/processors/chunk_text.ts` — Fixed-size+overlap chunker; stores assetChunks in version metadata
+- `server/services/asset-processing/processors/embed_text.ts` — Stub embedding generator; stores assetEmbeddings in version metadata
+- `server/services/asset-processing/processors/index_asset.ts` — Marks asset as indexed; sets processingState=ready
+- `server/services/asset-processing/processors/ocr_image.ts` — Stub OCR; stores ocrText in version metadata
+- `server/services/asset-processing/processors/caption_image.ts` — Stub image captioning; stores captionText in version metadata
+- `server/services/asset-processing/processors/transcribe_audio.ts` — Stub audio transcription; stores transcriptText in version metadata
+- `server/lib/ai/migrate-phase5i.ts` — Adds 5 indexes to knowledge_asset_processing_jobs (idempotent)
+- `server/lib/ai/validate-phase5i.ts` — 20 scenarios, 86/86 assertions passed
+
+### Modified files (2)
+- `server/lib/ai/knowledge-asset-processing.ts` — Added getAssetProcessingJobById() public export
+- `server/routes/admin.ts` — 9 new admin endpoints (Phase 5I section)
+
+### DB changes (idempotent — no new tables)
+Added 5 indexes to `knowledge_asset_processing_jobs`:
+- `idx_asset_processing_jobs_queue` (job_status, created_at) — dispatcher poll performance
+- `idx_asset_processing_jobs_asset` (asset_id) — per-asset job listing
+- `idx_asset_processing_jobs_version` (asset_version_id) — per-version job listing
+- `idx_asset_processing_jobs_started` (job_status, started_at WHERE started) — orphan detection
+- `idx_asset_processing_jobs_failed` (tenant_id, job_status, attempt_number WHERE failed) — retry detection
+
+### Invariant coverage
+- INV-PROC-1: No concurrent duplicate execution (started-status guard)
+- INV-PROC-2: Tenant isolation on all job + asset queries
+- INV-PROC-3: Asset must exist before job executes
+- INV-PROC-4: Pipeline order is deterministic (ASSET_PIPELINES constant)
+- INV-PROC-5: All processors are idempotent (metadata presence check)
+- INV-PROC-6: Failed jobs preserve error message + attempt number
+- INV-PROC-7/8: Orphan detection via detectOrphanJobs() (>30 min started)
+- INV-PROC-9: index_asset rejects non-active assets
+- INV-PROC-10: Full observability via explainJobExecution + getQueueHealthSummary
+
+### Admin endpoints (9)
+- GET  /api/admin/asset-processing/processors — list registered processors
+- GET  /api/admin/asset-processing/pipeline/:assetType — explain pipeline
+- GET  /api/admin/asset-processing/queue-health — queue health summary
+- POST /api/admin/asset-processing/dispatch — dispatch batch
+- POST /api/admin/asset-processing/jobs/:jobId/execute — execute single job
+- POST /api/admin/asset-processing/jobs/:jobId/retry — retry failed job
+- GET  /api/admin/asset-processing/jobs/:jobId/explain — explain job state
+- GET  /api/admin/asset-processing/orphans — detect orphan jobs
+- GET  /api/admin/assets/:assetId/processing-jobs — list jobs for asset
+- POST /api/admin/assets/:assetId/enqueue-processing — enqueue pipeline entry job
+
+### Validation: 86/86 assertions passed (20 scenarios)
+S01 registry load+list, S02 hasProcessor+getProcessor, S03 ProcessorNotFoundError, S04 pipeline definitions all types, S05 getNextJobType traversal, S06 explainPipeline, S07 job lifecycle enqueue→start→complete, S08 job lifecycle enqueue→start→fail, S09 tenant isolation, S10 getAssetProcessingJobById null for unknown, S11 MAX_ATTEMPTS=3, S12 retry mechanism, S13 retry rejected for non-failed, S14 no orphans fresh tenant, S15 explainJobExecution full observability, S16 listAssetProcessingJobs filter by asset, S17 explainAssetProcessingState, S18 getQueueHealthSummary, S19 dispatchProcessingBatch empty batch, S20 INV-PROC-1 concurrent duplicate prevention
