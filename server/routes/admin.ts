@@ -419,6 +419,26 @@ import {
   summarizeRetrievalRuntimeMetrics,
 } from "../lib/ai/answer-grounding";
 import { describeRetrievalConfig } from "../lib/config/retrieval-config";
+import {
+  rewriteRetrievalQuery,
+  expandRetrievalQuery,
+  previewExpandedQuery,
+  explainQueryExpansion,
+  summarizeQueryRewrite,
+  explainQueryRewrite,
+} from "../lib/ai/query-rewriting";
+import {
+  computeRetrievalQualitySignals,
+  summarizeRetrievalQualitySignals,
+  explainRetrievalQuality,
+  summarizeRetrievalQualityMetrics,
+} from "../lib/ai/retrieval-quality";
+import {
+  buildRetrievalSafetySummary,
+  explainRetrievalSafety,
+} from "../lib/ai/retrieval-safety";
+import type { SafetyChunkInput } from "../lib/ai/retrieval-safety";
+import type { QualityChunkInput } from "../lib/ai/retrieval-quality";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -5477,6 +5497,173 @@ export function registerAdminRoutes(app: Express): void {
       if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
       const metrics = await summarizeRetrievalRuntimeMetrics(tenantId);
       res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 5Q — Retrieval Quality, Query Rewriting & Safety Guards
+  // Routes: 5Q-1 → 5Q-9
+  // INV-QUAL1: originalQuery always preserved
+  // INV-QUAL2: rewrite/expansion deterministic (algorithmic only)
+  // INV-QUAL3: expansion bounded by MAX_QUERY_EXPANSION_TERMS
+  // INV-QUAL4–5: quality signals computed from chunks; confidence band assigned
+  // INV-QUAL6: no false positives on clean chunks
+  // INV-QUAL7: safety filter applied before answer generation
+  // INV-QUAL8: explain/preview routes perform no writes
+  // INV-QUAL9: quality metrics tenant-isolated
+  // INV-QUAL10: existing retrieval tables unmodified
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 5Q-1: GET /api/admin/retrieval/query-rewrite/config
+  // Returns Phase 5Q configuration block (INV-QUAL8: no writes)
+  app.get("/api/admin/retrieval/query-rewrite/config", async (_req: Request, res: Response) => {
+    try {
+      const cfg = describeRetrievalConfig();
+      res.json({ config: cfg });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-2: POST /api/admin/retrieval/query-rewrite/preview
+  // Preview query rewrite result for a given query (INV-QUAL8: no writes, INV-QUAL1: original preserved)
+  app.post("/api/admin/retrieval/query-rewrite/preview", async (req: Request, res: Response) => {
+    try {
+      const { queryText, tenantId } = req.body as { queryText?: string; tenantId?: string };
+      if (!queryText) return void res.status(400).json({ error: "queryText required" });
+      const result = await rewriteRetrievalQuery({
+        queryText,
+        tenantId: tenantId ?? "preview",
+        enableSemanticRewrite: false,
+      });
+      const summary = summarizeQueryRewrite(result);
+      const explain = explainQueryRewrite(result);
+      res.json({ result, summary, explain });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-3: POST /api/admin/retrieval/query-expand/preview
+  // Preview query expansion for a given query (INV-QUAL8: no writes, INV-QUAL3: bounded)
+  app.post("/api/admin/retrieval/query-expand/preview", async (req: Request, res: Response) => {
+    try {
+      const { queryText } = req.body as { queryText?: string };
+      if (!queryText) return void res.status(400).json({ error: "queryText required" });
+      const preview = previewExpandedQuery(queryText);
+      const explain = explainQueryExpansion(queryText);
+      res.json({ preview, explain });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-4: GET /api/admin/retrieval/runs/:runId/quality-signals
+  // Return quality signals for a retrieval run (INV-QUAL8: no writes)
+  app.get("/api/admin/retrieval/runs/:runId/quality-signals", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const summary = await summarizeRetrievalQualitySignals(runId);
+      res.json(summary);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-5: POST /api/admin/retrieval/safety/preview
+  // Preview safety scan for a set of context chunks (INV-QUAL8: no writes, INV-QUAL6: no false positives)
+  app.post("/api/admin/retrieval/safety/preview", async (req: Request, res: Response) => {
+    try {
+      const { chunks, safetyMode } = req.body as {
+        chunks?: SafetyChunkInput[];
+        safetyMode?: "monitor_only" | "downrank" | "exclude_high_risk";
+      };
+      if (!Array.isArray(chunks) || chunks.length === 0) {
+        return void res.status(400).json({ error: "chunks array required" });
+      }
+      const mode = safetyMode ?? "monitor_only";
+      const summary = buildRetrievalSafetySummary(chunks, mode);
+      const explain = explainRetrievalSafety(summary);
+      res.json({ summary, explain });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-6: GET /api/admin/retrieval/runs/:runId/safety-summary
+  // Return safety summary for a given retrieval run (read-only, INV-QUAL8)
+  app.get("/api/admin/retrieval/runs/:runId/safety-summary", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const qualitySummary = await summarizeRetrievalQualitySignals(runId);
+      res.json({
+        runId,
+        safetyStatus: qualitySummary.found ? qualitySummary.safetyStatus : null,
+        flaggedChunkCount: qualitySummary.found ? qualitySummary.flaggedChunkCount : null,
+        found: qualitySummary.found,
+        note: "INV-QUAL8: no writes performed",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-7: GET /api/admin/retrieval/runs/:runId/explain-quality
+  // Explain quality signal computation for a given run (INV-QUAL8: no writes)
+  app.get("/api/admin/retrieval/runs/:runId/explain-quality", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const signals = await summarizeRetrievalQualitySignals(runId);
+      if (!signals.found) {
+        return void res.status(404).json({ error: "No quality signals found for run", runId });
+      }
+      const explanation = await explainRetrievalQuality(runId);
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-8: GET /api/admin/retrieval/quality/metrics/:tenantId
+  // Tenant-level quality metrics summary (INV-QUAL9: tenant-isolated)
+  app.get("/api/admin/retrieval/quality/metrics/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const metrics = await summarizeRetrievalQualityMetrics(tenantId);
+      res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-9: POST /api/admin/retrieval/quality/compute
+  // Compute quality signals for a set of chunks (persist optional) — used by orchestrator
+  app.post("/api/admin/retrieval/quality/compute", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, retrievalRunId, chunks, persistSignals } = req.body as {
+        tenantId?: string;
+        retrievalRunId?: string;
+        chunks?: QualityChunkInput[];
+        persistSignals?: boolean;
+      };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      if (!retrievalRunId) return void res.status(400).json({ error: "retrievalRunId required" });
+      if (!Array.isArray(chunks) || chunks.length === 0) {
+        return void res.status(400).json({ error: "chunks array required" });
+      }
+      const signals = await computeRetrievalQualitySignals({
+        tenantId,
+        retrievalRunId,
+        chunks,
+        persistSignals: persistSignals ?? false,
+      });
+      res.json(signals);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

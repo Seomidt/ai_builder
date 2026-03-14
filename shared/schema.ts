@@ -1209,6 +1209,19 @@ export const knowledgeRetrievalRuns = pgTable(
     maxContextTokens: integer("max_context_tokens").notNull(),
     documentCount: integer("document_count").notNull().default(0),
     createdAt: timestamp("created_at").notNull().defaultNow(),
+    // ── Phase 5Q — Query rewriting & safety columns ──────────────────────────
+    originalQueryText: text("original_query_text"),
+    normalizedQueryText: text("normalized_query_text"),
+    rewrittenQueryText: text("rewritten_query_text"),
+    expansionTerms: jsonb("expansion_terms"),
+    rewriteStrategy: text("rewrite_strategy"),
+    retrievalSafetyStatus: text("retrieval_safety_status"),
+    queryRewriteLatencyMs: integer("query_rewrite_latency_ms"),
+    queryExpansionCount: integer("query_expansion_count"),
+    safetyReviewLatencyMs: integer("safety_review_latency_ms"),
+    flaggedChunkCount: integer("flagged_chunk_count"),
+    excludedForSafetyCount: integer("excluded_for_safety_count"),
+    qualityConfidenceBand: text("quality_confidence_band"),
   },
   (t) => [
     sql`CONSTRAINT krr_max_context_check CHECK (${t.maxContextTokens} > 0)`,
@@ -5267,6 +5280,11 @@ export const knowledgeAnswerRuns = pgTable(
     rerankProviderCostUsd: numeric("rerank_provider_cost_usd", { precision: 10, scale: 8 }),
     advancedRerankUsed: boolean("advanced_rerank_used").default(false),
     createdAt: timestamp("created_at").notNull().defaultNow(),
+    // ── Phase 5Q — Quality & safety context ─────────────────────────────────
+    retrievalConfidenceBand: text("retrieval_confidence_band"),
+    retrievalSafetyStatus: text("retrieval_safety_status"),
+    rewriteStrategyUsed: text("rewrite_strategy_used"),
+    safetyFlagCount: integer("safety_flag_count"),
   },
   (t) => [
     index("kar_tenant_run_idx").on(t.tenantId, t.retrievalRunId),
@@ -5310,6 +5328,35 @@ export const insertKnowledgeAnswerCitationSchema = createInsertSchema(knowledgeA
 });
 export type InsertKnowledgeAnswerCitation = z.infer<typeof insertKnowledgeAnswerCitationSchema>;
 export type KnowledgeAnswerCitation = typeof knowledgeAnswerCitations.$inferSelect;
+
+// ── Phase 5Q — Retrieval Quality Signals ─────────────────────────────────────
+
+export const knowledgeRetrievalQualitySignals = pgTable(
+  "knowledge_retrieval_quality_signals",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    retrievalRunId: varchar("retrieval_run_id"),
+    confidenceBand: text("confidence_band"),
+    sourceDiversityScore: numeric("source_diversity_score", { precision: 6, scale: 4 }),
+    documentDiversityScore: numeric("document_diversity_score", { precision: 6, scale: 4 }),
+    contextRedundancyScore: numeric("context_redundancy_score", { precision: 6, scale: 4 }),
+    safetyStatus: text("safety_status"),
+    flaggedChunkCount: integer("flagged_chunk_count"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("krqs_tenant_run_idx").on(t.tenantId, t.retrievalRunId),
+    index("krqs_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+
+export const insertKnowledgeRetrievalQualitySignalSchema = createInsertSchema(knowledgeRetrievalQualitySignals).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeRetrievalQualitySignal = z.infer<typeof insertKnowledgeRetrievalQualitySignalSchema>;
+export type KnowledgeRetrievalQualitySignal = typeof knowledgeRetrievalQualitySignals.$inferSelect;
 
 // Legacy types kept for compatibility
 export const users = profiles;
