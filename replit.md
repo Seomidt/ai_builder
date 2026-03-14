@@ -999,3 +999,31 @@ Compat: GET migration-strategy, GET legacy-preview, GET registry-state
 
 ### Validation: 117/117 assertions passed (20 scenarios)
 S01 document asset, S02 image asset, S03 video asset, S04 asset version, S05 version switch, S06 invalid asset_type rejected, S07 invalid lifecycle_state rejected, S08 invalid processing_state rejected, S09 job enqueue/start/complete, S10 job failure + invalid transition, S11 storage object register, S12 archive/delete transitions, S13 tenant isolation, S14 KB-scoped listing, S15 version uniqueness, S16 explainKnowledgeAsset, S17 explainAssetProcessingState, S18 compat migration strategy + legacy preview + registry state, S19 explainStorageObject, S20 DB tables/indexes/constraints/CHECK enforcement
+
+## Phase 5H — Retrieval Orchestration & Context Assembly (branch: feature/retrieval-orchestration)
+
+### Purpose
+Hardens and documents the retrieval orchestration layer originally built in Phase 5E. Adds the canonical `context-window.ts` entry point requested by the Phase 5H declaration, an idempotent `migrate-phase5h.ts` that verifies and adds indexes to `knowledge_retrieval_runs`, and a comprehensive `validate-phase5h.ts` with 20 scenarios and 116 assertions covering all 10 service invariants (INV-RET1 through INV-RET10).
+
+### New files (3)
+- `server/lib/ai/context-window.ts` — Phase 5H canonical re-export of `context-window-builder.ts` (buildContextWindow, summarizeContextWindow, types)
+- `server/lib/ai/migrate-phase5h.ts` — Idempotent migration: verifies knowledge_retrieval_runs table, confirms embedding_version + retrieval_version columns, adds krr_tenant_kb_hash_idx and krr_query_hash_idx indexes
+- `server/lib/ai/validate-phase5h.ts` — 20 scenarios, 116/116 assertions passed
+
+### DB changes (idempotent — no new tables)
+- Added indexes: `krr_tenant_kb_hash_idx` (tenant_id, knowledge_base_id, query_hash), `krr_query_hash_idx` (query_hash)
+- Verified: `embedding_version` + `retrieval_version` columns on knowledge_retrieval_runs
+- All existing Phase 5E schema preserved
+
+### Invariant coverage
+- INV-RET1: empty embedding/kb rejected
+- INV-RET2: vector search safety filters enforced
+- INV-RET3: documentVersionId traced in metadata
+- INV-RET5: token budget never exceeded (multiple scenarios)
+- INV-RET7: empty tenantId rejected
+- INV-RET8: deterministic output verified
+- INV-RET9: duplicate suppression via Jaccard + content hash
+- INV-RET10: chunk metadata traceability (chunkId, documentId, versionId, similarityScore)
+
+### Validation: 116/116 assertions passed (20 scenarios)
+S01 context-window.ts re-export, S02 estimateTokens, S03 budget greedy cut-off, S04 budget never exceeded (50 chunks), S05 wouldExceedBudget predicate, S06 ranking order, S07 Jaccard dedup, S08 content-hash dedup, S09 maxChunksPerDocument, S10 similarity threshold, S11 context window assembly, S12 budget stop boundary, S13 metadata traceability, S14 empty tenantId rejected, S15 empty knowledgeBaseId rejected, S16 empty embedding rejected, S17 deterministic output, S18 RetrievalExplainOutput shape, S19 buildContextPreview, S20 DB migration artifacts
