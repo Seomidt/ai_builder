@@ -1087,3 +1087,63 @@ Added 5 indexes to `knowledge_asset_processing_jobs`:
 
 ### Validation: 86/86 assertions passed (20 scenarios)
 S01 registry load+list, S02 hasProcessor+getProcessor, S03 ProcessorNotFoundError, S04 pipeline definitions all types, S05 getNextJobType traversal, S06 explainPipeline, S07 job lifecycle enqueue→start→complete, S08 job lifecycle enqueue→start→fail, S09 tenant isolation, S10 getAssetProcessingJobById null for unknown, S11 MAX_ATTEMPTS=3, S12 retry mechanism, S13 retry rejected for non-failed, S14 no orphans fresh tenant, S15 explainJobExecution full observability, S16 listAssetProcessingJobs filter by asset, S17 explainAssetProcessingState, S18 getQueueHealthSummary, S19 dispatchProcessingBatch empty batch, S20 INV-PROC-1 concurrent duplicate prevention
+
+---
+
+## Phase 5J — Asset Ingestion APIs & Storage Finalization (branch: feature/retrieval-orchestration)
+
+### Purpose
+Completes the multimodal ingestion control plane: safe asset+version creation via `ingestKnowledgeAsset` / `ingestKnowledgeAssetVersion`, tenant-scoped storage object registry extended with Phase 5J functions, preview-only endpoints (no writes), full processing plan observability, 12 invariant guards enforced, 5 new DB indexes. drizzle-kit push applied all schema changes directly.
+
+### New files (4)
+- `server/lib/ai/knowledge-asset-ingestion.ts` — Ingestion service: ingestKnowledgeAsset, ingestKnowledgeAssetVersion, previewKnowledgeAssetIngestion, setCurrentAssetVersion, explainKnowledgeAssetIngestion, listKnowledgeAssetVersions, explainAssetProcessingPlan
+- `server/lib/ai/migrate-phase5j.ts` — Partial index migration + column/index verification (idempotent)
+- `server/lib/ai/validate-phase5j.ts` — 20 scenarios, 121/121 assertions passed
+
+### Modified files (3)
+- `server/lib/ai/knowledge-storage.ts` — Extended with Phase 5J functions: registerKnowledgeStorageObject, getKnowledgeStorageObjectById, findKnowledgeStorageObjectByLocation, explainKnowledgeStorageObjectData (pure), previewStorageBinding
+- `shared/schema.ts` — 4 tables extended (updated_by/tenant_id/ingest_status/source_upload_id/is_active/uploaded_at/created_by); 4 regular indexes + ingest_status constraint added
+- `server/routes/admin.ts` — 10 new Phase 5J admin endpoints
+
+### DB changes (applied via drizzle-kit push --force + migrate-phase5j.ts)
+New columns:
+- `knowledge_assets.updated_by` (text null)
+- `knowledge_asset_versions.tenant_id` (text null), `.ingest_status` (text null, CHECK constraint), `.source_upload_id` (text null), `.is_active` (boolean NOT NULL DEFAULT true)
+- `asset_storage_objects.uploaded_at` (timestamp null)
+- `knowledge_asset_processing_jobs.created_by` (text null)
+
+New indexes (5):
+- `ka_tenant_kb_type_idx` (tenant_id, knowledge_base_id, asset_type)
+- `ka_tenant_current_version_idx` (tenant_id, current_version_id)
+- `kav_tenant_checksum_partial_idx` (checksum_sha256 WHERE NOT NULL) — partial index, applied via migrate-phase5j.ts
+- `kapj_tenant_asset_status_idx` (tenant_id, asset_id, job_status)
+- `kapj_tenant_version_type_idx` (tenant_id, asset_version_id, job_type)
+
+### Invariants enforced (12)
+- INV-ING1: Every request is tenant-scoped
+- INV-ING2: New asset requires valid KB scope
+- INV-ING3: Versions immutable/append-only (monotonically increasing version_number)
+- INV-ING4: current_version_id only points to same-asset same-tenant version
+- INV-ING5: Storage linkage requires tenantId
+- INV-ING6: No cross-tenant storage reuse (unique constraint per tenant)
+- INV-ING7: Processing jobs enqueued only for correct asset+version
+- INV-ING8: Preview endpoints perform no writes
+- INV-ING9: Duplicate checksum is informational — no silent merge
+- INV-ING10: Deleted storage objects cannot become active versions
+- INV-ING11: Asset rolled back on version creation failure
+- INV-ING12: Existing Phase 5I/5B retrieval stack untouched
+
+### Admin endpoints (10)
+- POST /api/admin/knowledge/assets/ingest — full ingestion (new asset + v1 + optional processing)
+- POST /api/admin/knowledge/assets/ingest-version — add new version to existing asset
+- POST /api/admin/knowledge/assets/ingest-preview — preview without writes (INV-ING8)
+- GET  /api/admin/knowledge/assets/:assetId/ingestion-explain — full ingestion observability
+- GET  /api/admin/knowledge/assets/:assetId/versions — list all versions (tenant-scoped)
+- POST /api/admin/knowledge/assets/:assetId/set-current-version-v2 — safe current-version update
+- GET  /api/admin/knowledge/assets/:assetId/processing-plan — explain pipeline plan
+- POST /api/admin/knowledge/storage/register — register storage object
+- POST /api/admin/knowledge/storage/preview-bind — preview storage binding (no writes)
+- GET  /api/admin/knowledge/storage/:objectId/explain — explain storage object state
+
+### Validation: 121/121 assertions passed (20 scenarios)
+S01 DB column verification, S02 DB index verification, S03 registerKnowledgeStorageObject (INV-ING5/6), S04 previewStorageBinding (INV-ING9/8), S05 deleted storage block (INV-ING10), S06 ingestKnowledgeAsset full flow, S07 explainAssetProcessingPlan, S08 previewKnowledgeAssetIngestion (INV-ING8), S09 version append-only (INV-ING3), S10 setCurrentAssetVersion cross-asset guard (INV-ING4), S11 setCurrentAssetVersion blocks deleted storage (INV-ING10), S12 cannot add version to deleted asset, S13 cross-tenant isolation (INV-ING1/6), S14 missing KB rejected (INV-ING2), S15 explainKnowledgeAssetIngestion observability, S16 explainKnowledgeStorageObjectData pure function, S17 multi-version flow, S18 ingestion without auto-enqueue, S19 storage reuse (INV-ING9), S20 Phase 5I/12 retrieval stack intact

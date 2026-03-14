@@ -1,5 +1,5 @@
 /**
- * knowledge-storage.ts — Phase 5G
+ * knowledge-storage.ts — Phase 5G + Phase 5J
  * Service layer for the physical storage object registry (asset_storage_objects).
  * Distinct from Phase 5B knowledge_storage_objects (document-version-linked).
  *
@@ -141,6 +141,184 @@ export async function markStorageObjectDeleted(
     .returning();
 
   return updated;
+}
+
+// ─── Phase 5J additions ───────────────────────────────────────────────────────
+
+export interface RegisterKnowledgeStorageObjectInput {
+  tenantId: string;
+  storageProvider: StorageProvider;
+  bucketName: string;
+  objectKey: string;
+  storageClass?: StorageClass;
+  sizeBytes: number;
+  mimeType?: string;
+  checksumSha256?: string;
+  uploadedAt?: Date;
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Phase 5J: Register a storage object — enforces tenant isolation via unique constraint.
+ * Use findKnowledgeStorageObjectByLocation first if you want to reuse an existing row.
+ *
+ * INV-ING5: tenantId required
+ * INV-ING6: unique constraint prevents cross-tenant collision
+ */
+export async function registerKnowledgeStorageObject(
+  input: RegisterKnowledgeStorageObjectInput,
+): Promise<AssetStorageObject> {
+  if (!input.tenantId) throw new Error("tenantId is required (INV-ING5)");
+  if (!input.bucketName) throw new Error("bucketName is required");
+  if (!input.objectKey) throw new Error("objectKey is required");
+  if (!input.storageProvider) throw new Error("storageProvider is required");
+  if (input.sizeBytes < 0) throw new Error("sizeBytes must be >= 0");
+
+  if (!STORAGE_PROVIDERS.includes(input.storageProvider as StorageProvider)) {
+    throw new Error(`Invalid storageProvider: ${input.storageProvider}. Allowed: ${STORAGE_PROVIDERS.join(", ")}`);
+  }
+
+  const [obj] = await db
+    .insert(assetStorageObjects)
+    .values({
+      tenantId: input.tenantId,
+      storageProvider: input.storageProvider,
+      bucketName: input.bucketName,
+      objectKey: input.objectKey,
+      storageClass: input.storageClass ?? "hot",
+      sizeBytes: input.sizeBytes,
+      mimeType: input.mimeType ?? null,
+      checksumSha256: input.checksumSha256 ?? null,
+      uploadedAt: input.uploadedAt ?? null,
+      metadata: (input.metadata ?? null) as any,
+    })
+    .returning();
+
+  return obj;
+}
+
+/**
+ * Phase 5J: Get storage object by ID with tenant scope.
+ * Named alias for getStorageObjectById.
+ */
+export async function getKnowledgeStorageObjectById(
+  id: string,
+  tenantId: string,
+): Promise<AssetStorageObject | null> {
+  return getStorageObjectById(id, tenantId);
+}
+
+/**
+ * Phase 5J: Find storage object by tenant + bucket + key (exact location).
+ * Returns null if not found for this tenant.
+ *
+ * INV-ING6: tenant-scoped lookup only
+ */
+export async function findKnowledgeStorageObjectByLocation(
+  tenantId: string,
+  bucketName: string,
+  objectKey: string,
+): Promise<AssetStorageObject | null> {
+  const [obj] = await db
+    .select()
+    .from(assetStorageObjects)
+    .where(
+      and(
+        eq(assetStorageObjects.tenantId, tenantId),
+        eq(assetStorageObjects.bucketName, bucketName),
+        eq(assetStorageObjects.objectKey, objectKey),
+      ),
+    )
+    .limit(1);
+  return obj ?? null;
+}
+
+/**
+ * Phase 5J: Synchronous explain for a loaded storage object.
+ * Does not perform a DB lookup — caller must load first.
+ */
+export function explainKnowledgeStorageObjectData(
+  obj: AssetStorageObject,
+): Record<string, unknown> {
+  const isDeleted = obj.storageClass === "deleted" || obj.deletedAt !== null;
+  const isArchived = (obj.storageClass === "archive" || obj.archivedAt !== null) && !isDeleted;
+  const isUsable = !isDeleted;
+
+  return {
+    id: obj.id,
+    tenantId: obj.tenantId,
+    storageProvider: obj.storageProvider,
+    bucketName: obj.bucketName,
+    objectKey: obj.objectKey,
+    location: `${obj.bucketName}/${obj.objectKey}`,
+    storageClass: obj.storageClass,
+    sizeBytes: obj.sizeBytes,
+    mimeType: obj.mimeType ?? null,
+    checksumSha256: obj.checksumSha256 ?? null,
+    uploadedAt: (obj as any).uploadedAt ?? null,
+    createdAt: obj.createdAt,
+    archivedAt: obj.archivedAt ?? null,
+    deletedAt: obj.deletedAt ?? null,
+    isDeleted,
+    isArchived,
+    isUsableAsActiveVersion: isUsable,
+    explanation: [
+      `${obj.storageProvider}: ${obj.bucketName}/${obj.objectKey}`,
+      `Class: ${obj.storageClass} | Deleted: ${isDeleted} | Archived: ${isArchived}`,
+      isDeleted ? "WARNING: cannot bind as active version (INV-ING10)" : "Available for binding",
+    ],
+  };
+}
+
+/**
+ * Phase 5J: Preview storage binding — no writes (INV-ING8).
+ */
+export async function previewStorageBinding(input: RegisterKnowledgeStorageObjectInput): Promise<{
+  tenantId: string;
+  bucketName: string;
+  objectKey: string;
+  storageProvider: string;
+  storageClass: string;
+  sizeBytes: number;
+  existingObjectId: string | null;
+  isNew: boolean;
+  duplicateChecksumDetected: boolean;
+  duplicateChecksumCount: number;
+  wouldWrite: false;
+}> {
+  const existing = await findKnowledgeStorageObjectByLocation(
+    input.tenantId,
+    input.bucketName,
+    input.objectKey,
+  );
+
+  let duplicateCount = 0;
+  if (input.checksumSha256) {
+    const dupes = await db
+      .select()
+      .from(assetStorageObjects)
+      .where(
+        and(
+          eq(assetStorageObjects.tenantId, input.tenantId),
+          eq(assetStorageObjects.checksumSha256, input.checksumSha256),
+        ),
+      );
+    duplicateCount = dupes.length;
+  }
+
+  return {
+    tenantId: input.tenantId,
+    bucketName: input.bucketName,
+    objectKey: input.objectKey,
+    storageProvider: input.storageProvider,
+    storageClass: input.storageClass ?? "hot",
+    sizeBytes: input.sizeBytes,
+    existingObjectId: existing?.id ?? null,
+    isNew: existing === null,
+    duplicateChecksumDetected: duplicateCount > 0,
+    duplicateChecksumCount: duplicateCount,
+    wouldWrite: false,
+  };
 }
 
 // ─── explainStorageObject ─────────────────────────────────────────────────────

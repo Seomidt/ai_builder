@@ -339,6 +339,22 @@ import {
   listAssetProcessingJobs as listJobs5I,
   getAssetProcessingJobById,
 } from "../lib/ai/knowledge-asset-processing";
+import {
+  ingestKnowledgeAsset,
+  ingestKnowledgeAssetVersion,
+  previewKnowledgeAssetIngestion,
+  setCurrentAssetVersion,
+  explainKnowledgeAssetIngestion,
+  listKnowledgeAssetVersions,
+  explainAssetProcessingPlan,
+} from "../lib/ai/knowledge-asset-ingestion";
+import {
+  registerKnowledgeStorageObject,
+  findKnowledgeStorageObjectByLocation,
+  getKnowledgeStorageObjectById,
+  previewStorageBinding,
+  explainKnowledgeStorageObjectData,
+} from "../lib/ai/knowledge-storage";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -4049,6 +4065,173 @@ export function registerAdminRoutes(app: Express): void {
         metadata: { enqueuedVia: "admin-api", assetType: assetType ?? "document" },
       });
       res.status(201).json({ job, pipeline: pipeline.steps });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5J: Asset Ingestion APIs & Storage Finalization ──────────────────
+
+  // POST /api/admin/knowledge/assets/ingest — ingest a new asset
+  app.post("/api/admin/knowledge/assets/ingest", async (req: Request, res: Response) => {
+    try {
+      const {
+        tenantId, knowledgeBaseId, assetType, sourceType, title,
+        storage, metadata, createdBy, autoSetCurrent, autoEnqueueProcessing,
+      } = req.body as {
+        tenantId: string; knowledgeBaseId: string; assetType: string;
+        sourceType: string; title?: string; storage: any;
+        metadata?: Record<string, unknown>; createdBy?: string;
+        autoSetCurrent?: boolean; autoEnqueueProcessing?: boolean;
+      };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      if (!knowledgeBaseId) return res.status(400).json({ error: "knowledgeBaseId required" });
+      if (!assetType) return res.status(400).json({ error: "assetType required" });
+      if (!sourceType) return res.status(400).json({ error: "sourceType required" });
+      if (!storage) return res.status(400).json({ error: "storage required" });
+      const result = await ingestKnowledgeAsset({
+        tenantId, knowledgeBaseId, assetType, sourceType, title,
+        storage, metadata, createdBy, autoSetCurrent, autoEnqueueProcessing,
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/knowledge/assets/ingest-version — add a new version to existing asset
+  app.post("/api/admin/knowledge/assets/ingest-version", async (req: Request, res: Response) => {
+    try {
+      const {
+        tenantId, assetId, storage, metadata, createdBy,
+        autoSetCurrent, autoEnqueueProcessing,
+      } = req.body as {
+        tenantId: string; assetId: string; storage: any;
+        metadata?: Record<string, unknown>; createdBy?: string;
+        autoSetCurrent?: boolean; autoEnqueueProcessing?: boolean;
+      };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      if (!assetId) return res.status(400).json({ error: "assetId required" });
+      if (!storage) return res.status(400).json({ error: "storage required" });
+      const result = await ingestKnowledgeAssetVersion({
+        tenantId, assetId, storage, metadata, createdBy,
+        autoSetCurrent, autoEnqueueProcessing,
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/knowledge/assets/ingest-preview — preview ingestion without writes
+  app.post("/api/admin/knowledge/assets/ingest-preview", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.body as { tenantId: string };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewKnowledgeAssetIngestion(req.body);
+      res.json(preview);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/knowledge/assets/:assetId/ingestion-explain — explain ingestion state
+  app.get("/api/admin/knowledge/assets/:assetId/ingestion-explain", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId query param required" });
+      const explanation = await explainKnowledgeAssetIngestion(assetId, tenantId);
+      res.json(explanation);
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/knowledge/assets/:assetId/versions — list all versions for asset
+  app.get("/api/admin/knowledge/assets/:assetId/versions", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId query param required" });
+      const versions = await listKnowledgeAssetVersions(assetId, tenantId);
+      res.json({ versions, count: versions.length });
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/knowledge/assets/:assetId/set-current-version — safely set current version
+  app.post("/api/admin/knowledge/assets/:assetId/set-current-version-v2", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const { tenantId, versionId } = req.body as { tenantId: string; versionId: string };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      if (!versionId) return res.status(400).json({ error: "versionId required" });
+      const updated = await setCurrentAssetVersion(assetId, versionId, tenantId);
+      res.json({ asset: updated, currentVersionId: versionId });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/knowledge/assets/:assetId/processing-plan — explain pipeline plan
+  app.get("/api/admin/knowledge/assets/:assetId/processing-plan", async (req: Request, res: Response) => {
+    try {
+      const assetType = req.query.assetType as string;
+      const mimeType = req.query.mimeType as string | undefined;
+      const sourceType = req.query.sourceType as string | undefined;
+      if (!assetType) return res.status(400).json({ error: "assetType query param required" });
+      const plan = explainAssetProcessingPlan(assetType, mimeType, sourceType);
+      res.json(plan);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/knowledge/storage/register — register new storage object
+  app.post("/api/admin/knowledge/storage/register", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, storageProvider, bucketName, objectKey,
+        storageClass, sizeBytes, mimeType, checksumSha256, uploadedAt } = req.body as {
+        tenantId: string; storageProvider: any; bucketName: string;
+        objectKey: string; storageClass?: any; sizeBytes: number;
+        mimeType?: string; checksumSha256?: string; uploadedAt?: string;
+      };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const obj = await registerKnowledgeStorageObject({
+        tenantId, storageProvider, bucketName, objectKey, storageClass,
+        sizeBytes, mimeType, checksumSha256,
+        uploadedAt: uploadedAt ? new Date(uploadedAt) : undefined,
+      });
+      res.status(201).json(obj);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/knowledge/storage/preview-bind — preview binding (no writes)
+  app.post("/api/admin/knowledge/storage/preview-bind", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.body as { tenantId: string };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewStorageBinding(req.body);
+      res.json(preview);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/knowledge/storage/:objectId/explain — explain storage object
+  app.get("/api/admin/knowledge/storage/:objectId/explain", async (req: Request, res: Response) => {
+    try {
+      const { objectId } = req.params as { objectId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId query param required" });
+      const obj = await getKnowledgeStorageObjectById(objectId, tenantId);
+      if (!obj) return res.status(404).json({ error: "Storage object not found" });
+      const explanation = explainKnowledgeStorageObjectData(obj);
+      res.json(explanation);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

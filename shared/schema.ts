@@ -1392,6 +1392,7 @@ export const knowledgeAssets = pgTable(
     checksumSha256: text("checksum_sha256"),
     metadata: jsonb("metadata"),
     createdBy: text("created_by"),
+    updatedBy: text("updated_by"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
@@ -1405,6 +1406,8 @@ export const knowledgeAssets = pgTable(
     index("ka_tenant_type_created_idx").on(t.tenantId, t.assetType, t.createdAt),
     index("ka_tenant_lifecycle_idx").on(t.tenantId, t.lifecycleState, t.createdAt),
     index("ka_tenant_processing_idx").on(t.tenantId, t.processingState, t.createdAt),
+    index("ka_tenant_kb_type_idx").on(t.tenantId, t.knowledgeBaseId, t.assetType),
+    index("ka_tenant_current_version_idx").on(t.tenantId, t.currentVersionId),
   ],
 );
 
@@ -1429,6 +1432,7 @@ export const knowledgeAssetVersions = pgTable(
     assetId: varchar("asset_id")
       .notNull()
       .references(() => knowledgeAssets.id),
+    tenantId: text("tenant_id"),
     versionNumber: integer("version_number").notNull(),
     storageObjectId: varchar("storage_object_id"),
     parserVersion: text("parser_version"),
@@ -1436,6 +1440,9 @@ export const knowledgeAssetVersions = pgTable(
     checksumSha256: text("checksum_sha256"),
     sizeBytes: bigint("size_bytes", { mode: "number" }),
     mimeType: text("mime_type"),
+    ingestStatus: text("ingest_status"),
+    sourceUploadId: text("source_upload_id"),
+    isActive: boolean("is_active").notNull().default(true),
     metadata: jsonb("metadata"),
     createdBy: text("created_by"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
@@ -1443,6 +1450,7 @@ export const knowledgeAssetVersions = pgTable(
   (t) => [
     sql`CONSTRAINT kav_version_number_check CHECK (${t.versionNumber} > 0)`,
     sql`CONSTRAINT kav_size_bytes_check CHECK (${t.sizeBytes} IS NULL OR ${t.sizeBytes} >= 0)`,
+    sql`CONSTRAINT kav_ingest_status_check CHECK (${t.ingestStatus} IS NULL OR ${t.ingestStatus} IN ('pending','registered','processing','ready','failed'))`,
     uniqueIndex("kav_asset_version_uniq").on(t.assetId, t.versionNumber),
     index("kav_asset_created_idx").on(t.assetId, t.createdAt),
     index("kav_storage_object_idx").on(t.storageObjectId),
@@ -1476,6 +1484,7 @@ export const assetStorageObjects = pgTable(
     mimeType: text("mime_type"),
     checksumSha256: text("checksum_sha256"),
     metadata: jsonb("metadata"),
+    uploadedAt: timestamp("uploaded_at"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     archivedAt: timestamp("archived_at"),
     deletedAt: timestamp("deleted_at"),
@@ -1522,6 +1531,7 @@ export const knowledgeAssetProcessingJobs = pgTable(
     startedAt: timestamp("started_at"),
     completedAt: timestamp("completed_at"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
+    createdBy: text("created_by"),
   },
   (t) => [
     sql`CONSTRAINT kapj_attempt_number_check CHECK (${t.attemptNumber} > 0)`,
@@ -1531,6 +1541,8 @@ export const knowledgeAssetProcessingJobs = pgTable(
     index("kapj_asset_created_idx").on(t.assetId, t.createdAt),
     index("kapj_status_created_idx").on(t.jobStatus, t.createdAt),
     index("kapj_type_created_idx").on(t.jobType, t.createdAt),
+    index("kapj_tenant_asset_status_idx").on(t.tenantId, t.assetId, t.jobStatus),
+    index("kapj_tenant_version_type_idx").on(t.tenantId, t.assetVersionId, t.jobType),
   ],
 );
 

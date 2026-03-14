@@ -144,8 +144,6 @@ async function createTestAsset(
       versionNumber: 1,
       mimeType: "text/plain",
       sizeBytes: 1024,
-      storageBackend: "local",
-      storageKey: `test/${asset.id}/v1`,
       isActive: true,
     })
     .returning();
