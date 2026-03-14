@@ -1202,3 +1202,113 @@ All processor outputs stored in existing `knowledge_asset_versions.metadata` JSO
 
 ### Validation: 110/110 assertions passed (20 scenarios)
 S01 Environment capability detection structure, S02 assertSupportedMimeType valid, S03 assertSupportedMimeType invalid (INV-MPROC3), S04 loadAssetBinaryForProcessing file-not-found, S05 cross-tenant access denied (INV-MPROC12), S06 non-local storage provider explicit failure, S07 text normalization helpers, S08 summarizeProcessorFailure structure, S09 safeEnqueueDownstreamJob first enqueue, S10 idempotent enqueue (INV-MPROC6), S11 OCR processor real/explicit-failure (INV-MPROC8), S12 caption preserves OCR metadata (INV-MPROC5), S13 transcription file-not-found failure path, S14 video metadata extraction (ffprobe), S15 video frame sampling (ffmpeg), S16 video pipeline structure, S17 all 9 processors registered, S18 SUPPORTED_MIME_TYPES complete, S19 processors do not mark retrieval-ready (INV-MPROC7), S20 retrieval/trust-signal stack intact (INV-MPROC9/10)
+
+---
+
+## Phase 5K.1 — Supabase RLS & Database Security Hardening (branch: feature/retrieval-orchestration)
+
+### Purpose
+Fixes Supabase database security lints: RLS disabled on all public tables, extensions in public schema, mutable function search_path. Establishes mandatory database security baseline for all future phases.
+
+### What was done
+- **RLS enabled** on all 95 public schema tables (was 0/95 before this phase)
+- **228 tenant-scoped RLS policies** created (57 tenant tables × 4 CRUD policies each)
+- **Policy model:** `current_setting('app.current_tenant_id', true)` — PostgreSQL-native, no Supabase Auth dependency
+- **Service-role safety:** Backend connects via service role (SUPABASE_DB_POOL_URL). Service role bypasses RLS by default → backend unaffected by policy enablement
+- **38 global/system tables:** RLS enabled, no tenant policies → deny-all for non-service-role connections (explicit documented exceptions per INV-RLS5)
+- **Function hardened:** `check_no_overlapping_tenant_subscriptions` — added `SET search_path = public`
+- **Extensions:** `vector` and `btree_gist` remain in public schema (justified exceptions: would break type resolution and GiST indexes if moved)
+
+### Table classification
+- **Tenant tables (57):** All tables with `tenant_id` column — full CRUD isolation policies applied
+- **Global/system tables (38):** No `tenant_id` — service-role-only access enforced via RLS deny-all
+
+### Extension exceptions (INV-RLS8)
+- `vector`: EXEMPT — 305 extension functions, moving breaks type resolution
+- `btree_gist`: EXEMPT — 5 active GiST/exclusion indexes (billing_periods, customer_pricing_versions, provider_pricing_versions, customer_storage_pricing_versions, storage_pricing_versions)
+- All other extensions correctly in non-public schemas (extensions, pg_catalog, graphql, vault)
+
+### Files created (3)
+- `server/lib/ai/migrate-phase5k1.ts` — idempotent, explains actions taken
+- `server/lib/ai/run-phase5k1-migration.ts` — single-connection executor (avoids deadlock)
+- `server/lib/ai/validate-phase5k1.ts` — 20 scenarios, 102/102 assertions passed
+
+### Files modified (2)
+- `server/routes/admin.ts` — 5 new read-only security inspection endpoints
+- `replit.md` — Phase 5K.1 section + mandatory future rules below
+
+### Admin endpoints (5 new, read-only)
+- GET /api/admin/db-security/rls-status — RLS state for all tables
+- GET /api/admin/db-security/table/:tableName/policies — policies per table
+- GET /api/admin/db-security/functions/search-path — function hardening status
+- GET /api/admin/db-security/extensions — extension schema locations
+- GET /api/admin/db-security/exceptions — all documented exceptions with justifications
+
+### Invariants enforced (10)
+- INV-RLS1: All tenant-owned public tables must have RLS enabled
+- INV-RLS2: All tenant-owned public tables must have tenant-safe SELECT policies
+- INV-RLS3: All tenant-owned public tables must have tenant-safe INSERT/UPDATE/DELETE controls
+- INV-RLS4: No tenant policy may allow cross-tenant access (current_setting isolation enforced)
+- INV-RLS5: Global/static exempted tables explicitly documented and justified
+- INV-RLS6: Internal service-role paths functional (service role bypasses RLS)
+- INV-RLS7: Functions requiring hardened search_path fixed (check_no_overlapping_tenant_subscriptions)
+- INV-RLS8: Extensions in public schema explicitly justified (vector, btree_gist)
+- INV-RLS9: Future phases MUST add RLS+policies for new tenant tables by default
+- INV-RLS10: Live DB verification proves final state (102/102 assertions)
+
+### Validation: 102/102 assertions passed (20 scenarios)
+S01 detect all public tables, S02 classify tenant tables, S03 classify global tables, S04 RLS enabled all tables (INV-RLS1), S05 SELECT policies (INV-RLS2), S06 INSERT policies (INV-RLS3), S07 UPDATE policies, S08 DELETE policies, S09 no unresolved tenant table, S10 no cross-tenant policy (INV-RLS4), S11 exempted tables documented (INV-RLS5), S12 function hardened (INV-RLS7), S13 extension schema (INV-RLS8), S14 knowledge stack works, S15 billing stack works, S16 retrieval stack works, S17 trust-signal stack works, S18 asset processing works, S19 idempotency, S20 live DB verification complete
+
+---
+
+## MANDATORY DATABASE SECURITY RULES (effective from Phase 5K.1)
+
+These rules are NON-NEGOTIABLE for all future phases. No phase may claim completion without satisfying all rules.
+
+### RULE 1 — New tenant tables MUST have RLS enabled in the same phase
+Any new public schema table that contains `tenant_id` MUST have `ENABLE ROW LEVEL SECURITY` applied in the SAME phase that creates the table. Do not defer.
+
+### RULE 2 — New tenant tables MUST have tenant-scoped policies before phase completion
+After enabling RLS on a new tenant table, all four CRUD policies MUST be created before the phase is marked complete. Use this exact pattern:
+```sql
+CREATE POLICY "rls_tenant_select" ON public."<table>"
+  FOR SELECT USING (
+    current_setting('app.current_tenant_id', true) <> ''
+    AND tenant_id::text = current_setting('app.current_tenant_id', true)
+  );
+CREATE POLICY "rls_tenant_insert" ON public."<table>"
+  FOR INSERT WITH CHECK (
+    current_setting('app.current_tenant_id', true) <> ''
+    AND tenant_id::text = current_setting('app.current_tenant_id', true)
+  );
+CREATE POLICY "rls_tenant_update" ON public."<table>"
+  FOR UPDATE
+  USING (current_setting('app.current_tenant_id', true) <> '' AND tenant_id::text = current_setting('app.current_tenant_id', true))
+  WITH CHECK (current_setting('app.current_tenant_id', true) <> '' AND tenant_id::text = current_setting('app.current_tenant_id', true));
+CREATE POLICY "rls_tenant_delete" ON public."<table>"
+  FOR DELETE USING (
+    current_setting('app.current_tenant_id', true) <> ''
+    AND tenant_id::text = current_setting('app.current_tenant_id', true)
+  );
+```
+
+### RULE 3 — New DB functions MUST define explicit search_path
+Any new function created in the public schema MUST include `SET search_path = public` in its definition. Example:
+```sql
+CREATE OR REPLACE FUNCTION public.my_function()
+  RETURNS trigger LANGUAGE plpgsql
+  SECURITY INVOKER
+  SET search_path = public
+AS $function$ ... $function$;
+```
+
+### RULE 4 — New extensions must not be left in public schema
+New extensions MUST be installed in the `extensions` schema unless a specific justified exception is documented. To install in extensions schema: `CREATE EXTENSION IF NOT EXISTS <name> SCHEMA extensions;`
+
+### RULE 5 — Phase completion checklist (database)
+Before any phase is marked complete, verify:
+- [ ] RLS enabled on all new tenant-owned tables
+- [ ] All four CRUD policies created for each tenant table
+- [ ] Any new DB functions have `SET search_path = public`
+- [ ] Any new extensions are NOT in public schema (or justified exception documented)
+- [ ] Live DB verification confirms state with actual SQL queries (not pseudo-output)

@@ -16,7 +16,7 @@
 
 import { type Express, type Request, type Response } from "express";
 import { z } from "zod";
-import { eq, and } from "drizzle-orm";
+import { eq, and, sql } from "drizzle-orm";
 import { db } from "../db";
 import { knowledgeAssets, knowledgeAssetVersions } from "@shared/schema";
 import {
@@ -4443,6 +4443,213 @@ export function registerAdminRoutes(app: Express): void {
         ...caps,
         detectedAt: new Date().toISOString(),
         note: "Capability detection is truthful — no faking of availability (INV-MPROC8)",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ============================================================
+  // Phase 5K.1 — DB Security Inspection Routes (read-only)
+  // ============================================================
+
+  // GET /api/admin/db-security/rls-status
+  // Returns RLS enabled/disabled status for all public tables
+  app.get("/api/admin/db-security/rls-status", async (_req: Request, res: Response) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT
+          c.relname AS table_name,
+          c.relrowsecurity AS rls_enabled,
+          c.relforcerowsecurity AS rls_forced,
+          (SELECT COUNT(*) FROM pg_policies p WHERE p.schemaname = 'public' AND p.tablename = c.relname) AS policy_count
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r'
+        ORDER BY c.relname
+      `);
+      const enabled = rows.rows.filter((r: any) => r.rls_enabled).length;
+      const disabled = rows.rows.filter((r: any) => !r.rls_enabled).length;
+      res.json({
+        summary: { total: rows.rows.length, rls_enabled: enabled, rls_disabled: disabled },
+        tables: rows.rows,
+        phase: "5K.1",
+        verified_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/db-security/table/:tableName/policies
+  // Returns all RLS policies for a specific table
+  app.get("/api/admin/db-security/table/:tableName/policies", async (req: Request, res: Response) => {
+    try {
+      const tableName = String(req.params.tableName);
+      if (!/^[a-z_][a-z0-9_]*$/.test(tableName)) {
+        return res.status(400).json({ error: "Invalid table name" });
+      }
+      const policies = await db.execute(sql`
+        SELECT policyname, cmd, permissive, roles, qual, with_check
+        FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = ${tableName}
+        ORDER BY policyname
+      `);
+      const rlsStatus = await db.execute(sql`
+        SELECT relrowsecurity FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = ${tableName}
+      `);
+      res.json({
+        table: tableName,
+        rls_enabled: rlsStatus.rows[0]?.relrowsecurity ?? false,
+        policy_count: policies.rows.length,
+        policies: policies.rows,
+        inspected_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/db-security/functions/search-path
+  // Returns search_path status for all custom public schema functions
+  app.get("/api/admin/db-security/functions/search-path", async (_req: Request, res: Response) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT
+          p.proname AS function_name,
+          p.prokind AS kind,
+          CASE WHEN pg_get_functiondef(p.oid) ILIKE '%search_path%' THEN true ELSE false END AS has_search_path,
+          CASE WHEN p.proconfig IS NOT NULL AND array_to_string(p.proconfig, ',') ILIKE '%search_path%' THEN true ELSE false END AS search_path_in_config
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public'
+          AND p.prokind IN ('f','p','w')
+          AND p.proname NOT IN (
+            SELECT p2.proname FROM pg_proc p2
+            JOIN pg_depend d ON d.objid = p2.oid
+            JOIN pg_extension e ON e.oid = d.refobjid
+            WHERE d.deptype = 'e'
+          )
+        ORDER BY p.proname
+      `);
+      res.json({
+        custom_functions: rows.rows.length,
+        functions: rows.rows,
+        note: "Extension-owned functions (vector, btree_gist) excluded — cannot modify extension functions",
+        inspected_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/db-security/extensions
+  // Returns extension schema locations and safety classification
+  app.get("/api/admin/db-security/extensions", async (_req: Request, res: Response) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT extname, extversion, n.nspname AS schema
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        ORDER BY extname
+      `);
+      const classified = rows.rows.map((r: any) => ({
+        ...r,
+        in_public: r.schema === "public",
+        safety_status: r.schema !== "public"
+          ? "SAFE — not in public schema"
+          : r.extname === "vector"
+          ? "EXEMPT — INV-RLS8-EXEMPT-vector: 305 extension functions, moving would break type resolution"
+          : r.extname === "btree_gist"
+          ? "EXEMPT — INV-RLS8-EXEMPT-btree_gist: 5 active GiST/exclusion indexes depend on this schema location"
+          : "REVIEW — in public schema, justification required",
+      }));
+      const publicCount = classified.filter((r: any) => r.in_public).length;
+      res.json({
+        total_extensions: classified.length,
+        in_public_schema: publicCount,
+        extensions: classified,
+        inspected_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/db-security/exceptions
+  // Returns all documented security exceptions with justifications
+  app.get("/api/admin/db-security/exceptions", async (_req: Request, res: Response) => {
+    try {
+      const globalExemptTables = [
+        { table: "admin_change_events", justification: "operator audit log — service-role only, no tenant scope" },
+        { table: "admin_change_requests", justification: "operator workflow — service-role only" },
+        { table: "ai_approvals", justification: "internal approval workflow — operator-scoped" },
+        { table: "ai_artifacts", justification: "internal build artifacts — operator-scoped" },
+        { table: "ai_model_overrides", justification: "global model config — no tenant scope" },
+        { table: "ai_model_pricing", justification: "global pricing reference — no tenant scope" },
+        { table: "ai_provider_reconciliation_runs", justification: "global reconciliation — operator-scoped" },
+        { table: "ai_runs", justification: "global AI run registry — operator-scoped" },
+        { table: "ai_steps", justification: "global AI step registry — operator-scoped" },
+        { table: "ai_tool_calls", justification: "global tool call log — operator-scoped" },
+        { table: "architecture_agent_configs", justification: "global architecture config" },
+        { table: "architecture_capability_configs", justification: "global capability config" },
+        { table: "architecture_policy_bindings", justification: "global policy bindings" },
+        { table: "architecture_profiles", justification: "global architecture profiles" },
+        { table: "architecture_template_bindings", justification: "global template bindings" },
+        { table: "architecture_versions", justification: "global architecture versions" },
+        { table: "artifact_dependencies", justification: "global artifact dependency graph" },
+        { table: "billing_audit_runs", justification: "operator billing audit runs" },
+        { table: "billing_job_definitions", justification: "global job definitions" },
+        { table: "billing_job_runs", justification: "global job run log" },
+        { table: "billing_metrics_snapshots", justification: "global metrics — operator-scoped" },
+        { table: "billing_periods", justification: "global billing period reference" },
+        { table: "billing_recovery_actions", justification: "operator recovery actions" },
+        { table: "billing_recovery_runs", justification: "operator recovery runs" },
+        { table: "integrations", justification: "global integrations config" },
+        { table: "invoice_line_items", justification: "linked to tenant invoices but accessed via service role" },
+        { table: "organization_members", justification: "org membership — service-role only" },
+        { table: "organization_secrets", justification: "org secrets — service-role only" },
+        { table: "organizations", justification: "org registry — service-role only" },
+        { table: "plan_entitlements", justification: "global plan config reference" },
+        { table: "profiles", justification: "user profiles — service-role only in current arch" },
+        { table: "projects", justification: "project registry — service-role only" },
+        { table: "provider_pricing_versions", justification: "global pricing reference" },
+        { table: "provider_reconciliation_runs", justification: "global reconciliation runs" },
+        { table: "provider_usage_snapshots", justification: "global usage snapshots" },
+        { table: "storage_pricing_versions", justification: "global storage pricing" },
+        { table: "subscription_plans", justification: "global plan reference — read-only config" },
+      ];
+
+      const extensionExceptions = [
+        {
+          name: "vector",
+          schema: "public",
+          exception_code: "INV-RLS8-EXEMPT-vector",
+          justification: "305 extension functions/operators depend on public schema location. Moving would break vector type resolution in all queries. Backend uses service role — no direct public access risk.",
+        },
+        {
+          name: "btree_gist",
+          schema: "public",
+          exception_code: "INV-RLS8-EXEMPT-btree_gist",
+          justification: "5 active GiST/exclusion indexes (billing_periods, customer_pricing_versions, provider_pricing_versions, customer_storage_pricing_versions, storage_pricing_versions) depend on btree_gist in current schema location.",
+        },
+      ];
+
+      res.json({
+        global_table_exceptions: {
+          count: globalExemptTables.length,
+          policy: "RLS enabled, no tenant policies — deny-all for non-service-role connections",
+          tables: globalExemptTables,
+        },
+        extension_exceptions: extensionExceptions,
+        function_exceptions: {
+          note: "304 extension-owned functions excluded from search_path hardening (owned by vector/btree_gist extensions)",
+          custom_functions_hardened: ["check_no_overlapping_tenant_subscriptions"],
+        },
+        documented_at: "Phase 5K.1",
+        updated_at: new Date().toISOString(),
       });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
