@@ -398,6 +398,19 @@ import {
   summarizeRerankingImpact,
   buildHybridRunSummary,
 } from "../lib/ai/reranking";
+import {
+  explainRerankShortlist,
+  summarizeShortlistComposition,
+  explainAdvancedReranking,
+  summarizeAdvancedRerankingImpact,
+  listAdvancedRerankCandidates,
+  explainFallbackReranking,
+  summarizeFallbackUsage,
+  summarizeCalibrationFactors,
+  summarizeAdvancedRerankMetrics,
+  previewAdvancedReranking,
+} from "../lib/ai/advanced-reranking";
+import { explainAdvancedRerankingProvider } from "../lib/ai/advanced-reranking-provider";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -5181,6 +5194,199 @@ export function registerAdminRoutes(app: Express): void {
         totalBothChannels: fused.filter((c) => c.channelOrigin === "vector_and_lexical").length,
         strategy: strategyExplain,
         note: "Preview only — no persistence. Use runHybridRetrieval with persistRun=true to persist.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 5O: Advanced Reranking admin routes ─────────────────────────────
+  // All routes: admin/internal only, read-only except preview, no hidden writes
+  // INV-RER7: all explain/* endpoints perform ZERO writes
+
+  // Route 5O-1: GET /api/admin/retrieval/run/:runId/rerank-summary
+  // Full advanced reranking summary for a run
+  app.get("/api/admin/retrieval/run/:runId/rerank-summary", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [shortlist, impact, calibration, fallback] = await Promise.all([
+        summarizeShortlistComposition(runId),
+        summarizeAdvancedRerankingImpact(runId),
+        summarizeCalibrationFactors(runId),
+        summarizeFallbackUsage(runId),
+      ]);
+      res.json({
+        runId,
+        shortlist,
+        impact,
+        calibration,
+        fallback,
+        providerInfo: explainAdvancedRerankingProvider(),
+        note: "Phase 5O advanced reranking summary. Read-only — no writes performed.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-2: GET /api/admin/retrieval/run/:runId/rerank-candidates
+  // Full candidate list with advanced rerank fields
+  app.get("/api/admin/retrieval/run/:runId/rerank-candidates", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await listAdvancedRerankCandidates(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-3: GET /api/admin/retrieval/run/:runId/rerank-shortlist
+  // Shortlist composition and strategy explanation
+  app.get("/api/admin/retrieval/run/:runId/rerank-shortlist", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [explain, summary] = await Promise.all([
+        explainRerankShortlist(runId),
+        summarizeShortlistComposition(runId),
+      ]);
+      res.json({ runId, explain, summary });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-4: GET /api/admin/retrieval/run/:runId/advanced-rerank-explain
+  // Per-candidate advanced reranking explainability (INV-RER4,7)
+  app.get("/api/admin/retrieval/run/:runId/advanced-rerank-explain", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [explain, impact] = await Promise.all([
+        explainAdvancedReranking(runId),
+        summarizeAdvancedRerankingImpact(runId),
+      ]);
+      res.json({
+        runId,
+        explain,
+        impact,
+        providerInfo: explainAdvancedRerankingProvider(),
+        note: "Read-only explainability endpoint. INV-RER7: no writes performed.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-5: GET /api/admin/retrieval/run/:runId/rerank-metrics
+  // Reranking metrics: shortlist size, latency, token usage, cost, rank deltas
+  app.get("/api/admin/retrieval/run/:runId/rerank-metrics", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const metrics = await summarizeAdvancedRerankMetrics(runId);
+      res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-6: GET /api/admin/retrieval/run/:runId/fallback-summary
+  // Fallback behavior explanation (INV-RER5)
+  app.get("/api/admin/retrieval/run/:runId/fallback-summary", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [explain, summary] = await Promise.all([
+        explainFallbackReranking(runId),
+        summarizeFallbackUsage(runId),
+      ]);
+      res.json({ runId, explain, summary });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-7: GET /api/admin/retrieval/run/:runId/final-score-breakdown
+  // Final score calibration breakdown per candidate (INV-RER4)
+  app.get("/api/admin/retrieval/run/:runId/final-score-breakdown", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const calibration = await summarizeCalibrationFactors(runId);
+      res.json({
+        runId,
+        calibration,
+        calibrationWeights: {
+          advancedWeight: 0.7,
+          fusedWeight: 0.3,
+          formula: "final_score = 0.7 * heavy_rerank_score + 0.3 * fused_score",
+          fallbackFormula: "final_score = fused_score (when heavy reranking unavailable)",
+        },
+        note: "Read-only. INV-RER4: fused_score, heavy_rerank_score, final_score always separately explainable.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-8: GET /api/admin/retrieval/run/:runId/rank-delta
+  // Rank change analysis: promotions, demotions, stable ranks
+  app.get("/api/admin/retrieval/run/:runId/rank-delta", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const impact = await summarizeAdvancedRerankingImpact(runId);
+      res.json({
+        runId,
+        rerankMode: impact.rerankMode,
+        shortlistSize: impact.shortlistSize,
+        promotionCount: impact.promotionCount,
+        demotionCount: impact.demotionCount,
+        stableRankCount: impact.stableRankCount,
+        largestPromotion: impact.largestPromotion,
+        largestDemotion: impact.largestDemotion,
+        avgFinalScore: impact.avgFinalScore,
+        avgHeavyRerankScore: impact.avgHeavyRerankScore,
+        note: impact.note,
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-9: POST /api/admin/retrieval/rerank/preview
+  // Preview advanced reranking on provided candidates — no persistence (INV-RER7)
+  app.post("/api/admin/retrieval/rerank/preview", async (req: Request, res: Response) => {
+    try {
+      const { candidates = [], queryText, options = {} } = req.body ?? {};
+      if (!Array.isArray(candidates))
+        return void res.status(400).json({ error: "candidates must be an array" });
+      if (typeof queryText !== "string" || !queryText.trim())
+        return void res.status(400).json({ error: "queryText (string) required" });
+
+      const result = await previewAdvancedReranking(candidates, queryText, options);
+      res.json({
+        rerankMode: result.rerankMode,
+        fallbackUsed: result.fallbackUsed,
+        fallbackReason: result.fallbackReason,
+        shortlistSize: result.shortlistSize,
+        metrics: result.metrics,
+        candidates: result.candidates.map((c) => ({
+          chunkId: c.chunkId,
+          finalRank: c.finalRank,
+          shortlistRank: c.shortlistRank,
+          advancedRerankRank: c.advancedRerankRank,
+          fusedScore: c.fusedScore,
+          heavyRerankScore: c.heavyRerankScore,
+          finalScore: c.finalScore,
+          rerankMode: c.rerankMode,
+          channelOrigin: c.channelOrigin,
+        })),
+        note: "Preview only — no persistence. Pass persistRun=true to runAdvancedReranking to persist results.",
       });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });

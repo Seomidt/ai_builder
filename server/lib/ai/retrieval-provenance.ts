@@ -52,6 +52,13 @@ export const EXCLUSION_REASONS = {
   RERANK_BELOW_CUTOFF: "rerank_below_cutoff",
   LEXICAL_DUPLICATE: "lexical_duplicate",
   VECTOR_DUPLICATE: "vector_duplicate",
+  // Phase 5O — Advanced reranking exclusion reasons (INV-RER4/5)
+  NOT_IN_RERANK_SHORTLIST: "not_in_rerank_shortlist",
+  RERANK_SCORE_BELOW_CUTOFF: "rerank_below_cutoff",
+  RERANK_TIMEOUT_FALLBACK: "rerank_timeout_fallback",
+  RERANK_PROVIDER_FAILURE: "rerank_provider_failure",
+  TOKEN_BUDGET_EXCEEDED_AFTER_RERANK: "token_budget_exceeded_after_rerank",
+  DUPLICATE_DOCUMENT_LIMIT_AFTER_RERANK: "duplicate_document_limit_after_rerank",
 } as const;
 
 export const INCLUSION_REASONS = {
@@ -68,6 +75,12 @@ export const INCLUSION_REASONS = {
   SELECTED_BY_BOTH_CHANNELS: "selected_by_both_channels",
   PROMOTED_BY_FUSION: "promoted_by_fusion",
   PROMOTED_BY_RERANK: "promoted_by_rerank",
+  // Phase 5O — Advanced reranking inclusion reasons (INV-RER4/5)
+  INCLUDED_IN_RERANK_SHORTLIST: "included_in_rerank_shortlist",
+  PROMOTED_BY_ADVANCED_RERANK: "promoted_by_advanced_rerank",
+  RETAINED_BY_ADVANCED_RERANK: "retained_by_advanced_rerank",
+  RETAINED_BY_FALLBACK_RERANK: "retained_by_fallback_rerank",
+  INCLUDED_IN_FINAL_CONTEXT_AFTER_RERANK: "included_in_final_context_after_rerank",
 } as const;
 
 export type ExclusionReason = (typeof EXCLUSION_REASONS)[keyof typeof EXCLUSION_REASONS];
