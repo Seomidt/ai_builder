@@ -4555,21 +4555,49 @@ export function registerAdminRoutes(app: Express): void {
         JOIN pg_namespace n ON n.oid = e.extnamespace
         ORDER BY extname
       `);
-      const classified = rows.rows.map((r: any) => ({
-        ...r,
-        in_public: r.schema === "public",
-        safety_status: r.schema !== "public"
-          ? "SAFE — not in public schema"
-          : r.extname === "vector"
-          ? "EXEMPT — INV-RLS8-EXEMPT-vector: 305 extension functions, moving would break type resolution"
-          : r.extname === "btree_gist"
-          ? "EXEMPT — INV-RLS8-EXEMPT-btree_gist: 5 active GiST/exclusion indexes depend on this schema location"
-          : "REVIEW — in public schema, justification required",
-      }));
+      const classified = rows.rows.map((r: any) => {
+        let placement: string;
+        let classification: string;
+        let lint_warning: string | null = null;
+        let lint_status: string | null = null;
+
+        if (r.schema !== "public") {
+          placement = "correctly_placed";
+          classification = `SAFE — installed in non-public schema '${r.schema}'`;
+        } else if (r.extname === "vector") {
+          placement = "intentionally_exempted";
+          classification = "ACCEPTED EXCEPTION (Phase 5K.1.A) — pgvector type/function resolution requires public schema. Moving would break embeddings and retrieval stack. See /api/admin/db-security/exceptions for full record.";
+          lint_warning = "extension_in_public_vector";
+          lint_status = "accepted_exception — not an unresolved warning";
+        } else if (r.extname === "btree_gist") {
+          placement = "intentionally_exempted";
+          classification = "ACCEPTED EXCEPTION (Phase 5K.1.A) — 5 active GiST/exclusion constraints depend on this location. Moving would require dropping and recreating billing integrity constraints. See /api/admin/db-security/exceptions for full record.";
+          lint_warning = "extension_in_public_btree_gist";
+          lint_status = "accepted_exception — not an unresolved warning";
+        } else {
+          placement = "requires_review";
+          classification = "REVIEW REQUIRED — in public schema without documented justification";
+          lint_warning = "extension_in_public_" + r.extname;
+          lint_status = "unresolved";
+        }
+
+        return { ...r, placement, classification, lint_warning, lint_status };
+      });
+
       const publicCount = classified.filter((r: any) => r.in_public).length;
+      const correctlyPlaced = classified.filter((r: any) => r.placement === "correctly_placed").length;
+      const intentionallyExempted = classified.filter((r: any) => r.placement === "intentionally_exempted").length;
+      const requiresReview = classified.filter((r: any) => r.placement === "requires_review").length;
+
       res.json({
         total_extensions: classified.length,
         in_public_schema: publicCount,
+        summary: {
+          correctly_placed: correctlyPlaced,
+          intentionally_exempted: intentionallyExempted,
+          requires_review: requiresReview,
+          unresolved_warnings: requiresReview,
+        },
         extensions: classified,
         inspected_at: new Date().toISOString(),
       });
@@ -4622,18 +4650,47 @@ export function registerAdminRoutes(app: Express): void {
         { table: "subscription_plans", justification: "global plan reference — read-only config" },
       ];
 
+      // Structured extension exception records (Phase 5K.1.A)
       const extensionExceptions = [
         {
-          name: "vector",
-          schema: "public",
+          warning_code: "extension_in_public",
+          object_type: "extension",
+          object_name: "vector",
+          schema_name: "public",
+          decision: "accepted_exception",
+          technical_reason: "pgvector installs 305 functions, operators, and type definitions into its schema. All vector column type references, similarity operators (<->, <=>, <#>), and index access methods resolve against the extension schema at query time. Moving to a non-public schema would require every consumer query and column definition to qualify the type, breaking existing embeddings storage and retrieval stack. No compatibility migration path exists without a dedicated rollback-capable maintenance phase.",
+          risk_of_change: "HIGH — would break knowledge_embeddings table, all vector similarity queries in retrieval engine, and pgvector index access methods",
+          recommended_future_handling: "Only move in a dedicated extension-migration phase with: (1) full compatibility test on a replica, (2) zero-downtime migration plan, (3) tested rollback procedure. Do not move to silence lint warnings.",
+          reviewed_in_phase: "5K.1.A",
           exception_code: "INV-RLS8-EXEMPT-vector",
-          justification: "305 extension functions/operators depend on public schema location. Moving would break vector type resolution in all queries. Backend uses service role — no direct public access risk.",
         },
         {
-          name: "btree_gist",
-          schema: "public",
+          warning_code: "extension_in_public",
+          object_type: "extension",
+          object_name: "btree_gist",
+          schema_name: "public",
+          decision: "accepted_exception",
+          technical_reason: "btree_gist provides operator classes used by 5 active GiST exclusion constraints: billing_periods_no_overlap, cpv_no_overlap, ppv_no_overlap, customer_storage_pricing_vers_tenant_id_storage_provider_s_excl, storage_pricing_versions_storage_provider_storage_product__excl. These constraints enforce non-overlapping billing period integrity. Moving the extension would invalidate the operator class references in those constraints, requiring all 5 to be dropped and recreated — a risky operation on live billing data.",
+          risk_of_change: "HIGH — would require dropping and recreating 5 active exclusion constraints on billing integrity tables (billing_periods, customer_pricing_versions, provider_pricing_versions, customer_storage_pricing_versions, storage_pricing_versions)",
+          recommended_future_handling: "Only move after: (1) auditing all exclusion constraint definitions, (2) testing operator class relocation on a replica, (3) coordinating a maintenance window for constraint recreation. Do not move to silence lint warnings.",
+          reviewed_in_phase: "5K.1.A",
           exception_code: "INV-RLS8-EXEMPT-btree_gist",
-          justification: "5 active GiST/exclusion indexes (billing_periods, customer_pricing_versions, provider_pricing_versions, customer_storage_pricing_versions, storage_pricing_versions) depend on btree_gist in current schema location.",
+        },
+      ];
+
+      // Supabase lint warnings — exactly 2 remaining, both are accepted exceptions
+      const remainingLintWarnings = [
+        {
+          warning_id: "extension_in_public_vector",
+          status: "accepted_exception",
+          exception_record: "vector",
+          resolution: "Documented accepted exception — reviewed in Phase 5K.1.A. Not an unresolved warning.",
+        },
+        {
+          warning_id: "extension_in_public_btree_gist",
+          status: "accepted_exception",
+          exception_record: "btree_gist",
+          resolution: "Documented accepted exception — reviewed in Phase 5K.1.A. Not an unresolved warning.",
         },
       ];
 
@@ -4643,12 +4700,21 @@ export function registerAdminRoutes(app: Express): void {
           policy: "RLS enabled, no tenant policies — deny-all for non-service-role connections",
           tables: globalExemptTables,
         },
-        extension_exceptions: extensionExceptions,
+        extension_exceptions: {
+          count: extensionExceptions.length,
+          note: "These are not ignored warnings. Each has been explicitly reviewed, technically justified, and accepted. See recommended_future_handling for safe resolution path.",
+          records: extensionExceptions,
+        },
         function_exceptions: {
           note: "304 extension-owned functions excluded from search_path hardening (owned by vector/btree_gist extensions)",
           custom_functions_hardened: ["check_no_overlapping_tenant_subscriptions"],
         },
-        documented_at: "Phase 5K.1",
+        remaining_lint_warnings: {
+          count: remainingLintWarnings.length,
+          all_resolved_or_accepted: true,
+          warnings: remainingLintWarnings,
+        },
+        documented_at: "Phase 5K.1 / 5K.1.A",
         updated_at: new Date().toISOString(),
       });
     } catch (err) {

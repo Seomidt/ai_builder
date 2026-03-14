@@ -1312,3 +1312,91 @@ Before any phase is marked complete, verify:
 - [ ] Any new DB functions have `SET search_path = public`
 - [ ] Any new extensions are NOT in public schema (or justified exception documented)
 - [ ] Live DB verification confirms state with actual SQL queries (not pseudo-output)
+
+---
+
+## Phase 5K.1.A — Extension Warning Documentation & Exception Hardening (branch: feature/retrieval-orchestration)
+
+### Purpose
+Correctly handles the 2 remaining Supabase linter warnings for extensions installed in the public schema. These are NOT unresolved warnings — they are explicitly reviewed, technically justified, and accepted exceptions. No schema changes were made in this phase.
+
+### Remaining lint warnings (exactly 2 — both accepted exceptions)
+| Warning ID | Extension | Schema | Status |
+|---|---|---|---|
+| extension_in_public_vector | vector | public | accepted_exception — reviewed Phase 5K.1.A |
+| extension_in_public_btree_gist | btree_gist | public | accepted_exception — reviewed Phase 5K.1.A |
+
+### Exception records
+
+**vector in public (INV-RLS8-EXEMPT-vector)**
+- decision: accepted_exception
+- technical_reason: pgvector installs 305 functions, operators, and type definitions into its schema. All vector column type references, similarity operators, and index access methods resolve against the extension schema at query time. Moving would break knowledge_embeddings, all retrieval stack similarity queries, and pgvector index access methods.
+- risk_of_change: HIGH
+- recommended_future_handling: Only move in a dedicated extension-migration phase with full compatibility test on replica, zero-downtime migration plan, and tested rollback procedure. NEVER move to silence lint warnings.
+- reviewed_in_phase: 5K.1.A
+
+**btree_gist in public (INV-RLS8-EXEMPT-btree_gist)**
+- decision: accepted_exception
+- technical_reason: btree_gist provides operator classes used by 5 active GiST exclusion constraints enforcing non-overlapping billing period integrity (billing_periods_no_overlap, cpv_no_overlap, ppv_no_overlap, and 2 others). Moving would require dropping and recreating all 5 constraints — a risky live billing data operation.
+- risk_of_change: HIGH
+- recommended_future_handling: Only move after auditing all exclusion constraint definitions, testing operator class relocation on a replica, and coordinating a maintenance window. NEVER move to silence lint warnings.
+- reviewed_in_phase: 5K.1.A
+
+### Files modified (2)
+- server/routes/admin.ts — /exceptions updated with full structured records (warning_code, object_type, decision, technical_reason, risk_of_change, recommended_future_handling, reviewed_in_phase); /extensions updated with explicit classification (correctly_placed / intentionally_exempted / requires_review)
+- replit.md — this section + rules below
+
+### Admin endpoints updated
+- GET /api/admin/db-security/exceptions — now returns structured extension_exceptions with full fields per Phase 5K.1.A requirements + remaining_lint_warnings section
+- GET /api/admin/db-security/extensions — now returns summary (correctly_placed / intentionally_exempted / requires_review / unresolved_warnings) + per-extension lint_warning and lint_status fields
+
+---
+
+## MANDATORY EXTENSION MANAGEMENT RULES (effective from Phase 5K.1.A)
+
+These rules apply to all future phases without exception.
+
+### RULE EXT-1 — New extensions must NOT be installed in public schema
+Any new extension MUST be installed in the `extensions` schema:
+```sql
+CREATE EXTENSION IF NOT EXISTS <name> SCHEMA extensions;
+```
+Installing in public without a documented justified exception is forbidden.
+
+### RULE EXT-2 — Existing public extensions are documented reviewed exceptions
+`vector` and `btree_gist` remain in public schema. They have been explicitly reviewed and accepted in Phase 5K.1.A. They must NOT be moved by any future phase without a dedicated compatibility and rollback plan.
+
+### RULE EXT-3 — vector must NOT be moved without a dedicated migration phase
+Requirements before moving `vector`:
+1. Full compatibility test on a database replica
+2. Zero-downtime migration plan confirmed
+3. All vector column type references and similarity operator usages inventoried
+4. Tested rollback procedure in place
+5. Coordinated maintenance window
+
+### RULE EXT-4 — btree_gist must NOT be moved without reviewing exclusion constraints
+Requirements before moving `btree_gist`:
+1. Inventory of all GiST/exclusion constraints using btree_gist operator classes
+2. Test on replica showing constraints survive operator class relocation
+3. Maintenance window planned for constraint recreation if needed
+4. Rollback procedure tested
+
+### RULE EXT-5 — "Fixing linter warnings" is NOT a valid reason for risky changes
+Supabase lint warnings must be:
+- Fixed safely when a low-risk fix exists
+- OR documented as accepted exceptions when the fix carries production risk
+Never perform risky production DDL purely to silence a linter warning.
+
+---
+
+## FUTURE MAINTENANCE NOTE — Extension Schema Migration (not yet scheduled)
+
+A potential future maintenance phase may address:
+- Extension schema migration review for `vector` and `btree_gist`
+- Compatibility testing for vector relocation (replica-based)
+- Compatibility testing for btree_gist relocation (replica-based)
+- Zero-downtime migration plan development
+- Rollback plan requirement
+- Only proceed if real operational benefit outweighs risk
+
+**This phase does NOT exist yet. It must not be implemented without explicit planning and review.**
