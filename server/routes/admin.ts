@@ -167,6 +167,17 @@ import {
   summarizeTranscriptChunkingResult,
   syncIndexStateAfterTranscriptChunking,
   markIndexStateStaleAfterTranscriptChunkReplace,
+  runImportParseForDocumentVersion,
+  runImportChunkingForDocumentVersion,
+  markImportParseFailed,
+  markImportParseCompleted,
+  explainImportParseState,
+  explainImportChunkState,
+  previewImportChunkReplacement,
+  listImportProcessingJobs,
+  summarizeImportChunkingResult,
+  syncIndexStateAfterImportChunking,
+  markIndexStateStaleAfterImportChunkReplace,
 } from "../lib/ai/knowledge-processing";
 import { selectDocumentParser } from "../lib/ai/document-parsers";
 import { getVectorAdapterInfo } from "../lib/ai/vector-adapter";
@@ -2684,6 +2695,227 @@ export function registerAdminRoutes(app: Express): void {
       if (!tenantId) return res.status(400).json({ error: "tenantId required" });
       const state = await explainTranscriptChunkState(versionId, tenantId);
       res.json({ transcriptChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.4: Email / HTML / Imported Content Admin Routes ─────────────
+
+  app.post("/api/admin/knowledge/import-content/parse/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        workerId: z.string().optional(),
+        parseOptions: z.object({
+          parserHint: z.string().optional(),
+          languageHint: z.string().optional(),
+          includeQuotedContent: z.boolean().optional(),
+          contentLabel: z.string().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runImportParseForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        idempotencyKey: body.idempotencyKey,
+        workerId: body.workerId,
+        parseOptions: body.parseOptions,
+      });
+      res.json({ importParse: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/import-content/parse/mark-failed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().min(1),
+      }).parse(req.body);
+      await markImportParseFailed(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/import-content/parse/mark-completed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        contentType: z.enum(["email", "html", "imported_text"]),
+        parserName: z.string().min(1),
+        parserVersion: z.string().min(1),
+        textChecksum: z.string().min(1),
+        messageCount: z.number().int().min(0),
+        sectionCount: z.number().int().min(0),
+        linkCount: z.number().int().min(0),
+        sourceLanguageCode: z.string().optional(),
+      }).parse(req.body);
+      await markImportParseCompleted(body.versionId, body.tenantId, {
+        contentType: body.contentType,
+        parserName: body.parserName,
+        parserVersion: body.parserVersion,
+        textChecksum: body.textChecksum,
+        messageCount: body.messageCount,
+        sectionCount: body.sectionCount,
+        linkCount: body.linkCount,
+        sourceLanguageCode: body.sourceLanguageCode,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/import-content/parse/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainImportParseState(versionId, tenantId);
+      res.json({ importParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/import-content/chunk/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        workerId: z.string().optional(),
+        chunkingConfig: z.object({
+          strategy: z.string().optional(),
+          version: z.string().optional(),
+          maxBlockSize: z.number().int().optional(),
+          includeHeaderContext: z.boolean().optional(),
+          includeSectionLabel: z.boolean().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runImportChunkingForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        idempotencyKey: body.idempotencyKey,
+        workerId: body.workerId,
+        chunkingConfig: body.chunkingConfig,
+      });
+      res.json({ importChunk: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/import-content/chunk/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainImportChunkState(versionId, tenantId);
+      res.json({ importChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/import-content/chunk/preview-replacement/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewImportChunkReplacement(versionId, tenantId);
+      res.json({ preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/import-content/jobs/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listImportProcessingJobs(documentId, tenantId);
+      res.json({ jobs });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/import-content/jobs/:jobId/summarize", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeImportChunkingResult(jobId, tenantId);
+      res.json({ summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/import-content/index-state/sync", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        chunkCount: z.number().int().min(0),
+      }).parse(req.body);
+      const row = await syncIndexStateAfterImportChunking(
+        body.versionId,
+        body.tenantId,
+        body.knowledgeBaseId,
+        body.knowledgeDocumentId,
+        body.chunkCount,
+      );
+      res.json({ indexState: row });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/import-content/index-state/mark-stale", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().optional(),
+      }).parse(req.body);
+      await markIndexStateStaleAfterImportChunkReplace(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/import-parse-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainImportParseState(versionId, tenantId);
+      res.json({ importParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/import-chunk-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainImportChunkState(versionId, tenantId);
+      res.json({ importChunkState: state });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }

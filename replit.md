@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5B.3 complete)
+# AI Builder Platform — V1 (Phase 5B.4 complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -752,3 +752,40 @@ parse/run, parse/mark-failed, parse/mark-completed, parse/explain/:versionId, ch
 
 ### Validation: 32/32 assertions passed (15 scenarios)
 S1 kdv transcript columns (12), S2 kc transcript chunk columns (9), S3 kpj processor columns (2), S4 job_type CHECK constraints, S5 SUPPORTED_AUDIO_MIME_TYPES (4 types), S6 SUPPORTED_VIDEO_MIME_TYPES (video/mp4, webm, quicktime), S7 video/mp4 rejects with INV-MEDIA2, S8 text/csv rejects with INV-MEDIA1, S9 default engine=openai_whisper_transcription (plain text fallback path), S10 normalizeTranscriptDocument recomputes checksum, S11 summarizeTranscriptParseResult format, S12 chunkTranscriptDocument time_windows strategy + deterministic keys/hashes, S13 buildTranscriptChunkKey determinism (INV-MEDIA10), S14 normalizeTranscriptChunkText collapses whitespace, S15 summarizeTranscriptChunks format.
+
+## Phase 5B.4 — Email / HTML / Imported Content Ingestion (branch: feature/email-html-ingestion)
+
+### Purpose
+Import content ingestion pipeline for email (RFC 822/thread), HTML (heading-aware sections), and plain text imports. Parallel structure to Phase 5B.2 (OCR) and 5B.3 (Transcript). No external library dependencies — pure regex-based parsing.
+
+### New files
+- `server/lib/ai/import-content-parsers.ts` — parser abstraction, SUPPORTED_IMPORT_MIME_TYPES, htmlImportParser (heading-aware sectioning, link counting, tag stripping), emailImportParser (RFC 822 header extraction, quoted content separation, thread splitting), textImportParser (paragraph blocking), selectImportContentParser, parseImportedDocumentVersion, normalizeImportedDocument, computeImportTextChecksum, summarizeImportParseResult
+- `server/lib/ai/import-content-chunking.ts` — email_messages / html_sections / import_text_blocks strategies, deterministic chunkKey/chunkHash (INV-IMP10), normalizeImportChunkText, summarizeImportChunks
+- `server/lib/ai/migrate-phase5b4.ts` — raw SQL migration (ran successfully)
+- `server/lib/ai/validate-phase5b4.ts` — 16 validation scenarios, 54/54 assertions passed
+
+### DB changes (25 new items)
+- `knowledge_document_versions`: 12 import parse columns (import_content_type, import_parse_status, import_parse_started_at, import_parse_completed_at, import_parser_name, import_parser_version, import_text_checksum, import_message_count, import_section_count, import_link_count, import_failure_reason, source_language_code) + CHECK constraints
+- `knowledge_chunks`: 11 import chunk columns (email_chunk, html_chunk, import_chunk_strategy, import_chunk_version, message_index, thread_position, section_label, source_url, sender_label, sent_at, quoted_content_included) + CHECK constraints
+- `knowledge_processing_jobs`: 2 import processor columns (import_processor_name, import_processor_version) + job_type CHECK updated (import_parse, import_chunk)
+
+### knowledge-processing.ts additions (12 functions + 4 interfaces)
+RunImportParseOptions, ImportParseExecutionResult, RunImportChunkingOptions, ImportChunkingExecutionResult (interfaces)
+runImportParseForDocumentVersion, markImportParseFailed, markImportParseCompleted, runImportChunkingForDocumentVersion, syncIndexStateAfterImportChunking, markIndexStateStaleAfterImportChunkReplace, explainImportParseState, explainImportChunkState, previewImportChunkReplacement, listImportProcessingJobs, summarizeImportChunkingResult (functions)
+
+### Admin routes (14 endpoints under /api/admin/knowledge/import-content/)
+parse/run, parse/mark-failed, parse/mark-completed, parse/explain/:versionId, chunk/run, chunk/explain/:versionId, chunk/preview-replacement/:versionId, jobs/document/:documentId, jobs/:jobId/summarize, index-state/sync, index-state/mark-stale + versions/:versionId/import-parse-state + versions/:versionId/import-chunk-state
+
+### Invariants enforced
+- INV-IMP1: Version→document→KB chain + tenant validation required
+- INV-IMP2: Only the explicitly requested version is processed
+- INV-IMP3: Import chunking requires importParseStatus='completed' or explicit content
+- INV-IMP4: Import chunking NEVER sets index_state='indexed'
+- INV-IMP7: Failed chunk rebuild uses transactions to prevent partial active chunk corruption
+- INV-IMP8: Non-current version processing does not alter current retrieval state
+- INV-IMP10: Chunk keys and hashes are deterministic
+- INV-IMP11: Explicit failure for unsupported/malformed/empty/unsafe content
+- INV-IMP12: Does NOT mark document_status='ready'
+
+### Validation: 54/54 assertions passed (16 scenarios)
+S1 kdv import columns (12), S2 kc import chunk columns (11), S3 kpj processor columns (2), S4 job_type CHECK constraints (import_parse + import_chunk), S5 SUPPORTED mime type sets, S6 HTML parser parses headings into sections, S7 Email parser extracts RFC 822 headers + messages, S8 Plain text import parser produces paragraph sections, S9 Unsupported mime type rejected explicitly (INV-IMP11), S10 Empty content rejected explicitly (INV-IMP11), S11 HTML chunking html_sections strategy + deterministic keys/hashes, S12 Email chunking email_messages strategy preserves message context, S13 buildImportChunkKey determinism (INV-IMP10), S14 normalizeImportChunkText collapses whitespace, S15 normalizeImportedDocument sorts + recomputes checksum, S16 summarizeImportParseResult + summarizeImportChunks output format.

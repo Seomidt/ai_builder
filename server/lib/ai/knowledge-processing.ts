@@ -88,6 +88,21 @@ import {
   type TranscriptChunkingConfig,
   type TranscriptChunkCandidate,
 } from "./media-transcript-chunking";
+import {
+  parseImportedDocumentVersion,
+  normalizeImportedDocument,
+  summarizeImportParseResult,
+  selectImportContentParser,
+  SUPPORTED_IMPORT_MIME_TYPES,
+  type ImportParseResult,
+  type ImportParseOptions,
+} from "./import-content-parsers";
+import {
+  chunkImportedContent,
+  summarizeImportChunks,
+  type ImportChunkingConfig,
+  type ImportChunkCandidate,
+} from "./import-content-chunking";
 
 // ─── Internal tenant-assertion helpers ────────────────────────────────────────
 
@@ -3659,6 +3674,647 @@ export async function summarizeTranscriptChunkingResult(
     strategy: (summary.strategy as string) ?? null,
     engineName: (summary.engineName as string) ?? null,
     processorName: job.transcriptProcessorName ?? null,
+    startedAt: job.startedAt,
+    completedAt: job.completedAt,
+    failureReason: job.failureReason,
+  };
+}
+
+// ─── Phase 5B.4: Import Parse / Chunk Types ───────────────────────────────────
+
+export interface RunImportParseOptions {
+  content?: string;
+  workerId?: string;
+  idempotencyKey?: string;
+  parseOptions?: ImportParseOptions;
+}
+
+export interface ImportParseExecutionResult {
+  jobId: string;
+  status: "completed" | "failed";
+  importParseStatus?: string;
+  messageCount?: number;
+  sectionCount?: number;
+  linkCount?: number;
+  textChecksum?: string;
+  contentType?: string;
+  parserName?: string;
+  parserVersion?: string;
+  parseResult?: ImportParseResult;
+  error?: string;
+}
+
+export interface RunImportChunkingOptions {
+  content?: string;
+  workerId?: string;
+  idempotencyKey?: string;
+  chunkingConfig?: ImportChunkingConfig;
+  parseOptions?: ImportParseOptions;
+}
+
+export interface ImportChunkingExecutionResult {
+  jobId: string;
+  status: "completed" | "failed";
+  chunkCount: number;
+  priorImportChunksDeactivated: number;
+  error?: string;
+}
+
+// ─── Phase 5B.4: Import Parse Execution ──────────────────────────────────────
+
+/**
+ * runImportParseForDocumentVersion — Phase 5B.4 import content parse flow.
+ *
+ * INV-IMP1: validates version→document→KB chain + tenant.
+ * INV-IMP5: archived/inactive KB or document blocks processing.
+ * INV-IMP6: parse failure does NOT clear valid historical chunks.
+ * INV-IMP11: unsupported/malformed/empty content fails explicitly.
+ * INV-IMP12: does NOT mark document_status='ready'.
+ */
+export async function runImportParseForDocumentVersion(
+  versionId: string,
+  tenantId: string,
+  opts: RunImportParseOptions = {},
+): Promise<ImportParseExecutionResult> {
+  const ctx = await assertFullVersionContext(versionId, tenantId, { requireActiveLifecycle: true });
+  const mimeType = ctx.version.mimeType ?? "";
+
+  if (!opts.content) {
+    const reason = `No import content provided for version ${versionId}. Storage-backed import parsing not yet wired — supply content directly (INV-IMP11).`;
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({ importParseStatus: "failed", importFailureReason: reason, importParseCompletedAt: new Date() })
+      .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+    const [failJob] = await db
+      .insert(knowledgeProcessingJobs)
+      .values({
+        tenantId,
+        knowledgeDocumentId: ctx.document.id,
+        knowledgeDocumentVersionId: versionId,
+        jobType: "import_parse",
+        status: "failed",
+        failureReason: reason,
+        importProcessorName: "import_parse_runner",
+        importProcessorVersion: "1.0",
+        idempotencyKey: opts.idempotencyKey ?? null,
+        startedAt: new Date(),
+        completedAt: new Date(),
+      })
+      .returning();
+    return { jobId: failJob.id, status: "failed", importParseStatus: "failed", error: reason };
+  }
+
+  const [job] = await db
+    .insert(knowledgeProcessingJobs)
+    .values({
+      tenantId,
+      knowledgeDocumentId: ctx.document.id,
+      knowledgeDocumentVersionId: versionId,
+      jobType: "import_parse",
+      status: "queued",
+      importProcessorName: "import_parse_runner",
+      importProcessorVersion: "1.0",
+      idempotencyKey: opts.idempotencyKey ?? null,
+    })
+    .returning();
+
+  const acquired = await acquireKnowledgeProcessingJob(job.id, tenantId, {
+    workerId: opts.workerId,
+    processorName: "import_parse_runner",
+    processorVersion: "1.0",
+  });
+  if (!acquired) {
+    return { jobId: job.id, status: "failed", importParseStatus: "failed", error: "Failed to acquire import parse job lock." };
+  }
+
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({ importParseStatus: "running", importParseStartedAt: new Date() })
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+  try {
+    const parseResult = await parseImportedDocumentVersion(opts.content, mimeType, opts.parseOptions);
+
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({
+        importParseStatus: "completed",
+        importParseCompletedAt: new Date(),
+        importContentType: parseResult.contentType,
+        importParserName: parseResult.parserName,
+        importParserVersion: parseResult.parserVersion,
+        importTextChecksum: parseResult.textChecksum,
+        importMessageCount: parseResult.messageCount,
+        importSectionCount: parseResult.sectionCount,
+        importLinkCount: parseResult.linkCount,
+        sourceLanguageCode: parseResult.sourceLanguageCode !== "unknown" ? parseResult.sourceLanguageCode : null,
+        importFailureReason: null,
+      })
+      .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+    await db
+      .update(knowledgeProcessingJobs)
+      .set({
+        status: "completed",
+        completedAt: new Date(),
+        heartbeatAt: new Date(),
+        resultSummary: {
+          contentType: parseResult.contentType,
+          parserName: parseResult.parserName,
+          parserVersion: parseResult.parserVersion,
+          messageCount: parseResult.messageCount,
+          sectionCount: parseResult.sectionCount,
+          linkCount: parseResult.linkCount,
+          textChecksum: parseResult.textChecksum,
+          summary: summarizeImportParseResult(parseResult),
+        },
+      })
+      .where(and(eq(knowledgeProcessingJobs.id, job.id), eq(knowledgeProcessingJobs.tenantId, tenantId)));
+
+    return {
+      jobId: job.id,
+      status: "completed",
+      importParseStatus: "completed",
+      messageCount: parseResult.messageCount,
+      sectionCount: parseResult.sectionCount,
+      linkCount: parseResult.linkCount,
+      textChecksum: parseResult.textChecksum,
+      contentType: parseResult.contentType,
+      parserName: parseResult.parserName,
+      parserVersion: parseResult.parserVersion,
+      parseResult,
+    };
+  } catch (err) {
+    const reason = (err as Error).message;
+    await db
+      .update(knowledgeDocumentVersions)
+      .set({ importParseStatus: "failed", importParseCompletedAt: new Date(), importFailureReason: reason })
+      .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+    await failKnowledgeProcessingJob(job.id, tenantId, reason);
+    return { jobId: job.id, status: "failed", importParseStatus: "failed", error: reason };
+  }
+}
+
+/**
+ * markImportParseFailed — explicitly mark import parse as failed.
+ */
+export async function markImportParseFailed(
+  versionId: string,
+  tenantId: string,
+  reason: string,
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({ importParseStatus: "failed", importParseCompletedAt: new Date(), importFailureReason: reason })
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+}
+
+/**
+ * markImportParseCompleted — mark import parse completed with explicit metadata.
+ */
+export async function markImportParseCompleted(
+  versionId: string,
+  tenantId: string,
+  meta: {
+    contentType: string;
+    parserName: string;
+    parserVersion: string;
+    textChecksum: string;
+    messageCount: number;
+    sectionCount: number;
+    linkCount: number;
+    sourceLanguageCode?: string;
+  },
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+  await db
+    .update(knowledgeDocumentVersions)
+    .set({
+      importParseStatus: "completed",
+      importParseCompletedAt: new Date(),
+      importContentType: meta.contentType as "email" | "html" | "imported_text",
+      importParserName: meta.parserName,
+      importParserVersion: meta.parserVersion,
+      importTextChecksum: meta.textChecksum,
+      importMessageCount: meta.messageCount,
+      importSectionCount: meta.sectionCount,
+      importLinkCount: meta.linkCount,
+      sourceLanguageCode: meta.sourceLanguageCode ?? null,
+      importFailureReason: null,
+    })
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+}
+
+// ─── Phase 5B.4: Import Chunk Execution ──────────────────────────────────────
+
+/**
+ * runImportChunkingForDocumentVersion — Phase 5B.4 import content chunking flow.
+ *
+ * INV-IMP2: only the explicitly requested version is processed.
+ * INV-IMP3: requires successful import parse state or explicit content.
+ * INV-IMP4: does NOT mark index_state='indexed'.
+ * INV-IMP7: failed chunk rebuild leaves no partial active chunk corruption.
+ * INV-IMP8: non-current version processing does not alter current retrieval state.
+ */
+export async function runImportChunkingForDocumentVersion(
+  versionId: string,
+  tenantId: string,
+  opts: RunImportChunkingOptions = {},
+): Promise<ImportChunkingExecutionResult> {
+  const ctx = await assertFullVersionContext(versionId, tenantId, { requireActiveLifecycle: true });
+
+  const [verRow] = await db
+    .select()
+    .from(knowledgeDocumentVersions)
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+
+  if (!verRow) {
+    throw new KnowledgeInvariantError("INV-IMP1", `Version ${versionId} not found for tenant ${tenantId}`);
+  }
+
+  const hasCompletedParse = verRow.importParseStatus === "completed";
+  if (!hasCompletedParse && !opts.content) {
+    throw new KnowledgeInvariantError(
+      "INV-IMP3",
+      `Import chunking requires importParseStatus='completed' or explicit content for version ${versionId}. Current importParseStatus: ${verRow.importParseStatus ?? "null"}.`,
+    );
+  }
+
+  const mimeType = verRow.mimeType ?? "text/plain";
+  const contentForChunking = opts.content ?? "";
+
+  const [job] = await db
+    .insert(knowledgeProcessingJobs)
+    .values({
+      tenantId,
+      knowledgeDocumentId: ctx.document.id,
+      knowledgeDocumentVersionId: versionId,
+      jobType: "import_chunk",
+      status: "queued",
+      importProcessorName: "import_chunk_runner",
+      importProcessorVersion: "1.0",
+      idempotencyKey: opts.idempotencyKey ?? null,
+    })
+    .returning();
+
+  const acquired = await acquireKnowledgeProcessingJob(job.id, tenantId, {
+    workerId: opts.workerId,
+    processorName: "import_chunk_runner",
+    processorVersion: "1.0",
+  });
+  if (!acquired) {
+    return { jobId: job.id, status: "failed", chunkCount: 0, priorImportChunksDeactivated: 0, error: "Failed to acquire import chunk job lock." };
+  }
+
+  let parseResult: ImportParseResult;
+  try {
+    if (!contentForChunking) {
+      throw new KnowledgeInvariantError(
+        "INV-IMP3",
+        `Import chunking requires content for version ${versionId}. Storage-backed import not yet wired — supply content directly.`,
+      );
+    }
+    parseResult = await parseImportedDocumentVersion(contentForChunking, mimeType, opts.parseOptions);
+  } catch (err) {
+    const reason = (err as Error).message;
+    await failKnowledgeProcessingJob(job.id, tenantId, reason);
+    return { jobId: job.id, status: "failed", chunkCount: 0, priorImportChunksDeactivated: 0, error: reason };
+  }
+
+  const candidates = chunkImportedContent(parseResult, ctx.document.id, versionId, opts.chunkingConfig);
+
+  let newChunkCount = 0;
+  let priorDeactivated = 0;
+
+  try {
+    await db.transaction(async (tx) => {
+      const now = new Date();
+
+      // Deactivate prior email chunks for this version (INV-IMP7)
+      const priorEmail = await tx
+        .update(knowledgeChunks)
+        .set({ chunkActive: false, replacedAt: now, replacedByJobId: job.id })
+        .where(
+          and(
+            eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+            eq(knowledgeChunks.tenantId, tenantId),
+            eq(knowledgeChunks.chunkActive, true),
+            eq(knowledgeChunks.emailChunk, true),
+          ),
+        )
+        .returning();
+
+      // Deactivate prior html chunks for this version (INV-IMP7)
+      const priorHtml = await tx
+        .update(knowledgeChunks)
+        .set({ chunkActive: false, replacedAt: now, replacedByJobId: job.id })
+        .where(
+          and(
+            eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+            eq(knowledgeChunks.tenantId, tenantId),
+            eq(knowledgeChunks.chunkActive, true),
+            eq(knowledgeChunks.htmlChunk, true),
+          ),
+        )
+        .returning();
+
+      priorDeactivated = priorEmail.length + priorHtml.length;
+
+      if (candidates.length > 0) {
+        const inserts = candidates.map((c: ImportChunkCandidate) => ({
+          tenantId,
+          knowledgeBaseId: ctx.kb.id,
+          knowledgeDocumentId: ctx.document.id,
+          knowledgeDocumentVersionId: versionId,
+          chunkIndex: c.chunkIndex,
+          chunkKey: c.chunkKey,
+          chunkHash: c.chunkHash,
+          chunkText: c.chunkText,
+          emailChunk: c.emailChunk,
+          htmlChunk: c.htmlChunk,
+          importChunkStrategy: c.importChunkStrategy,
+          importChunkVersion: c.importChunkVersion,
+          messageIndex: c.messageIndex ?? null,
+          threadPosition: c.threadPosition ?? null,
+          sectionLabel: c.sectionLabel ?? null,
+          sourceUrl: c.sourceUrl ?? null,
+          senderLabel: c.senderLabel ?? null,
+          sentAt: c.sentAt ? new Date(c.sentAt) : null,
+          quotedContentIncluded: c.quotedContentIncluded ?? null,
+          tokenEstimate: c.tokenEstimate,
+          chunkActive: true,
+        }));
+        await tx.insert(knowledgeChunks).values(inserts);
+        newChunkCount = inserts.length;
+      }
+    });
+
+    const idxRows = await db
+      .select()
+      .from(knowledgeIndexState)
+      .where(and(eq(knowledgeIndexState.knowledgeDocumentVersionId, versionId), eq(knowledgeIndexState.tenantId, tenantId)));
+
+    if (idxRows.length > 0 && idxRows[0].indexState === "indexed" && priorDeactivated > 0) {
+      await markIndexStateStaleAfterImportChunkReplace(versionId, tenantId, "import_chunk_rebuild");
+    }
+
+    await db
+      .update(knowledgeProcessingJobs)
+      .set({
+        status: "completed",
+        completedAt: new Date(),
+        heartbeatAt: new Date(),
+        resultSummary: {
+          chunkCount: newChunkCount,
+          priorImportChunksDeactivated: priorDeactivated,
+          strategy: opts.chunkingConfig?.strategy ?? "auto",
+          contentType: parseResult.contentType,
+          parserName: parseResult.parserName,
+          summary: summarizeImportChunks(candidates),
+        },
+      })
+      .where(and(eq(knowledgeProcessingJobs.id, job.id), eq(knowledgeProcessingJobs.tenantId, tenantId)));
+
+    return { jobId: job.id, status: "completed", chunkCount: newChunkCount, priorImportChunksDeactivated: priorDeactivated };
+  } catch (err) {
+    const reason = (err as Error).message;
+    await failKnowledgeProcessingJob(job.id, tenantId, reason);
+    return { jobId: job.id, status: "failed", chunkCount: 0, priorImportChunksDeactivated: 0, error: reason };
+  }
+}
+
+// ─── Phase 5B.4: Index State Sync ────────────────────────────────────────────
+
+export async function syncIndexStateAfterImportChunking(
+  versionId: string,
+  tenantId: string,
+  knowledgeBaseId: string,
+  knowledgeDocumentId: string,
+  chunkCount: number,
+): Promise<typeof knowledgeIndexState.$inferSelect> {
+  await assertVersionTenant(versionId, tenantId);
+  const existing = await getIndexStateByVersion(versionId, tenantId);
+  if (existing) {
+    const [updated] = await db
+      .update(knowledgeIndexState)
+      .set({
+        indexState: existing.indexState === "indexed" ? "stale" : "pending",
+        chunkCount,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(knowledgeIndexState.knowledgeDocumentVersionId, versionId), eq(knowledgeIndexState.tenantId, tenantId)))
+      .returning();
+    return updated;
+  }
+  const [inserted] = await db
+    .insert(knowledgeIndexState)
+    .values({
+      tenantId,
+      knowledgeBaseId,
+      knowledgeDocumentId,
+      knowledgeDocumentVersionId: versionId,
+      indexState: "pending",
+      chunkCount,
+    })
+    .returning();
+  return inserted;
+}
+
+export async function markIndexStateStaleAfterImportChunkReplace(
+  versionId: string,
+  tenantId: string,
+  reason?: string,
+): Promise<void> {
+  await assertVersionTenant(versionId, tenantId);
+  await db
+    .update(knowledgeIndexState)
+    .set({ indexState: "stale", updatedAt: new Date() })
+    .where(
+      and(
+        eq(knowledgeIndexState.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeIndexState.tenantId, tenantId),
+        eq(knowledgeIndexState.indexState, "indexed"),
+      ),
+    );
+}
+
+// ─── Phase 5B.4: Inspection Helpers ──────────────────────────────────────────
+
+export async function explainImportParseState(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  importParseStatus: string | null;
+  importParseStartedAt: Date | null;
+  importParseCompletedAt: Date | null;
+  importContentType: string | null;
+  importParserName: string | null;
+  importParserVersion: string | null;
+  importTextChecksum: string | null;
+  importMessageCount: number | null;
+  importSectionCount: number | null;
+  importLinkCount: number | null;
+  sourceLanguageCode: string | null;
+  importFailureReason: string | null;
+}> {
+  await assertVersionTenant(versionId, tenantId);
+  const [row] = await db
+    .select()
+    .from(knowledgeDocumentVersions)
+    .where(and(eq(knowledgeDocumentVersions.id, versionId), eq(knowledgeDocumentVersions.tenantId, tenantId)));
+  if (!row) throw new KnowledgeInvariantError("INV-IMP1", `Version ${versionId} not found`);
+
+  return {
+    importParseStatus: row.importParseStatus ?? null,
+    importParseStartedAt: row.importParseStartedAt ?? null,
+    importParseCompletedAt: row.importParseCompletedAt ?? null,
+    importContentType: row.importContentType ?? null,
+    importParserName: row.importParserName ?? null,
+    importParserVersion: row.importParserVersion ?? null,
+    importTextChecksum: row.importTextChecksum ?? null,
+    importMessageCount: row.importMessageCount ?? null,
+    importSectionCount: row.importSectionCount ?? null,
+    importLinkCount: row.importLinkCount ?? null,
+    sourceLanguageCode: row.sourceLanguageCode ?? null,
+    importFailureReason: row.importFailureReason ?? null,
+  };
+}
+
+export async function explainImportChunkState(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  activeEmailChunkCount: number;
+  activeHtmlChunkCount: number;
+  totalImportChunkCount: number;
+  indexState: string | null;
+  strategies: string[];
+  sectionLabels: string[];
+}> {
+  await assertVersionTenant(versionId, tenantId);
+  const all = await db
+    .select()
+    .from(knowledgeChunks)
+    .where(
+      and(
+        eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeChunks.tenantId, tenantId),
+        sql`(${knowledgeChunks.emailChunk} = true OR ${knowledgeChunks.htmlChunk} = true)`,
+      ),
+    );
+  const active = all.filter((c) => c.chunkActive);
+  const activeEmail = active.filter((c) => c.emailChunk).length;
+  const activeHtml = active.filter((c) => c.htmlChunk).length;
+  const idxState = await getIndexStateByVersion(versionId, tenantId);
+  const strategies = Array.from(new Set(active.map((c) => c.importChunkStrategy).filter(Boolean))) as string[];
+  const sectionLabels = Array.from(new Set(active.map((c) => c.sectionLabel).filter(Boolean))) as string[];
+
+  return {
+    activeEmailChunkCount: activeEmail,
+    activeHtmlChunkCount: activeHtml,
+    totalImportChunkCount: all.length,
+    indexState: idxState?.indexState ?? null,
+    strategies,
+    sectionLabels,
+  };
+}
+
+export async function previewImportChunkReplacement(
+  versionId: string,
+  tenantId: string,
+): Promise<{
+  currentActiveEmailChunkCount: number;
+  currentActiveHtmlChunkCount: number;
+  currentIndexState: string | null;
+  wouldDeactivate: number;
+  explanation: string;
+}> {
+  await assertVersionTenant(versionId, tenantId);
+  const emailActive = await db
+    .select()
+    .from(knowledgeChunks)
+    .where(
+      and(
+        eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeChunks.tenantId, tenantId),
+        eq(knowledgeChunks.chunkActive, true),
+        eq(knowledgeChunks.emailChunk, true),
+      ),
+    );
+  const htmlActive = await db
+    .select()
+    .from(knowledgeChunks)
+    .where(
+      and(
+        eq(knowledgeChunks.knowledgeDocumentVersionId, versionId),
+        eq(knowledgeChunks.tenantId, tenantId),
+        eq(knowledgeChunks.chunkActive, true),
+        eq(knowledgeChunks.htmlChunk, true),
+      ),
+    );
+  const total = emailActive.length + htmlActive.length;
+  const idxState = await getIndexStateByVersion(versionId, tenantId);
+
+  const explanation =
+    total === 0
+      ? "No active import chunks to replace. Import chunking would insert fresh chunks."
+      : `Re-running import chunking would deactivate ${total} existing active import chunk(s) (${emailActive.length} email, ${htmlActive.length} html) and insert new ones. Index state would transition to '${idxState?.indexState === "indexed" ? "stale" : "pending"}'.`;
+
+  return {
+    currentActiveEmailChunkCount: emailActive.length,
+    currentActiveHtmlChunkCount: htmlActive.length,
+    currentIndexState: idxState?.indexState ?? null,
+    wouldDeactivate: total,
+    explanation,
+  };
+}
+
+export async function listImportProcessingJobs(
+  documentId: string,
+  tenantId: string,
+): Promise<KnowledgeProcessingJob[]> {
+  await assertDocumentTenant(documentId, tenantId);
+  return db
+    .select()
+    .from(knowledgeProcessingJobs)
+    .where(
+      and(
+        eq(knowledgeProcessingJobs.knowledgeDocumentId, documentId),
+        eq(knowledgeProcessingJobs.tenantId, tenantId),
+        sql`${knowledgeProcessingJobs.jobType} IN ('import_parse','import_chunk')`,
+      ),
+    )
+    .orderBy(desc(knowledgeProcessingJobs.createdAt));
+}
+
+export async function summarizeImportChunkingResult(
+  jobId: string,
+  tenantId: string,
+): Promise<{
+  jobId: string;
+  status: string;
+  chunkCount: number;
+  priorImportChunksDeactivated: number;
+  strategy: string | null;
+  contentType: string | null;
+  processorName: string | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  failureReason: string | null;
+}> {
+  const job = await getProcessingJob(jobId, tenantId);
+  if (!job) throw new KnowledgeInvariantError("INV-IMP1", `Processing job ${jobId} not found`);
+  const summary = (job.resultSummary ?? {}) as Record<string, unknown>;
+  return {
+    jobId: job.id,
+    status: job.status,
+    chunkCount: (summary.chunkCount as number) ?? 0,
+    priorImportChunksDeactivated: (summary.priorImportChunksDeactivated as number) ?? 0,
+    strategy: (summary.strategy as string) ?? null,
+    contentType: (summary.contentType as string) ?? null,
+    processorName: job.importProcessorName ?? null,
     startedAt: job.startedAt,
     completedAt: job.completedAt,
     failureReason: job.failureReason,
