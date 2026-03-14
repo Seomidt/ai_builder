@@ -1,6 +1,6 @@
 # AI Builder Platform
 
-Enterprise multi-tenant AI SaaS backend platform providing AI runtime orchestration, usage metering, a complete billing engine, wallet ledger, subscription plans, Stripe payments, automated billing operations, a billing integrity and recovery system, and a document registry with versioning, processing pipelines, embedding metadata, and vector index management.
+Enterprise multi-tenant AI SaaS backend platform providing AI runtime orchestration, usage metering, a complete billing engine, wallet ledger, subscription plans, Stripe payments, automated billing operations, a billing integrity and recovery system, and a full-stack knowledge retrieval pipeline — including document versioning, async processing pipelines, vector embeddings, pgvector similarity search, full-text search (FTS), Reciprocal Rank Fusion (RRF) hybrid retrieval, deterministic reranking, and multi-layer retrieval provenance and explainability.
 
 ---
 
@@ -12,7 +12,7 @@ This repository implements the control plane for an AI-driven software generatio
 - 50 000+ users
 - Millions of AI requests per billing period
 
-The platform separates concerns cleanly across an AI runtime pipeline, a multi-layer billing engine, a wallet credit system, a subscription entitlement layer, a Stripe payment integration, and an automated operations layer with integrity scanning and recovery workflows.
+The platform separates concerns cleanly across an AI runtime pipeline, a multi-layer billing engine, a wallet credit system, a subscription entitlement layer, a Stripe payment integration, an automated operations layer with integrity scanning and recovery workflows, and a production-grade knowledge retrieval pipeline with hybrid search, vector + lexical fusion, deterministic reranking, and full retrieval explainability.
 
 ---
 
@@ -514,45 +514,140 @@ echo "yes" | DATABASE_URL="$DATABASE_URL" npx drizzle-kit push --config=drizzle.
 | **4Q** | Margin Monitoring | `billing_metrics_snapshots`, monitoring summaries, alerts |
 | **4R** | Automated Billing Operations | `billing_job_definitions`, `billing_job_runs`, 13 predefined jobs, scheduler |
 | **4S** | Billing Integrity & Recovery | `billing_recovery_runs`, `billing_recovery_actions`, scan engine, recovery engine |
-| **5A** | Document Registry & Storage Foundation | `knowledge_bases`, `knowledge_documents`, `knowledge_document_versions`, `knowledge_storage_objects`, `knowledge_processing_jobs`, `knowledge_chunks`, `knowledge_embeddings`, `knowledge_index_state` |
+| **5A** | Document Registry & Storage Foundation | 8 tables: `knowledge_bases`, `knowledge_documents`, `knowledge_document_versions`, `knowledge_storage_objects`, `knowledge_processing_jobs`, `knowledge_chunks`, `knowledge_embeddings`, `knowledge_index_state` |
+| **5B** | Knowledge Asset Layer | `knowledge_assets`, `knowledge_asset_versions`, `knowledge_asset_embeddings` — asset-level versioning + embedding lifecycle |
+| **5C** | Binary Storage & Object Registry | `knowledge_storage_objects` extensions, storage class tracking, content-hash dedup foundation |
+| **5D** | pgvector Similarity Search | `runVectorSearch()`, cosine/L2/inner-product metrics, full lifecycle + version + index-state safety filters, `vector-search-provider.ts` isolation boundary |
+| **5E** | Retrieval Orchestration Core | `knowledge_retrieval_runs`, `retrieval-orchestrator.ts`, `chunk-ranking.ts`, `context-window-builder.ts`, token budget enforcement |
+| **5F** | Trust Signal Framework | `knowledge_trust_signals`, `document-trust.ts`, per-chunk trust scores, trust-weighted retrieval, trust provenance |
+| **5G** | Multimodal Asset Storage | `asset_storage_objects`, multimodal storage registry, provider-agnostic object handles |
+| **5H** | Image & OCR Pipeline | `knowledge_image_embeddings`, `knowledge_ocr_results`, OpenAI Vision OCR ingestion, image chunking |
+| **5I** | Media Transcript Pipeline | `knowledge_media_transcripts`, `knowledge_media_chunks`, Whisper transcription, media chunking |
+| **5J** | Import Content Pipeline | `knowledge_import_sources`, `knowledge_import_runs`, structured import ingestion |
+| **5K** | Embedding Lifecycle Management | `embedding_lifecycle_events`, `multimodal_embedding_sources`, re-embedding triggers, lifecycle state machine |
+| **5L** | Structured Document Parsing | `knowledge_structured_documents`, `knowledge_structured_chunks`, schema-aware document parsers |
+| **5M** | Retrieval Explainability & Source Provenance | `knowledge_retrieval_candidates`, `retrieval-provenance.ts`, `context-provenance.ts`, inclusion/exclusion reason codes, 9 explain admin routes |
+| **5N** | Hybrid Search & Reranking Foundation | `searchable_text_tsv` generated tsvector + GIN index on `knowledge_chunks`; `lexical-search-provider.ts` (FTS), `hybrid-retrieval.ts` (RRF fusion), `reranking.ts` (deterministic reranker), 9 hybrid admin routes, 12 service-layer invariants (INV-HYB1–12) |
 
 ---
 
-## 16. Phase 5A — Document Registry & Storage Foundation
+## 16. Phase 5 — Knowledge Retrieval Pipeline (5A – 5N)
 
-Phase 5A introduces a production-grade document management subsystem with 8 new tables (total: 85 tables), 4 lib files, and 20 admin routes.
+Phases 5A through 5N collectively deliver a production-grade, enterprise-scale knowledge retrieval pipeline spanning 14 phases, **97 RLS-enabled tables**, and hundreds of admin routes. Each phase is additive and fully backward-compatible.
 
-### New tables
+### 16.1 Architecture overview
 
-| Table | Purpose |
-|---|---|
-| `knowledge_bases` | Tenant-isolated KB registry with slug, lifecycle_state, visibility, default_retrieval_k |
-| `knowledge_documents` | Enterprise document registry — knowledge_base_id FK, source_type, document_status, current_version_id (no FK — enforced at service layer), soft-delete |
-| `knowledge_document_versions` | Immutable version chain — version_number, is_current flag, content_checksum, language_code, processing timestamps |
-| `knowledge_storage_objects` | Binary object references — storage_provider, bucket_name, object_key, upload_status, soft-delete |
-| `knowledge_processing_jobs` | Async job queue — job_type, status lifecycle, priority, idempotency_key (UNIQUE), worker_id, payload/result JSONB |
-| `knowledge_chunks` | Text chunks — chunk_key (NOT NULL, content-addressable), chunk_index, source ranges, token_estimate |
-| `knowledge_embeddings` | Embedding metadata — embedding_provider (NOT NULL), embedding_model (NOT NULL), vector_backend, vector_status, dimensions |
-| `knowledge_index_state` | Per-document-version index tracker — index_state, chunk_count, indexed_chunk_count, embedding_count, last_indexed_at |
+```
+Document ingestion
+  └── knowledge_documents + knowledge_document_versions (Phase 5A)
+  └── knowledge_storage_objects (Phase 5A/5C)
+  └── knowledge_processing_jobs — async extract/chunk/embed pipeline (5A)
 
-### Key capabilities
+Chunking & Embedding
+  └── knowledge_chunks  ←  searchable_text_tsv tsvector column (5N)
+  └── knowledge_embeddings  ←  pgvector embedding_vector (5D)
+  └── knowledge_index_state  ←  index_state per document version (5A/5D)
 
-- **Knowledge base management** — tenant-scoped KBs with lifecycle control (draft → active → archived) and configurable retrieval settings
-- **Document versioning** — every upload creates a new immutable version; `current_version_id` is managed at the service layer (no FK due to circular dependency)
-- **Processing pipelines** — durable job queue tracks extract, chunk, and embed operations with `pending → running → completed | failed | retrying` lifecycle
-- **Embedding metadata** — provider, model, dimensions, and vector backend recorded at embedding time for future re-indexing and cost attribution
-- **Vector index management** — index build state tracked independently from embedding generation, enabling partial rebuilds without re-embedding
-- **Soft-delete support** — documents and storage objects use `deleted_at` for non-destructive removal
+Retrieval pipeline
+  ┌─────────────────────────────────────────────────┐
+  │              retrieval-orchestrator.ts           │
+  │                                                 │
+  │  vector-search-provider.ts  ←→  pgvector cosine │
+  │  lexical-search-provider.ts ←→  PostgreSQL FTS   │
+  │         ↓                          ↓             │
+  │      hybrid-retrieval.ts (RRF fusion, k=60)      │
+  │              ↓                                   │
+  │         reranking.ts (deterministic reranker)    │
+  │              ↓                                   │
+  │    chunk-ranking.ts + context-window-builder.ts  │
+  └─────────────────────────────────────────────────┘
 
-### Design invariants
+Provenance & Explainability
+  └── knowledge_retrieval_candidates (5M/5N — channel, scores, ranks)
+  └── retrieval-provenance.ts   — inclusion/exclusion reason codes
+  └── context-provenance.ts     — context window source lineage
+  └── 18 hybrid+provenance admin routes (read-only, INV-HYB7)
+```
 
-- `knowledge_documents.current_version_id` has **no FK** — circular dependency with `knowledge_document_versions`; validity enforced by `setCurrentDocumentVersion()` at service layer
-- `knowledge_index_state.knowledge_document_id` is **NOT NULL** — state scoped to a specific document, not just KB
-- `chunk_key` is **NOT NULL** — content-addressable identifier set at ingestion time
-- `embedding_provider` and `embedding_model` are **NOT NULL** — required for cost attribution and re-indexing
-- `knowledge_bases.slug` is **NOT NULL** — URL-safe tenant-unique identifier
+### 16.2 Key tables
 
-The document system follows the same architectural principles as the billing engine: immutable records, durable audit logs, idempotent operations, and strict per-tenant isolation.
+| Table | Phase | Purpose |
+|---|---|---|
+| `knowledge_bases` | 5A | Tenant-isolated KB registry — slug, lifecycle, retrieval settings |
+| `knowledge_documents` | 5A | Document registry — versioning, source type, soft-delete |
+| `knowledge_document_versions` | 5A | Immutable version chain — content checksum, language, ingest status |
+| `knowledge_storage_objects` | 5A/5C | Binary object handles — provider, bucket, object key, upload status |
+| `knowledge_processing_jobs` | 5A | Async job queue — extract/chunk/embed, idempotency_key UNIQUE |
+| `knowledge_chunks` | 5A/5N | Text chunks — chunk_key, token_estimate, `searchable_text_tsv` (generated tsvector, Phase 5N) |
+| `knowledge_embeddings` | 5A/5D | Embedding metadata — provider, model, dimensions, pgvector vector |
+| `knowledge_index_state` | 5A | Index tracker per document version — index_state, chunk/embedding counts |
+| `knowledge_assets` | 5B | Asset-level versioning above document — asset_key, lifecycle |
+| `knowledge_asset_versions` | 5B | Immutable asset version chain |
+| `knowledge_asset_embeddings` | 5B | Asset-level embedding handles |
+| `knowledge_trust_signals` | 5F | Per-chunk trust scores — signal_type, trust_score, source, expiry |
+| `asset_storage_objects` | 5G | Multimodal storage registry — provider-agnostic object handles |
+| `knowledge_image_embeddings` | 5H | Vision embedding metadata for image chunks |
+| `knowledge_ocr_results` | 5H | OCR result storage — provider, confidence, bounding boxes |
+| `knowledge_media_transcripts` | 5I | Audio/video transcript records — provider, language, duration |
+| `knowledge_media_chunks` | 5I | Media transcript chunks — time ranges, speaker labels |
+| `knowledge_import_sources` | 5J | Import source registry — source type, credentials, sync config |
+| `knowledge_import_runs` | 5J | Import execution audit trail |
+| `embedding_lifecycle_events` | 5K | Re-embedding trigger events — lifecycle_state, trigger_reason |
+| `multimodal_embedding_sources` | 5K | Source registry for multimodal embedding generation |
+| `knowledge_structured_documents` | 5L | Schema-aware structured document records |
+| `knowledge_structured_chunks` | 5L | Structured document chunks — field path, data type |
+| `knowledge_retrieval_runs` | 5E/5M | Per-retrieval run record — query hash, token budget, candidate counts |
+| `knowledge_retrieval_candidates` | 5M/5N | Per-candidate provenance — channel_origin, vector/lexical/fused/rerank scores, pre/post ranks |
+
+### 16.3 Retrieval invariants (Phase 5D–5N)
+
+All retrieval operations enforce these invariants at the service layer:
+
+- **INV-VEC / INV-LEX**: chunk_active = true, doc lifecycle = active, doc status = ready, current_version_id enforced, index_state = indexed, kb lifecycle = active
+- **INV-HYB1**: All hybrid operations are tenant-safe — no cross-tenant candidate leakage
+- **INV-HYB2**: Lexical search applies identical scope/lifecycle/version safety filters as vector search
+- **INV-HYB3**: RRF fusion is deterministic — same inputs always produce the same ranked output
+- **INV-HYB4**: Every candidate's channel origin is explicit (`vector_only` | `lexical_only` | `vector_and_lexical`)
+- **INV-HYB5**: Vector score, lexical score, and fused score are always stored and explainable
+- **INV-HYB6**: Reranking factors are recorded and reranking never silently changes deterministic guarantees
+- **INV-HYB7**: All explain/summarize endpoints perform **zero database writes**
+- **INV-HYB8**: Hybrid summaries correctly reflect channel counts
+- **INV-HYB9–12**: Phase 5M provenance, Phase 5F trust signals, Phase 5L embedding lifecycle, and RLS tenant isolation are all preserved
+
+### 16.4 Hybrid search pipeline (Phase 5N)
+
+```
+Query
+  │
+  ├─ vector-search-provider.ts
+  │     pgvector cosine similarity → ranked vector candidates
+  │
+  ├─ lexical-search-provider.ts
+  │     websearch_to_tsquery + ts_rank_cd → ranked lexical candidates
+  │     (uses searchable_text_tsv GENERATED tsvector + GIN index)
+  │
+  └─ hybrid-retrieval.ts
+        Reciprocal Rank Fusion (RRF, k=60)
+          rrf_score = Σ weight_c / (k + rank_c)
+        Channel origin assigned per candidate
+        Optional: reranking.ts (fused_score + source diversity + doc balance)
+        → context-window-builder.ts (token budget, dedup)
+        → knowledge_retrieval_candidates persisted with full score provenance
+```
+
+### 16.5 Admin routes (Phase 5 retrieval)
+
+All routes are internal/admin-only. Explain routes are strictly read-only (INV-HYB7).
+
+| Route group | Count | Notes |
+|---|---|---|
+| `/api/admin/retrieval/run/:runId/hybrid-*` | 5 GET | hybrid-summary, hybrid-candidates, vector-candidates, lexical-candidates, channel-breakdown |
+| `/api/admin/retrieval/run/:runId/fusion-explain` | 1 GET | Full RRF fusion breakdown per run |
+| `/api/admin/retrieval/run/:runId/rerank-explain` | 1 GET | Reranking impact per run |
+| `/api/admin/retrieval/run/:runId/final-context-scores` | 1 GET | Selected candidate scores |
+| `/api/admin/retrieval/hybrid/preview` | 1 POST | Fusion preview — no persistence |
+| `/api/admin/retrieval/runs/:runId/provenance` | — | Phase 5M provenance routes |
+| `/api/admin/retrieval/chunks/:chunkId/explain` | — | Phase 5M chunk explain routes |
 
 ---
 
@@ -560,15 +655,17 @@ The document system follows the same architectural principles as the billing eng
 
 The platform is designed to grow through clearly scoped phases, each adding a production-grade subsystem without breaking existing contracts.
 
-Planned future areas:
+Planned future phases:
 
-- **Phase 5B — Vector Search & Retrieval** — vector similarity search, hybrid BM25+vector retrieval, relevance scoring
+- **Phase 5O — Hybrid Retrieval Orchestrator Integration** — wire hybrid-retrieval.ts into the main retrieval-orchestrator.ts with graceful mode switching; end-to-end hybrid retrieval with full provenance
+- **Phase 5P — Multilingual FTS & Locale-Aware Retrieval** — language-specific tsvector configurations, locale-aware query normalization, cross-language retrieval scoring
+- **Phase 5Q — Retrieval Quality Metrics & Evaluation** — automated retrieval quality scoring, precision/recall proxies, per-KB retrieval health dashboards
 - **Phase 6 — Agent Orchestration Layer** — durable multi-step agent execution with state persistence and retry
 - **Phase 7 — Plan Marketplace** — self-serve plan selection, upgrade / downgrade flows, prorated billing
 - **Phase 8 — Tenant Analytics** — usage dashboards, cost breakdown, anomaly history per tenant
 - **Phase 9 — Compliance & Audit Export** — GDPR data export, billing audit exports, SOC 2 log retention
 
-Each phase is additive. No phase modifies canonical financial data in a way that invalidates prior billing records.
+Each phase is additive. No phase modifies canonical financial data or retrieval contracts in a way that invalidates prior records.
 
 ---
 
@@ -580,6 +677,15 @@ The automated operations layer (Phase 4R) provides scheduled execution of 13 bil
 
 The integrity and recovery layer (Phase 4S) provides a read-only scan engine across five integrity dimensions and controlled write-recovery workflows for snapshot and invoice repair, with full before/after audit trails for every action taken.
 
-The document registry layer (Phase 5A) extends the platform with 8 new tables for knowledge base management, document versioning, binary storage tracking, async processing pipelines, text chunking, embedding metadata, and vector index state — all following the same architectural principles of immutability, idempotency, and per-tenant isolation that underpin the billing engine.
+The knowledge retrieval pipeline (Phases 5A–5N) extends the platform with 30+ tables covering document versioning, async processing, text chunking, pgvector embeddings, PostgreSQL full-text search, Reciprocal Rank Fusion hybrid retrieval, deterministic reranking, per-candidate score provenance, and 18 read-only explainability admin routes — all following the same architectural principles of immutability, idempotency, and per-tenant isolation that underpin the billing engine.
 
-**Total schema: 85 tables across 5 major subsystems.**
+**Total schema: 97 RLS-enabled tables across 6 major subsystems.**
+
+| Subsystem | Tables | Description |
+|---|---|---|
+| Core platform | ~20 | Tenants, users, projects, architectures |
+| AI runtime | ~15 | Usage, requests, cache, idempotency, safety |
+| Billing engine | ~35 | Billing, wallet, subscriptions, invoices, Stripe, operations, integrity |
+| Document registry | ~8 | knowledge_bases, documents, versions, storage, jobs (Phase 5A) |
+| Knowledge assets | ~12 | Assets, embeddings, multimodal, OCR, transcripts, imports (5B–5L) |
+| Retrieval pipeline | ~7 | Chunks (FTS), index state, retrieval runs, candidates with hybrid provenance (5D–5N) |
