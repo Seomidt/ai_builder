@@ -411,6 +411,14 @@ import {
   previewAdvancedReranking,
 } from "../lib/ai/advanced-reranking";
 import { explainAdvancedRerankingProvider } from "../lib/ai/advanced-reranking-provider";
+import {
+  summarizeAnswerGrounding,
+  getAnswerCitations,
+  explainAnswerTrace,
+  getAnswerContext,
+  summarizeRetrievalRuntimeMetrics,
+} from "../lib/ai/answer-grounding";
+import { describeRetrievalConfig } from "../lib/config/retrieval-config";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -5388,6 +5396,87 @@ export function registerAdminRoutes(app: Express): void {
         })),
         note: "Preview only — no persistence. Pass persistRun=true to runAdvancedReranking to persist results.",
       });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 5P: Answer Grounding admin routes ───────────────────────────────
+
+  // Route 5P-1: GET /api/admin/retrieval/answer/config
+  // Return centralised retrieval configuration snapshot (INV-ANS7: no writes)
+  app.get("/api/admin/retrieval/answer/config", async (_req: Request, res: Response) => {
+    try {
+      const config = describeRetrievalConfig();
+      res.json({
+        config,
+        note: "Read-only retrieval config snapshot. Modify retrieval-config.ts to change defaults.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5P-2: GET /api/admin/retrieval/answer/runs/:runId
+  // Summarise a persisted answer run (INV-ANS7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const summary = await summarizeAnswerGrounding(runId);
+      res.json(summary);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5P-3: GET /api/admin/retrieval/answer/runs/:runId/citations
+  // Return citations for a persisted answer run (INV-ANS7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/citations", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const citations = await getAnswerCitations(runId);
+      res.json(citations);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5P-4: GET /api/admin/retrieval/answer/runs/:runId/trace
+  // Explain the full answer generation trace for a run (INV-ANS5/7: deterministic, no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/trace", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const trace = await explainAnswerTrace(runId);
+      res.json(trace);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5P-5: GET /api/admin/retrieval/answer/runs/:runId/context
+  // Return context window summary for a persisted answer run (INV-ANS7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/context", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const context = await getAnswerContext(runId);
+      res.json(context);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5P-6: GET /api/admin/retrieval/answer/metrics/:tenantId
+  // Tenant-level retrieval runtime metrics summary (INV-ANS8: tenant-isolated)
+  app.get("/api/admin/retrieval/answer/metrics/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const metrics = await summarizeRetrievalRuntimeMetrics(tenantId);
+      res.json(metrics);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

@@ -5245,6 +5245,72 @@ export const insertBillingRecoveryActionSchema = createInsertSchema(billingRecov
 export type InsertBillingRecoveryAction = z.infer<typeof insertBillingRecoveryActionSchema>;
 export type BillingRecoveryAction = typeof billingRecoveryActions.$inferSelect;
 
+// ── Phase 5P — Answer Grounding & Citations ───────────────────────────────────
+
+export const knowledgeAnswerRuns = pgTable(
+  "knowledge_answer_runs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    retrievalRunId: varchar("retrieval_run_id"),
+    answerText: text("answer_text").notNull(),
+    generationModel: text("generation_model").notNull(),
+    generationLatencyMs: integer("generation_latency_ms"),
+    promptTokens: integer("prompt_tokens"),
+    completionTokens: integer("completion_tokens"),
+    contextChunkCount: integer("context_chunk_count"),
+    fallbackUsed: boolean("fallback_used").default(false),
+    fallbackReason: text("fallback_reason"),
+    rerankLatencyMs: integer("rerank_latency_ms"),
+    shortlistSize: integer("shortlist_size"),
+    rerankProviderLatencyMs: integer("rerank_provider_latency_ms"),
+    rerankProviderCostUsd: numeric("rerank_provider_cost_usd", { precision: 10, scale: 8 }),
+    advancedRerankUsed: boolean("advanced_rerank_used").default(false),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("kar_tenant_run_idx").on(t.tenantId, t.retrievalRunId),
+    index("kar_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+
+export const insertKnowledgeAnswerRunSchema = createInsertSchema(knowledgeAnswerRuns).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeAnswerRun = z.infer<typeof insertKnowledgeAnswerRunSchema>;
+export type KnowledgeAnswerRun = typeof knowledgeAnswerRuns.$inferSelect;
+
+export const knowledgeAnswerCitations = pgTable(
+  "knowledge_answer_citations",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    answerRunId: varchar("answer_run_id").notNull().references(() => knowledgeAnswerRuns.id),
+    tenantId: text("tenant_id").notNull(),
+    chunkId: varchar("chunk_id"),
+    documentId: varchar("document_id"),
+    assetId: varchar("asset_id"),
+    citationIndex: integer("citation_index").notNull(),
+    contextPosition: integer("context_position"),
+    chunkTextPreview: text("chunk_text_preview"),
+    sourceUri: text("source_uri"),
+    finalScore: numeric("final_score", { precision: 10, scale: 8 }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("kac_answer_run_idx").on(t.answerRunId),
+    index("kac_tenant_idx").on(t.tenantId),
+    index("kac_chunk_idx").on(t.chunkId),
+  ],
+);
+
+export const insertKnowledgeAnswerCitationSchema = createInsertSchema(knowledgeAnswerCitations).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeAnswerCitation = z.infer<typeof insertKnowledgeAnswerCitationSchema>;
+export type KnowledgeAnswerCitation = typeof knowledgeAnswerCitations.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
