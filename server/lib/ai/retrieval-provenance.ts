@@ -46,6 +46,12 @@ export const EXCLUSION_REASONS = {
   STALE_EMBEDDING: "stale_embedding",
   LIFECYCLE_EXCLUDED: "lifecycle_excluded",
   TRUST_POLICY_EXCLUDED: "trust_policy_excluded",
+  // Phase 5N — Hybrid search exclusion reasons (INV-HYB3/4)
+  LEXICAL_BELOW_THRESHOLD: "lexical_below_threshold",
+  FUSED_BELOW_THRESHOLD: "fused_below_threshold",
+  RERANK_BELOW_CUTOFF: "rerank_below_cutoff",
+  LEXICAL_DUPLICATE: "lexical_duplicate",
+  VECTOR_DUPLICATE: "vector_duplicate",
 } as const;
 
 export const INCLUSION_REASONS = {
@@ -56,6 +62,12 @@ export const INCLUSION_REASONS = {
   INCLUDED_IN_CONTEXT_BUDGET: "included_in_context_budget",
   SELECTED_FOR_SOURCE_DIVERSITY: "selected_for_source_diversity",
   SELECTED_FOR_DOCUMENT_COVERAGE: "selected_for_document_coverage",
+  // Phase 5N — Hybrid channel inclusion reasons (INV-HYB4)
+  SELECTED_BY_VECTOR_CHANNEL: "selected_by_vector_channel",
+  SELECTED_BY_LEXICAL_CHANNEL: "selected_by_lexical_channel",
+  SELECTED_BY_BOTH_CHANNELS: "selected_by_both_channels",
+  PROMOTED_BY_FUSION: "promoted_by_fusion",
+  PROMOTED_BY_RERANK: "promoted_by_rerank",
 } as const;
 
 export type ExclusionReason = (typeof EXCLUSION_REASONS)[keyof typeof EXCLUSION_REASONS];

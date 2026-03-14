@@ -386,6 +386,18 @@ import {
   buildContextWindowProvenance,
   summarizeContextWindowSources,
 } from "../lib/ai/context-provenance";
+import {
+  explainHybridFusion,
+  summarizeHybridRetrieval,
+  listHybridCandidateSources,
+  explainFusionStrategy,
+  fuseVectorAndLexicalCandidates,
+} from "../lib/ai/hybrid-retrieval";
+import {
+  explainReranking,
+  summarizeRerankingImpact,
+  buildHybridRunSummary,
+} from "../lib/ai/reranking";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -4993,6 +5005,183 @@ export function registerAdminRoutes(app: Express): void {
       if (!runId) return void res.status(400).json({ error: "runId required" });
       const result = await summarizeContextWindowSources(runId);
       res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 5N: Hybrid Search & Reranking Admin Routes ─────────────────────────
+
+  // Route 5N-1: GET /api/admin/retrieval/run/:runId/hybrid-summary
+  // INV-HYB7,8: hybrid retrieval summary — no writes
+  app.get("/api/admin/retrieval/run/:runId/hybrid-summary", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await summarizeHybridRetrieval(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-2: GET /api/admin/retrieval/run/:runId/hybrid-candidates
+  // INV-HYB5,7: full hybrid candidate list with channel origins — no writes
+  app.get("/api/admin/retrieval/run/:runId/hybrid-candidates", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await listHybridCandidateSources(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-3: GET /api/admin/retrieval/run/:runId/vector-candidates
+  // INV-HYB5,7: vector-only channel candidates — no writes
+  app.get("/api/admin/retrieval/run/:runId/vector-candidates", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const allSources = await listHybridCandidateSources(runId);
+      const vectorOnly = {
+        ...allSources,
+        sources: allSources.sources.filter(
+          (s) => s.channelOrigin === "vector_only" || s.channelOrigin === "vector_and_lexical",
+        ),
+        count: allSources.sources.filter(
+          (s) => s.channelOrigin === "vector_only" || s.channelOrigin === "vector_and_lexical",
+        ).length,
+        filter: "vector_channel",
+      };
+      res.json(vectorOnly);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-4: GET /api/admin/retrieval/run/:runId/lexical-candidates
+  // INV-HYB5,7: lexical-only channel candidates — no writes
+  app.get("/api/admin/retrieval/run/:runId/lexical-candidates", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const allSources = await listHybridCandidateSources(runId);
+      const lexicalOnly = {
+        ...allSources,
+        sources: allSources.sources.filter(
+          (s) => s.channelOrigin === "lexical_only" || s.channelOrigin === "vector_and_lexical",
+        ),
+        count: allSources.sources.filter(
+          (s) => s.channelOrigin === "lexical_only" || s.channelOrigin === "vector_and_lexical",
+        ).length,
+        filter: "lexical_channel",
+      };
+      res.json(lexicalOnly);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-5: GET /api/admin/retrieval/run/:runId/fusion-explain
+  // INV-HYB5,7: full RRF fusion explainability — no writes
+  app.get("/api/admin/retrieval/run/:runId/fusion-explain", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [fusionDetail, strategyExplain] = await Promise.all([
+        explainHybridFusion(runId),
+        Promise.resolve(explainFusionStrategy()),
+      ]);
+      res.json({ ...fusionDetail, strategy: strategyExplain });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-6: GET /api/admin/retrieval/run/:runId/rerank-explain
+  // INV-HYB6,7: reranking explainability — no writes
+  app.get("/api/admin/retrieval/run/:runId/rerank-explain", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [explain, impact] = await Promise.all([
+        explainReranking(runId),
+        summarizeRerankingImpact(runId),
+      ]);
+      res.json({ ...explain, impact });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-7: GET /api/admin/retrieval/run/:runId/channel-breakdown
+  // INV-HYB4,7,8: channel breakdown by origin — no writes
+  app.get("/api/admin/retrieval/run/:runId/channel-breakdown", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const fusion = await explainHybridFusion(runId);
+      res.json({
+        runId,
+        channelBreakdown: fusion.channelBreakdown,
+        totalCandidates: fusion.candidates.length,
+        fusionStrategy: fusion.fusionStrategy,
+        note: fusion.note,
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-8: GET /api/admin/retrieval/run/:runId/final-context-scores
+  // INV-HYB5,7: all score columns for selected candidates — no writes
+  app.get("/api/admin/retrieval/run/:runId/final-context-scores", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const allCands = await listHybridCandidateSources(runId);
+      const selected = {
+        runId,
+        filter: "selected_only",
+        candidates: allCands.sources.filter((s) => s.filterStatus === "selected").map((s) => ({
+          chunkId: s.chunkId,
+          channelOrigin: s.channelOrigin,
+          vectorScore: s.vectorScore,
+          lexicalScore: s.lexicalScore,
+          fusedScore: s.fusedScore,
+          finalRank: s.finalRank,
+        })),
+        count: allCands.sources.filter((s) => s.filterStatus === "selected").length,
+      };
+      res.json(selected);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-9: POST /api/admin/retrieval/hybrid/preview
+  // INV-HYB7: preview hybrid fusion without persisting — no writes to DB
+  app.post("/api/admin/retrieval/hybrid/preview", async (req: Request, res: Response) => {
+    try {
+      const { vectorCandidates = [], lexicalCandidates = [], rrfOptions = {} } = req.body ?? {};
+      if (!Array.isArray(vectorCandidates))
+        return void res.status(400).json({ error: "vectorCandidates must be an array" });
+      if (!Array.isArray(lexicalCandidates))
+        return void res.status(400).json({ error: "lexicalCandidates must be an array" });
+
+      const fused = fuseVectorAndLexicalCandidates(vectorCandidates, lexicalCandidates, rrfOptions);
+      const strategyExplain = explainFusionStrategy(rrfOptions);
+      res.json({
+        fusedCandidates: fused,
+        totalFused: fused.length,
+        totalVectorOnly: fused.filter((c) => c.channelOrigin === "vector_only").length,
+        totalLexicalOnly: fused.filter((c) => c.channelOrigin === "lexical_only").length,
+        totalBothChannels: fused.filter((c) => c.channelOrigin === "vector_and_lexical").length,
+        strategy: strategyExplain,
+        note: "Preview only — no persistence. Use runHybridRetrieval with persistRun=true to persist.",
+      });
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
