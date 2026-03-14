@@ -179,6 +179,14 @@ import {
   syncIndexStateAfterImportChunking,
   markIndexStateStaleAfterImportChunkReplace,
 } from "../lib/ai/knowledge-processing";
+import {
+  runEmbeddingForDocumentVersion,
+  retryEmbeddingForDocumentVersion,
+  explainEmbeddingState,
+  listEmbeddingJobs,
+  summarizeEmbeddingResult,
+  listEmbeddingsForDocument,
+} from "../lib/ai/embedding-processing";
 import { selectDocumentParser } from "../lib/ai/document-parsers";
 import { getVectorAdapterInfo } from "../lib/ai/vector-adapter";
 
@@ -2916,6 +2924,114 @@ export function registerAdminRoutes(app: Express): void {
       if (!tenantId) return res.status(400).json({ error: "tenantId required" });
       const state = await explainImportChunkState(versionId, tenantId);
       res.json({ importChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5C: Embedding Pipeline Admin Routes ─────────────────────────────
+
+  app.post("/api/admin/knowledge/embeddings/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        providerName: z.string().optional(),
+        batchSize: z.number().int().min(1).max(500).optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        replaceExisting: z.boolean().optional(),
+      }).parse(req.body);
+      const result = await runEmbeddingForDocumentVersion(body.versionId, body.tenantId, {
+        providerName: body.providerName as any,
+        batchSize: body.batchSize,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+        replaceExisting: body.replaceExisting,
+      });
+      res.json({ embedding: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/embeddings/retry", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        providerName: z.string().optional(),
+        batchSize: z.number().int().min(1).max(500).optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+      }).parse(req.body);
+      const result = await retryEmbeddingForDocumentVersion(body.versionId, body.tenantId, {
+        providerName: body.providerName as any,
+        batchSize: body.batchSize,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+      });
+      res.json({ embedding: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/embeddings/state/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainEmbeddingState(versionId, tenantId);
+      res.json({ embeddingState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/embeddings/jobs/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listEmbeddingJobs(documentId, tenantId);
+      res.json({ jobs });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/embeddings/jobs/:jobId/summarize", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeEmbeddingResult(jobId, tenantId);
+      res.json({ summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/embeddings/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const embeddings = await listEmbeddingsForDocument(documentId, tenantId);
+      res.json({ embeddings, count: embeddings.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/embedding-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainEmbeddingState(versionId, tenantId);
+      res.json({ embeddingState: state });
     } catch (err) {
       res.status(400).json({ error: (err as Error).message });
     }

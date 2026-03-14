@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5B.4 complete)
+# AI Builder Platform — V1 (Phase 5C complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -789,3 +789,36 @@ parse/run, parse/mark-failed, parse/mark-completed, parse/explain/:versionId, ch
 
 ### Validation: 54/54 assertions passed (16 scenarios)
 S1 kdv import columns (12), S2 kc import chunk columns (11), S3 kpj processor columns (2), S4 job_type CHECK constraints (import_parse + import_chunk), S5 SUPPORTED mime type sets, S6 HTML parser parses headings into sections, S7 Email parser extracts RFC 822 headers + messages, S8 Plain text import parser produces paragraph sections, S9 Unsupported mime type rejected explicitly (INV-IMP11), S10 Empty content rejected explicitly (INV-IMP11), S11 HTML chunking html_sections strategy + deterministic keys/hashes, S12 Email chunking email_messages strategy preserves message context, S13 buildImportChunkKey determinism (INV-IMP10), S14 normalizeImportChunkText collapses whitespace, S15 normalizeImportedDocument sorts + recomputes checksum, S16 summarizeImportParseResult + summarizeImportChunks output format.
+
+## Phase 5C — Embedding Pipeline & Vector Preparation (branch: feature/embedding-pipeline)
+
+### Purpose
+Transform knowledge_chunks into vector embeddings for semantic retrieval. Job-driven, batch-capable, deterministic, retry-safe, tenant-safe. pgvector enabled. Vectors stored as real[] (Phase 5D will add HNSW index).
+
+### New files
+- `server/lib/ai/embedding-providers.ts` — EmbeddingProvider interface, OpenAI text-embedding-3-small (1536-dim, default), OpenAI text-embedding-3-large (3072-dim), stub_embedding (deterministic, no API call), selectEmbeddingProvider(), splitIntoBatches(), normalizeEmbeddingVector(), computeEmbeddingContentHash(), summarizeEmbeddingCost()
+- `server/lib/ai/embedding-processing.ts` — runEmbeddingForDocumentVersion() (5-step pipeline: validate→fetch chunks→create job→batch→persist), retryEmbeddingForDocumentVersion(), explainEmbeddingState(), listEmbeddingJobs(), summarizeEmbeddingResult(), listEmbeddingsForDocument()
+- `server/lib/ai/migrate-phase5c.ts` — raw SQL migration (ran successfully, pgvector enabled)
+- `server/lib/ai/validate-phase5c.ts` — 10 validation scenarios, 46/46 assertions passed
+
+### DB changes (10 new items + pgvector)
+- `pgvector` extension: enabled (`CREATE EXTENSION IF NOT EXISTS vector`)
+- `knowledge_embeddings`: 6 new columns (embedding_status CHECK('pending','running','completed','failed'), embedding_vector real[], embedding_dimensions, token_usage, estimated_cost_usd, updated_at) + CHECK constraints + ke_tenant_embedding_status_idx
+- `knowledge_processing_jobs`: 4 new columns (embedding_provider, embedding_model, token_usage, estimated_cost_usd) + job_type CHECK updated (embedding_generate, embedding_retry)
+- `shared/schema.ts`: `real` imported from drizzle-orm/pg-core
+
+### Admin routes (7 endpoints under /api/admin/knowledge/embeddings/)
+run, retry, state/:versionId, jobs/document/:documentId, jobs/:jobId/summarize, document/:documentId, versions/:versionId/embedding-state
+
+### Invariants enforced
+- INV-EMB1: Tenant isolation — cross-tenant access fails explicitly
+- INV-EMB2: Only active KB documents are processed
+- INV-EMB3: Re-running replaces all prior embeddings transactionally (INV-EMB7)
+- INV-EMB4: NEVER sets index_state='indexed'
+- INV-EMB5: Each batch records provider, model, token_usage, estimated_cost_usd
+- INV-EMB6: Empty chunk set fails explicitly
+- INV-EMB7: Embedding replacement is transactional — no partial state
+- INV-EMB8: embedding_count reflects completed embeddings only
+
+### Validation: 46/46 assertions passed (10 scenarios)
+S1 ke new columns (6), S2 kpj embedding columns (4), S3 job_type CHECK (embedding_generate+retry), S4 provider abstraction (openai_small/large/stub routing + unknown provider throws), S5 stub provider determinism (1536-dim vectors, same text → same vector), S6 embed 5 chunks → 5 DB rows with vectors in DB, S7 embedding_count updated + index_state NOT 'indexed' (INV-EMB4), S8 deterministic replacement (5 prior deactivated + 5 new created) INV-EMB3/7, S9 cross-tenant rejected INV-EMB1, S10 batch size handling + splitIntoBatches utility.

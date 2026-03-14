@@ -58,6 +58,7 @@ import {
   integer,
   bigint,
   numeric,
+  real,
   pgEnum,
   index,
   uniqueIndex,
@@ -844,9 +845,13 @@ export const knowledgeProcessingJobs = pgTable(
     transcriptProcessorVersion: text("transcript_processor_version"),
     importProcessorName: text("import_processor_name"),
     importProcessorVersion: text("import_processor_version"),
+    embeddingProvider: text("embedding_provider"),
+    embeddingModel: text("embedding_model"),
+    tokenUsage: integer("token_usage"),
+    estimatedCostUsd: numeric("estimated_cost_usd", { precision: 12, scale: 8 }),
   },
   (t) => [
-    sql`CONSTRAINT kpj_job_type_check CHECK (${t.jobType} IN ('upload_verify','parse','chunk','embed','index','reindex','delete_index','lifecycle_sync','extract_text','structured_parse','structured_chunk','ocr_parse','ocr_chunk','transcript_parse','transcript_chunk','import_parse','import_chunk'))`,
+    sql`CONSTRAINT kpj_job_type_check CHECK (${t.jobType} IN ('upload_verify','parse','chunk','embed','index','reindex','delete_index','lifecycle_sync','extract_text','structured_parse','structured_chunk','ocr_parse','ocr_chunk','transcript_parse','transcript_chunk','import_parse','import_chunk','embedding_generate','embedding_retry'))`,
     sql`CONSTRAINT kpj_status_check CHECK (${t.status} IN ('queued','running','completed','failed','cancelled','skipped'))`,
     sql`CONSTRAINT kpj_priority_check CHECK (${t.priority} >= 0)`,
     sql`CONSTRAINT kpj_attempt_count_check CHECK (${t.attemptCount} >= 0)`,
@@ -1006,6 +1011,11 @@ export const knowledgeEmbeddings = pgTable(
       .references(() => knowledgeChunks.id),
     embeddingProvider: text("embedding_provider").notNull(),
     embeddingModel: text("embedding_model").notNull(),
+    embeddingStatus: text("embedding_status").notNull().default("pending"),
+    embeddingVector: real("embedding_vector").array(),
+    embeddingDimensions: integer("embedding_dimensions"),
+    tokenUsage: integer("token_usage"),
+    estimatedCostUsd: numeric("estimated_cost_usd", { precision: 12, scale: 8 }),
     vectorBackend: text("vector_backend").notNull().default("pgvector"),
     vectorStatus: text("vector_status").notNull().default("pending"),
     vectorNamespace: text("vector_namespace"),
@@ -1015,22 +1025,28 @@ export const knowledgeEmbeddings = pgTable(
     indexedAt: timestamp("indexed_at"),
     failureReason: text("failure_reason"),
     metadata: jsonb("metadata"),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
     createdAt: timestamp("created_at").notNull().defaultNow(),
   },
   (t) => [
+    sql`CONSTRAINT ke_embedding_status_check CHECK (${t.embeddingStatus} IN ('pending','running','completed','failed'))`,
     sql`CONSTRAINT ke_vector_backend_check CHECK (${t.vectorBackend} IN ('pgvector','pinecone','weaviate','qdrant','custom'))`,
     sql`CONSTRAINT ke_vector_status_check CHECK (${t.vectorStatus} IN ('pending','indexed','failed','deleted'))`,
     sql`CONSTRAINT ke_dimensions_check CHECK (${t.dimensions} IS NULL OR ${t.dimensions} > 0)`,
+    sql`CONSTRAINT ke_embedding_dimensions_check CHECK (${t.embeddingDimensions} IS NULL OR ${t.embeddingDimensions} > 0)`,
+    sql`CONSTRAINT ke_token_usage_check CHECK (${t.tokenUsage} IS NULL OR ${t.tokenUsage} >= 0)`,
     index("ke_tenant_kb_status_idx").on(t.tenantId, t.knowledgeBaseId, t.vectorStatus, t.createdAt),
     index("ke_tenant_version_idx").on(t.tenantId, t.knowledgeDocumentVersionId, t.createdAt),
     index("ke_tenant_chunk_idx").on(t.tenantId, t.knowledgeChunkId, t.createdAt),
     index("ke_tenant_backend_status_idx").on(t.tenantId, t.vectorBackend, t.vectorStatus),
+    index("ke_tenant_embedding_status_idx").on(t.tenantId, t.embeddingStatus, t.createdAt),
   ],
 );
 
 export const insertKnowledgeEmbeddingSchema = createInsertSchema(knowledgeEmbeddings).omit({
   id: true,
   createdAt: true,
+  updatedAt: true,
 });
 export type InsertKnowledgeEmbedding = z.infer<typeof insertKnowledgeEmbeddingSchema>;
 export type KnowledgeEmbedding = typeof knowledgeEmbeddings.$inferSelect;
