@@ -428,6 +428,27 @@ import {
   explainQueryRewrite,
 } from "../lib/ai/query-rewriting";
 import {
+  verifyGroundedAnswer,
+  previewExtractedClaims,
+  summarizeCitationCoverage,
+  summarizeAnswerVerificationMetrics,
+  getAnswerVerificationMetrics,
+  explainAnswerVerification,
+  getAnswerVerificationTrace,
+  explainVerificationStage,
+} from "../lib/ai/answer-verification";
+import type { CitationInput } from "../lib/ai/answer-verification";
+import {
+  buildHallucinationGuardSummary,
+  explainHallucinationGuard,
+} from "../lib/ai/hallucination-guard";
+import {
+  decideFinalAnswerPolicy,
+  applyAnswerPolicy,
+  explainAnswerPolicy,
+  previewAnswerPolicy,
+} from "../lib/ai/answer-policy";
+import {
   computeRetrievalQualitySignals,
   summarizeRetrievalQualitySignals,
   explainRetrievalQuality,
@@ -5664,6 +5685,189 @@ export function registerAdminRoutes(app: Express): void {
         persistSignals: persistSignals ?? false,
       });
       res.json(signals);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 5R — Answer Safety, Hallucination Guard & Citation Coverage
+  // Routes: 5R-1 → 5R-9
+  // INV-ANSV1: Verification on real data only
+  // INV-ANSV2: Claims never marked supported without evidence
+  // INV-ANSV3: Coverage scoring deterministic
+  // INV-ANSV4: Hallucination guard evidence-based
+  // INV-ANSV5: Answer policy deterministic
+  // INV-ANSV6: Answer text / citations not mutated
+  // INV-ANSV7: Preview endpoints perform no writes
+  // INV-ANSV8: Verification metrics tenant-isolated
+  // INV-ANSV9: Existing retrieval/citation behavior intact
+  // INV-ANSV10: Cross-tenant leakage impossible
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 5R-1: GET /api/admin/retrieval/answer/runs/:runId/verification
+  // Return answer verification metadata for a run (INV-ANSV7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/verification", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const metrics = await getAnswerVerificationMetrics(runId);
+      if (!metrics) return void res.status(404).json({ error: "Answer run not found", runId });
+      res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-2: GET /api/admin/retrieval/answer/runs/:runId/claims
+  // Explain claims for a run — explain trace with claim extraction stages (INV-ANSV7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/claims", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const explanation = await explainAnswerVerification(runId);
+      const stageDetail = await explainVerificationStage(runId);
+      res.json({ explanation, stageDetail });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-3: GET /api/admin/retrieval/answer/runs/:runId/coverage
+  // Return citation coverage summary for a run (INV-ANSV7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/coverage", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const coverage = await summarizeCitationCoverage(runId);
+      res.json(coverage);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-4: GET /api/admin/retrieval/answer/runs/:runId/hallucination-summary
+  // Return hallucination guard explanation for a run (INV-ANSV4/7: evidence-based, no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/hallucination-summary", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const explanation = await explainHallucinationGuard(runId);
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-5: GET /api/admin/retrieval/answer/runs/:runId/policy
+  // Return final answer policy explanation for a run (INV-ANSV5/7: deterministic, no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/policy", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const policyExpl = await explainAnswerPolicy(runId);
+      res.json(policyExpl);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-6: GET /api/admin/retrieval/answer/runs/:runId/final-safe-answer
+  // Return full pipeline trace including verification and policy (INV-ANSV7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/final-safe-answer", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const trace = await getAnswerVerificationTrace(runId);
+      const policyExpl = await explainAnswerPolicy(runId);
+      const coverage = await summarizeCitationCoverage(runId);
+      res.json({
+        runId,
+        pipelineTrace: trace.traceStages,
+        policyOutcome: policyExpl.policyOutcome,
+        coverageRatio: coverage.citationCoverageRatio,
+        groundingBand: coverage.groundingConfidenceBand,
+        found: trace.found,
+        note: "INV-ANSV7: no writes performed.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-7: GET /api/admin/retrieval/answer/metrics/:tenantId/verification
+  // Tenant-level answer verification metrics (INV-ANSV8: tenant-isolated)
+  app.get("/api/admin/retrieval/answer/metrics/:tenantId/verification", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const metrics = await summarizeAnswerVerificationMetrics(tenantId);
+      res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-8: POST /api/admin/retrieval/answer/verification/preview
+  // Preview verification for a given answer + citations (INV-ANSV7: no writes)
+  app.post("/api/admin/retrieval/answer/verification/preview", async (req: Request, res: Response) => {
+    try {
+      const { answerText, citations, retrievalSafetyStatus } = req.body as {
+        answerText?: string;
+        citations?: CitationInput[];
+        retrievalSafetyStatus?: string;
+      };
+      if (!answerText) return void res.status(400).json({ error: "answerText required" });
+      const result = await verifyGroundedAnswer({
+        answerText,
+        citations: citations ?? [],
+        retrievalSafetyStatus: retrievalSafetyStatus ?? null,
+        tenantId: "preview",
+        persistVerification: false,
+      });
+      const claimPreview = previewExtractedClaims(answerText);
+      res.json({ result, claimPreview });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-9: POST /api/admin/retrieval/answer/policy/preview
+  // Preview final answer policy for given verification params (INV-ANSV5/7: deterministic, no writes)
+  app.post("/api/admin/retrieval/answer/policy/preview", async (req: Request, res: Response) => {
+    try {
+      const {
+        groundingConfidenceBand,
+        groundingConfidenceScore,
+        citationCoverageRatio,
+        unsupportedClaimCount,
+        totalClaimCount,
+        hallucinationGuardStatus,
+        retrievalSafetyStatus,
+      } = req.body as {
+        groundingConfidenceBand?: "high" | "medium" | "low" | "unsafe";
+        groundingConfidenceScore?: number;
+        citationCoverageRatio?: number;
+        unsupportedClaimCount?: number;
+        totalClaimCount?: number;
+        hallucinationGuardStatus?: "no_issue" | "caution" | "high_risk";
+        retrievalSafetyStatus?: string;
+      };
+
+      if (!groundingConfidenceBand) return void res.status(400).json({ error: "groundingConfidenceBand required" });
+      if (groundingConfidenceScore === undefined) return void res.status(400).json({ error: "groundingConfidenceScore required" });
+      if (citationCoverageRatio === undefined) return void res.status(400).json({ error: "citationCoverageRatio required" });
+
+      const preview = previewAnswerPolicy({
+        groundingConfidenceBand,
+        groundingConfidenceScore,
+        citationCoverageRatio,
+        unsupportedClaimCount: unsupportedClaimCount ?? 0,
+        totalClaimCount: totalClaimCount ?? 0,
+        hallucinationGuardStatus: hallucinationGuardStatus ?? "no_issue",
+        retrievalSafetyStatus: retrievalSafetyStatus ?? null,
+      });
+      res.json(preview);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

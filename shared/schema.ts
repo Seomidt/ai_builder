@@ -5285,6 +5285,17 @@ export const knowledgeAnswerRuns = pgTable(
     retrievalSafetyStatus: text("retrieval_safety_status"),
     rewriteStrategyUsed: text("rewrite_strategy_used"),
     safetyFlagCount: integer("safety_flag_count"),
+    // ── Phase 5R — Answer verification ───────────────────────────────────────
+    groundingConfidenceScore: numeric("grounding_confidence_score", { precision: 10, scale: 6 }),
+    groundingConfidenceBand: text("grounding_confidence_band"),
+    citationCoverageRatio: numeric("citation_coverage_ratio", { precision: 10, scale: 6 }),
+    supportedClaimCount: integer("supported_claim_count"),
+    partiallySupportedClaimCount: integer("partially_supported_claim_count"),
+    unsupportedClaimCount: integer("unsupported_claim_count"),
+    unverifiableClaimCount: integer("unverifiable_claim_count"),
+    answerSafetyStatus: text("answer_safety_status"),
+    answerPolicyResult: text("answer_policy_result"),
+    answerVerificationLatencyMs: integer("answer_verification_latency_ms"),
   },
   (t) => [
     index("kar_tenant_run_idx").on(t.tenantId, t.retrievalRunId),

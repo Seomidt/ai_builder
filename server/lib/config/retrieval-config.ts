@@ -109,6 +109,35 @@ export const QUALITY_SIGNAL_MEDIUM_CONFIDENCE_THRESHOLD = 0.4;
 /** Minimum document diversity score for "high" confidence (combined with score threshold). */
 export const QUALITY_SIGNAL_HIGH_DIVERSITY_THRESHOLD = 0.4;
 
+// ── Phase 5R — Answer verification & hallucination guard ──────────────────────
+
+/** Whether answer verification runs after answer generation. */
+export const ANSWER_VERIFICATION_ENABLED = true;
+
+/** Whether hallucination guard heuristics run on each answer. */
+export const HALLUCINATION_GUARD_ENABLED = true;
+
+/** Minimum citation coverage ratio required for non-degraded answers. */
+export const MINIMUM_CITATION_COVERAGE_RATIO = 0.5;
+
+/** Maximum unsupported claim count before policy degrades the answer. */
+export const MAXIMUM_UNSUPPORTED_CLAIM_COUNT = 2;
+
+/** Whether grounded_partial_answer is allowed as a fallback outcome. */
+export const ALLOW_PARTIAL_ANSWER_FALLBACK = true;
+
+/** Whether insufficient_evidence is allowed as a fallback outcome. */
+export const ALLOW_INSUFFICIENT_EVIDENCE_FALLBACK = true;
+
+/** Whether strong certainty language (definitely, certainly, etc.) triggers a guard penalty. */
+export const STRONG_CERTAINTY_PENALTY_ENABLED = true;
+
+/**
+ * Minimum grounding confidence band required to deliver any answer.
+ * Answers below this band fall to safe_refusal.
+ */
+export const MINIMUM_GROUNDING_CONFIDENCE_BAND: "high" | "medium" | "low" | "unsafe" = "low";
+
 // ── Validation helpers ────────────────────────────────────────────────────────
 
 export function clampShortlistSize(size: number): number {
@@ -150,5 +179,14 @@ export function describeRetrievalConfig(): Record<string, unknown> {
       medium: QUALITY_SIGNAL_MEDIUM_CONFIDENCE_THRESHOLD,
       highDiversity: QUALITY_SIGNAL_HIGH_DIVERSITY_THRESHOLD,
     },
+    // Phase 5R
+    answerVerificationEnabled: ANSWER_VERIFICATION_ENABLED,
+    hallucinationGuardEnabled: HALLUCINATION_GUARD_ENABLED,
+    minimumCitationCoverageRatio: MINIMUM_CITATION_COVERAGE_RATIO,
+    maximumUnsupportedClaimCount: MAXIMUM_UNSUPPORTED_CLAIM_COUNT,
+    allowPartialAnswerFallback: ALLOW_PARTIAL_ANSWER_FALLBACK,
+    allowInsufficientEvidenceFallback: ALLOW_INSUFFICIENT_EVIDENCE_FALLBACK,
+    strongCertaintyPenaltyEnabled: STRONG_CERTAINTY_PENALTY_ENABLED,
+    minimumGroundingConfidenceBand: MINIMUM_GROUNDING_CONFIDENCE_BAND,
   };
 }
