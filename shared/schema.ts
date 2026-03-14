@@ -1368,6 +1368,179 @@ export const insertDocumentRiskScoreSchema = createInsertSchema(documentRiskScor
 export type InsertDocumentRiskScore = z.infer<typeof insertDocumentRiskScoreSchema>;
 export type DocumentRiskScore = typeof documentRiskScores.$inferSelect;
 
+// ─── Phase 5G — Knowledge Asset Registry & Multimodal Foundation ─────────────
+
+// ─── knowledge_assets ─────────────────────────────────────────────────────────
+// Phase 5G — Canonical registry for all knowledge content (documents, images,
+// videos, audio, emails, webpages). current_version_id FK added post-migration.
+
+export const knowledgeAssets = pgTable(
+  "knowledge_assets",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    knowledgeBaseId: text("knowledge_base_id").notNull(),
+    assetType: text("asset_type").notNull(),
+    title: text("title"),
+    sourceType: text("source_type").notNull(),
+    lifecycleState: text("lifecycle_state").notNull().default("active"),
+    processingState: text("processing_state").notNull().default("pending"),
+    visibilityState: text("visibility_state").notNull().default("private"),
+    currentVersionId: varchar("current_version_id"),
+    checksumSha256: text("checksum_sha256"),
+    metadata: jsonb("metadata"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT ka_asset_type_check CHECK (${t.assetType} IN ('document','image','video','audio','email','webpage'))`,
+    sql`CONSTRAINT ka_source_type_check CHECK (${t.sourceType} IN ('upload','url','manual','api','email_ingest'))`,
+    sql`CONSTRAINT ka_lifecycle_state_check CHECK (${t.lifecycleState} IN ('active','suspended','archived','deleted'))`,
+    sql`CONSTRAINT ka_processing_state_check CHECK (${t.processingState} IN ('pending','processing','ready','failed','reindex_required'))`,
+    sql`CONSTRAINT ka_visibility_state_check CHECK (${t.visibilityState} IN ('private','shared','internal'))`,
+    index("ka_tenant_kb_created_idx").on(t.tenantId, t.knowledgeBaseId, t.createdAt),
+    index("ka_tenant_type_created_idx").on(t.tenantId, t.assetType, t.createdAt),
+    index("ka_tenant_lifecycle_idx").on(t.tenantId, t.lifecycleState, t.createdAt),
+    index("ka_tenant_processing_idx").on(t.tenantId, t.processingState, t.createdAt),
+  ],
+);
+
+export const insertKnowledgeAssetSchema = createInsertSchema(knowledgeAssets).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertKnowledgeAsset = z.infer<typeof insertKnowledgeAssetSchema>;
+export type KnowledgeAsset = typeof knowledgeAssets.$inferSelect;
+
+// ─── knowledge_asset_versions ─────────────────────────────────────────────────
+// Phase 5G — Immutable version log per asset. version_number is per-asset
+// monotonically increasing. storage_object_id links to physical file reference.
+
+export const knowledgeAssetVersions = pgTable(
+  "knowledge_asset_versions",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    assetId: varchar("asset_id")
+      .notNull()
+      .references(() => knowledgeAssets.id),
+    versionNumber: integer("version_number").notNull(),
+    storageObjectId: varchar("storage_object_id"),
+    parserVersion: text("parser_version"),
+    processingProfile: text("processing_profile"),
+    checksumSha256: text("checksum_sha256"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }),
+    mimeType: text("mime_type"),
+    metadata: jsonb("metadata"),
+    createdBy: text("created_by"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT kav_version_number_check CHECK (${t.versionNumber} > 0)`,
+    sql`CONSTRAINT kav_size_bytes_check CHECK (${t.sizeBytes} IS NULL OR ${t.sizeBytes} >= 0)`,
+    uniqueIndex("kav_asset_version_uniq").on(t.assetId, t.versionNumber),
+    index("kav_asset_created_idx").on(t.assetId, t.createdAt),
+    index("kav_storage_object_idx").on(t.storageObjectId),
+  ],
+);
+
+export const insertKnowledgeAssetVersionSchema = createInsertSchema(knowledgeAssetVersions).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeAssetVersion = z.infer<typeof insertKnowledgeAssetVersionSchema>;
+export type KnowledgeAssetVersion = typeof knowledgeAssetVersions.$inferSelect;
+
+// ─── asset_storage_objects ────────────────────────────────────────────────────
+// Phase 5G — Generic provider-agnostic storage registry for multimodal assets.
+// Distinct from Phase 5B knowledge_storage_objects (document-version-linked).
+// Prepares for checksum-based dedup in a future phase.
+
+export const assetStorageObjects = pgTable(
+  "asset_storage_objects",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    storageProvider: text("storage_provider").notNull(),
+    bucketName: text("bucket_name").notNull(),
+    objectKey: text("object_key").notNull(),
+    storageClass: text("storage_class").notNull().default("hot"),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    mimeType: text("mime_type"),
+    checksumSha256: text("checksum_sha256"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    archivedAt: timestamp("archived_at"),
+    deletedAt: timestamp("deleted_at"),
+  },
+  (t) => [
+    sql`CONSTRAINT aso_size_bytes_check CHECK (${t.sizeBytes} >= 0)`,
+    sql`CONSTRAINT aso_storage_provider_check CHECK (${t.storageProvider} IN ('r2','s3','supabase','local'))`,
+    sql`CONSTRAINT aso_storage_class_check CHECK (${t.storageClass} IN ('hot','cold','archive','deleted'))`,
+    uniqueIndex("aso_tenant_bucket_key_uniq").on(t.tenantId, t.bucketName, t.objectKey),
+    index("aso_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("aso_tenant_checksum_idx").on(t.tenantId, t.checksumSha256),
+    index("aso_tenant_class_created_idx").on(t.tenantId, t.storageClass, t.createdAt),
+  ],
+);
+
+export const insertAssetStorageObjectSchema = createInsertSchema(assetStorageObjects).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertAssetStorageObject = z.infer<typeof insertAssetStorageObjectSchema>;
+export type AssetStorageObject = typeof assetStorageObjects.$inferSelect;
+
+// ─── knowledge_asset_processing_jobs ──────────────────────────────────────────
+// Phase 5G — Async job queue for multimodal asset processing. One row per
+// discrete processing step. Append-only operational log.
+
+export const knowledgeAssetProcessingJobs = pgTable(
+  "knowledge_asset_processing_jobs",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    assetId: varchar("asset_id")
+      .notNull()
+      .references(() => knowledgeAssets.id),
+    assetVersionId: varchar("asset_version_id")
+      .references(() => knowledgeAssetVersions.id),
+    jobType: text("job_type").notNull(),
+    jobStatus: text("job_status").notNull().default("queued"),
+    attemptNumber: integer("attempt_number").notNull().default(1),
+    errorMessage: text("error_message"),
+    metadata: jsonb("metadata"),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT kapj_attempt_number_check CHECK (${t.attemptNumber} > 0)`,
+    sql`CONSTRAINT kapj_job_type_check CHECK (${t.jobType} IN ('parse_document','ocr_image','caption_image','extract_video_metadata','extract_audio','transcribe_audio','sample_video_frames','segment_video','chunk_text','embed_text','embed_image','index_asset','reindex_asset','delete_index'))`,
+    sql`CONSTRAINT kapj_job_status_check CHECK (${t.jobStatus} IN ('queued','started','completed','failed','skipped','cancelled'))`,
+    index("kapj_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("kapj_asset_created_idx").on(t.assetId, t.createdAt),
+    index("kapj_status_created_idx").on(t.jobStatus, t.createdAt),
+    index("kapj_type_created_idx").on(t.jobType, t.createdAt),
+  ],
+);
+
+export const insertKnowledgeAssetProcessingJobSchema = createInsertSchema(knowledgeAssetProcessingJobs).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeAssetProcessingJob = z.infer<typeof insertKnowledgeAssetProcessingJobSchema>;
+export type KnowledgeAssetProcessingJob = typeof knowledgeAssetProcessingJobs.$inferSelect;
+
 // ─── Artifact Dependencies ───────────────────────────────────────────────────
 
 export const artifactDependencies = pgTable(

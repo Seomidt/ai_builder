@@ -280,6 +280,40 @@ import {
   previewDuplicateStartedRuns,
 } from "../lib/ai/billing-ops-retention";
 
+// Phase 5G: Knowledge Asset Registry & Multimodal Foundation
+import {
+  createKnowledgeAsset,
+  createKnowledgeAssetVersion,
+  setKnowledgeAssetCurrentVersion,
+  getKnowledgeAssetById,
+  listKnowledgeAssetsByKnowledgeBase,
+  listKnowledgeAssetsByTenant,
+  updateKnowledgeAssetLifecycle,
+  markKnowledgeAssetProcessingState,
+  explainKnowledgeAsset,
+} from "../lib/ai/knowledge-assets";
+import {
+  registerStorageObject,
+  getStorageObjectById,
+  listStorageObjectsByTenant,
+  markStorageObjectArchived,
+  markStorageObjectDeleted,
+  explainStorageObject,
+} from "../lib/ai/knowledge-storage";
+import {
+  enqueueAssetProcessingJob,
+  startAssetProcessingJob,
+  completeAssetProcessingJob,
+  failAssetProcessingJob,
+  listAssetProcessingJobs,
+  explainAssetProcessingState,
+} from "../lib/ai/knowledge-asset-processing";
+import {
+  explainDocumentToAssetMigrationStrategy,
+  previewLegacyDocumentCompatibility,
+  explainCurrentRegistryState,
+} from "../lib/ai/knowledge-asset-compat";
+
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
 const createProviderPricingVersionSchema = z.object({
@@ -3559,6 +3593,277 @@ export function registerAdminRoutes(app: Express): void {
       if (!tenantId) return res.status(400).json({ error: "tenantId required" });
       const explanation = await explainDocumentTrust(documentId, tenantId);
       res.json({ explanation });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5G: Knowledge Asset Registry & Multimodal Foundation ───────────
+
+  // Asset CRUD
+  app.post("/api/admin/knowledge/assets", async (req: Request, res: Response) => {
+    try {
+      const asset = await createKnowledgeAsset(req.body);
+      res.status(201).json({ asset });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/assets/:assetId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const asset = await getKnowledgeAssetById(String(req.params.assetId), tenantId);
+      if (!asset) return res.status(404).json({ error: "Asset not found" });
+      res.json({ asset });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/assets/by-kb/:kbId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const assets = await listKnowledgeAssetsByKnowledgeBase(tenantId, String(req.params.kbId));
+      res.json({ assets });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/assets/by-tenant", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const assets = await listKnowledgeAssetsByTenant(tenantId);
+      res.json({ assets });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/assets/:assetId/lifecycle", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      const lifecycleState = String(req.body.lifecycleState ?? "");
+      if (!tenantId || !lifecycleState) {
+        return res.status(400).json({ error: "tenantId and lifecycleState required" });
+      }
+      const asset = await updateKnowledgeAssetLifecycle(String(req.params.assetId), tenantId, lifecycleState as any);
+      res.json({ asset });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/assets/:assetId/processing-state", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      const processingState = String(req.body.processingState ?? "");
+      if (!tenantId || !processingState) {
+        return res.status(400).json({ error: "tenantId and processingState required" });
+      }
+      const asset = await markKnowledgeAssetProcessingState(String(req.params.assetId), tenantId, processingState as any);
+      res.json({ asset });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/assets/:assetId/explain", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const result = await explainKnowledgeAsset(String(req.params.assetId), tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Asset Versions
+  app.post("/api/admin/knowledge/asset-versions", async (req: Request, res: Response) => {
+    try {
+      const version = await createKnowledgeAssetVersion(req.body);
+      res.status(201).json({ version });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/assets/:assetId/set-current-version", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      const versionId = String(req.body.versionId ?? "");
+      if (!tenantId || !versionId) {
+        return res.status(400).json({ error: "tenantId and versionId required" });
+      }
+      const asset = await setKnowledgeAssetCurrentVersion(String(req.params.assetId), tenantId, versionId);
+      res.json({ asset });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Storage Objects
+  app.post("/api/admin/knowledge/storage-objects", async (req: Request, res: Response) => {
+    try {
+      const obj = await registerStorageObject(req.body);
+      res.status(201).json({ storageObject: obj });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/storage-objects/:objectId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const obj = await getStorageObjectById(String(req.params.objectId), tenantId);
+      if (!obj) return res.status(404).json({ error: "Storage object not found" });
+      res.json({ storageObject: obj });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/storage-objects/by-tenant", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const objects = await listStorageObjectsByTenant(tenantId);
+      res.json({ storageObjects: objects });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/storage-objects/:objectId/archive", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const obj = await markStorageObjectArchived(String(req.params.objectId), tenantId);
+      res.json({ storageObject: obj });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/storage-objects/:objectId/delete", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const obj = await markStorageObjectDeleted(String(req.params.objectId), tenantId);
+      res.json({ storageObject: obj });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/storage-objects/:objectId/explain", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const result = await explainStorageObject(String(req.params.objectId), tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Processing Jobs
+  app.post("/api/admin/knowledge/processing-jobs", async (req: Request, res: Response) => {
+    try {
+      const job = await enqueueAssetProcessingJob(req.body);
+      res.status(201).json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/processing-jobs/:jobId/start", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const job = await startAssetProcessingJob(String(req.params.jobId), tenantId);
+      res.json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/processing-jobs/:jobId/complete", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const job = await completeAssetProcessingJob(String(req.params.jobId), tenantId, req.body.metadata);
+      res.json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/processing-jobs/:jobId/fail", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      const errorMessage = String(req.body.errorMessage ?? "unspecified error");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const job = await failAssetProcessingJob(String(req.params.jobId), tenantId, errorMessage);
+      res.json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/processing-jobs/by-asset/:assetId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listAssetProcessingJobs(tenantId, { assetId: String(req.params.assetId) });
+      res.json({ jobs });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/processing-jobs/:assetId/explain", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const result = await explainAssetProcessingState(tenantId, String(req.params.assetId));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Compatibility / Migration Explain Helpers
+  app.get("/api/admin/knowledge/compat/migration-strategy", async (_req: Request, res: Response) => {
+    try {
+      const result = explainDocumentToAssetMigrationStrategy();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/compat/legacy-preview", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const result = await previewLegacyDocumentCompatibility(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/compat/registry-state", async (_req: Request, res: Response) => {
+    try {
+      const result = await explainCurrentRegistryState();
+      res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

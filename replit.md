@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 5F complete)
+# AI Builder Platform — V1 (Phase 5G complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -959,3 +959,43 @@ Builds the enterprise observability + cache + trust layer on top of the Phase 5E
 
 ### Validation: 84/84 assertions passed (25 scenarios)
 S01 metrics record+retrieve, S02 metrics summary, S03 cache store+hit, S04 tenant isolation, S05 expired cache ignored, S06 KB invalidation, S07 hash stability, S08-S09 version constants, S10 explainEmbeddingVersionState, S11 stale preview, S12 trust signal insert, S13-S16 risk score derivation (high/medium/low/unknown), S17 getDocumentTrustSignals, S18 getDocumentRiskScore, S19 explainDocumentTrust, S20 DB tables, S21 DB columns, S22 DB CHECK constraints, S23 FK constraint, S24 sample rows round-trip, S25 admin endpoint shapes
+
+## Phase 5G — Knowledge Asset Registry & Multimodal Foundation (branch: feature/retrieval-orchestration)
+
+### Purpose
+Transforms the document-centric foundation into a generalized enterprise asset registry supporting documents, images, videos, audio, emails, and webpages. Foundational only — no OCR, transcription, or multimodal retrieval executed yet. Backward-compatible with Phase 5A–5F document flows.
+
+### New files (6)
+- `server/lib/ai/knowledge-assets.ts` — createKnowledgeAsset, createKnowledgeAssetVersion, setKnowledgeAssetCurrentVersion, getKnowledgeAssetById, listKnowledgeAssetsByKnowledgeBase, listKnowledgeAssetsByTenant, updateKnowledgeAssetLifecycle, markKnowledgeAssetProcessingState, explainKnowledgeAsset
+- `server/lib/ai/knowledge-storage.ts` — registerStorageObject, getStorageObjectById, listStorageObjectsByTenant, markStorageObjectArchived, markStorageObjectDeleted, explainStorageObject (table: asset_storage_objects)
+- `server/lib/ai/knowledge-asset-processing.ts` — enqueueAssetProcessingJob, startAssetProcessingJob, completeAssetProcessingJob, failAssetProcessingJob, listAssetProcessingJobs, explainAssetProcessingState
+- `server/lib/ai/knowledge-asset-compat.ts` — explainDocumentToAssetMigrationStrategy, previewLegacyDocumentCompatibility, explainCurrentRegistryState
+- `server/lib/ai/migrate-phase5g.ts` — Raw SQL migration (ran successfully, all 4 tables)
+- `server/lib/ai/validate-phase5g.ts` — 20 scenarios, 117/117 assertions passed
+
+### Modified files (3)
+- `shared/schema.ts` — 4 new tables: knowledge_assets, knowledge_asset_versions, asset_storage_objects, knowledge_asset_processing_jobs
+- `server/routes/admin.ts` — 23 new admin endpoints + Phase 5G imports
+- `replit.md` — Phase 5G documented
+
+### DB changes (4 new tables)
+- `knowledge_assets` — 5 CHECK constraints, 4 indexes, deferred FK to knowledge_asset_versions
+- `knowledge_asset_versions` — 2 CHECK constraints, UNIQUE(asset_id, version_number), FK → knowledge_assets, 2 indexes
+- `asset_storage_objects` — 3 CHECK constraints, UNIQUE(tenant_id, bucket_name, object_key), 3 indexes (note: distinct from Phase 5B knowledge_storage_objects which is document-version-linked)
+- `knowledge_asset_processing_jobs` — 3 CHECK constraints, FK → knowledge_assets + knowledge_asset_versions, 4 indexes
+
+### Design decisions
+- `asset_storage_objects` renamed from `knowledge_storage_objects` to avoid collision with Phase 5B's document-version-linked storage table
+- Deferred FK: `knowledge_assets.current_version_id` → `knowledge_asset_versions.id` (DEFERRABLE INITIALLY DEFERRED to allow same-transaction inserts)
+- Job lifecycle is deterministic: queued → started → completed | failed (transitions enforced in service layer)
+- Strategy: additive-coexistence — legacy document tables remain untouched; new asset registry runs alongside
+
+### Admin routes (23 endpoints)
+Assets: POST create, GET by id, GET by-kb, GET by-tenant, POST lifecycle, POST processing-state, GET explain
+Versions: POST create, POST set-current-version
+Storage: POST register, GET by id, GET by-tenant, POST archive, POST delete, GET explain
+Jobs: POST enqueue, POST start, POST complete, POST fail, GET by-asset, GET explain-state
+Compat: GET migration-strategy, GET legacy-preview, GET registry-state
+
+### Validation: 117/117 assertions passed (20 scenarios)
+S01 document asset, S02 image asset, S03 video asset, S04 asset version, S05 version switch, S06 invalid asset_type rejected, S07 invalid lifecycle_state rejected, S08 invalid processing_state rejected, S09 job enqueue/start/complete, S10 job failure + invalid transition, S11 storage object register, S12 archive/delete transitions, S13 tenant isolation, S14 KB-scoped listing, S15 version uniqueness, S16 explainKnowledgeAsset, S17 explainAssetProcessingState, S18 compat migration strategy + legacy preview + registry state, S19 explainStorageObject, S20 DB tables/indexes/constraints/CHECK enforcement
