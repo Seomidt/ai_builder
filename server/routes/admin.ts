@@ -6886,4 +6886,159 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── PHASE 24 — AI GOVERNANCE & SAFETY PLATFORM ───────────────────────────
+
+  // Route 24-1: GET /api/admin/governance/policies — list all AI policies
+  app.get("/api/admin/governance/policies", async (req: Request, res: Response) => {
+    try {
+      const { listPolicies } = require("../lib/governance/policy-engine");
+      res.json(await listPolicies({ enabledOnly: req.query.enabledOnly === "true" }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-2: POST /api/admin/governance/policies/seed — seed built-in policies
+  app.post("/api/admin/governance/policies/seed", async (req: Request, res: Response) => {
+    try {
+      const { seedBuiltInPolicies } = require("../lib/governance/policy-engine");
+      res.json(await seedBuiltInPolicies());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-3: PATCH /api/admin/governance/policies/:key/toggle — enable/disable policy
+  app.patch("/api/admin/governance/policies/:key/toggle", async (req: Request, res: Response) => {
+    try {
+      const { togglePolicy } = require("../lib/governance/policy-engine");
+      const { enabled } = req.body;
+      res.json(await togglePolicy(req.params.key, enabled));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-4: GET /api/admin/governance/models — list model allowlist
+  app.get("/api/admin/governance/models", async (req: Request, res: Response) => {
+    try {
+      const { listModels } = require("../lib/governance/model-allowlist");
+      res.json(await listModels({
+        active: req.query.active !== undefined ? req.query.active === "true" : undefined,
+        tier: req.query.tier as string,
+        provider: req.query.provider as string,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-5: POST /api/admin/governance/models — add model to allowlist
+  app.post("/api/admin/governance/models", async (req: Request, res: Response) => {
+    try {
+      const { addModel } = require("../lib/governance/model-allowlist");
+      res.status(201).json(await addModel(req.body));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-6: PATCH /api/admin/governance/models/:name/active — toggle model active
+  app.patch("/api/admin/governance/models/:name/active", async (req: Request, res: Response) => {
+    try {
+      const { setModelActive } = require("../lib/governance/model-allowlist");
+      res.json(await setModelActive(req.params.name, req.body.active));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-7: GET /api/admin/governance/settings — list tenant AI settings
+  app.get("/api/admin/governance/settings", async (req: Request, res: Response) => {
+    try {
+      const { listTenantAiSettings, getTenantAiSettings } = require("../lib/governance/governance-checks");
+      const tenantId = req.query.tenantId as string;
+      if (tenantId) res.json(await getTenantAiSettings(tenantId));
+      else res.json(await listTenantAiSettings());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-8: POST /api/admin/governance/settings — upsert tenant AI settings
+  app.post("/api/admin/governance/settings", async (req: Request, res: Response) => {
+    try {
+      const { upsertTenantAiSettings } = require("../lib/governance/governance-checks");
+      res.json(await upsertTenantAiSettings(req.body));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-9: POST /api/admin/governance/check — run governance check on request
+  app.post("/api/admin/governance/check", async (req: Request, res: Response) => {
+    try {
+      const { runGovernanceChecks } = require("../lib/governance/governance-checks");
+      res.json(await runGovernanceChecks(req.body));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-10: GET /api/admin/governance/events — moderation event log
+  app.get("/api/admin/governance/events", async (req: Request, res: Response) => {
+    try {
+      const { listModerationEvents } = require("../lib/governance/output-moderation");
+      const tenantId = (req.query.tenantId as string) || "";
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await listModerationEvents(tenantId, {
+        result: req.query.result as string,
+        eventType: req.query.eventType as string,
+        limit: req.query.limit ? Number(req.query.limit) : 50,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-11: GET /api/admin/governance/metrics/moderation — moderation stats
+  app.get("/api/admin/governance/metrics/moderation", async (req: Request, res: Response) => {
+    try {
+      const { getModerationStats } = require("../lib/governance/output-moderation");
+      res.json(await getModerationStats(req.query.tenantId as string | undefined));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-12: GET /api/admin/governance/metrics/policies — policy violation stats
+  app.get("/api/admin/governance/metrics/policies", async (req: Request, res: Response) => {
+    try {
+      const { getPolicyViolationStats } = require("../lib/governance/policy-engine");
+      res.json(await getPolicyViolationStats(req.query.tenantId as string | undefined));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-13: GET /api/admin/governance/metrics/models — model usage distribution
+  app.get("/api/admin/governance/metrics/models", async (req: Request, res: Response) => {
+    try {
+      const { getModelUsageDistribution } = require("../lib/governance/model-allowlist");
+      res.json(await getModelUsageDistribution(req.query.tenantId as string | undefined));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-14: GET /api/admin/governance/metrics/stats — full governance stats
+  app.get("/api/admin/governance/metrics/stats", async (req: Request, res: Response) => {
+    try {
+      const { getGovernanceStats } = require("../lib/governance/governance-checks");
+      res.json(await getGovernanceStats(req.query.tenantId as string | undefined));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }

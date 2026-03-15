@@ -6123,3 +6123,97 @@ export const webhookDeliveries = pgTable(
 export const insertWebhookDeliverySchema = createInsertSchema(webhookDeliveries).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertWebhookDelivery = z.infer<typeof insertWebhookDeliverySchema>;
 export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
+
+// ─── PHASE 24 — AI GOVERNANCE & SAFETY PLATFORM ──────────────────────────────
+
+// ai_policies — platform-level governance policies
+export const aiPolicies = pgTable(
+  "ai_policies",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    policyKey: text("policy_key").notNull().unique(),
+    description: text("description").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    config: jsonb("config"),
+    severity: text("severity").notNull().default("medium"), // low | medium | high | critical
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ap24_policy_key_idx").on(t.policyKey),
+    index("ap24_enabled_idx").on(t.enabled),
+  ],
+);
+export const insertAiPolicySchema = createInsertSchema(aiPolicies).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertAiPolicy = z.infer<typeof insertAiPolicySchema>;
+export type AiPolicy = typeof aiPolicies.$inferSelect;
+
+// tenant_ai_settings — per-tenant AI governance configuration
+export const tenantAiSettings = pgTable(
+  "tenant_ai_settings",
+  {
+    tenantId: text("tenant_id").primaryKey(),
+    maxTokens: integer("max_tokens").notNull().default(4096),
+    allowedModels: text("allowed_models").array().notNull().default(sql`'{}'::text[]`),
+    moderationEnabled: boolean("moderation_enabled").notNull().default(true),
+    promptScanningEnabled: boolean("prompt_scanning_enabled").notNull().default(true),
+    maxPromptsPerMinute: integer("max_prompts_per_minute").notNull().default(60),
+    blockedTopics: text("blocked_topics").array().notNull().default(sql`'{}'::text[]`),
+    sensitivityLevel: text("sensitivity_level").notNull().default("medium"), // low | medium | high
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("tas24_tenant_id_idx").on(t.tenantId),
+  ],
+);
+export const insertTenantAiSettingsSchema = createInsertSchema(tenantAiSettings).omit({ updatedAt: true });
+export type InsertTenantAiSettings = z.infer<typeof insertTenantAiSettingsSchema>;
+export type TenantAiSettings = typeof tenantAiSettings.$inferSelect;
+
+// model_allowlists — approved AI models
+export const modelAllowlists = pgTable(
+  "model_allowlists",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    modelName: text("model_name").notNull().unique(),
+    provider: text("provider").notNull().default("openai"),
+    active: boolean("active").notNull().default(true),
+    maxTokens: integer("max_tokens").notNull().default(4096),
+    tier: text("tier").notNull().default("standard"), // standard | premium | restricted
+    description: text("description"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("mal24_model_name_idx").on(t.modelName),
+    index("mal24_active_idx").on(t.active),
+  ],
+);
+export const insertModelAllowlistSchema = createInsertSchema(modelAllowlists).omit({ id: true, createdAt: true });
+export type InsertModelAllowlist = z.infer<typeof insertModelAllowlistSchema>;
+export type ModelAllowlist = typeof modelAllowlists.$inferSelect;
+
+// moderation_events — audit log for governance decisions
+export const moderationEvents = pgTable(
+  "moderation_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    eventType: text("event_type").notNull(), // prompt_blocked | policy_violation | model_denied | output_flagged | allowed
+    promptHash: text("prompt_hash"),
+    modelName: text("model_name"),
+    policyKey: text("policy_key"),
+    result: text("result").notNull(), // allowed | blocked | flagged
+    reason: text("reason"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("me24_tenant_id_idx").on(t.tenantId),
+    index("me24_event_type_idx").on(t.eventType),
+    index("me24_result_idx").on(t.result),
+    index("me24_created_at_idx").on(t.createdAt),
+  ],
+);
+export const insertModerationEventSchema = createInsertSchema(moderationEvents).omit({ id: true, createdAt: true });
+export type InsertModerationEvent = z.infer<typeof insertModerationEventSchema>;
+export type ModerationEvent = typeof moderationEvents.$inferSelect;
