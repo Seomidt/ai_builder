@@ -6651,3 +6651,136 @@ export const promptChangeLog = pgTable(
 export const insertPromptChangeLogSchema = createInsertSchema(promptChangeLog).omit({ createdAt: true });
 export type InsertPromptChangeLog = z.infer<typeof insertPromptChangeLogSchema>;
 export type PromptChangeLog = typeof promptChangeLog.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 14 — AI Agents Execution Platform
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── 14.1 ai_agents ───────────────────────────────────────────────────────────
+export const aiAgents = pgTable(
+  "ai_agents",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    agentName: text("agent_name").notNull(),
+    description: text("description"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_agents_tenant_id_idx").on(t.tenantId),
+    uniqueIndex("ai_agents_tenant_name_unique").on(t.tenantId, t.agentName),
+  ],
+);
+export const insertAiAgentSchema = createInsertSchema(aiAgents).omit({ createdAt: true });
+export type InsertAiAgent = z.infer<typeof insertAiAgentSchema>;
+export type AiAgent = typeof aiAgents.$inferSelect;
+
+// ─── 14.2 ai_agent_versions ───────────────────────────────────────────────────
+export const aiAgentVersions = pgTable(
+  "ai_agent_versions",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    agentId: text("agent_id").notNull(),
+    version: integer("version").notNull(),
+    promptVersionId: text("prompt_version_id"),
+    modelId: text("model_id"),
+    maxIterations: integer("max_iterations").notNull().default(10),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_agent_versions_agent_id_idx").on(t.agentId),
+    uniqueIndex("ai_agent_versions_agent_version_unique").on(t.agentId, t.version),
+    check("ai_agent_versions_max_iter_check", sql`max_iterations >= 1 AND max_iterations <= 10`),
+  ],
+);
+export const insertAiAgentVersionSchema = createInsertSchema(aiAgentVersions).omit({ createdAt: true });
+export type InsertAiAgentVersion = z.infer<typeof insertAiAgentVersionSchema>;
+export type AiAgentVersion = typeof aiAgentVersions.$inferSelect;
+
+// ─── 14.3 ai_workflows ────────────────────────────────────────────────────────
+export const aiWorkflows = pgTable(
+  "ai_workflows",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    workflowName: text("workflow_name").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_workflows_tenant_id_idx").on(t.tenantId),
+    uniqueIndex("ai_workflows_tenant_name_unique").on(t.tenantId, t.workflowName),
+  ],
+);
+export const insertAiWorkflowSchema = createInsertSchema(aiWorkflows).omit({ createdAt: true });
+export type InsertAiWorkflow = z.infer<typeof insertAiWorkflowSchema>;
+export type AiWorkflow = typeof aiWorkflows.$inferSelect;
+
+// ─── 14.4 ai_workflow_steps ───────────────────────────────────────────────────
+export const aiWorkflowSteps = pgTable(
+  "ai_workflow_steps",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    workflowId: text("workflow_id").notNull(),
+    stepOrder: integer("step_order").notNull(),
+    stepType: text("step_type").notNull().default("agent"),
+    agentVersionId: text("agent_version_id"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_workflow_steps_workflow_id_idx").on(t.workflowId),
+    index("ai_workflow_steps_order_idx").on(t.stepOrder),
+    uniqueIndex("ai_workflow_steps_workflow_order_unique").on(t.workflowId, t.stepOrder),
+    check("ai_workflow_steps_type_check", sql`step_type IN ('agent','transform','condition','output')`),
+    check("ai_workflow_steps_order_check", sql`step_order >= 1 AND step_order <= 20`),
+  ],
+);
+export const insertAiWorkflowStepSchema = createInsertSchema(aiWorkflowSteps).omit({ createdAt: true });
+export type InsertAiWorkflowStep = z.infer<typeof insertAiWorkflowStepSchema>;
+export type AiWorkflowStep = typeof aiWorkflowSteps.$inferSelect;
+
+// ─── 14.5 ai_agent_runs ───────────────────────────────────────────────────────
+export const aiAgentRuns = pgTable(
+  "ai_agent_runs",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    agentVersionId: text("agent_version_id").notNull(),
+    workflowId: text("workflow_id"),
+    runStatus: text("run_status").notNull().default("pending"),
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+  },
+  (t) => [
+    index("ai_agent_runs_tenant_id_idx").on(t.tenantId),
+    index("ai_agent_runs_agent_version_id_idx").on(t.agentVersionId),
+    index("ai_agent_runs_status_idx").on(t.runStatus),
+    index("ai_agent_runs_started_at_idx").on(t.startedAt),
+    check("ai_agent_runs_status_check", sql`run_status IN ('pending','running','completed','failed','aborted','timeout')`),
+  ],
+);
+export const insertAiAgentRunSchema = createInsertSchema(aiAgentRuns).omit({ startedAt: true, completedAt: true });
+export type InsertAiAgentRun = z.infer<typeof insertAiAgentRunSchema>;
+export type AiAgentRun = typeof aiAgentRuns.$inferSelect;
+
+// ─── 14.6 ai_agent_run_logs ───────────────────────────────────────────────────
+export const aiAgentRunLogs = pgTable(
+  "ai_agent_run_logs",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    runId: text("run_id").notNull(),
+    stepIndex: integer("step_index").notNull(),
+    inputPayload: jsonb("input_payload").notNull().default(sql`'{}'::jsonb`),
+    outputPayload: jsonb("output_payload").notNull().default(sql`'{}'::jsonb`),
+    latencyMs: integer("latency_ms"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_agent_run_logs_run_id_idx").on(t.runId),
+    index("ai_agent_run_logs_step_index_idx").on(t.stepIndex),
+    index("ai_agent_run_logs_created_at_idx").on(t.createdAt),
+    check("ai_agent_run_logs_step_check", sql`step_index >= 0`),
+  ],
+);
+export const insertAiAgentRunLogSchema = createInsertSchema(aiAgentRunLogs).omit({ createdAt: true });
+export type InsertAiAgentRunLog = z.infer<typeof insertAiAgentRunLogSchema>;
+export type AiAgentRunLog = typeof aiAgentRunLogs.$inferSelect;

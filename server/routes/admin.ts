@@ -7669,4 +7669,106 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 14 — AI Agents Execution Platform
+  // Routes: 14-1 → 14-8
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 14-1: GET /api/admin/agents — list agents
+  app.get("/api/admin/agents", async (req: Request, res: Response) => {
+    try {
+      const { listAgents } = await import("../lib/agents/agent-engine");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await listAgents(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 14-2: POST /api/admin/agents — create agent + initial version
+  app.post("/api/admin/agents", async (req: Request, res: Response) => {
+    try {
+      const { createAgent, createAgentVersion } = await import("../lib/agents/agent-engine");
+      const { tenantId, agentName, description, promptVersionId, modelId, maxIterations } = req.body;
+      if (!tenantId || !agentName) return void res.status(400).json({ error: "tenantId, agentName required" });
+      const agent = await createAgent({ tenantId, agentName, description });
+      const version = await createAgentVersion({ agentId: agent.id, version: 1, promptVersionId, modelId, maxIterations });
+      res.status(201).json({ agent, version });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 14-3: GET /api/admin/agents/workflows — list workflows
+  app.get("/api/admin/agents/workflows", async (req: Request, res: Response) => {
+    try {
+      const { listWorkflows } = await import("../lib/agents/workflow-validator");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await listWorkflows(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 14-4: POST /api/admin/agents/run — run an agent
+  app.post("/api/admin/agents/run", async (req: Request, res: Response) => {
+    try {
+      const { runAgent } = await import("../lib/agents/agent-runner");
+      const { tenantId, agentVersionId, workflowId, initialInput, skipApprovalCheck } = req.body;
+      if (!tenantId || !agentVersionId) return void res.status(400).json({ error: "tenantId, agentVersionId required" });
+      res.json(await runAgent({ tenantId, agentVersionId, workflowId, initialInput, skipApprovalCheck }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 14-5: GET /api/admin/agents/runs — run history
+  app.get("/api/admin/agents/runs", async (req: Request, res: Response) => {
+    try {
+      const { listRuns } = await import("../lib/agents/agent-state");
+      const { tenantId, limit } = req.query as Record<string, string>;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await listRuns({ tenantId, limit: limit ? parseInt(limit, 10) : undefined }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 14-6: GET /api/admin/agents/runs/:runId/logs — run step logs
+  app.get("/api/admin/agents/runs/:runId/logs", async (req: Request, res: Response) => {
+    try {
+      const { getRunLogsByTenant } = await import("../lib/agents/agent-logger");
+      const { tenantId } = req.query as { tenantId?: string };
+      const { runId } = req.params;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await getRunLogsByTenant({ tenantId, runId }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 14-7: GET /api/admin/agents/metrics — agent metrics
+  app.get("/api/admin/agents/metrics", async (req: Request, res: Response) => {
+    try {
+      const { agentMetrics } = await import("../lib/agents/agent-engine");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await agentMetrics(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 14-8: GET /api/admin/agents/health — agent system health
+  app.get("/api/admin/agents/health", async (_req: Request, res: Response) => {
+    try {
+      const { agentHealth } = await import("../lib/agents/agent-engine");
+      res.json(agentHealth());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
