@@ -460,6 +460,18 @@ import {
 } from "../lib/ai/retrieval-safety";
 import type { SafetyChunkInput } from "../lib/ai/retrieval-safety";
 import type { QualityChunkInput } from "../lib/ai/retrieval-quality";
+import {
+  summarizeRetrievalFeedback,
+  explainRetrievalFeedback,
+  listWeakRetrievalRuns,
+  listWeakPatterns,
+  getFeedbackMetrics,
+  summarizeTenantTuningSignals,
+  summarizeFeedbackMetrics,
+  recordFeedbackMetrics,
+  evaluateRetrievalRunFeedback,
+  explainRerankEffectiveness,
+} from "../lib/ai/retrieval-feedback";
 
 // ─── Zod Schemas ──────────────────────────────────────────────────────────────
 
@@ -5868,6 +5880,177 @@ export function registerAdminRoutes(app: Express): void {
         retrievalSafetyStatus: retrievalSafetyStatus ?? null,
       });
       res.json(preview);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Phase 5S — Retrieval Feedback Loop, Quality Evaluation & Auto-Tuning Signals
+  // Routes: 5S-1 → 5S-10
+  // INV-FB1: Feedback derived from real retrieval/answer run data only
+  // INV-FB2: Quality bands deterministic
+  // INV-FB3: Tuning signals evidence-based with rationale
+  // INV-FB4: Rewrite effectiveness never overclaimed
+  // INV-FB5: Rerank effectiveness never fabricated
+  // INV-FB6: Citation quality based on real coverage data
+  // INV-FB7: All feedback queries tenant-isolated
+  // INV-FB8: Explain/preview routes perform no writes
+  // INV-FB9: Existing retrieval/answer tables not modified
+  // INV-FB10: Cross-tenant leakage impossible
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 5S-1: GET /api/admin/retrieval/feedback/:runId/summary
+  // Return summarized feedback for a retrieval run (INV-FB7: tenant-isolated, INV-FB8: no writes)
+  app.get("/api/admin/retrieval/feedback/:runId/summary", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      const result = await summarizeRetrievalFeedback(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-2: GET /api/admin/retrieval/feedback/:runId/explain
+  // Return staged explanation of persisted feedback for a run (INV-FB8: no writes)
+  app.get("/api/admin/retrieval/feedback/:runId/explain", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      const result = await explainRetrievalFeedback(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-3: GET /api/admin/retrieval/feedback/tenant/:tenantId/weak-runs
+  // List weak or failed retrieval runs for a tenant (INV-FB7, INV-FB10)
+  app.get("/api/admin/retrieval/feedback/tenant/:tenantId/weak-runs", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+      const result = await listWeakRetrievalRuns({ tenantId, limit });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-4: GET /api/admin/retrieval/feedback/tenant/:tenantId/weak-patterns
+  // Return aggregated failure pattern summary for a tenant (INV-FB7, INV-FB10)
+  app.get("/api/admin/retrieval/feedback/tenant/:tenantId/weak-patterns", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
+      const result = await listWeakPatterns({ tenantId, limit });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-5: GET /api/admin/retrieval/feedback/tenant/:tenantId/metrics
+  // Return feedback quality metrics for a tenant (INV-FB7, INV-FB10)
+  app.get("/api/admin/retrieval/feedback/tenant/:tenantId/metrics", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const result = await getFeedbackMetrics({ tenantId });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-6: GET /api/admin/retrieval/feedback/tenant/:tenantId/tuning-signals
+  // Summarize auto-tuning signals emitted for a tenant (INV-FB3, INV-FB7)
+  app.get("/api/admin/retrieval/feedback/tenant/:tenantId/tuning-signals", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+      const result = await summarizeTenantTuningSignals({ tenantId, limit });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-7: GET /api/admin/retrieval/feedback/tenant/:tenantId/feedback-summary
+  // Return human-readable feedback summary for a tenant (INV-FB7, INV-FB8)
+  app.get("/api/admin/retrieval/feedback/tenant/:tenantId/feedback-summary", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const result = await summarizeFeedbackMetrics({ tenantId });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-8: POST /api/admin/retrieval/feedback/record
+  // Persist feedback notes for a retrieval run (write route — INV-FB7)
+  app.post("/api/admin/retrieval/feedback/record", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, runId, notes } = req.body as { tenantId?: string; runId?: string; notes?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await recordFeedbackMetrics({ tenantId, runId, notes });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-9: POST /api/admin/retrieval/feedback/preview
+  // Preview feedback evaluation for a hypothetical run without writing (INV-FB8: no writes)
+  app.post("/api/admin/retrieval/feedback/preview", async (req: Request, res: Response) => {
+    try {
+      const { retrievalRun, qualitySignals, answerRun } = req.body as {
+        retrievalRun?: unknown;
+        qualitySignals?: unknown;
+        answerRun?: unknown;
+      };
+      if (!retrievalRun) return void res.status(400).json({ error: "retrievalRun required" });
+      if (!qualitySignals) return void res.status(400).json({ error: "qualitySignals required" });
+      const result = await evaluateRetrievalRunFeedback({
+        retrievalRun: retrievalRun as Parameters<typeof evaluateRetrievalRunFeedback>[0]["retrievalRun"],
+        qualitySignals: qualitySignals as Parameters<typeof evaluateRetrievalRunFeedback>[0]["qualitySignals"],
+        answerRun: answerRun as Parameters<typeof evaluateRetrievalRunFeedback>[0]["answerRun"],
+        persistFeedback: false,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-10: POST /api/admin/retrieval/feedback/preview/rerank
+  // Explain rerank effectiveness for a hypothetical input (INV-FB5, INV-FB8: no writes)
+  app.post("/api/admin/retrieval/feedback/preview/rerank", async (req: Request, res: Response) => {
+    try {
+      const {
+        advancedRerankUsed,
+        groundingConfidenceBand,
+        citationCoverageRatio,
+        shortlistSize,
+        fallbackUsed,
+      } = req.body as {
+        advancedRerankUsed?: boolean;
+        groundingConfidenceBand?: "high" | "medium" | "low" | "unsafe";
+        citationCoverageRatio?: number;
+        shortlistSize?: number;
+        fallbackUsed?: boolean;
+      };
+      if (advancedRerankUsed === undefined) return void res.status(400).json({ error: "advancedRerankUsed required" });
+      if (!groundingConfidenceBand) return void res.status(400).json({ error: "groundingConfidenceBand required" });
+      if (citationCoverageRatio === undefined) return void res.status(400).json({ error: "citationCoverageRatio required" });
+      const result = await explainRerankEffectiveness({
+        advancedRerankUsed,
+        groundingConfidenceBand,
+        citationCoverageRatio,
+        shortlistSize: shortlistSize ?? 0,
+        fallbackUsed: fallbackUsed ?? false,
+      });
+      res.json(result);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }

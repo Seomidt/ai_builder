@@ -138,6 +138,36 @@ export const STRONG_CERTAINTY_PENALTY_ENABLED = true;
  */
 export const MINIMUM_GROUNDING_CONFIDENCE_BAND: "high" | "medium" | "low" | "unsafe" = "low";
 
+// ── Phase 5S — Retrieval Feedback Loop, Quality Evaluation & Auto-Tuning ──────
+
+/** Whether feedback evaluation runs after answer verification. */
+export const FEEDBACK_EVALUATION_ENABLED = true;
+
+/**
+ * Thresholds used for feedback band transitions.
+ * These control when a run is classified as weak or failed.
+ */
+export const FEEDBACK_SIGNAL_THRESHOLDS = {
+  weakCitationCoverageRatio: 0.4,
+  failedCitationCoverageRatio: 0.2,
+  weakDocumentDiversityScore: 0.3,
+  highContextRedundancyScore: 0.7,
+  maxSafetyExclusionsBeforeReview: 3,
+} as const;
+
+/**
+ * Thresholds used to classify a retrieval run as "weak" or "failed".
+ */
+export const WEAK_RUN_THRESHOLDS = {
+  qualityBands: ["low", "poor"] as string[],
+  maxUnsupportedClaimCount: 2,
+  minShortlistSizeForSignal: 10,
+  maxShortlistSizeForSignal: 30,
+} as const;
+
+/** Maximum number of tuning signals emitted per feedback evaluation. */
+export const MAX_TUNING_SIGNALS_PER_RUN = 6;
+
 // ── Validation helpers ────────────────────────────────────────────────────────
 
 export function clampShortlistSize(size: number): number {
@@ -188,5 +218,10 @@ export function describeRetrievalConfig(): Record<string, unknown> {
     allowInsufficientEvidenceFallback: ALLOW_INSUFFICIENT_EVIDENCE_FALLBACK,
     strongCertaintyPenaltyEnabled: STRONG_CERTAINTY_PENALTY_ENABLED,
     minimumGroundingConfidenceBand: MINIMUM_GROUNDING_CONFIDENCE_BAND,
+    // Phase 5S
+    feedbackEvaluationEnabled: FEEDBACK_EVALUATION_ENABLED,
+    feedbackSignalThresholds: FEEDBACK_SIGNAL_THRESHOLDS,
+    weakRunThresholds: WEAK_RUN_THRESHOLDS,
+    maxTuningSignalsPerRun: MAX_TUNING_SIGNALS_PER_RUN,
   };
 }

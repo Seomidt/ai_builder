@@ -5369,6 +5369,42 @@ export const insertKnowledgeRetrievalQualitySignalSchema = createInsertSchema(kn
 export type InsertKnowledgeRetrievalQualitySignal = z.infer<typeof insertKnowledgeRetrievalQualitySignalSchema>;
 export type KnowledgeRetrievalQualitySignal = typeof knowledgeRetrievalQualitySignals.$inferSelect;
 
+// ── Phase 5S — Retrieval Feedback Loop ────────────────────────────────────────
+
+export const knowledgeRetrievalFeedback = pgTable(
+  "knowledge_retrieval_feedback",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    retrievalRunId: varchar("retrieval_run_id").notNull(),
+    answerRunId: varchar("answer_run_id"),
+    feedbackStatus: text("feedback_status").notNull(),
+    retrievalQualityBand: text("retrieval_quality_band").notNull(),
+    rerankEffectivenessBand: text("rerank_effectiveness_band").notNull(),
+    citationQualityBand: text("citation_quality_band").notNull(),
+    rewriteEffectivenessBand: text("rewrite_effectiveness_band").notNull(),
+    answerSafetyBand: text("answer_safety_band").notNull(),
+    dominantFailureMode: text("dominant_failure_mode"),
+    tuningSignals: jsonb("tuning_signals").notNull().default(sql`'[]'::jsonb`),
+    notes: jsonb("notes"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("krf_tenant_run_idx").on(t.tenantId, t.retrievalRunId),
+    index("krf_tenant_answer_idx").on(t.tenantId, t.answerRunId),
+    index("krf_tenant_status_idx").on(t.tenantId, t.feedbackStatus),
+    index("krf_tenant_quality_idx").on(t.tenantId, t.retrievalQualityBand),
+    index("krf_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+
+export const insertKnowledgeRetrievalFeedbackSchema = createInsertSchema(knowledgeRetrievalFeedback).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertKnowledgeRetrievalFeedback = z.infer<typeof insertKnowledgeRetrievalFeedbackSchema>;
+export type KnowledgeRetrievalFeedback = typeof knowledgeRetrievalFeedback.$inferSelect;
+
 // Legacy types kept for compatibility
 export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
