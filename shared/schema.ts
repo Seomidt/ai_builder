@@ -5962,3 +5962,135 @@ export const govAnomalyEvents = pgTable(
 export const insertGovAnomalyEventSchema = createInsertSchema(govAnomalyEvents).omit({ id: true, createdAt: true });
 export type InsertGovAnomalyEvent = z.infer<typeof insertGovAnomalyEventSchema>;
 export type GovAnomalyEvent = typeof govAnomalyEvents.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 17 — AI Evaluation Platform
+// Tables: ai_eval_datasets, ai_eval_cases, ai_eval_runs,
+//         ai_eval_results, ai_eval_regressions
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ai_eval_datasets — evaluation dataset registry (INV-EVAL1)
+export const aiEvalDatasets = pgTable(
+  "ai_eval_datasets",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id"),
+    datasetName: text("dataset_name").notNull(),
+    datasetType: text("dataset_type").notNull(), // 'answer_quality'|'retrieval_quality'|'hallucination'|'prompt_regression'|'model_comparison'
+    description: text("description"),
+    isActive: boolean("is_active").notNull().default(true),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("aed_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("aed_type_created_idx").on(t.datasetType, t.createdAt),
+    index("aed_active_created_idx").on(t.isActive, t.createdAt),
+  ],
+);
+export const insertAiEvalDatasetSchema = createInsertSchema(aiEvalDatasets).omit({ id: true, createdAt: true });
+export type InsertAiEvalDataset = z.infer<typeof insertAiEvalDatasetSchema>;
+export type AiEvalDataset = typeof aiEvalDatasets.$inferSelect;
+
+// ai_eval_cases — individual benchmark cases (INV-EVAL1)
+export const aiEvalCases = pgTable(
+  "ai_eval_cases",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    datasetId: varchar("dataset_id").notNull(),
+    tenantId: text("tenant_id"),
+    inputQuery: text("input_query").notNull(),
+    expectedSignals: jsonb("expected_signals"),
+    expectedAnswer: text("expected_answer"),
+    expectedCitations: jsonb("expected_citations"),
+    difficulty: text("difficulty").notNull().default("medium"), // 'low'|'medium'|'high'
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("aec_dataset_created_idx").on(t.datasetId, t.createdAt),
+    index("aec_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("aec_difficulty_created_idx").on(t.difficulty, t.createdAt),
+  ],
+);
+export const insertAiEvalCaseSchema = createInsertSchema(aiEvalCases).omit({ id: true, createdAt: true });
+export type InsertAiEvalCase = z.infer<typeof insertAiEvalCaseSchema>;
+export type AiEvalCase = typeof aiEvalCases.$inferSelect;
+
+// ai_eval_runs — benchmark run records (INV-EVAL2: append-only)
+export const aiEvalRuns = pgTable(
+  "ai_eval_runs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id"),
+    datasetId: varchar("dataset_id").notNull(),
+    promptVersionId: varchar("prompt_version_id"),
+    modelId: varchar("model_id"),
+    runStatus: text("run_status").notNull().default("queued"), // 'queued'|'running'|'completed'|'failed'
+    totalCases: integer("total_cases").notNull().default(0),
+    completedCases: integer("completed_cases").notNull().default(0),
+    summaryScores: jsonb("summary_scores"),
+    metadata: jsonb("metadata"),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("aer_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("aer_dataset_created_idx").on(t.datasetId, t.createdAt),
+    index("aer_status_created_idx").on(t.runStatus, t.createdAt),
+  ],
+);
+export const insertAiEvalRunSchema = createInsertSchema(aiEvalRuns).omit({ id: true, createdAt: true });
+export type InsertAiEvalRun = z.infer<typeof insertAiEvalRunSchema>;
+export type AiEvalRun = typeof aiEvalRuns.$inferSelect;
+
+// ai_eval_results — per-case scored results (INV-EVAL3: bounded scores)
+export const aiEvalResults = pgTable(
+  "ai_eval_results",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    runId: varchar("run_id").notNull(),
+    caseId: varchar("case_id").notNull(),
+    tenantId: text("tenant_id"),
+    answerQualityScore: numeric("answer_quality_score", { precision: 10, scale: 4 }),
+    retrievalQualityScore: numeric("retrieval_quality_score", { precision: 10, scale: 4 }),
+    groundingScore: numeric("grounding_score", { precision: 10, scale: 4 }),
+    hallucinationRiskScore: numeric("hallucination_risk_score", { precision: 10, scale: 4 }),
+    pass: boolean("pass").notNull().default(false),
+    resultSummary: jsonb("result_summary"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("aerr_run_created_idx").on(t.runId, t.createdAt),
+    index("aerr_case_created_idx").on(t.caseId, t.createdAt),
+    index("aerr_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("aerr_pass_created_idx").on(t.pass, t.createdAt),
+  ],
+);
+export const insertAiEvalResultSchema = createInsertSchema(aiEvalResults).omit({ id: true, createdAt: true });
+export type InsertAiEvalResult = z.infer<typeof insertAiEvalResultSchema>;
+export type AiEvalResult = typeof aiEvalResults.$inferSelect;
+
+// ai_eval_regressions — regression detection records (INV-EVAL5)
+export const aiEvalRegressions = pgTable(
+  "ai_eval_regressions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id"),
+    baselineRunId: varchar("baseline_run_id").notNull(),
+    candidateRunId: varchar("candidate_run_id").notNull(),
+    regressionType: text("regression_type").notNull(), // 'answer_quality_drop'|'retrieval_quality_drop'|'grounding_drop'|'hallucination_increase'|'latency_regression'|'cost_regression'
+    severity: text("severity").notNull().default("medium"), // 'low'|'medium'|'high'
+    regressionSummary: jsonb("regression_summary"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("aeReg_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("aeReg_type_created_idx").on(t.regressionType, t.createdAt),
+    index("aeReg_severity_created_idx").on(t.severity, t.createdAt),
+  ],
+);
+export const insertAiEvalRegressionSchema = createInsertSchema(aiEvalRegressions).omit({ id: true, createdAt: true });
+export type InsertAiEvalRegression = z.infer<typeof insertAiEvalRegressionSchema>;
+export type AiEvalRegression = typeof aiEvalRegressions.$inferSelect;

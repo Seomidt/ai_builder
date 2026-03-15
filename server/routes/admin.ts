@@ -4131,9 +4131,10 @@ export function registerAdminRoutes(app: Express): void {
   app.get("/api/admin/asset-processing/orphans", async (req: Request, res: Response) => {
     try {
       const tenantId = req.query.tenantId as string;
-      const timeoutMinutes = req.query.timeoutMinutes
-        ? parseInt(req.query.timeoutMinutes as string, 10)
-        : 30;
+      // INV-EVAL8 / CodeQL Finding 9.1: Clamp user-supplied timeout to prevent resource exhaustion.
+      const { clampOrphanTimeoutMinutes } = require("../lib/ai-evals/runtime-bounds");
+      const rawTimeout = req.query.timeoutMinutes ? parseInt(req.query.timeoutMinutes as string, 10) : 30;
+      const timeoutMinutes = clampOrphanTimeoutMinutes(rawTimeout);
       if (!tenantId) {
         return res.status(400).json({ error: "tenantId query param required" });
       }
@@ -6595,6 +6596,176 @@ export function registerAdminRoutes(app: Express): void {
       const all = tenantId ? await listAnomalyEvents(tenantId, limit) : await listAllAnomalyEvents(limit);
       const runaway = all.filter((e: any) => e.eventType === "runaway_agent" || e.event_type === "runaway_agent");
       res.json(runaway);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Phase 17 — AI Evaluation Platform Admin Routes
+  // INV-EVAL4: All comparison routes return structured, explicit output.
+  // INV-EVAL6: All routes respect tenant isolation where tenantId is provided.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Route 17-1: POST /api/admin/evals/datasets
+  app.post("/api/admin/evals/datasets", async (req: Request, res: Response) => {
+    try {
+      const { createDataset } = require("../lib/ai-evals/eval-datasets");
+      const result = await createDataset(req.body);
+      if (!result) return res.status(400).json({ error: "Failed to create dataset" });
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-2: GET /api/admin/evals/datasets
+  app.get("/api/admin/evals/datasets", async (req: Request, res: Response) => {
+    try {
+      const { listDatasets } = require("../lib/ai-evals/eval-datasets");
+      const tenantId = req.query.tenantId as string | undefined;
+      const datasetType = req.query.datasetType as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const data = await listDatasets({ tenantId, datasetType, limit });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-3: POST /api/admin/evals/datasets/:datasetId/cases
+  app.post("/api/admin/evals/datasets/:datasetId/cases", async (req: Request, res: Response) => {
+    try {
+      const { createEvalCase } = require("../lib/ai-evals/eval-datasets");
+      const result = await createEvalCase({ ...req.body, datasetId: req.params.datasetId });
+      if (!result) return res.status(400).json({ error: "Failed to create eval case" });
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-4: GET /api/admin/evals/datasets/:datasetId/cases
+  app.get("/api/admin/evals/datasets/:datasetId/cases", async (req: Request, res: Response) => {
+    try {
+      const { listEvalCases } = require("../lib/ai-evals/eval-datasets");
+      const limit = Number(req.query.limit) || 200;
+      const data = await listEvalCases({ datasetId: req.params.datasetId, limit });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-5: POST /api/admin/evals/runs
+  app.post("/api/admin/evals/runs", async (req: Request, res: Response) => {
+    try {
+      const { createEvalRun } = require("../lib/ai-evals/eval-runs");
+      const result = await createEvalRun(req.body);
+      if (!result) return res.status(400).json({ error: "Failed to create eval run" });
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-6: GET /api/admin/evals/runs
+  app.get("/api/admin/evals/runs", async (req: Request, res: Response) => {
+    try {
+      const { listEvalRuns } = require("../lib/ai-evals/eval-runs");
+      const tenantId = req.query.tenantId as string | undefined;
+      const datasetId = req.query.datasetId as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const data = await listEvalRuns({ tenantId, datasetId, limit });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-7: GET /api/admin/evals/runs/:runId
+  app.get("/api/admin/evals/runs/:runId", async (req: Request, res: Response) => {
+    try {
+      const { explainEvalRun } = require("../lib/ai-evals/eval-runs");
+      const data = await explainEvalRun(req.params.runId);
+      if (!data) return res.status(404).json({ error: "Run not found" });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-8: GET /api/admin/evals/runs/:runId/results
+  app.get("/api/admin/evals/runs/:runId/results", async (req: Request, res: Response) => {
+    try {
+      const { listEvalResults } = require("../lib/ai-evals/eval-runs");
+      const limit = Number(req.query.limit) || 200;
+      const data = await listEvalResults(req.params.runId, limit);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-9: POST /api/admin/evals/compare/prompt-versions
+  app.post("/api/admin/evals/compare/prompt-versions", async (req: Request, res: Response) => {
+    try {
+      const { comparePromptVersions } = require("../lib/ai-evals/eval-comparisons");
+      const result = await comparePromptVersions(req.body);
+      if (!result) return res.status(400).json({ error: "Comparison failed — check run IDs" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-10: POST /api/admin/evals/compare/models
+  app.post("/api/admin/evals/compare/models", async (req: Request, res: Response) => {
+    try {
+      const { compareModels } = require("../lib/ai-evals/eval-comparisons");
+      const result = await compareModels(req.body);
+      if (!result) return res.status(400).json({ error: "Model comparison failed — check run IDs" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-11: GET /api/admin/evals/regressions
+  app.get("/api/admin/evals/regressions", async (req: Request, res: Response) => {
+    try {
+      const { listRegressions } = require("../lib/ai-evals/eval-regressions");
+      const tenantId = req.query.tenantId as string | undefined;
+      const regressionType = req.query.regressionType as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const data = await listRegressions({ tenantId, regressionType, limit });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-12: GET /api/admin/evals/metrics
+  app.get("/api/admin/evals/metrics", async (req: Request, res: Response) => {
+    try {
+      const { getEvalMetrics } = require("../lib/ai-evals/eval-observability");
+      const tenantId = req.query.tenantId as string | undefined;
+      const limitRuns = Number(req.query.limitRuns) || 100;
+      const data = await getEvalMetrics({ tenantId, limitRuns });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 17-13: GET /api/admin/evals/failures
+  app.get("/api/admin/evals/failures", async (req: Request, res: Response) => {
+    try {
+      const { listRecentFailures } = require("../lib/ai-evals/eval-observability");
+      const tenantId = req.query.tenantId as string | undefined;
+      const limit = Number(req.query.limit) || 50;
+      const data = await listRecentFailures({ tenantId, limit });
+      res.json(data);
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
