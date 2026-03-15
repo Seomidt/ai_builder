@@ -5962,3 +5962,86 @@ export const govAnomalyEvents = pgTable(
 export const insertGovAnomalyEventSchema = createInsertSchema(govAnomalyEvents).omit({ id: true, createdAt: true });
 export type InsertGovAnomalyEvent = z.infer<typeof insertGovAnomalyEventSchema>;
 export type GovAnomalyEvent = typeof govAnomalyEvents.$inferSelect;
+
+// ─── PHASE 22 — STRIPE BILLING INTEGRATION ────────────────────────────────────
+
+// stripe_customers — maps tenants to Stripe customer IDs
+export const stripeCustomers = pgTable(
+  "stripe_customers",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull().unique(),
+    stripeCustomerId: text("stripe_customer_id").notNull().unique(),
+    email: text("email"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("sc22_tenant_id_idx").on(t.tenantId),
+    index("sc22_stripe_cid_idx").on(t.stripeCustomerId),
+  ],
+);
+export const insertStripeCustomerSchema = createInsertSchema(stripeCustomers).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertStripeCustomer = z.infer<typeof insertStripeCustomerSchema>;
+export type StripeCustomer = typeof stripeCustomers.$inferSelect;
+
+// stripe_subscriptions — maps tenants to Stripe subscription state
+export const stripeSubscriptions = pgTable(
+  "stripe_subscriptions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    stripeSubscriptionId: text("stripe_subscription_id").notNull().unique(),
+    stripeCustomerId: text("stripe_customer_id").notNull(),
+    planKey: text("plan_key").notNull(),
+    status: text("status").notNull().default("active"), // active | canceled | past_due | trialing | unpaid | incomplete
+    currentPeriodStart: timestamp("current_period_start"),
+    currentPeriodEnd: timestamp("current_period_end"),
+    cancelAtPeriodEnd: boolean("cancel_at_period_end").notNull().default(false),
+    canceledAt: timestamp("canceled_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ss22_tenant_id_idx").on(t.tenantId),
+    index("ss22_stripe_sub_id_idx").on(t.stripeSubscriptionId),
+    index("ss22_status_idx").on(t.status),
+  ],
+);
+export const insertStripeSubscriptionSchema = createInsertSchema(stripeSubscriptions).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertStripeSubscription = z.infer<typeof insertStripeSubscriptionSchema>;
+export type StripeSubscription = typeof stripeSubscriptions.$inferSelect;
+
+// stripe_invoices — invoice tracking per tenant
+export const stripeInvoices = pgTable(
+  "stripe_invoices",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    stripeInvoiceId: text("stripe_invoice_id").notNull().unique(),
+    tenantId: text("tenant_id").notNull(),
+    stripeCustomerId: text("stripe_customer_id"),
+    stripeSubscriptionId: text("stripe_subscription_id"),
+    amount: integer("amount").notNull().default(0), // in cents
+    currency: text("currency").notNull().default("usd"),
+    status: text("status").notNull().default("draft"), // draft | open | paid | uncollectible | void
+    paymentAttempts: integer("payment_attempts").notNull().default(0),
+    lastPaymentError: text("last_payment_error"),
+    issuedAt: timestamp("issued_at"),
+    paidAt: timestamp("paid_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("si22_tenant_id_idx").on(t.tenantId),
+    index("si22_stripe_inv_id_idx").on(t.stripeInvoiceId),
+    index("si22_status_idx").on(t.status),
+  ],
+);
+export const insertStripeInvoiceSchema = createInsertSchema(stripeInvoices).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertStripeInvoice = z.infer<typeof insertStripeInvoiceSchema>;
+export type StripeInvoice = typeof stripeInvoices.$inferSelect;
+
+// stripe_webhook_events — already defined in earlier phase (see stripeWebhookEvents above)

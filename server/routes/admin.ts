@@ -6591,10 +6591,151 @@ export function registerAdminRoutes(app: Express): void {
       const { listAnomalyEvents, listAllAnomalyEvents } = require("../lib/ai-governance/anomaly-detector");
       const tenantId = req.query.tenantId as string | undefined;
       const limit = Number(req.query.limit) || 100;
-      // Runaway events are anomaly_events with event_type = 'runaway_agent'
       const all = tenantId ? await listAnomalyEvents(tenantId, limit) : await listAllAnomalyEvents(limit);
       const runaway = all.filter((e: any) => e.eventType === "runaway_agent" || e.event_type === "runaway_agent");
       res.json(runaway);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── PHASE 22 — STRIPE BILLING INTEGRATION ─────────────────────────────────
+
+  // Route 22-1: GET /api/admin/stripe/customers
+  app.get("/api/admin/stripe/customers", async (req: Request, res: Response) => {
+    try {
+      const { listStripeCustomers } = require("../lib/stripe/customer-service");
+      const limit = Number(req.query.limit) || 50;
+      const offset = Number(req.query.offset) || 0;
+      const customers = await listStripeCustomers({ limit, offset });
+      res.json({ customers, count: customers.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-2: GET /api/admin/stripe/customers/:tenantId
+  app.get("/api/admin/stripe/customers/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const { getStripeCustomer } = require("../lib/stripe/customer-service");
+      const customer = await getStripeCustomer(req.params.tenantId);
+      if (!customer) return res.status(404).json({ error: "Customer not found" });
+      res.json(customer);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-3: POST /api/admin/stripe/customers
+  app.post("/api/admin/stripe/customers", async (req: Request, res: Response) => {
+    try {
+      const { upsertStripeCustomer } = require("../lib/stripe/customer-service");
+      if (!req.body.tenantId) return res.status(400).json({ error: "tenantId required" });
+      const result = await upsertStripeCustomer(req.body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-4: GET /api/admin/stripe/subscriptions
+  app.get("/api/admin/stripe/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { listStripeSubscriptions } = require("../lib/stripe/subscription-service");
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const subscriptions = await listStripeSubscriptions(tenantId);
+      res.json({ subscriptions, count: subscriptions.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-5: POST /api/admin/stripe/subscriptions
+  app.post("/api/admin/stripe/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { createStripeSubscription } = require("../lib/stripe/subscription-service");
+      if (!req.body.tenantId || !req.body.planKey) return res.status(400).json({ error: "tenantId and planKey required" });
+      const result = await createStripeSubscription(req.body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-6: GET /api/admin/stripe/invoices
+  app.get("/api/admin/stripe/invoices", async (req: Request, res: Response) => {
+    try {
+      const { listStripeInvoices } = require("../lib/stripe/invoice-service");
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const invoices = await listStripeInvoices(tenantId, {
+        status: req.query.status as string | undefined,
+        limit: Number(req.query.limit) || 50,
+      });
+      res.json({ invoices, count: invoices.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-7: POST /api/admin/stripe/webhook
+  app.post("/api/admin/stripe/webhook", async (req: Request, res: Response) => {
+    try {
+      const { handleStripeWebhook } = require("../lib/stripe/webhook-handler");
+      const result = await handleStripeWebhook(req.body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-8: GET /api/admin/stripe/webhook-events
+  app.get("/api/admin/stripe/webhook-events", async (req: Request, res: Response) => {
+    try {
+      const { getWebhookEventLog } = require("../lib/stripe/webhook-handler");
+      const events = await getWebhookEventLog({
+        tenantId: req.query.tenantId as string | undefined,
+        eventType: req.query.eventType as string | undefined,
+        limit: Number(req.query.limit) || 50,
+      });
+      res.json({ events, count: events.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-9: GET /api/admin/stripe/metrics/churn
+  app.get("/api/admin/stripe/metrics/churn", async (req: Request, res: Response) => {
+    try {
+      const { getSubscriptionChurnMetrics } = require("../lib/stripe/subscription-service");
+      res.json(await getSubscriptionChurnMetrics());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-10: GET /api/admin/stripe/metrics/revenue
+  app.get("/api/admin/stripe/metrics/revenue", async (req: Request, res: Response) => {
+    try {
+      const { getRevenueMetrics } = require("../lib/stripe/subscription-service");
+      const { getRevenueFromInvoices, getPaymentFailureMetrics } = require("../lib/stripe/invoice-service");
+      const [mrr, invoices, failures] = await Promise.all([
+        getRevenueMetrics(),
+        getRevenueFromInvoices(),
+        getPaymentFailureMetrics(),
+      ]);
+      res.json({ mrr, invoices, failures });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-11: GET /api/admin/stripe/metrics/payments
+  app.get("/api/admin/stripe/metrics/payments", async (req: Request, res: Response) => {
+    try {
+      const { getPaymentFailureMetrics } = require("../lib/stripe/invoice-service");
+      res.json(await getPaymentFailureMetrics());
     } catch (err) {
       res.status(500).json({ error: (err as Error).message });
     }
