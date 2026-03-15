@@ -6219,3 +6219,104 @@ export const featureResolutionEvents = pgTable(
 export const insertFeatureResolutionEventSchema = createInsertSchema(featureResolutionEvents).omit({ id: true, createdAt: true });
 export type InsertFeatureResolutionEvent = z.infer<typeof insertFeatureResolutionEventSchema>;
 export type FeatureResolutionEvent = typeof featureResolutionEvents.$inferSelect;
+
+// ─── PHASE 19 — BACKGROUND JOBS & QUEUE PLATFORM ─────────────────────────────
+
+// jobs — canonical job registry
+export const jobs = pgTable(
+  "jobs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    jobType: text("job_type").notNull(),
+    tenantId: text("tenant_id"),
+    payload: jsonb("payload"),
+    status: text("status").notNull().default("pending"), // 'pending'|'running'|'completed'|'failed'|'cancelled'
+    priority: integer("priority").notNull().default(5), // 1=highest, 10=lowest
+    idempotencyKey: text("idempotency_key"),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    retryPolicy: jsonb("retry_policy"), // { backoffMs, multiplier, maxBackoffMs }
+    scheduledAt: timestamp("scheduled_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("j_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("j_status_created_idx").on(t.status, t.createdAt),
+    index("j_type_status_idx").on(t.jobType, t.status),
+    index("j_idempotency_idx").on(t.idempotencyKey),
+    index("j_scheduled_idx").on(t.scheduledAt),
+  ],
+);
+export const insertJobSchema = createInsertSchema(jobs).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertJob = z.infer<typeof insertJobSchema>;
+export type Job = typeof jobs.$inferSelect;
+
+// job_runs — per-job execution records
+export const jobRuns = pgTable(
+  "job_runs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    jobId: varchar("job_id").notNull(),
+    runStatus: text("run_status").notNull().default("running"), // 'running'|'completed'|'failed'
+    attemptCount: integer("attempt_count").notNull().default(0),
+    errorMessage: text("error_message"),
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+    durationMs: integer("duration_ms"),
+  },
+  (t) => [
+    index("jr_job_id_idx").on(t.jobId, t.startedAt),
+    index("jr_status_started_idx").on(t.runStatus, t.startedAt),
+  ],
+);
+export const insertJobRunSchema = createInsertSchema(jobRuns).omit({ id: true, startedAt: true });
+export type InsertJobRun = z.infer<typeof insertJobRunSchema>;
+export type JobRun = typeof jobRuns.$inferSelect;
+
+// job_attempts — per-attempt records (INV: append-only)
+export const jobAttempts = pgTable(
+  "job_attempts",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    runId: varchar("run_id").notNull(),
+    attemptNumber: integer("attempt_number").notNull(),
+    status: text("status").notNull(), // 'success'|'failure'|'timeout'
+    error: text("error"),
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+    durationMs: integer("duration_ms"),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [
+    index("ja_run_attempt_idx").on(t.runId, t.attemptNumber),
+    index("ja_status_started_idx").on(t.status, t.startedAt),
+  ],
+);
+export const insertJobAttemptSchema = createInsertSchema(jobAttempts).omit({ id: true, startedAt: true });
+export type InsertJobAttempt = z.infer<typeof insertJobAttemptSchema>;
+export type JobAttempt = typeof jobAttempts.$inferSelect;
+
+// job_schedules — cron-based recurring job definitions
+export const jobSchedules = pgTable(
+  "job_schedules",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    jobType: text("job_type").notNull(),
+    scheduleCron: text("schedule_cron").notNull(),
+    tenantId: text("tenant_id"),
+    active: boolean("active").notNull().default(true),
+    payloadTemplate: jsonb("payload_template"),
+    lastRunAt: timestamp("last_run_at"),
+    nextRunAt: timestamp("next_run_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("js_active_type_idx").on(t.active, t.jobType),
+    index("js_tenant_idx").on(t.tenantId),
+    index("js_next_run_idx").on(t.nextRunAt),
+  ],
+);
+export const insertJobScheduleSchema = createInsertSchema(jobSchedules).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertJobSchedule = z.infer<typeof insertJobScheduleSchema>;
+export type JobSchedule = typeof jobSchedules.$inferSelect;

@@ -6995,4 +6995,143 @@ export function registerAdminRoutes(app: Express): void {
       res.status(400).json({ error: (err as Error).message });
     }
   });
+
+  // ── PHASE 19 — BACKGROUND JOBS & QUEUE PLATFORM ───────────────────────────
+
+  // Route 19-1: POST /api/admin/jobs
+  app.post("/api/admin/jobs", async (req: Request, res: Response) => {
+    try {
+      const { dispatchJob } = require("../lib/jobs/job-dispatcher");
+      const job = await dispatchJob(req.body);
+      res.status(201).json(job);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 19-2: GET /api/admin/jobs
+  app.get("/api/admin/jobs", async (req: Request, res: Response) => {
+    try {
+      const { listJobs } = require("../lib/jobs/job-dispatcher");
+      const jobs = await listJobs({
+        tenantId: req.query.tenantId as string | undefined,
+        status: req.query.status as string | undefined,
+        jobType: req.query.jobType as string | undefined,
+        limit: Number(req.query.limit) || 50,
+      });
+      res.json({ jobs, count: jobs.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 19-3: GET /api/admin/jobs/:jobId
+  app.get("/api/admin/jobs/:jobId", async (req: Request, res: Response) => {
+    try {
+      const { explainJob } = require("../lib/jobs/job-observability");
+      const data = await explainJob(req.params.jobId);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 19-4: POST /api/admin/jobs/:jobId/cancel
+  app.post("/api/admin/jobs/:jobId/cancel", async (req: Request, res: Response) => {
+    try {
+      const { cancelJob } = require("../lib/jobs/job-dispatcher");
+      const result = await cancelJob(req.params.jobId, req.body.tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 19-5: GET /api/admin/jobs/metrics
+  app.get("/api/admin/jobs/metrics", async (req: Request, res: Response) => {
+    try {
+      const { getJobMetrics, summarizeQueue } = require("../lib/jobs/job-observability");
+      const [metrics, summary] = await Promise.all([
+        getJobMetrics({ tenantId: req.query.tenantId as string | undefined }),
+        summarizeQueue({ tenantId: req.query.tenantId as string | undefined }),
+      ]);
+      res.json({ summary, metrics });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 19-6: GET /api/admin/jobs/failures
+  app.get("/api/admin/jobs/failures", async (req: Request, res: Response) => {
+    try {
+      const { listRecentFailures } = require("../lib/jobs/job-observability");
+      const data = await listRecentFailures({
+        tenantId: req.query.tenantId as string | undefined,
+        jobType: req.query.jobType as string | undefined,
+        limit: Number(req.query.limit) || 50,
+      });
+      res.json({ failures: data, count: data.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 19-7: GET /api/admin/jobs/schedules
+  app.get("/api/admin/jobs/schedules", async (req: Request, res: Response) => {
+    try {
+      const { listSchedules } = require("../lib/jobs/job-scheduler");
+      const schedules = await listSchedules({
+        active: req.query.active !== undefined ? req.query.active === "true" : undefined,
+        tenantId: req.query.tenantId as string | undefined,
+        limit: Number(req.query.limit) || 50,
+      });
+      res.json({ schedules, count: schedules.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 19-8: POST /api/admin/jobs/schedules
+  app.post("/api/admin/jobs/schedules", async (req: Request, res: Response) => {
+    try {
+      const { createSchedule } = require("../lib/jobs/job-scheduler");
+      const schedule = await createSchedule(req.body);
+      res.status(201).json(schedule);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 19-9: POST /api/admin/jobs/schedules/:scheduleId/pause
+  app.post("/api/admin/jobs/schedules/:scheduleId/pause", async (req: Request, res: Response) => {
+    try {
+      const { pauseSchedule } = require("../lib/jobs/job-scheduler");
+      const result = await pauseSchedule(req.params.scheduleId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 19-10: POST /api/admin/jobs/schedules/:scheduleId/resume
+  app.post("/api/admin/jobs/schedules/:scheduleId/resume", async (req: Request, res: Response) => {
+    try {
+      const { resumeSchedule } = require("../lib/jobs/job-scheduler");
+      const result = await resumeSchedule(req.params.scheduleId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 19-11: GET /api/admin/jobs/latency
+  app.get("/api/admin/jobs/latency", async (req: Request, res: Response) => {
+    try {
+      const { getLatencyPercentiles } = require("../lib/jobs/job-observability");
+      const data = await getLatencyPercentiles({ tenantId: req.query.tenantId as string | undefined });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
