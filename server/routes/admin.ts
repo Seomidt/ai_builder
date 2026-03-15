@@ -7554,4 +7554,109 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 13 — Prompt Governance & AI Safety Platform
+  // Routes: 13-1 → 13-8
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 13-1: GET /api/admin/governance/policies — list policies
+  app.get("/api/admin/governance/policies", async (req: Request, res: Response) => {
+    try {
+      const { listPolicies } = await import("../lib/prompt-governance/policy-engine");
+      const { tenantId, activeOnly } = req.query as Record<string, string>;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await listPolicies({ tenantId, activeOnly: activeOnly === "true" }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 13-2: POST /api/admin/governance/policies — create policy
+  app.post("/api/admin/governance/policies", async (req: Request, res: Response) => {
+    try {
+      const { createPolicy } = await import("../lib/prompt-governance/policy-engine");
+      const { tenantId, policyName, policyType, policyRules } = req.body;
+      if (!tenantId || !policyName || !policyType) return void res.status(400).json({ error: "tenantId, policyName, policyType required" });
+      res.status(201).json(await createPolicy({ tenantId, policyName, policyType, policyRules }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 13-3: POST /api/admin/governance/reviews — review a prompt version
+  app.post("/api/admin/governance/reviews", async (req: Request, res: Response) => {
+    try {
+      const { createReview } = await import("../lib/prompt-governance/prompt-review");
+      const { logChange } = await import("../lib/prompt-governance/prompt-audit");
+      const { promptVersionId, reviewerId, reviewStatus, reviewNotes } = req.body;
+      if (!promptVersionId || !reviewerId) return void res.status(400).json({ error: "promptVersionId, reviewerId required" });
+      const review = await createReview({ promptVersionId, reviewerId, reviewStatus, reviewNotes });
+      logChange({ promptVersionId, changeType: "reviewed", changedBy: reviewerId, changeDescription: `Reviewed: ${reviewStatus ?? "pending"}` }).catch(() => {});
+      res.status(201).json(review);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 13-4: POST /api/admin/governance/approvals — approve a prompt version
+  app.post("/api/admin/governance/approvals", async (req: Request, res: Response) => {
+    try {
+      const { createApproval } = await import("../lib/prompt-governance/approval-engine");
+      const { promptVersionId, approvedBy, skipReviewCheck } = req.body;
+      if (!promptVersionId || !approvedBy) return void res.status(400).json({ error: "promptVersionId, approvedBy required" });
+      res.status(201).json(await createApproval({ promptVersionId, approvedBy, skipReviewCheck }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 13-5: POST /api/admin/governance/redteam — run redteam test
+  app.post("/api/admin/governance/redteam", async (req: Request, res: Response) => {
+    try {
+      const { createRedteamTest, runRedteamTest } = await import("../lib/prompt-governance/redteam-tests");
+      const { promptVersionId, testInput, expectedBehavior, runImmediately } = req.body;
+      if (!promptVersionId || !testInput || !expectedBehavior) return void res.status(400).json({ error: "promptVersionId, testInput, expectedBehavior required" });
+      const test = await createRedteamTest({ promptVersionId, testInput, expectedBehavior });
+      if (runImmediately) return void res.json(await runRedteamTest({ testId: test.id }));
+      res.status(201).json(test);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 13-6: GET /api/admin/governance/violations — list policy violations
+  app.get("/api/admin/governance/violations", async (req: Request, res: Response) => {
+    try {
+      const { listViolations } = await import("../lib/prompt-governance/policy-checker");
+      const { tenantId, requestId, policyId, limit } = req.query as Record<string, string>;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await listViolations({ tenantId, requestId, policyId, limit: limit ? parseInt(limit, 10) : undefined }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 13-7: GET /api/admin/governance/audit — prompt audit log
+  app.get("/api/admin/governance/audit", async (req: Request, res: Response) => {
+    try {
+      const { getAuditLog } = await import("../lib/prompt-governance/prompt-audit");
+      const { promptVersionId, changedBy, changeType, limit, offset } = req.query as Record<string, string>;
+      res.json(await getAuditLog({ promptVersionId, changedBy, changeType: changeType as any, limit: limit ? parseInt(limit, 10) : undefined, offset: offset ? parseInt(offset, 10) : undefined }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 13-8: GET /api/admin/governance/health — governance health summary
+  app.get("/api/admin/governance/health", async (req: Request, res: Response) => {
+    try {
+      const { governanceHealth } = await import("../lib/prompt-governance/prompt-audit");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await governanceHealth(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }

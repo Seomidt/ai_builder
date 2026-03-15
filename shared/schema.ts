@@ -6514,3 +6514,140 @@ export const aiUsageMetrics = pgTable(
 export const insertAiUsageMetricsSchema = createInsertSchema(aiUsageMetrics).omit({ createdAt: true });
 export type InsertAiUsageMetrics = z.infer<typeof insertAiUsageMetricsSchema>;
 export type AiUsageMetrics = typeof aiUsageMetrics.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 13 — Prompt Governance & AI Safety Platform
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── 13.1 prompt_policies ─────────────────────────────────────────────────────
+export const promptPolicies = pgTable(
+  "prompt_policies",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    policyName: text("policy_name").notNull(),
+    policyType: text("policy_type").notNull(),
+    policyRules: jsonb("policy_rules").notNull().default(sql`'{}'::jsonb`),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("prompt_policies_tenant_id_idx").on(t.tenantId),
+    index("prompt_policies_type_idx").on(t.policyType),
+    index("prompt_policies_is_active_idx").on(t.isActive),
+    uniqueIndex("prompt_policies_tenant_name_unique").on(t.tenantId, t.policyName),
+    check("prompt_policies_type_check", sql`policy_type IN ('content_safety','injection_prevention','topic_restriction','output_format','approval_required','rate_limit')`),
+  ],
+);
+export const insertPromptPolicySchema = createInsertSchema(promptPolicies).omit({ createdAt: true });
+export type InsertPromptPolicy = z.infer<typeof insertPromptPolicySchema>;
+export type PromptPolicy = typeof promptPolicies.$inferSelect;
+
+// ─── 13.2 prompt_reviews ──────────────────────────────────────────────────────
+export const promptReviews = pgTable(
+  "prompt_reviews",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    promptVersionId: text("prompt_version_id").notNull(),
+    reviewerId: text("reviewer_id").notNull(),
+    reviewStatus: text("review_status").notNull().default("pending"),
+    reviewNotes: text("review_notes"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("prompt_reviews_version_id_idx").on(t.promptVersionId),
+    index("prompt_reviews_reviewer_id_idx").on(t.reviewerId),
+    index("prompt_reviews_status_idx").on(t.reviewStatus),
+    check("prompt_reviews_status_check", sql`review_status IN ('pending','approved','rejected','changes_requested')`),
+  ],
+);
+export const insertPromptReviewSchema = createInsertSchema(promptReviews).omit({ createdAt: true });
+export type InsertPromptReview = z.infer<typeof insertPromptReviewSchema>;
+export type PromptReview = typeof promptReviews.$inferSelect;
+
+// ─── 13.3 prompt_approvals ────────────────────────────────────────────────────
+export const promptApprovals = pgTable(
+  "prompt_approvals",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    promptVersionId: text("prompt_version_id").notNull(),
+    approvedBy: text("approved_by").notNull(),
+    approvalStatus: text("approval_status").notNull().default("pending"),
+    approvedAt: timestamp("approved_at"),
+  },
+  (t) => [
+    index("prompt_approvals_version_id_idx").on(t.promptVersionId),
+    index("prompt_approvals_status_idx").on(t.approvalStatus),
+    uniqueIndex("prompt_approvals_version_unique").on(t.promptVersionId),
+    check("prompt_approvals_status_check", sql`approval_status IN ('pending','approved','rejected','revoked')`),
+  ],
+);
+export const insertPromptApprovalSchema = createInsertSchema(promptApprovals);
+export type InsertPromptApproval = z.infer<typeof insertPromptApprovalSchema>;
+export type PromptApproval = typeof promptApprovals.$inferSelect;
+
+// ─── 13.4 prompt_redteam_tests ────────────────────────────────────────────────
+export const promptRedteamTests = pgTable(
+  "prompt_redteam_tests",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    promptVersionId: text("prompt_version_id").notNull(),
+    testInput: text("test_input").notNull(),
+    expectedBehavior: text("expected_behavior").notNull(),
+    testResult: text("test_result"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("prompt_redteam_tests_version_id_idx").on(t.promptVersionId),
+    index("prompt_redteam_tests_result_idx").on(t.testResult),
+    check("prompt_redteam_tests_result_check", sql`test_result IS NULL OR test_result IN ('passed','failed','skipped')`),
+  ],
+);
+export const insertPromptRedteamTestSchema = createInsertSchema(promptRedteamTests).omit({ createdAt: true });
+export type InsertPromptRedteamTest = z.infer<typeof insertPromptRedteamTestSchema>;
+export type PromptRedteamTest = typeof promptRedteamTests.$inferSelect;
+
+// ─── 13.5 prompt_policy_violations ───────────────────────────────────────────
+export const promptPolicyViolations = pgTable(
+  "prompt_policy_violations",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    requestId: text("request_id").notNull(),
+    policyId: text("policy_id").notNull(),
+    violationType: text("violation_type").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("prompt_policy_violations_request_id_idx").on(t.requestId),
+    index("prompt_policy_violations_policy_id_idx").on(t.policyId),
+    index("prompt_policy_violations_type_idx").on(t.violationType),
+    index("prompt_policy_violations_created_at_idx").on(t.createdAt),
+    check("prompt_policy_violations_type_check", sql`violation_type IN ('injection_attempt','topic_violation','output_violation','approval_bypass','rate_limit_exceeded','content_safety')`),
+  ],
+);
+export const insertPromptPolicyViolationSchema = createInsertSchema(promptPolicyViolations).omit({ createdAt: true });
+export type InsertPromptPolicyViolation = z.infer<typeof insertPromptPolicyViolationSchema>;
+export type PromptPolicyViolation = typeof promptPolicyViolations.$inferSelect;
+
+// ─── 13.6 prompt_change_log ───────────────────────────────────────────────────
+export const promptChangeLog = pgTable(
+  "prompt_change_log",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    promptVersionId: text("prompt_version_id").notNull(),
+    changeType: text("change_type").notNull(),
+    changedBy: text("changed_by").notNull(),
+    changeDescription: text("change_description").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("prompt_change_log_version_id_idx").on(t.promptVersionId),
+    index("prompt_change_log_changed_by_idx").on(t.changedBy),
+    index("prompt_change_log_created_at_idx").on(t.createdAt),
+    index("prompt_change_log_type_idx").on(t.changeType),
+    check("prompt_change_log_type_check", sql`change_type IN ('created','reviewed','approved','rejected','revoked','redteam_tested','policy_applied','executed')`),
+  ],
+);
+export const insertPromptChangeLogSchema = createInsertSchema(promptChangeLog).omit({ createdAt: true });
+export type InsertPromptChangeLog = z.infer<typeof insertPromptChangeLogSchema>;
+export type PromptChangeLog = typeof promptChangeLog.$inferSelect;
