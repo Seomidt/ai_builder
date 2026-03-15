@@ -6120,3 +6120,145 @@ export const tenantDomains = pgTable(
 export const insertTenantDomainSchema = createInsertSchema(tenantDomains).omit({ id: true, createdAt: true });
 export type InsertTenantDomain = z.infer<typeof insertTenantDomainSchema>;
 export type TenantDomain = typeof tenantDomains.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 10 — Knowledge Ingestion Platform
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── 10.1 knowledge_sources ───────────────────────────────────────────────────
+export const knowledgeSources = pgTable(
+  "knowledge_sources",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    sourceType: text("source_type").notNull(),
+    name: text("name").notNull(),
+    status: text("status").notNull().default("pending"),
+    lastSyncAt: timestamp("last_sync_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("knowledge_sources_tenant_id_idx").on(t.tenantId),
+    index("knowledge_sources_status_idx").on(t.status),
+    index("knowledge_sources_tenant_status_created_idx").on(t.tenantId, t.status, t.createdAt),
+    check("knowledge_sources_source_type_check", sql`source_type IN ('file_upload','web_crawl','api_ingestion','manual')`),
+    check("knowledge_sources_status_check", sql`status IN ('pending','active','syncing','error','disabled')`),
+  ],
+);
+export const insertKnowledgeSourceSchema = createInsertSchema(knowledgeSources).omit({ createdAt: true, updatedAt: true });
+export type InsertKnowledgeSource = z.infer<typeof insertKnowledgeSourceSchema>;
+export type KnowledgeSource = typeof knowledgeSources.$inferSelect;
+
+// ─── 10.2 ingestion_documents ─────────────────────────────────────────────────
+// Phase 10 ingestion document registry (distinct from Phase 5 knowledge_documents)
+export const ingestionDocuments = pgTable(
+  "ingestion_documents",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    sourceId: text("source_id").notNull(),
+    title: text("title").notNull(),
+    documentStatus: text("document_status").notNull().default("pending"),
+    checksum: text("checksum"),
+    contentType: text("content_type"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ingestion_documents_tenant_id_idx").on(t.tenantId),
+    index("ingestion_documents_source_id_idx").on(t.sourceId),
+    index("ingestion_documents_status_idx").on(t.documentStatus),
+    index("ingestion_documents_tenant_source_created_idx").on(t.tenantId, t.sourceId, t.createdAt),
+    check("ingestion_documents_status_check", sql`document_status IN ('pending','processing','chunked','embedded','indexed','failed','archived')`),
+  ],
+);
+export const insertIngestionDocumentSchema = createInsertSchema(ingestionDocuments).omit({ createdAt: true, updatedAt: true });
+export type InsertIngestionDocument = z.infer<typeof insertIngestionDocumentSchema>;
+export type IngestionDocument = typeof ingestionDocuments.$inferSelect;
+
+// ─── 10.3 ingestion_chunks ────────────────────────────────────────────────────
+// Phase 10 chunk registry (distinct from Phase 5 knowledge_chunks)
+export const ingestionChunks = pgTable(
+  "ingestion_chunks",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    documentId: text("document_id").notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    content: text("content").notNull(),
+    tokenCount: integer("token_count"),
+    embeddingStatus: text("embedding_status").notNull().default("pending"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ingestion_chunks_tenant_id_idx").on(t.tenantId),
+    index("ingestion_chunks_document_id_idx").on(t.documentId),
+    index("ingestion_chunks_tenant_doc_idx_idx").on(t.tenantId, t.documentId, t.chunkIndex),
+    index("ingestion_chunks_embedding_status_idx").on(t.embeddingStatus),
+    check("ingestion_chunks_embedding_status_check", sql`embedding_status IN ('pending','generating','completed','failed')`),
+  ],
+);
+export const insertIngestionChunkSchema = createInsertSchema(ingestionChunks).omit({ createdAt: true });
+export type InsertIngestionChunk = z.infer<typeof insertIngestionChunkSchema>;
+export type IngestionChunk = typeof ingestionChunks.$inferSelect;
+
+// ─── 10.4 ingestion_embeddings ────────────────────────────────────────────────
+// Phase 10 embedding registry (distinct from Phase 5 knowledge_embeddings)
+export const ingestionEmbeddings = pgTable(
+  "ingestion_embeddings",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    chunkId: text("chunk_id").notNull(),
+    embeddingModel: text("embedding_model").notNull(),
+    embeddingStatus: text("embedding_status").notNull().default("pending"),
+    dimensions: integer("dimensions"),
+    vectorReference: text("vector_reference"),
+    errorMessage: text("error_message"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ingestion_embeddings_tenant_id_idx").on(t.tenantId),
+    index("ingestion_embeddings_chunk_id_idx").on(t.chunkId),
+    index("ingestion_embeddings_status_created_idx").on(t.embeddingStatus, t.createdAt),
+    check("ingestion_embeddings_status_check", sql`embedding_status IN ('pending','generating','completed','failed')`),
+  ],
+);
+export const insertIngestionEmbeddingSchema = createInsertSchema(ingestionEmbeddings).omit({ createdAt: true, updatedAt: true });
+export type InsertIngestionEmbedding = z.infer<typeof insertIngestionEmbeddingSchema>;
+export type IngestionEmbedding = typeof ingestionEmbeddings.$inferSelect;
+
+// ─── 10.5 knowledge_index_entries ─────────────────────────────────────────────
+export const knowledgeIndexEntries = pgTable(
+  "knowledge_index_entries",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    chunkId: text("chunk_id").notNull(),
+    documentId: text("document_id").notNull(),
+    sourceId: text("source_id").notNull(),
+    vectorIndexed: boolean("vector_indexed").notNull().default(false),
+    lexicalIndexed: boolean("lexical_indexed").notNull().default(false),
+    indexedAt: timestamp("indexed_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("knowledge_index_entries_tenant_id_idx").on(t.tenantId),
+    index("knowledge_index_entries_chunk_id_idx").on(t.chunkId),
+    index("knowledge_index_entries_document_id_idx").on(t.documentId),
+    index("knowledge_index_entries_source_id_idx").on(t.sourceId),
+    index("knowledge_index_entries_tenant_indexed_idx").on(t.tenantId, t.vectorIndexed, t.lexicalIndexed),
+    uniqueIndex("knowledge_index_entries_chunk_id_unique").on(t.chunkId),
+  ],
+);
+export const insertKnowledgeIndexEntrySchema = createInsertSchema(knowledgeIndexEntries).omit({ createdAt: true, updatedAt: true });
+export type InsertKnowledgeIndexEntry = z.infer<typeof insertKnowledgeIndexEntrySchema>;
+export type KnowledgeIndexEntry = typeof knowledgeIndexEntries.$inferSelect;

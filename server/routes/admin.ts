@@ -7242,4 +7242,107 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 10 — Knowledge Ingestion Platform
+  // Routes: 10-1 → 10-8
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 10-1: POST /api/admin/knowledge/sources — create source
+  app.post("/api/admin/knowledge/sources", async (req: Request, res: Response) => {
+    try {
+      const { createKnowledgeSource } = await import("../lib/knowledge/knowledge-sources");
+      const { tenantId, sourceType, name, status, metadata } = req.body;
+      if (!tenantId || !sourceType || !name) return void res.status(400).json({ error: "tenantId, sourceType, name required" });
+      res.status(201).json(await createKnowledgeSource({ tenantId, sourceType, name, status, metadata, actorId: (req as any).user?.id }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 10-2: GET /api/admin/knowledge/sources — list sources
+  app.get("/api/admin/knowledge/sources", async (req: Request, res: Response) => {
+    try {
+      const { listKnowledgeSources } = await import("../lib/knowledge/knowledge-sources");
+      const { tenantId, status, sourceType, limit = "50", offset = "0" } = req.query as Record<string, string>;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await listKnowledgeSources({ tenantId, status: status as any, sourceType: sourceType as any, limit: parseInt(limit, 10), offset: parseInt(offset, 10) }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 10-3: POST /api/admin/knowledge/documents — ingest document
+  app.post("/api/admin/knowledge/documents", async (req: Request, res: Response) => {
+    try {
+      const { ingestDocument } = await import("../lib/knowledge/knowledge-documents");
+      const { tenantId, sourceId, title, checksum, contentType, metadata } = req.body;
+      if (!tenantId || !sourceId || !title) return void res.status(400).json({ error: "tenantId, sourceId, title required" });
+      res.status(201).json(await ingestDocument({ tenantId, sourceId, title, checksum, contentType, metadata, actorId: (req as any).user?.id }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 10-4: GET /api/admin/knowledge/documents — list documents
+  app.get("/api/admin/knowledge/documents", async (req: Request, res: Response) => {
+    try {
+      const { listIngestionDocuments } = await import("../lib/knowledge/knowledge-documents");
+      const { tenantId, sourceId, documentStatus, limit = "50", offset = "0" } = req.query as Record<string, string>;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await listIngestionDocuments({ tenantId, sourceId, documentStatus: documentStatus as any, limit: parseInt(limit, 10), offset: parseInt(offset, 10) }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 10-5: GET /api/admin/knowledge/documents/:id — get single document
+  app.get("/api/admin/knowledge/documents/:id", async (req: Request, res: Response) => {
+    try {
+      const { getIngestionDocumentById } = await import("../lib/knowledge/knowledge-documents");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const doc = await getIngestionDocumentById(req.params.id, tenantId);
+      if (!doc) return void res.status(404).json({ error: "Document not found" });
+      res.json(doc);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 10-6: POST /api/admin/knowledge/ingest — full pipeline
+  app.post("/api/admin/knowledge/ingest", async (req: Request, res: Response) => {
+    try {
+      const { runIngestionPipeline } = await import("../lib/knowledge/knowledge-ingestion");
+      const { tenantId, sourceType, sourceName, existingSourceId, documentTitle, content, contentType, checksum, embeddingModel, chunkSize, chunkOverlap, vectorIndexed, lexicalIndexed } = req.body;
+      if (!tenantId || !documentTitle || !content) return void res.status(400).json({ error: "tenantId, documentTitle, content required" });
+      res.json(await runIngestionPipeline({ tenantId, sourceType, sourceName, existingSourceId, documentTitle, content, contentType, checksum, embeddingModel, chunkSize, chunkOverlap, vectorIndexed, lexicalIndexed, actorId: (req as any).user?.id }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 10-7: GET /api/admin/knowledge/documents/:id/pipeline — pipeline state (read-only)
+  app.get("/api/admin/knowledge/documents/:id/pipeline", async (req: Request, res: Response) => {
+    try {
+      const { explainPipelineState } = await import("../lib/knowledge/knowledge-ingestion");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await explainPipelineState({ tenantId, documentId: req.params.id }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 10-8: GET /api/admin/knowledge/index/summary — index state summary
+  app.get("/api/admin/knowledge/index/summary", async (req: Request, res: Response) => {
+    try {
+      const { summarizeIndexState } = await import("../lib/knowledge/knowledge-indexing");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await summarizeIndexState(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
