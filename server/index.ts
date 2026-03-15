@@ -5,9 +5,13 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { authMiddleware } from "./middleware/auth";
 import { requestIdMiddleware, structuredLoggingMiddleware } from "./middleware/request-id";
+import { securityHeaders } from "./middleware/security-headers";
 
 const app = express();
 const httpServer = createServer(app);
+
+// Phase 13.2: security headers — applied first, before all other middleware
+app.use(securityHeaders);
 
 declare module "http" {
   interface IncomingMessage {
