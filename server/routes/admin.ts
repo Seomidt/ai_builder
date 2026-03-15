@@ -7451,4 +7451,107 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 12 — AI Orchestrator Platform
+  // Routes: 12-1 → 12-8
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 12-1: GET /api/admin/ai/models — list AI models
+  app.get("/api/admin/ai/models", async (_req: Request, res: Response) => {
+    try {
+      const { listModels } = await import("../lib/ai/ai-model-router");
+      const activeOnly = _req.query.activeOnly !== "false";
+      res.json(await listModels(activeOnly));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 12-2: POST /api/admin/ai/prompts — create prompt + v1
+  app.post("/api/admin/ai/prompts", async (req: Request, res: Response) => {
+    try {
+      const { createPrompt } = await import("../lib/ai/ai-prompt-builder");
+      const { tenantId, name, description, systemPrompt, temperature, topP, maxTokens } = req.body;
+      if (!tenantId || !name || !systemPrompt) return void res.status(400).json({ error: "tenantId, name, systemPrompt required" });
+      res.status(201).json(await createPrompt({ tenantId, name, description, systemPrompt, temperature, topP, maxTokens }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 12-3: GET /api/admin/ai/prompts — list prompts for tenant
+  app.get("/api/admin/ai/prompts", async (req: Request, res: Response) => {
+    try {
+      const { listPrompts } = await import("../lib/ai/ai-prompt-builder");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await listPrompts(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 12-4: GET /api/admin/ai/prompts/:id/versions — list prompt versions
+  app.get("/api/admin/ai/prompts/:id/versions", async (req: Request, res: Response) => {
+    try {
+      const { listPromptVersions } = await import("../lib/ai/ai-prompt-builder");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await listPromptVersions(req.params.id, tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 12-5: POST /api/admin/ai/query — run full RAG AI query
+  app.post("/api/admin/ai/query", async (req: Request, res: Response) => {
+    try {
+      const { runAiQuery } = await import("../lib/ai/ai-orchestrator");
+      const { tenantId, queryText, promptId, promptVersionId, preferredModelId, retrievalStrategy, topK, timeoutMs } = req.body;
+      if (!tenantId || !queryText) return void res.status(400).json({ error: "tenantId, queryText required" });
+      const requestId = (req.headers["x-request-id"] as string) ?? undefined;
+      res.json(await runAiQuery({ tenantId, queryText, promptId, promptVersionId, preferredModelId, retrievalStrategy, topK, requestId, timeoutMs }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 12-6: GET /api/admin/ai/metrics — tenant AI metrics
+  app.get("/api/admin/ai/metrics", async (req: Request, res: Response) => {
+    try {
+      const { tenantUsageSummary } = await import("../lib/ai/ai-usage");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await tenantUsageSummary(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 12-7: GET /api/admin/ai/usage — per-request usage
+  app.get("/api/admin/ai/usage", async (req: Request, res: Response) => {
+    try {
+      const { getUsageByRequest } = await import("../lib/ai/ai-usage");
+      const { requestId, tenantId } = req.query as { requestId?: string; tenantId?: string };
+      if (!requestId || !tenantId) return void res.status(400).json({ error: "requestId, tenantId required" });
+      const usage = await getUsageByRequest(requestId, tenantId);
+      if (!usage) return void res.status(404).json({ error: "Usage record not found" });
+      res.json(usage);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 12-8: GET /api/admin/ai/health — AI system health
+  app.get("/api/admin/ai/health", async (req: Request, res: Response) => {
+    try {
+      const { aiHealth } = await import("../lib/ai/ai-usage");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await aiHealth(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }

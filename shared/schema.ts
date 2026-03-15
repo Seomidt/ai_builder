@@ -6364,3 +6364,153 @@ export const retrievalFeedback = pgTable(
 export const insertRetrievalFeedbackSchema = createInsertSchema(retrievalFeedback).omit({ createdAt: true });
 export type InsertRetrievalFeedback = z.infer<typeof insertRetrievalFeedbackSchema>;
 export type RetrievalFeedback = typeof retrievalFeedback.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 12 — AI Orchestrator Platform
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── 12.1 ai_models ──────────────────────────────────────────────────────────
+export const aiModels = pgTable(
+  "ai_models",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    provider: text("provider").notNull(),
+    modelName: text("model_name").notNull(),
+    maxTokens: integer("max_tokens").notNull().default(4096),
+    contextWindow: integer("context_window").notNull().default(8192),
+    costPrompt: numeric("cost_prompt").notNull().default("0"),
+    costCompletion: numeric("cost_completion").notNull().default("0"),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_models_provider_idx").on(t.provider),
+    index("ai_models_is_active_idx").on(t.isActive),
+    uniqueIndex("ai_models_provider_name_unique").on(t.provider, t.modelName),
+    check("ai_models_max_tokens_check", sql`max_tokens > 0`),
+    check("ai_models_context_window_check", sql`context_window > 0`),
+  ],
+);
+export const insertAiModelSchema = createInsertSchema(aiModels).omit({ createdAt: true });
+export type InsertAiModel = z.infer<typeof insertAiModelSchema>;
+export type AiModel = typeof aiModels.$inferSelect;
+
+// ─── 12.2 ai_prompts ─────────────────────────────────────────────────────────
+export const aiPrompts = pgTable(
+  "ai_prompts",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_prompts_tenant_id_idx").on(t.tenantId),
+    index("ai_prompts_name_idx").on(t.name),
+    uniqueIndex("ai_prompts_tenant_name_unique").on(t.tenantId, t.name),
+  ],
+);
+export const insertAiPromptSchema = createInsertSchema(aiPrompts).omit({ createdAt: true });
+export type InsertAiPrompt = z.infer<typeof insertAiPromptSchema>;
+export type AiPrompt = typeof aiPrompts.$inferSelect;
+
+// ─── 12.3 ai_prompt_versions ─────────────────────────────────────────────────
+export const aiPromptVersions = pgTable(
+  "ai_prompt_versions",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    promptId: text("prompt_id").notNull(),
+    version: integer("version").notNull().default(1),
+    systemPrompt: text("system_prompt").notNull(),
+    temperature: numeric("temperature").notNull().default("0.7"),
+    topP: numeric("top_p").notNull().default("1.0"),
+    maxTokens: integer("max_tokens").notNull().default(1024),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ai_prompt_versions_prompt_version_unique").on(t.promptId, t.version),
+    index("ai_prompt_versions_prompt_id_idx").on(t.promptId),
+    check("ai_prompt_versions_temperature_check", sql`temperature >= 0 AND temperature <= 2`),
+    check("ai_prompt_versions_top_p_check", sql`top_p > 0 AND top_p <= 1`),
+    check("ai_prompt_versions_max_tokens_check", sql`max_tokens > 0`),
+    check("ai_prompt_versions_version_check", sql`version >= 1`),
+  ],
+);
+export const insertAiPromptVersionSchema = createInsertSchema(aiPromptVersions).omit({ createdAt: true });
+export type InsertAiPromptVersion = z.infer<typeof insertAiPromptVersionSchema>;
+export type AiPromptVersion = typeof aiPromptVersions.$inferSelect;
+
+// ─── 12.4 ai_requests ────────────────────────────────────────────────────────
+export const aiRequests = pgTable(
+  "ai_requests",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    queryText: text("query_text").notNull(),
+    promptVersionId: text("prompt_version_id"),
+    retrievalQueryId: text("retrieval_query_id"),
+    modelId: text("model_id"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_requests_tenant_id_idx").on(t.tenantId),
+    index("ai_requests_created_at_idx").on(t.createdAt),
+    index("ai_requests_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("ai_requests_retrieval_query_id_idx").on(t.retrievalQueryId),
+  ],
+);
+export const insertAiRequestSchema = createInsertSchema(aiRequests).omit({ createdAt: true });
+export type InsertAiRequest = z.infer<typeof insertAiRequestSchema>;
+export type AiRequest = typeof aiRequests.$inferSelect;
+
+// ─── 12.5 ai_responses ───────────────────────────────────────────────────────
+export const aiResponses = pgTable(
+  "ai_responses",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    requestId: text("request_id").notNull(),
+    responseText: text("response_text").notNull(),
+    tokenPrompt: integer("token_prompt").notNull().default(0),
+    tokenCompletion: integer("token_completion").notNull().default(0),
+    latencyMs: integer("latency_ms").notNull().default(0),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_responses_request_id_idx").on(t.requestId),
+    uniqueIndex("ai_responses_request_id_unique").on(t.requestId),
+    check("ai_responses_token_prompt_check", sql`token_prompt >= 0`),
+    check("ai_responses_token_completion_check", sql`token_completion >= 0`),
+    check("ai_responses_latency_check", sql`latency_ms >= 0`),
+  ],
+);
+export const insertAiResponseSchema = createInsertSchema(aiResponses).omit({ createdAt: true });
+export type InsertAiResponse = z.infer<typeof insertAiResponseSchema>;
+export type AiResponse = typeof aiResponses.$inferSelect;
+
+// ─── 12.6 ai_usage_metrics ───────────────────────────────────────────────────
+export const aiUsageMetrics = pgTable(
+  "ai_usage_metrics",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    requestId: text("request_id").notNull(),
+    modelId: text("model_id").notNull(),
+    tokenPrompt: integer("token_prompt").notNull().default(0),
+    tokenCompletion: integer("token_completion").notNull().default(0),
+    estimatedCost: numeric("estimated_cost").notNull().default("0"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ai_usage_metrics_tenant_id_idx").on(t.tenantId),
+    index("ai_usage_metrics_request_id_idx").on(t.requestId),
+    index("ai_usage_metrics_model_id_idx").on(t.modelId),
+    index("ai_usage_metrics_tenant_created_idx").on(t.tenantId, t.createdAt),
+    uniqueIndex("ai_usage_metrics_request_id_unique").on(t.requestId),
+    check("ai_usage_metrics_token_prompt_check", sql`token_prompt >= 0`),
+    check("ai_usage_metrics_token_completion_check", sql`token_completion >= 0`),
+  ],
+);
+export const insertAiUsageMetricsSchema = createInsertSchema(aiUsageMetrics).omit({ createdAt: true });
+export type InsertAiUsageMetrics = z.infer<typeof insertAiUsageMetricsSchema>;
+export type AiUsageMetrics = typeof aiUsageMetrics.$inferSelect;
