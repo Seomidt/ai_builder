@@ -6905,4 +6905,341 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 9 — Tenant Lifecycle Management
+  // Routes: 9-1 → 9-30
+  // INV-TEN1–12 enforced
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 9-1: POST /api/admin/tenants — create canonical tenant
+  app.post("/api/admin/tenants", async (req: Request, res: Response) => {
+    try {
+      const { createTenant } = await import("../lib/tenant/tenant-lifecycle");
+      const { name, tenantCode, lifecycleStatus, tenantType, billingEmail, defaultRegion, metadata, changedBy } = req.body;
+      if (!name) return void res.status(400).json({ error: "name required" });
+      res.status(201).json(await createTenant({ name, tenantCode, lifecycleStatus, tenantType, billingEmail, defaultRegion, metadata, changedBy: changedBy ?? (req as any).user?.id }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-2: GET /api/admin/tenants — list tenants
+  app.get("/api/admin/tenants", async (req: Request, res: Response) => {
+    try {
+      const { listTenants } = await import("../lib/tenant/tenant-lifecycle");
+      const { lifecycleStatus, tenantType, limit = "50", offset = "0" } = req.query as Record<string, string>;
+      res.json(await listTenants({ lifecycleStatus: lifecycleStatus as any, tenantType: tenantType as any, limit: parseInt(limit, 10), offset: parseInt(offset, 10) }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-3: GET /api/admin/tenants/bootstrap/explain — read-only bootstrap state (INV-TEN9)
+  app.get("/api/admin/tenants/bootstrap/explain", async (_req: Request, res: Response) => {
+    try {
+      const { explainTenantBootstrapState } = await import("../lib/tenant/tenant-bootstrap");
+      res.json(await explainTenantBootstrapState());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-4: POST /api/admin/tenants/bootstrap — run bootstrap (idempotent, INV-TEN7)
+  app.post("/api/admin/tenants/bootstrap", async (req: Request, res: Response) => {
+    try {
+      const { bootstrapCanonicalTenantsFromExistingData } = await import("../lib/tenant/tenant-bootstrap");
+      const { dryRun, limit } = req.body as { dryRun?: boolean; limit?: number };
+      res.json(await bootstrapCanonicalTenantsFromExistingData({ dryRun: dryRun ?? false, limit, changedBy: (req as any).user?.id ?? "admin_route" }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-5: POST /api/admin/tenants/preview/access-check — read-only access preview (INV-TEN9)
+  app.post("/api/admin/tenants/preview/access-check", async (req: Request, res: Response) => {
+    try {
+      const { explainTenantAccessState } = await import("../lib/tenant/tenant-access");
+      const { tenantId } = req.body as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await explainTenantAccessState(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-6: GET /api/admin/tenants/:tenantId — single tenant
+  app.get("/api/admin/tenants/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const { getTenantById } = await import("../lib/tenant/tenant-lifecycle");
+      const t = await getTenantById(req.params.tenantId);
+      if (!t) return void res.status(404).json({ error: "Tenant not found" });
+      res.json(t);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-7: GET /api/admin/tenants/:tenantId/explain — lifecycle explain (INV-TEN9)
+  app.get("/api/admin/tenants/:tenantId/explain", async (req: Request, res: Response) => {
+    try {
+      const { explainTenantLifecycle } = await import("../lib/tenant/tenant-lifecycle");
+      res.json(await explainTenantLifecycle(req.params.tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-8: POST /api/admin/tenants/:tenantId/status — explicit status transition (INV-TEN2/3)
+  app.post("/api/admin/tenants/:tenantId/status", async (req: Request, res: Response) => {
+    try {
+      const { updateTenantStatus } = await import("../lib/tenant/tenant-lifecycle");
+      const { newStatus, reason } = req.body as { newStatus?: string; reason?: string };
+      if (!newStatus) return void res.status(400).json({ error: "newStatus required" });
+      res.json(await updateTenantStatus({ tenantId: req.params.tenantId, newStatus: newStatus as any, changedBy: (req as any).user?.id, reason }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-9: POST /api/admin/tenants/:tenantId/suspend
+  app.post("/api/admin/tenants/:tenantId/suspend", async (req: Request, res: Response) => {
+    try {
+      const { suspendTenant } = await import("../lib/tenant/tenant-lifecycle");
+      const { reason } = req.body as { reason?: string };
+      res.json(await suspendTenant({ tenantId: req.params.tenantId, reason, changedBy: (req as any).user?.id }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-10: POST /api/admin/tenants/:tenantId/reactivate
+  app.post("/api/admin/tenants/:tenantId/reactivate", async (req: Request, res: Response) => {
+    try {
+      const { reactivateTenant } = await import("../lib/tenant/tenant-lifecycle");
+      const { reason } = req.body as { reason?: string };
+      res.json(await reactivateTenant({ tenantId: req.params.tenantId, reason, changedBy: (req as any).user?.id }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-11: POST /api/admin/tenants/:tenantId/offboarding
+  app.post("/api/admin/tenants/:tenantId/offboarding", async (req: Request, res: Response) => {
+    try {
+      const { startTenantOffboarding } = await import("../lib/tenant/tenant-lifecycle");
+      const { reason } = req.body as { reason?: string };
+      res.json(await startTenantOffboarding({ tenantId: req.params.tenantId, reason, changedBy: (req as any).user?.id }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-12: GET /api/admin/tenants/:tenantId/settings
+  app.get("/api/admin/tenants/:tenantId/settings", async (req: Request, res: Response) => {
+    try {
+      const { getTenantSettings } = await import("../lib/tenant/tenant-settings");
+      const settings = await getTenantSettings(req.params.tenantId);
+      if (!settings) return void res.status(404).json({ error: "Settings not found" });
+      res.json(settings);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-13: POST /api/admin/tenants/:tenantId/settings
+  app.post("/api/admin/tenants/:tenantId/settings", async (req: Request, res: Response) => {
+    try {
+      const { createOrGetTenantSettings, updateTenantSettings, getTenantSettings } = await import("../lib/tenant/tenant-settings");
+      const existing = await getTenantSettings(req.params.tenantId);
+      if (existing) {
+        res.json(await updateTenantSettings({ tenantId: req.params.tenantId, ...req.body, changedBy: (req as any).user?.id }));
+      } else {
+        const { createTenantSettings } = await import("../lib/tenant/tenant-settings");
+        res.status(201).json(await createTenantSettings({ tenantId: req.params.tenantId, ...req.body, changedBy: (req as any).user?.id }));
+      }
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-14: POST /api/admin/tenants/:tenantId/domains
+  app.post("/api/admin/tenants/:tenantId/domains", async (req: Request, res: Response) => {
+    try {
+      const { addTenantDomain } = await import("../lib/tenant/tenant-governance");
+      const { domain } = req.body as { domain?: string };
+      if (!domain) return void res.status(400).json({ error: "domain required" });
+      res.status(201).json(await addTenantDomain({ tenantId: req.params.tenantId, domain, addedBy: (req as any).user?.id }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-15: GET /api/admin/tenants/:tenantId/domains
+  app.get("/api/admin/tenants/:tenantId/domains", async (req: Request, res: Response) => {
+    try {
+      const { listTenantDomains } = await import("../lib/tenant/tenant-governance");
+      res.json(await listTenantDomains(req.params.tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-16: POST /api/admin/tenants/:tenantId/export-requests
+  app.post("/api/admin/tenants/:tenantId/export-requests", async (req: Request, res: Response) => {
+    try {
+      const { requestTenantExport } = await import("../lib/tenant/tenant-governance");
+      const { exportScope, filterSummary } = req.body as { exportScope?: "full" | "metadata_only" | "audit_only"; filterSummary?: Record<string, unknown> };
+      res.status(201).json(await requestTenantExport({ tenantId: req.params.tenantId, requestedBy: (req as any).user?.id ?? null, exportScope, filterSummary }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-17: GET /api/admin/tenants/:tenantId/export-requests
+  app.get("/api/admin/tenants/:tenantId/export-requests", async (req: Request, res: Response) => {
+    try {
+      const { listTenantExportRequests } = await import("../lib/tenant/tenant-governance");
+      res.json(await listTenantExportRequests(req.params.tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-18: POST /api/admin/tenant-export-requests/:requestId/start
+  app.post("/api/admin/tenant-export-requests/:requestId/start", async (req: Request, res: Response) => {
+    try {
+      const { startTenantExport } = await import("../lib/tenant/tenant-governance");
+      res.json(await startTenantExport(req.params.requestId, (req as any).user?.id));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-19: POST /api/admin/tenant-export-requests/:requestId/complete
+  app.post("/api/admin/tenant-export-requests/:requestId/complete", async (req: Request, res: Response) => {
+    try {
+      const { completeTenantExport } = await import("../lib/tenant/tenant-governance");
+      res.json(await completeTenantExport(req.params.requestId, req.body.resultSummary));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-20: POST /api/admin/tenant-export-requests/:requestId/fail
+  app.post("/api/admin/tenant-export-requests/:requestId/fail", async (req: Request, res: Response) => {
+    try {
+      const { failTenantExport } = await import("../lib/tenant/tenant-governance");
+      const { errorMessage } = req.body as { errorMessage?: string };
+      if (!errorMessage) return void res.status(400).json({ error: "errorMessage required" });
+      res.json(await failTenantExport(req.params.requestId, errorMessage));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-21: POST /api/admin/tenants/:tenantId/deletion-requests
+  app.post("/api/admin/tenants/:tenantId/deletion-requests", async (req: Request, res: Response) => {
+    try {
+      const { requestTenantDeletion } = await import("../lib/tenant/tenant-governance");
+      const { retentionUntil } = req.body as { retentionUntil?: string };
+      res.status(201).json(await requestTenantDeletion({ tenantId: req.params.tenantId, requestedBy: (req as any).user?.id ?? null, retentionUntil: retentionUntil ? new Date(retentionUntil) : undefined }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-22: GET /api/admin/tenants/:tenantId/deletion-requests
+  app.get("/api/admin/tenants/:tenantId/deletion-requests", async (req: Request, res: Response) => {
+    try {
+      const { listTenantDeletionRequests } = await import("../lib/tenant/tenant-governance");
+      res.json(await listTenantDeletionRequests(req.params.tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-23: POST /api/admin/tenant-deletion-requests/:requestId/approve
+  app.post("/api/admin/tenant-deletion-requests/:requestId/approve", async (req: Request, res: Response) => {
+    try {
+      const { approveTenantDeletion } = await import("../lib/tenant/tenant-governance");
+      res.json(await approveTenantDeletion(req.params.requestId, (req as any).user?.id ?? "admin"));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-24: POST /api/admin/tenant-deletion-requests/:requestId/block
+  app.post("/api/admin/tenant-deletion-requests/:requestId/block", async (req: Request, res: Response) => {
+    try {
+      const { blockTenantDeletion } = await import("../lib/tenant/tenant-governance");
+      const { blockReason } = req.body as { blockReason?: string };
+      if (!blockReason) return void res.status(400).json({ error: "blockReason required" });
+      res.json(await blockTenantDeletion(req.params.requestId, blockReason, (req as any).user?.id ?? "admin"));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-25: POST /api/admin/tenant-deletion-requests/:requestId/start
+  app.post("/api/admin/tenant-deletion-requests/:requestId/start", async (req: Request, res: Response) => {
+    try {
+      const { startTenantDeletion } = await import("../lib/tenant/tenant-governance");
+      res.json(await startTenantDeletion(req.params.requestId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-26: POST /api/admin/tenant-deletion-requests/:requestId/complete
+  app.post("/api/admin/tenant-deletion-requests/:requestId/complete", async (req: Request, res: Response) => {
+    try {
+      const { completeTenantDeletion } = await import("../lib/tenant/tenant-governance");
+      res.json(await completeTenantDeletion(req.params.requestId, req.body.resultSummary));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-27: POST /api/admin/tenant-deletion-requests/:requestId/fail
+  app.post("/api/admin/tenant-deletion-requests/:requestId/fail", async (req: Request, res: Response) => {
+    try {
+      const { failTenantDeletion } = await import("../lib/tenant/tenant-governance");
+      const { errorMessage } = req.body as { errorMessage?: string };
+      if (!errorMessage) return void res.status(400).json({ error: "errorMessage required" });
+      res.json(await failTenantDeletion(req.params.requestId, errorMessage));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-28: GET /api/admin/tenants/:tenantId/governance — governance explain (INV-TEN9)
+  app.get("/api/admin/tenants/:tenantId/governance", async (req: Request, res: Response) => {
+    try {
+      const { explainTenantGovernanceState } = await import("../lib/tenant/tenant-governance");
+      res.json(await explainTenantGovernanceState(req.params.tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-29: GET /api/admin/tenants/:tenantId/summary — summarize state (INV-TEN9)
+  app.get("/api/admin/tenants/:tenantId/summary", async (req: Request, res: Response) => {
+    try {
+      const { summarizeTenantState } = await import("../lib/tenant/tenant-lifecycle");
+      res.json(await summarizeTenantState(req.params.tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9-30: GET /api/admin/tenants/:tenantId/status-history — append-only history
+  app.get("/api/admin/tenants/:tenantId/status-history", async (req: Request, res: Response) => {
+    try {
+      const { getTenantStatusHistory } = await import("../lib/tenant/tenant-lifecycle");
+      res.json(await getTenantStatusHistory(req.params.tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }

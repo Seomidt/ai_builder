@@ -5954,3 +5954,169 @@ export const auditExportRuns = pgTable(
 export const insertAuditExportRunSchema = createInsertSchema(auditExportRuns).omit({ id: true, createdAt: true });
 export type InsertAuditExportRun = z.infer<typeof insertAuditExportRunSchema>;
 export type AuditExportRun = typeof auditExportRuns.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 9 — Tenant Lifecycle Management
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── 9.1 tenants — canonical tenant record ────────────────────────────────────
+export const tenants = pgTable(
+  "tenants",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantCode: text("tenant_code"),
+    name: text("name").notNull(),
+    lifecycleStatus: text("lifecycle_status").notNull().default("active"),
+    tenantType: text("tenant_type").notNull().default("customer"),
+    primaryOwnerUserId: text("primary_owner_user_id"),
+    billingEmail: text("billing_email"),
+    defaultRegion: text("default_region"),
+    suspendedAt: timestamp("suspended_at"),
+    offboardingStartedAt: timestamp("offboarding_started_at"),
+    deletedAt: timestamp("deleted_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tenants_tenant_code_unique").on(t.tenantCode),
+    index("tenants_lifecycle_status_created_idx").on(t.lifecycleStatus, t.createdAt),
+    index("tenants_tenant_type_created_idx").on(t.tenantType, t.createdAt),
+    index("tenants_primary_owner_user_id_idx").on(t.primaryOwnerUserId),
+    index("tenants_created_at_idx").on(t.createdAt),
+    check("tenants_lifecycle_status_check", sql`lifecycle_status IN ('trial','active','suspended','delinquent','offboarding','deleted')`),
+    check("tenants_tenant_type_check", sql`tenant_type IN ('customer','internal','demo','test')`),
+  ],
+);
+export const insertTenantSchema = createInsertSchema(tenants).omit({ createdAt: true, updatedAt: true });
+export type InsertTenant = z.infer<typeof insertTenantSchema>;
+export type Tenant = typeof tenants.$inferSelect;
+
+// ─── 9.2 tenant_settings ──────────────────────────────────────────────────────
+export const tenantSettings = pgTable(
+  "tenant_settings",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    allowLogin: boolean("allow_login").notNull().default(true),
+    allowApiAccess: boolean("allow_api_access").notNull().default(true),
+    allowAiRuntime: boolean("allow_ai_runtime").notNull().default(true),
+    allowKnowledgeAccess: boolean("allow_knowledge_access").notNull().default(true),
+    allowBillingAccess: boolean("allow_billing_access").notNull().default(true),
+    tenantTimezone: text("tenant_timezone"),
+    locale: text("locale"),
+    settingsStatus: text("settings_status").notNull().default("active"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tenant_settings_tenant_id_unique").on(t.tenantId),
+    index("tenant_settings_tenant_id_idx").on(t.tenantId),
+    index("tenant_settings_status_created_idx").on(t.settingsStatus, t.createdAt),
+    check("tenant_settings_status_check", sql`settings_status IN ('active','archived')`),
+  ],
+);
+export const insertTenantSettingsSchema = createInsertSchema(tenantSettings).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTenantSettings = z.infer<typeof insertTenantSettingsSchema>;
+export type TenantSettings = typeof tenantSettings.$inferSelect;
+
+// ─── 9.3 tenant_status_history — append-only ─────────────────────────────────
+export const tenantStatusHistory = pgTable(
+  "tenant_status_history",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    previousStatus: text("previous_status"),
+    newStatus: text("new_status").notNull(),
+    changedBy: text("changed_by"),
+    changeReason: text("change_reason"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("tenant_status_history_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("tenant_status_history_new_status_created_idx").on(t.newStatus, t.createdAt),
+    check("tenant_status_history_new_status_check", sql`new_status IN ('trial','active','suspended','delinquent','offboarding','deleted')`),
+  ],
+);
+export const insertTenantStatusHistorySchema = createInsertSchema(tenantStatusHistory).omit({ id: true, createdAt: true });
+export type InsertTenantStatusHistory = z.infer<typeof insertTenantStatusHistorySchema>;
+export type TenantStatusHistory = typeof tenantStatusHistory.$inferSelect;
+
+// ─── 9.4 tenant_export_requests ───────────────────────────────────────────────
+export const tenantExportRequests = pgTable(
+  "tenant_export_requests",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    requestedBy: text("requested_by"),
+    exportStatus: text("export_status").notNull().default("requested"),
+    exportScope: text("export_scope").notNull().default("full"),
+    filterSummary: jsonb("filter_summary"),
+    resultSummary: jsonb("result_summary"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+  },
+  (t) => [
+    index("tenant_export_requests_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("tenant_export_requests_status_created_idx").on(t.exportStatus, t.createdAt),
+    check("tenant_export_requests_status_check", sql`export_status IN ('requested','running','completed','failed','cancelled')`),
+    check("tenant_export_requests_scope_check", sql`export_scope IN ('full','metadata_only','audit_only')`),
+  ],
+);
+export const insertTenantExportRequestSchema = createInsertSchema(tenantExportRequests).omit({ id: true, createdAt: true });
+export type InsertTenantExportRequest = z.infer<typeof insertTenantExportRequestSchema>;
+export type TenantExportRequest = typeof tenantExportRequests.$inferSelect;
+
+// ─── 9.5 tenant_deletion_requests ────────────────────────────────────────────
+export const tenantDeletionRequests = pgTable(
+  "tenant_deletion_requests",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    requestedBy: text("requested_by"),
+    deletionStatus: text("deletion_status").notNull().default("requested"),
+    retentionUntil: timestamp("retention_until"),
+    blockReason: text("block_reason"),
+    resultSummary: jsonb("result_summary"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    approvedAt: timestamp("approved_at"),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+  },
+  (t) => [
+    index("tenant_deletion_requests_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("tenant_deletion_requests_status_created_idx").on(t.deletionStatus, t.createdAt),
+    check("tenant_deletion_requests_status_check", sql`deletion_status IN ('requested','approved','blocked','running','completed','cancelled','failed')`),
+  ],
+);
+export const insertTenantDeletionRequestSchema = createInsertSchema(tenantDeletionRequests).omit({ id: true, createdAt: true });
+export type InsertTenantDeletionRequest = z.infer<typeof insertTenantDeletionRequestSchema>;
+export type TenantDeletionRequest = typeof tenantDeletionRequests.$inferSelect;
+
+// ─── 9.6 tenant_domains ───────────────────────────────────────────────────────
+export const tenantDomains = pgTable(
+  "tenant_domains",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull().references(() => tenants.id),
+    domain: text("domain").notNull(),
+    domainStatus: text("domain_status").notNull().default("pending"),
+    verifiedAt: timestamp("verified_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tenant_domains_domain_unique").on(t.domain),
+    index("tenant_domains_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("tenant_domains_status_created_idx").on(t.domainStatus, t.createdAt),
+    check("tenant_domains_status_check", sql`domain_status IN ('pending','verified','disabled')`),
+  ],
+);
+export const insertTenantDomainSchema = createInsertSchema(tenantDomains).omit({ id: true, createdAt: true });
+export type InsertTenantDomain = z.infer<typeof insertTenantDomainSchema>;
+export type TenantDomain = typeof tenantDomains.$inferSelect;
