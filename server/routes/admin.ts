@@ -7135,6 +7135,120 @@ export function registerAdminRoutes(app: Express): void {
     }
   });
 
+  // ── PHASE 21 — INTERNATIONALIZATION, LOCALE & CURRENCY ───────────────────
+
+  // Route 21-1: GET /api/admin/i18n/languages
+  app.get("/api/admin/i18n/languages", async (req: Request, res: Response) => {
+    try {
+      const { listSupportedLanguages } = require("../lib/i18n/language-service");
+      const active = req.query.active !== undefined ? req.query.active === "true" : undefined;
+      const languages = await listSupportedLanguages({ active });
+      res.json({ languages, count: languages.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 21-2: GET /api/admin/i18n/currencies
+  app.get("/api/admin/i18n/currencies", async (req: Request, res: Response) => {
+    try {
+      const { listSupportedCurrencies } = require("../lib/i18n/currency-service");
+      const active = req.query.active !== undefined ? req.query.active === "true" : undefined;
+      const currencies = await listSupportedCurrencies({ active });
+      res.json({ currencies, count: currencies.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 21-3: GET /api/admin/i18n/tenant-locale
+  app.get("/api/admin/i18n/tenant-locale", async (req: Request, res: Response) => {
+    try {
+      const { getTenantLocale } = require("../lib/i18n/locale-resolution");
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const locale = await getTenantLocale(tenantId);
+      res.json(locale ?? { tenantId, configured: false });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 21-4: POST /api/admin/i18n/tenant-locale
+  app.post("/api/admin/i18n/tenant-locale", async (req: Request, res: Response) => {
+    try {
+      const { setTenantLocale } = require("../lib/i18n/locale-resolution");
+      const result = await setTenantLocale(req.body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 21-5: GET /api/admin/i18n/user-locale
+  app.get("/api/admin/i18n/user-locale", async (req: Request, res: Response) => {
+    try {
+      const { getUserLocale } = require("../lib/i18n/locale-resolution");
+      const userId = req.query.userId as string;
+      if (!userId) return res.status(400).json({ error: "userId required" });
+      const locale = await getUserLocale(userId);
+      res.json(locale ?? { userId, configured: false });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 21-6: POST /api/admin/i18n/user-locale
+  app.post("/api/admin/i18n/user-locale", async (req: Request, res: Response) => {
+    try {
+      const { setUserLocale } = require("../lib/i18n/locale-resolution");
+      const result = await setUserLocale(req.body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 21-7: GET /api/admin/i18n/resolve
+  app.get("/api/admin/i18n/resolve", async (req: Request, res: Response) => {
+    try {
+      const { resolveLocale } = require("../lib/i18n/locale-resolution");
+      const result = await resolveLocale({
+        userId: req.query.userId as string | undefined,
+        tenantId: req.query.tenantId as string | undefined,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 21-8: GET /api/admin/i18n/timezones
+  app.get("/api/admin/i18n/timezones", async (req: Request, res: Response) => {
+    try {
+      const { listCommonTimezones } = require("../lib/i18n/timezone-service");
+      const timezones = listCommonTimezones();
+      res.json({ timezones, count: timezones.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 21-9: GET /api/admin/i18n/distribution
+  app.get("/api/admin/i18n/distribution", async (req: Request, res: Response) => {
+    try {
+      const { getLanguageDistribution } = require("../lib/i18n/language-service");
+      const { getCurrencyUsageStats } = require("../lib/i18n/currency-service");
+      const [languages, currencies] = await Promise.all([
+        getLanguageDistribution(),
+        getCurrencyUsageStats(),
+      ]);
+      res.json({ languages, currencies });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   // ── PHASE 20 — SAAS PLANS, ENTITLEMENTS & USAGE QUOTAS ───────────────────
 
   // Route 20-1: GET /api/admin/plans

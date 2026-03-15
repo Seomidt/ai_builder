@@ -6429,3 +6429,85 @@ export const usageCounters = pgTable(
 export const insertUsageCounterSchema = createInsertSchema(usageCounters).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertUsageCounter = z.infer<typeof insertUsageCounterSchema>;
 export type UsageCounter = typeof usageCounters.$inferSelect;
+
+// ─── PHASE 21 — INTERNATIONALIZATION, LOCALE & CURRENCY PLATFORM ─────────────
+
+// supported_languages — canonical language registry
+export const supportedLanguages = pgTable(
+  "supported_languages",
+  {
+    languageCode: text("language_code").primaryKey(), // BCP-47: 'en', 'da', 'de', 'fr', 'es', 'ja', etc.
+    displayName: text("display_name").notNull(),
+    nativeName: text("native_name"),
+    active: boolean("active").notNull().default(true),
+    rtl: boolean("rtl").notNull().default(false),
+  },
+  (t) => [
+    index("sl_active_idx").on(t.active),
+  ],
+);
+export const insertSupportedLanguageSchema = createInsertSchema(supportedLanguages);
+export type InsertSupportedLanguage = z.infer<typeof insertSupportedLanguageSchema>;
+export type SupportedLanguage = typeof supportedLanguages.$inferSelect;
+
+// supported_currencies — canonical currency registry
+export const supportedCurrencies = pgTable(
+  "supported_currencies",
+  {
+    currencyCode: text("currency_code").primaryKey(), // ISO 4217: 'USD', 'EUR', 'DKK', etc.
+    symbol: text("symbol").notNull(),
+    displayName: text("display_name").notNull(),
+    decimals: integer("decimals").notNull().default(2),
+    active: boolean("active").notNull().default(true),
+  },
+  (t) => [
+    index("sc_active_idx").on(t.active),
+  ],
+);
+export const insertSupportedCurrencySchema = createInsertSchema(supportedCurrencies);
+export type InsertSupportedCurrency = z.infer<typeof insertSupportedCurrencySchema>;
+export type SupportedCurrency = typeof supportedCurrencies.$inferSelect;
+
+// tenant_locales — per-tenant locale configuration
+export const tenantLocales = pgTable(
+  "tenant_locales",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull().unique(),
+    defaultLanguage: text("default_language").notNull().default("en"),
+    defaultCurrency: text("default_currency").notNull().default("USD"),
+    defaultTimezone: text("default_timezone").notNull().default("UTC"),
+    numberFormat: text("number_format").notNull().default("en-US"), // BCP-47 for Intl
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("tl_tenant_id_idx").on(t.tenantId),
+  ],
+);
+export const insertTenantLocaleSchema = createInsertSchema(tenantLocales).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTenantLocale = z.infer<typeof insertTenantLocaleSchema>;
+export type TenantLocale = typeof tenantLocales.$inferSelect;
+
+// user_locales — per-user language and timezone preferences
+export const userLocales = pgTable(
+  "user_locales",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    userId: text("user_id").notNull().unique(),
+    tenantId: text("tenant_id"),
+    language: text("language").notNull().default("en"),
+    timezone: text("timezone").notNull().default("UTC"),
+    currency: text("currency"),
+    numberFormat: text("number_format"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ul_user_id_idx").on(t.userId),
+    index("ul_tenant_id_idx").on(t.tenantId),
+  ],
+);
+export const insertUserLocaleSchema = createInsertSchema(userLocales).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertUserLocale = z.infer<typeof insertUserLocaleSchema>;
+export type UserLocale = typeof userLocales.$inferSelect;
