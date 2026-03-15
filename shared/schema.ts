@@ -6262,3 +6262,105 @@ export const knowledgeIndexEntries = pgTable(
 export const insertKnowledgeIndexEntrySchema = createInsertSchema(knowledgeIndexEntries).omit({ createdAt: true, updatedAt: true });
 export type InsertKnowledgeIndexEntry = z.infer<typeof insertKnowledgeIndexEntrySchema>;
 export type KnowledgeIndexEntry = typeof knowledgeIndexEntries.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 11 — Retrieval Engine Platform
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── 11.1 retrieval_queries ───────────────────────────────────────────────────
+export const retrievalQueries = pgTable(
+  "retrieval_queries",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    queryText: text("query_text").notNull(),
+    queryEmbedding: jsonb("query_embedding"),
+    retrievalStrategy: text("retrieval_strategy").notNull().default("hybrid"),
+    topK: integer("top_k").notNull().default(10),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("retrieval_queries_tenant_id_idx").on(t.tenantId),
+    index("retrieval_queries_created_at_idx").on(t.createdAt),
+    index("retrieval_queries_tenant_strategy_idx").on(t.tenantId, t.retrievalStrategy),
+    check("retrieval_queries_strategy_check", sql`retrieval_strategy IN ('vector','lexical','hybrid')`),
+    check("retrieval_queries_top_k_check", sql`top_k BETWEEN 1 AND 100`),
+  ],
+);
+export const insertRetrievalQuerySchema = createInsertSchema(retrievalQueries).omit({ createdAt: true });
+export type InsertRetrievalQuery = z.infer<typeof insertRetrievalQuerySchema>;
+export type RetrievalQuery = typeof retrievalQueries.$inferSelect;
+
+// ─── 11.2 retrieval_results ────────────────────────────────────────────────────
+export const retrievalResults = pgTable(
+  "retrieval_results",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    queryId: text("query_id").notNull(),
+    chunkId: text("chunk_id").notNull(),
+    scoreVector: numeric("score_vector"),
+    scoreLexical: numeric("score_lexical"),
+    scoreCombined: numeric("score_combined").notNull().default("0"),
+    rankPosition: integer("rank_position").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("retrieval_results_query_id_idx").on(t.queryId),
+    index("retrieval_results_chunk_id_idx").on(t.chunkId),
+    index("retrieval_results_query_rank_idx").on(t.queryId, t.rankPosition),
+    uniqueIndex("retrieval_results_query_chunk_unique").on(t.queryId, t.chunkId),
+  ],
+);
+export const insertRetrievalResultSchema = createInsertSchema(retrievalResults).omit({ createdAt: true });
+export type InsertRetrievalResult = z.infer<typeof insertRetrievalResultSchema>;
+export type RetrievalResult = typeof retrievalResults.$inferSelect;
+
+// ─── 11.3 retrieval_query_metrics ─────────────────────────────────────────────
+// Named retrieval_query_metrics (not retrieval_metrics — that already exists from Phase 5)
+export const retrievalQueryMetrics = pgTable(
+  "retrieval_query_metrics",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId: text("tenant_id").notNull(),
+    queryId: text("query_id").notNull(),
+    latencyMs: integer("latency_ms").notNull(),
+    vectorHits: integer("vector_hits").notNull().default(0),
+    lexicalHits: integer("lexical_hits").notNull().default(0),
+    totalResults: integer("total_results").notNull().default(0),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("retrieval_query_metrics_tenant_id_idx").on(t.tenantId),
+    index("retrieval_query_metrics_query_id_idx").on(t.queryId),
+    index("retrieval_query_metrics_latency_idx").on(t.latencyMs),
+    index("retrieval_query_metrics_tenant_created_idx").on(t.tenantId, t.createdAt),
+    uniqueIndex("retrieval_query_metrics_query_id_unique").on(t.queryId),
+    check("retrieval_query_metrics_latency_check", sql`latency_ms >= 0`),
+  ],
+);
+export const insertRetrievalQueryMetricsSchema = createInsertSchema(retrievalQueryMetrics).omit({ createdAt: true });
+export type InsertRetrievalQueryMetrics = z.infer<typeof insertRetrievalQueryMetricsSchema>;
+export type RetrievalQueryMetrics = typeof retrievalQueryMetrics.$inferSelect;
+
+// ─── 11.4 retrieval_feedback ──────────────────────────────────────────────────
+export const retrievalFeedback = pgTable(
+  "retrieval_feedback",
+  {
+    id: text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    queryId: text("query_id").notNull(),
+    chunkId: text("chunk_id").notNull(),
+    feedbackType: text("feedback_type").notNull(),
+    tenantId: text("tenant_id").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("retrieval_feedback_query_id_idx").on(t.queryId),
+    index("retrieval_feedback_chunk_id_idx").on(t.chunkId),
+    index("retrieval_feedback_tenant_id_idx").on(t.tenantId),
+    index("retrieval_feedback_tenant_created_idx").on(t.tenantId, t.createdAt),
+    check("retrieval_feedback_type_check", sql`feedback_type IN ('relevant','irrelevant','partial','thumbs_up','thumbs_down')`),
+  ],
+);
+export const insertRetrievalFeedbackSchema = createInsertSchema(retrievalFeedback).omit({ createdAt: true });
+export type InsertRetrievalFeedback = z.infer<typeof insertRetrievalFeedbackSchema>;
+export type RetrievalFeedback = typeof retrievalFeedback.$inferSelect;

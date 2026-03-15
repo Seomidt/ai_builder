@@ -7345,4 +7345,110 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 11 — Retrieval Engine Platform
+  // Routes: 11-1 → 11-8
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 11-1: POST /api/admin/retrieval/run — run retrieval pipeline
+  app.post("/api/admin/retrieval/run", async (req: Request, res: Response) => {
+    try {
+      const { runRetrieval } = await import("../lib/retrieval/retrieval-orchestrator");
+      const { tenantId, queryText, strategy, topK, timeoutMs } = req.body;
+      if (!tenantId || !queryText) return void res.status(400).json({ error: "tenantId, queryText required" });
+      const requestId = (req.headers["x-request-id"] as string) ?? undefined;
+      res.json(await runRetrieval({ tenantId, queryText, strategy, topK, requestId, timeoutMs }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 11-2: GET /api/admin/retrieval/queries — list queries
+  app.get("/api/admin/retrieval/queries", async (req: Request, res: Response) => {
+    try {
+      const { listQueries } = await import("../lib/retrieval/retrieval-query");
+      const { tenantId, strategy, limit = "50", offset = "0" } = req.query as Record<string, string>;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await listQueries({ tenantId, strategy: strategy as any, limit: parseInt(limit, 10), offset: parseInt(offset, 10) }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 11-3: GET /api/admin/retrieval/queries/:id/results — query results
+  app.get("/api/admin/retrieval/queries/:id/results", async (req: Request, res: Response) => {
+    try {
+      const { getResultsByQueryId } = await import("../lib/retrieval/retrieval-orchestrator");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await getResultsByQueryId(req.params.id, tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 11-4: GET /api/admin/retrieval/queries/:id/metrics — query metrics
+  app.get("/api/admin/retrieval/queries/:id/metrics", async (req: Request, res: Response) => {
+    try {
+      const { getMetricsByQueryId } = await import("../lib/retrieval/retrieval-metrics");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const metrics = await getMetricsByQueryId(req.params.id, tenantId);
+      if (!metrics) return void res.status(404).json({ error: "Metrics not found" });
+      res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 11-5: GET /api/admin/retrieval/queries/:id/explain — explain retrieval
+  app.get("/api/admin/retrieval/queries/:id/explain", async (req: Request, res: Response) => {
+    try {
+      const { explainRetrieval } = await import("../lib/retrieval/retrieval-explain");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const explanation = await explainRetrieval(req.params.id, tenantId);
+      if (!explanation) return void res.status(404).json({ error: "Query not found" });
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 11-6: GET /api/admin/retrieval/queries/top — top queries
+  app.get("/api/admin/retrieval/queries/top", async (req: Request, res: Response) => {
+    try {
+      const { topQueries } = await import("../lib/retrieval/retrieval-query");
+      const { tenantId, limit = "10" } = req.query as Record<string, string>;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await topQueries({ tenantId, limit: parseInt(limit, 10) }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 11-7: GET /api/admin/retrieval/slow — slow queries
+  app.get("/api/admin/retrieval/slow", async (req: Request, res: Response) => {
+    try {
+      const { slowQueries } = await import("../lib/retrieval/retrieval-metrics");
+      const { tenantId, thresholdMs = "500", limit = "20" } = req.query as Record<string, string>;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await slowQueries({ tenantId, thresholdMs: parseInt(thresholdMs, 10), limit: parseInt(limit, 10) }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 11-8: GET /api/admin/retrieval/health — retrieval health summary
+  app.get("/api/admin/retrieval/health", async (req: Request, res: Response) => {
+    try {
+      const { retrievalHealth } = await import("../lib/retrieval/retrieval-metrics");
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      res.json(await retrievalHealth(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
