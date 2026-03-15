@@ -1512,3 +1512,74 @@ INV-EMB1 through INV-EMB12 all implemented and verified.
 
 ### Validation results
 24/24 scenarios PASSED — 129/129 assertions PASSED
+
+---
+
+## Phase 5S — Retrieval Orchestration & Feedback (commit 3fccfc9)
+- Branch: feature/retrieval-orchestration (fully merged)
+- 159/159 assertions PASSED — 10 admin routes added (5S-1→5S-10)
+- RLS tables after Phase 5S: 101
+
+---
+
+## Phase 6 — Identity, RBAC & Actor Governance Foundation (commit 8362988)
+Branch: feature/identity-rbac-foundation
+
+### New tables (12, schema.ts now 5716 lines)
+- `app_user_profiles` — canonical application-level identity (linked to Supabase auth.users)
+- `tenant_memberships` — multi-tenant membership with status lifecycle (invited/active/suspended/removed)
+- `roles` — tenant-scoped and system-scoped roles with lifecycle states
+- `permissions` — canonical permission codes by domain
+- `role_permissions` — M:M binding of permissions to roles
+- `membership_roles` — M:M binding of roles to tenant memberships
+- `service_accounts` — machine actors per tenant
+- `service_account_keys` — hashed keys for service accounts (never plaintext in DB)
+- `api_keys` — hashed API keys per tenant with scope bindings
+- `api_key_scopes` — M:M binding of permissions to API keys
+- `identity_providers` — OIDC/SAML/Google Workspace/Azure AD provider foundation
+- `tenant_invitations` — time-limited hashed token invitations
+
+### New service files (server/lib/auth/)
+- `identity-bootstrap.ts` — seed canonical permissions + system roles (idempotent, INV-ID11)
+- `actor-resolution.ts` — resolve human / service-account / API-key / request actors (INV-ID1, ID10)
+- `permissions.ts` — permission-code-based decision engine (INV-ID2, ID3, ID4)
+- `key-management.ts` — key creation/revocation/verification (INV-ID5, ID7)
+- `memberships.ts` — membership CRUD, role assignment, invitations (INV-ID3, ID6)
+- `identity-providers.ts` — provider CRUD + status transitions (INV-ID12)
+- `identity-compat.ts` — backward compat layer + mapCurrentUserToCanonicalActor (INV-ID9)
+- `request-context.ts` — Express middleware: attachResolvedActorToRequest, requireRequestPermission
+- `migrate-phase6.ts` — idempotent migration script (runs via npx tsx)
+- `validate-phase6.ts` — 54 scenarios, 200+ assertions, ALL PASS
+
+### Modified files
+- `shared/schema.ts` — 12 new tables + insert schemas + types (5716 lines total)
+- `server/middleware/auth.ts` — attaches req.resolvedActor on every request (req.user untouched, INV-ID9)
+- `server/routes/admin.ts` — 27 new Phase 6 admin routes (6-1 → 6-27)
+
+### Admin routes (27 endpoints)
+Memberships/invites (7): POST/GET tenants/:id/memberships, suspend, remove, POST/GET/revoke invitations
+Roles/permissions/bootstrap (6): GET permissions, GET roles, POST bootstrap, POST/DELETE assign role, GET access-explainer
+Service accounts/keys (4): POST/GET service-accounts, POST keys, POST revoke key
+API keys (3): POST/GET api-keys, POST revoke api-key
+Identity providers (3): POST/GET providers, POST status
+Explainers/compat (4): GET actor/explain, POST permission-check, GET compat/state, POST compat/preview
+
+### Invariants enforced (INV-ID1–ID12)
+INV-ID1: Every resolved actor has explicit actorType + tenantId
+INV-ID2: All permission checks are permission-code-based, never role-name-based
+INV-ID3: Suspended/removed memberships grant zero permissions
+INV-ID4: Disabled/archived roles and permissions are silently ignored
+INV-ID5: Keys stored as SHA-256 hex hash only — plaintext returned once at creation
+INV-ID6: Tenant-scoped role bindings cross-tenant-safe
+INV-ID7: Revoked and expired keys fail closed unconditionally
+INV-ID8: All explain/preview endpoints are read-only, no side-effects
+INV-ID9: Backward compatible — req.user untouched, all legacy routes work
+INV-ID10: Cross-tenant permission leakage structurally impossible
+INV-ID11: Permission + role bootstrap seeding is idempotent
+INV-ID12: Identity provider foundation is explicit; no fake SSO completion
+
+### RLS state after Phase 6
+- Tables with RLS: 113 (+12 from Phase 6)
+
+### Validation results
+54/54 scenarios — 200+ assertions — ALL PASS
