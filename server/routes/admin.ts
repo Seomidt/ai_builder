@@ -7134,4 +7134,143 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── PHASE 20 — SAAS PLANS, ENTITLEMENTS & USAGE QUOTAS ───────────────────
+
+  // Route 20-1: GET /api/admin/plans
+  app.get("/api/admin/plans", async (req: Request, res: Response) => {
+    try {
+      const { listPlans } = require("../lib/billing/plans");
+      const active = req.query.active !== undefined ? req.query.active === "true" : undefined;
+      const plans = await listPlans({ active });
+      res.json({ plans, count: plans.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 20-2: POST /api/admin/plans
+  app.post("/api/admin/plans", async (req: Request, res: Response) => {
+    try {
+      const { createPlan } = require("../lib/billing/plans");
+      const plan = await createPlan(req.body);
+      res.status(201).json(plan);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 20-3: GET /api/admin/plans/:planId
+  app.get("/api/admin/plans/:planId", async (req: Request, res: Response) => {
+    try {
+      const { getPlan, listPlanFeatures } = require("../lib/billing/plans");
+      const [plan, features] = await Promise.all([
+        getPlan(req.params.planId),
+        listPlanFeatures(req.params.planId),
+      ]);
+      if (!plan) return res.status(404).json({ error: "Plan not found" });
+      res.json({ plan, features });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 20-4: POST /api/admin/plans/:planId/features
+  app.post("/api/admin/plans/:planId/features", async (req: Request, res: Response) => {
+    try {
+      const { setPlanFeature } = require("../lib/billing/plans");
+      const result = await setPlanFeature({ planId: req.params.planId, ...req.body });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 20-5: POST /api/admin/plans/assign
+  app.post("/api/admin/plans/assign", async (req: Request, res: Response) => {
+    try {
+      const { assignPlan } = require("../lib/billing/plan-lifecycle");
+      const result = await assignPlan(req.body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 20-6: POST /api/admin/plans/trial
+  app.post("/api/admin/plans/trial", async (req: Request, res: Response) => {
+    try {
+      const { startTrial } = require("../lib/billing/plan-lifecycle");
+      const { tenantId, planId, trialDays } = req.body;
+      const result = await startTrial(tenantId, planId, trialDays);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 20-7: POST /api/admin/plans/:tenantId/cancel
+  app.post("/api/admin/plans/:tenantId/cancel", async (req: Request, res: Response) => {
+    try {
+      const { cancelPlan } = require("../lib/billing/plan-lifecycle");
+      const result = await cancelPlan(req.params.tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 20-8: GET /api/admin/plans/entitlements
+  app.get("/api/admin/plans/entitlements", async (req: Request, res: Response) => {
+    try {
+      const { getTenantEntitlements } = require("../lib/billing/entitlements");
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const data = await getTenantEntitlements(tenantId);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 20-9: GET /api/admin/plans/quota-status
+  app.get("/api/admin/plans/quota-status", async (req: Request, res: Response) => {
+    try {
+      const { getTenantQuotaStatus } = require("../lib/billing/quota-checker");
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const data = await getTenantQuotaStatus(tenantId);
+      res.json({ tenantId, quotas: data });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 20-10: POST /api/admin/plans/usage/increment
+  app.post("/api/admin/plans/usage/increment", async (req: Request, res: Response) => {
+    try {
+      const { incrementUsage } = require("../lib/billing/usage-tracker");
+      const { tenantId, quotaKey, amount, resetPeriod } = req.body;
+      const result = await incrementUsage(tenantId, quotaKey, amount ?? 1, resetPeriod ?? "monthly");
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 20-11: GET /api/admin/plans/usage/history
+  app.get("/api/admin/plans/usage/history", async (req: Request, res: Response) => {
+    try {
+      const { getUsageHistory } = require("../lib/billing/usage-tracker");
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const data = await getUsageHistory(tenantId, {
+        quotaKey: req.query.quotaKey as string | undefined,
+        limit: Number(req.query.limit) || 50,
+      });
+      res.json({ history: data, count: data.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }

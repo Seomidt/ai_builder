@@ -6320,3 +6320,112 @@ export const jobSchedules = pgTable(
 export const insertJobScheduleSchema = createInsertSchema(jobSchedules).omit({ id: true, createdAt: true, updatedAt: true });
 export type InsertJobSchedule = z.infer<typeof insertJobScheduleSchema>;
 export type JobSchedule = typeof jobSchedules.$inferSelect;
+
+// ─── PHASE 20 — SAAS PLANS, ENTITLEMENTS & USAGE QUOTAS ──────────────────────
+
+// plans — canonical SaaS plan definitions
+export const plans = pgTable(
+  "plans",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    planKey: text("plan_key").notNull().unique(),
+    name: text("name").notNull(),
+    description: text("description"),
+    priceMonthly: integer("price_monthly").notNull().default(0), // cents
+    priceYearly: integer("price_yearly").notNull().default(0),   // cents
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("p_plan_key_idx").on(t.planKey),
+    index("p_active_idx").on(t.active),
+  ],
+);
+export const insertPlanSchema = createInsertSchema(plans).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertPlan = z.infer<typeof insertPlanSchema>;
+export type Plan = typeof plans.$inferSelect;
+
+// plan_features — feature entitlements per plan
+export const planFeatures = pgTable(
+  "plan_features",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    planId: varchar("plan_id").notNull(),
+    featureKey: text("feature_key").notNull(),
+    enabled: boolean("enabled").notNull().default(true),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [
+    index("pf_plan_id_idx").on(t.planId, t.featureKey),
+    index("pf_feature_key_idx").on(t.featureKey),
+  ],
+);
+export const insertPlanFeatureSchema = createInsertSchema(planFeatures).omit({ id: true });
+export type InsertPlanFeature = z.infer<typeof insertPlanFeatureSchema>;
+export type PlanFeature = typeof planFeatures.$inferSelect;
+
+// tenant_plans — tenant plan subscriptions
+export const tenantPlans = pgTable(
+  "tenant_plans",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    planId: varchar("plan_id").notNull(),
+    status: text("status").notNull().default("active"), // 'active'|'cancelled'|'suspended'|'trial'|'expired'
+    startedAt: timestamp("started_at").notNull().defaultNow(),
+    expiresAt: timestamp("expires_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("tp_tenant_id_idx").on(t.tenantId, t.status),
+    index("tp_plan_id_idx").on(t.planId),
+    index("tp_expires_idx").on(t.expiresAt),
+  ],
+);
+export const insertTenantPlanSchema = createInsertSchema(tenantPlans).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTenantPlan = z.infer<typeof insertTenantPlanSchema>;
+export type TenantPlan = typeof tenantPlans.$inferSelect;
+
+// usage_quotas — quota limits per plan
+export const usageQuotas = pgTable(
+  "usage_quotas",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    planId: varchar("plan_id").notNull(),
+    quotaKey: text("quota_key").notNull(),
+    quotaLimit: integer("quota_limit").notNull(), // -1 = unlimited
+    resetPeriod: text("reset_period").notNull().default("monthly"), // 'daily'|'monthly'|'yearly'|'never'
+  },
+  (t) => [
+    index("uq_plan_quota_idx").on(t.planId, t.quotaKey),
+    index("uq_quota_key_idx").on(t.quotaKey),
+  ],
+);
+export const insertUsageQuotaSchema = createInsertSchema(usageQuotas).omit({ id: true });
+export type InsertUsageQuota = z.infer<typeof insertUsageQuotaSchema>;
+export type UsageQuota = typeof usageQuotas.$inferSelect;
+
+// usage_counters — per-tenant usage tracking
+export const usageCounters = pgTable(
+  "usage_counters",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    quotaKey: text("quota_key").notNull(),
+    usageValue: integer("usage_value").notNull().default(0),
+    periodStart: timestamp("period_start").notNull(),
+    periodEnd: timestamp("period_end").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("uc_tenant_quota_period_idx").on(t.tenantId, t.quotaKey, t.periodStart),
+    index("uc_period_end_idx").on(t.periodEnd),
+    index("uc_tenant_idx").on(t.tenantId),
+  ],
+);
+export const insertUsageCounterSchema = createInsertSchema(usageCounters).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertUsageCounter = z.infer<typeof insertUsageCounterSchema>;
+export type UsageCounter = typeof usageCounters.$inferSelect;
