@@ -25,38 +25,66 @@ import {
 /**
  * Central error → HTTP response mapper.
  *
- * AI typed errors (AiError subclasses) carry their own httpStatus, errorCode,
- * and optional retryAfterSeconds — these are used directly so no guard outcome
- * ever surfaces as a generic 500.
+ * Phase 13.1 hardening:
+ *   - All responses include error_code, message, and request_id.
+ *   - Stack traces are NEVER exposed to the client.
+ *   - ForbiddenError (403) and UnauthorizedError (401) handled explicitly.
+ *   - AI typed errors (AiError subclasses) carry their own httpStatus/errorCode.
  *
- * Stable AI error payload shape:
- *   { error: "<machine_code>", message: "<human_readable>", request_id?, retry_after_seconds? }
- *
- * Phase 3H.1: Added AiError branch for correct HTTP semantics.
+ * Stable response shape: { error_code, message, request_id }
  */
 function handleError(res: Response, error: unknown, requestId?: string | null) {
+  const reqId = requestId ?? null;
+
   if (error instanceof ZodError) {
-    return res.status(400).json({ error: fromZodError(error).message });
+    return res.status(400).json({
+      error_code: "VALIDATION_ERROR",
+      message: fromZodError(error).message,
+      request_id: reqId,
+    });
   }
+
+  // Dynamic imports may produce ForbiddenError/UnauthorizedError from tenant-check.ts
+  if (error instanceof Error && (error as any).statusCode) {
+    const typedErr = error as Error & { statusCode: number; errorCode: string };
+    return res.status(typedErr.statusCode).json({
+      error_code: typedErr.errorCode ?? "ERROR",
+      message: typedErr.message,
+      request_id: reqId,
+    });
+  }
+
   if (error instanceof AiError) {
     if (error.retryAfterSeconds !== undefined) {
       res.set("Retry-After", String(error.retryAfterSeconds));
     }
     const payload: Record<string, unknown> = {
-      error: error.errorCode,
+      error_code: error.errorCode,
       message: error.message,
+      request_id: reqId,
     };
-    if (requestId) payload.request_id = requestId;
     if (error.retryAfterSeconds !== undefined) {
       payload.retry_after_seconds = error.retryAfterSeconds;
     }
     return res.status(error.httpStatus).json(payload);
   }
+
   if (error instanceof Error) {
-    const status = error.message.includes("not found") ? 404 : 500;
-    return res.status(status).json({ error: error.message });
+    // Phase 13.1: never expose stack traces — only message, and only if safe
+    const status = error.message.toLowerCase().includes("not found") ? 404 : 500;
+    const message = status === 404 ? error.message : "Internal server error";
+    return res.status(status).json({
+      error_code: status === 404 ? "NOT_FOUND" : "INTERNAL_ERROR",
+      message,
+      request_id: reqId,
+    });
   }
-  return res.status(500).json({ error: "Internal server error" });
+
+  return res.status(500).json({
+    error_code: "INTERNAL_ERROR",
+    message: "Internal server error",
+    request_id: reqId,
+  });
 }
 
 function getOrgId(req: Request): string {
@@ -371,31 +399,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ─── Config (server-side env state) ────────────────────────────────────────
+  // Phase 13.1 hardening: owner role required; no env values, repo names, or org IDs exposed.
 
-  app.get("/api/config/status", async (_req, res) => {
-    const projectRef = process.env.SUPABASE_URL
-      ? process.env.SUPABASE_URL.replace(/^https:\/\/([^.]+)\.supabase\.co.*$/, "$1")
-      : null;
-    res.json({
-      database: {
-        provider: dbProvider,
-        label: dbProvider === "supabase" ? "Supabase Postgres" : "PostgreSQL (Replit)",
-        projectRef,
-      },
-      supabase: {
-        url: process.env.SUPABASE_URL ? process.env.SUPABASE_URL.replace(/^(https:\/\/[^.]+).*$/, "$1…") : null,
-        connected: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
-        poolConnected: !!process.env.SUPABASE_DB_POOL_URL,
-      },
-      github: {
-        connected: !!process.env.GITHUB_TOKEN,
-        owner: process.env.GITHUB_OWNER || null,
-        repo: process.env.GITHUB_REPO || null,
-      },
-      openai: {
-        connected: !!process.env.OPENAI_API_KEY,
-      },
-    });
+  app.get("/api/config/status", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      // Return only boolean connection flags — never expose env values or identifiers
+      res.json({
+        database: !!dbProvider,
+        supabase: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
+        github: !!process.env.GITHUB_TOKEN,
+        openai: !!process.env.OPENAI_API_KEY,
+      });
+    } catch (err) {
+      handleError(res, err, (req as any).requestId ?? null);
+    }
   });
 
   // ─── AI Features ─────────────────────────────────────────────────────────────
