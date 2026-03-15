@@ -84,6 +84,8 @@ import {
   markAiRequestFailed,
   releaseAiRequestOwnership,
 } from "./idempotency";
+// Phase 15: Observability — fire-and-forget, never throws (INV-OBS-1, INV-OBS-6)
+import { collectAiLatency } from "../observability/metrics-collector";
 import {
   AiUnavailableError,
   AiTimeoutError,
@@ -488,6 +490,18 @@ export async function runAiCall(
       outputTokensBillable,
       cachedInputTokens: result.usage?.cached_input_tokens ?? 0,
       reasoningTokens: result.usage?.reasoning_tokens ?? 0,
+    });
+
+    // Phase 15: Record AI latency telemetry — fire-and-forget (INV-OBS-1, INV-OBS-6)
+    collectAiLatency({
+      tenantId: tenantId ?? null,
+      model: route.model,
+      provider: route.provider,
+      latencyMs,
+      tokensIn: result.usage?.input_tokens ?? null,
+      tokensOut: result.usage?.output_tokens ?? null,
+      costUsd: estimatedCostUsd ?? null,
+      requestId: context.requestId ?? null,
     });
 
     if (tenantId && guardLimit && guardState !== "normal") {

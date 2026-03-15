@@ -53,6 +53,8 @@ import {
   DEFAULT_CONTEXT_TOKEN_BUDGET,
   formatBudgetSummary,
 } from "./token-budget";
+// Phase 15: Observability — fire-and-forget, never throws (INV-OBS-1, INV-OBS-6)
+import { collectRetrievalMetric } from "../observability/metrics-collector";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -240,6 +242,16 @@ export async function runRetrievalOrchestration(
       // Best-effort: candidate persistence failure must never abort the retrieval run
     }
   }
+
+  // Phase 15: Record retrieval telemetry — fire-and-forget (INV-OBS-1, INV-OBS-6)
+  collectRetrievalMetric({
+    tenantId: tenantId ?? null,
+    queryLength: queryEmbedding.length,
+    chunksRetrieved: rankResult.ranked.length,
+    rerankUsed: !!(rankingOptions && Object.keys(rankingOptions).length > 0),
+    latencyMs: searchDurationMs,
+    resultCount: contextWindow.documentCount,
+  });
 
   return {
     tenantId,

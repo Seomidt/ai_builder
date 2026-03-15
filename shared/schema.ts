@@ -5747,3 +5747,125 @@ export const securityEvents = pgTable(
 export const insertSecurityEventSchema = createInsertSchema(securityEvents).omit({ id: true, createdAt: true });
 export type InsertSecurityEvent = z.infer<typeof insertSecurityEventSchema>;
 export type SecurityEvent = typeof securityEvents.$inferSelect;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PHASE 15 — OBSERVABILITY & TELEMETRY PLATFORM
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── 15.1 obs_system_metrics ─────────────────────────────────────────────────
+// Platform-wide health signals. Append-only, non-tenant-scoped.
+
+export const obsSystemMetrics = pgTable(
+  "obs_system_metrics",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    metricType: text("metric_type").notNull(),
+    value: numeric("value", { precision: 20, scale: 6 }).notNull(),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("osm_type_created_idx").on(t.metricType, t.createdAt),
+  ],
+);
+export const insertObsSystemMetricsSchema = createInsertSchema(obsSystemMetrics).omit({ id: true, createdAt: true });
+export type InsertObsSystemMetric = z.infer<typeof insertObsSystemMetricsSchema>;
+export type ObsSystemMetric = typeof obsSystemMetrics.$inferSelect;
+
+// ─── 15.2 obs_ai_latency_metrics ─────────────────────────────────────────────
+// Per-LLM-call latency, token, and cost telemetry. Append-only, tenant-scoped.
+
+export const obsAiLatencyMetrics = pgTable(
+  "obs_ai_latency_metrics",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id"),
+    model: text("model").notNull(),
+    provider: text("provider").notNull(),
+    latencyMs: integer("latency_ms").notNull(),
+    tokensIn: integer("tokens_in"),
+    tokensOut: integer("tokens_out"),
+    costUsd: numeric("cost_usd", { precision: 20, scale: 10 }),
+    requestId: text("request_id"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("oalm_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("oalm_provider_model_idx").on(t.provider, t.model, t.createdAt),
+    index("oalm_request_id_idx").on(t.requestId),
+  ],
+);
+export const insertObsAiLatencyMetricsSchema = createInsertSchema(obsAiLatencyMetrics).omit({ id: true, createdAt: true });
+export type InsertObsAiLatencyMetric = z.infer<typeof insertObsAiLatencyMetricsSchema>;
+export type ObsAiLatencyMetric = typeof obsAiLatencyMetrics.$inferSelect;
+
+// ─── 15.3 obs_retrieval_metrics ──────────────────────────────────────────────
+// Phase 15 observability-layer retrieval signals. Append-only, tenant-scoped.
+// (Separate from Phase 5F retrieval_metrics which tracks full retrieval runs.)
+
+export const obsRetrievalMetrics = pgTable(
+  "obs_retrieval_metrics",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id"),
+    queryLength: integer("query_length"),
+    chunksRetrieved: integer("chunks_retrieved"),
+    rerankUsed: boolean("rerank_used").default(false),
+    latencyMs: integer("latency_ms"),
+    resultCount: integer("result_count"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("orm_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+export const insertObsRetrievalMetricsSchema = createInsertSchema(obsRetrievalMetrics).omit({ id: true, createdAt: true });
+export type InsertObsRetrievalMetric = z.infer<typeof insertObsRetrievalMetricsSchema>;
+export type ObsRetrievalMetric = typeof obsRetrievalMetrics.$inferSelect;
+
+// ─── 15.4 obs_agent_runtime_metrics ──────────────────────────────────────────
+// Per-run agent execution telemetry. Append-only, tenant-scoped.
+
+export const obsAgentRuntimeMetrics = pgTable(
+  "obs_agent_runtime_metrics",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id"),
+    agentId: text("agent_id"),
+    runId: text("run_id"),
+    steps: integer("steps"),
+    iterations: integer("iterations"),
+    durationMs: integer("duration_ms"),
+    status: text("status"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("oarm_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("oarm_run_id_idx").on(t.runId),
+  ],
+);
+export const insertObsAgentRuntimeMetricsSchema = createInsertSchema(obsAgentRuntimeMetrics).omit({ id: true, createdAt: true });
+export type InsertObsAgentRuntimeMetric = z.infer<typeof insertObsAgentRuntimeMetricsSchema>;
+export type ObsAgentRuntimeMetric = typeof obsAgentRuntimeMetrics.$inferSelect;
+
+// ─── 15.5 obs_tenant_usage_metrics ───────────────────────────────────────────
+// Tenant-level usage aggregation by metric type and period. Append-only.
+
+export const obsTenantUsageMetrics = pgTable(
+  "obs_tenant_usage_metrics",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    metricType: text("metric_type").notNull(),
+    value: numeric("value", { precision: 20, scale: 6 }).notNull(),
+    period: text("period").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("otum_tenant_type_period_idx").on(t.tenantId, t.metricType, t.period),
+    index("otum_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+export const insertObsTenantUsageMetricsSchema = createInsertSchema(obsTenantUsageMetrics).omit({ id: true, createdAt: true });
+export type InsertObsTenantUsageMetric = z.infer<typeof insertObsTenantUsageMetricsSchema>;
+export type ObsTenantUsageMetric = typeof obsTenantUsageMetrics.$inferSelect;

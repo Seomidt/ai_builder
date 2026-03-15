@@ -6446,4 +6446,86 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Phase 15 — Observability & Telemetry Admin Routes
+  // All routes are admin-only (called through the admin route registrar).
+  // INV-OBS-2: No raw tenant data exposed — aggregates only.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Route 15-1: GET /api/admin/metrics/system
+  app.get("/api/admin/metrics/system", async (_req: Request, res: Response) => {
+    try {
+      const { getSystemMetricsSummary } = require("../lib/observability/metrics-health");
+      const data = await getSystemMetricsSummary(24);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 15-2: GET /api/admin/metrics/ai
+  app.get("/api/admin/metrics/ai", async (req: Request, res: Response) => {
+    try {
+      const { summariseAiLatency } = require("../lib/observability/latency-tracker");
+      const windowHours = Number(req.query.windowHours) || 24;
+      const tenantId = req.query.tenantId as string | undefined;
+      const provider = req.query.provider as string | undefined;
+      const model = req.query.model as string | undefined;
+      const data = await summariseAiLatency({ windowHours, tenantId, provider, model });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 15-3: GET /api/admin/metrics/retrieval
+  app.get("/api/admin/metrics/retrieval", async (req: Request, res: Response) => {
+    try {
+      const { summariseRetrievalMetrics } = require("../lib/observability/retrieval-tracker");
+      const windowHours = Number(req.query.windowHours) || 24;
+      const tenantId = req.query.tenantId as string | undefined;
+      const data = await summariseRetrievalMetrics({ windowHours, tenantId });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 15-4: GET /api/admin/metrics/agents
+  app.get("/api/admin/metrics/agents", async (req: Request, res: Response) => {
+    try {
+      const { summariseAgentMetrics } = require("../lib/observability/agent-tracker");
+      const windowHours = Number(req.query.windowHours) || 24;
+      const tenantId = req.query.tenantId as string | undefined;
+      const data = await summariseAgentMetrics({ windowHours, tenantId });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 15-5: GET /api/admin/metrics/tenants
+  app.get("/api/admin/metrics/tenants", async (req: Request, res: Response) => {
+    try {
+      const { listActiveTenantsForPeriod, getCurrentPeriod } = require("../lib/observability/tenant-usage-tracker");
+      const period = (req.query.period as string) || getCurrentPeriod();
+      const data = await listActiveTenantsForPeriod(period);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 15-6: GET /api/admin/metrics/health
+  app.get("/api/admin/metrics/health", async (req: Request, res: Response) => {
+    try {
+      const { getPlatformHealthStatus } = require("../lib/observability/metrics-health");
+      const windowHours = Number(req.query.windowHours) || 24;
+      const data = await getPlatformHealthStatus(windowHours);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
