@@ -5866,3 +5866,91 @@ export const securityEvents = pgTable(
 export const insertSecurityEventSchema = createInsertSchema(securityEvents).omit({ id: true, createdAt: true });
 export type InsertSecurityEvent = z.infer<typeof insertSecurityEventSchema>;
 export type SecurityEvent = typeof securityEvents.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 8 — Global Audit Log Platform
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── 8.1 audit_events ────────────────────────────────────────────────────────
+export const auditEvents = pgTable(
+  "audit_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    actorId: text("actor_id"),
+    actorType: text("actor_type").notNull(),
+    action: text("action").notNull(),
+    resourceType: text("resource_type").notNull(),
+    resourceId: text("resource_id"),
+    requestId: text("request_id"),
+    correlationId: text("correlation_id"),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    auditSource: text("audit_source").notNull().default("application"),
+    eventStatus: text("event_status").notNull().default("committed"),
+    summary: text("summary"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ae_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("ae_tenant_action_created_idx").on(t.tenantId, t.action, t.createdAt),
+    index("ae_tenant_resource_type_created_idx").on(t.tenantId, t.resourceType, t.createdAt),
+    index("ae_tenant_actor_type_created_idx").on(t.tenantId, t.actorType, t.createdAt),
+    index("ae_resource_type_id_created_idx").on(t.resourceType, t.resourceId, t.createdAt),
+    index("ae_request_id_idx").on(t.requestId),
+    index("ae_correlation_id_idx").on(t.correlationId),
+    check("ae_actor_type_check", sql`actor_type IN ('user','service_account','api_key','system','job','webhook','unknown')`),
+    check("ae_audit_source_check", sql`audit_source IN ('application','admin_route','system_process','security_middleware','migration','job_runtime')`),
+    check("ae_event_status_check", sql`event_status IN ('committed','best_effort','partial_context')`),
+  ],
+);
+export const insertAuditEventSchema = createInsertSchema(auditEvents).omit({ id: true, createdAt: true });
+export type InsertAuditEvent = z.infer<typeof insertAuditEventSchema>;
+export type AuditEvent = typeof auditEvents.$inferSelect;
+
+// ─── 8.2 audit_event_metadata ────────────────────────────────────────────────
+export const auditEventMetadata = pgTable(
+  "audit_event_metadata",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    auditEventId: varchar("audit_event_id").notNull().references(() => auditEvents.id),
+    beforeState: jsonb("before_state"),
+    afterState: jsonb("after_state"),
+    changeFields: jsonb("change_fields"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("aem_audit_event_id_idx").on(t.auditEventId),
+  ],
+);
+export const insertAuditEventMetadataSchema = createInsertSchema(auditEventMetadata).omit({ id: true, createdAt: true });
+export type InsertAuditEventMetadata = z.infer<typeof insertAuditEventMetadataSchema>;
+export type AuditEventMetadata = typeof auditEventMetadata.$inferSelect;
+
+// ─── 8.3 audit_export_runs ───────────────────────────────────────────────────
+export const auditExportRuns = pgTable(
+  "audit_export_runs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    requestedBy: text("requested_by"),
+    exportFormat: text("export_format").notNull(),
+    filterSummary: jsonb("filter_summary"),
+    rowCount: integer("row_count"),
+    exportStatus: text("export_status").notNull().default("completed"),
+    errorMessage: text("error_message"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    completedAt: timestamp("completed_at"),
+  },
+  (t) => [
+    index("aer_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("aer_status_created_idx").on(t.exportStatus, t.createdAt),
+    check("aer_export_format_check", sql`export_format IN ('json','csv')`),
+    check("aer_export_status_check", sql`export_status IN ('started','completed','failed')`),
+  ],
+);
+export const insertAuditExportRunSchema = createInsertSchema(auditExportRuns).omit({ id: true, createdAt: true });
+export type InsertAuditExportRun = z.infer<typeof insertAuditExportRunSchema>;
+export type AuditExportRun = typeof auditExportRuns.$inferSelect;

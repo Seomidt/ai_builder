@@ -6662,4 +6662,247 @@ export function registerAdminRoutes(app: Express): void {
 
   // Route 6-27 compat — also fix require() in identity-compat route
   // (already using require, but that route is Phase 6 — skip editing to avoid side effects)
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 8 — Global Audit Log Platform
+  // Routes: 8-1 → 8-19
+  // INV-AUD1–AUD12 enforced
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 8-1: GET /api/admin/audit/events — global audit event list (admin only, up to 200 rows)
+  app.get("/api/admin/audit/events", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, action, actorType, resourceType, limit = "50", offset = "0" } = req.query as Record<string, string>;
+      const { listAuditEventsByTenant } = await import("../lib/audit/audit-log");
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required (INV-AUD5: tenant-scoped query)" });
+      res.json(await listAuditEventsByTenant({
+        tenantId, action, actorType, resourceType,
+        limit: Math.min(parseInt(limit, 10), 200),
+        offset: parseInt(offset, 10),
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-2: GET /api/admin/audit/events/:auditEventId — single event
+  app.get("/api/admin/audit/events/:auditEventId", async (req: Request, res: Response) => {
+    try {
+      const { auditEventId } = req.params;
+      const { getAuditEventById } = await import("../lib/audit/audit-log");
+      const result = await getAuditEventById(auditEventId);
+      if (!result.event) return void res.status(404).json({ error: "Audit event not found" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-3: GET /api/admin/audit/tenant/:tenantId/events — tenant-scoped events
+  app.get("/api/admin/audit/tenant/:tenantId/events", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { action, actorType, resourceType, limit = "50", offset = "0" } = req.query as Record<string, string>;
+      const { listAuditEventsByTenant } = await import("../lib/audit/audit-log");
+      res.json(await listAuditEventsByTenant({
+        tenantId, action, actorType, resourceType,
+        limit: Math.min(parseInt(limit, 10), 500),
+        offset: parseInt(offset, 10),
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-4: GET /api/admin/audit/tenant/:tenantId/actors/:actorId/events — actor-scoped events
+  app.get("/api/admin/audit/tenant/:tenantId/actors/:actorId/events", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, actorId } = req.params;
+      const { limit = "50" } = req.query as Record<string, string>;
+      const { listAuditEventsByActor } = await import("../lib/audit/audit-log");
+      res.json(await listAuditEventsByActor({ tenantId, actorId, limit: Math.min(parseInt(limit, 10), 200) }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-5: GET /api/admin/audit/tenant/:tenantId/resources/:resourceType/:resourceId/events — resource events
+  app.get("/api/admin/audit/tenant/:tenantId/resources/:resourceType/:resourceId/events", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, resourceType, resourceId } = req.params;
+      const { limit = "50" } = req.query as Record<string, string>;
+      const { listAuditEventsByResource } = await import("../lib/audit/audit-log");
+      res.json(await listAuditEventsByResource({ tenantId, resourceType, resourceId, limit: Math.min(parseInt(limit, 10), 200) }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-6: GET /api/admin/audit/events/:auditEventId/explain — read-only explainer (INV-AUD7)
+  app.get("/api/admin/audit/events/:auditEventId/explain", async (req: Request, res: Response) => {
+    try {
+      const { auditEventId } = req.params;
+      const { explainAuditEvent } = await import("../lib/audit/audit-log");
+      res.json(await explainAuditEvent(auditEventId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-7: POST /api/admin/audit/preview/context — audit context preview (INV-AUD7 read-only)
+  app.post("/api/admin/audit/preview/context", async (req: Request, res: Response) => {
+    try {
+      const { explainAuditContext, buildAuditContextFromRequest } = await import("../lib/audit/audit-context");
+      const ctx = buildAuditContextFromRequest(req, { auditSource: "admin_route" });
+      res.json({
+        ...explainAuditContext(ctx),
+        note: "INV-AUD7: Preview is read-only — no audit event written.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-8: POST /api/admin/audit/preview/export — export preview (INV-AUD7 read-only)
+  app.post("/api/admin/audit/preview/export", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, filters } = req.body as { tenantId?: string; filters?: Record<string, unknown> };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const { explainAuditExport } = await import("../lib/audit/audit-export");
+      res.json(explainAuditExport({ tenantId, filters: filters as any }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-9: GET /api/admin/audit/tenant/:tenantId/export/json — JSON export
+  app.get("/api/admin/audit/tenant/:tenantId/export/json", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { action, actorType, resourceType, limit = "1000" } = req.query as Record<string, string>;
+      const requestedBy = (req as any).user?.id ?? null;
+      const { exportAuditEventsAsJson } = await import("../lib/audit/audit-export");
+      const result = await exportAuditEventsAsJson({
+        tenantId, requestedBy,
+        filters: { action, actorType, resourceType, limit: parseInt(limit, 10) },
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-10: GET /api/admin/audit/tenant/:tenantId/export/csv — CSV export
+  app.get("/api/admin/audit/tenant/:tenantId/export/csv", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { action, actorType, resourceType, limit = "1000" } = req.query as Record<string, string>;
+      const requestedBy = (req as any).user?.id ?? null;
+      const { exportAuditEventsAsCsv } = await import("../lib/audit/audit-export");
+      const result = await exportAuditEventsAsCsv({
+        tenantId, requestedBy,
+        filters: { action, actorType, resourceType, limit: parseInt(limit, 10) },
+      });
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", `attachment; filename="audit-${tenantId}-${Date.now()}.csv"`);
+      res.send(result.csv);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-11: GET /api/admin/audit/tenant/:tenantId/export-runs — list export runs
+  app.get("/api/admin/audit/tenant/:tenantId/export-runs", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { limit = "20" } = req.query as Record<string, string>;
+      const { listExportRunsForTenant } = await import("../lib/audit/audit-export");
+      res.json(await listExportRunsForTenant({ tenantId, limit: parseInt(limit, 10) }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-12: GET /api/admin/audit/metrics/:tenantId — tenant audit metrics
+  app.get("/api/admin/audit/metrics/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { getAuditMetricsByTenant } = await import("../lib/audit/audit-metrics");
+      res.json(await getAuditMetricsByTenant(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-13: GET /api/admin/audit/operational/state — operational health (INV-AUD12)
+  app.get("/api/admin/audit/operational/state", async (_req: Request, res: Response) => {
+    try {
+      const { explainAuditOperationalState } = await import("../lib/audit/audit-metrics");
+      res.json(await explainAuditOperationalState());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-14: GET /api/admin/audit/write-failures — write failure visibility (INV-AUD12)
+  app.get("/api/admin/audit/write-failures", async (_req: Request, res: Response) => {
+    try {
+      const { listAuditWriteFailures } = await import("../lib/audit/audit-metrics");
+      res.json({ failures: listAuditWriteFailures(), note: "INV-AUD12: Operational observability." });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-15: GET /api/admin/audit/compat/coverage — explain coverage (INV-AUD7)
+  app.get("/api/admin/audit/compat/coverage", async (_req: Request, res: Response) => {
+    try {
+      const { explainCurrentAuditCoverage } = await import("../lib/audit/audit-compat");
+      res.json(explainCurrentAuditCoverage());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-16: GET /api/admin/audit/compat/boundary — security vs audit boundary (INV-AUD9)
+  app.get("/api/admin/audit/compat/boundary", async (_req: Request, res: Response) => {
+    try {
+      const { explainAuditVsSecurityEventBoundary } = await import("../lib/audit/audit-compat");
+      res.json(explainAuditVsSecurityEventBoundary());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-17: POST /api/admin/audit/compat/preview-integration — preview integration impact (INV-AUD7)
+  app.post("/api/admin/audit/compat/preview-integration", async (req: Request, res: Response) => {
+    try {
+      const { serviceArea } = req.body as { serviceArea?: string };
+      if (!serviceArea) return void res.status(400).json({ error: "serviceArea required" });
+      const { previewAuditIntegrationImpact } = await import("../lib/audit/audit-compat");
+      res.json(previewAuditIntegrationImpact(serviceArea));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-18: GET /api/admin/audit/taxonomy — canonical action taxonomy
+  app.get("/api/admin/audit/taxonomy", async (_req: Request, res: Response) => {
+    try {
+      const { explainAuditTaxonomy, ALL_AUDIT_ACTION_CODES, AUDIT_ACTION_DOMAINS } = await import("../lib/audit/audit-actions");
+      res.json({ ...explainAuditTaxonomy(), allActionCodes: ALL_AUDIT_ACTION_CODES, domains: AUDIT_ACTION_DOMAINS });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8-19: GET /api/admin/audit/metrics/summary — global summary (admin)
+  app.get("/api/admin/audit/metrics/summary", async (_req: Request, res: Response) => {
+    try {
+      const { summarizeAuditMetrics } = await import("../lib/audit/audit-metrics");
+      res.json(await summarizeAuditMetrics());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
