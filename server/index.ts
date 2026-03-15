@@ -1,17 +1,23 @@
 import express, { type Request, Response, NextFunction } from "express";
-import rateLimit from "express-rate-limit";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { authMiddleware } from "./middleware/auth";
 import { requestIdMiddleware, structuredLoggingMiddleware } from "./middleware/request-id";
 import { securityHeaders } from "./middleware/security-headers";
+import { cspMiddleware } from "./middleware/csp";
+import { responseSecurityMiddleware } from "./middleware/response-security";
+import { globalApiLimiter } from "./middleware/rate-limit";
 
 const app = express();
 const httpServer = createServer(app);
 
-// Phase 13.2: security headers — applied first, before all other middleware
+// Phase 13.2: security headers — FIRST, before all routes and body parsing
 app.use(securityHeaders);
+// Phase 13.2: explicit CSP header
+app.use(cspMiddleware);
+// Phase 13.2: response header hardening (overrides specific helmet defaults)
+app.use(responseSecurityMiddleware);
 
 declare module "http" {
   interface IncomingMessage {
@@ -19,42 +25,23 @@ declare module "http" {
   }
 }
 
+// Phase 13.2: JSON body limit 1mb — rejects oversized payloads (INV-SEC-H4)
 app.use(
   express.json({
+    limit: "1mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
-
-app.use(express.urlencoded({ extended: false }));
+// Phase 13.2: urlencoded limit aligned to 1mb
+app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 
 // Phase 13.1: request ID + structured logging (before auth so all requests are traced)
 app.use(requestIdMiddleware);
 app.use(structuredLoggingMiddleware);
 
-// Phase 13.1: global rate limiter — 100 requests per 15 minutes per user (fallback: IP)
-const globalApiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1_000, // 15 minutes
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req: Request) => {
-    const user = (req as any).user;
-    if (user?.id && !user.id.startsWith("demo-")) return `user:${user.id}`;
-    return `ip:${req.ip ?? "unknown"}`;
-  },
-  handler: (req: Request, res: Response) => {
-    res.status(429).json({
-      error_code: "RATE_LIMIT_EXCEEDED",
-      message: "Too many requests. Please retry after 15 minutes.",
-      request_id: (req as any).requestId ?? null,
-      retry_after_seconds: 900,
-    });
-  },
-  skip: (req: Request) => !req.path.startsWith("/api"),
-});
-
+// Phase 13.2: global API rate limiter — 1000 req/15 min per actor/IP (replaces Phase 13.1 inline)
 app.use("/api", globalApiLimiter);
 
 app.use(authMiddleware);

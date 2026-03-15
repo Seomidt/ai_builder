@@ -1,6 +1,20 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { registerAdminRoutes } from "./routes/admin";
+import {
+  getSecurityHealth,
+  getSecurityViolationCounts,
+  getRateLimitStats,
+  explainSecurityHealth,
+} from "./lib/security/security-health";
+import {
+  listSecurityEventsByTenant,
+  listRecentSecurityEvents,
+  explainSecurityEvent,
+  type SecurityEventType,
+} from "./lib/security/security-events";
+import { sanitizeInput, sanitizeObject, explainSanitization } from "./lib/security/sanitize";
+import { getRateLimitConfig } from "./middleware/rate-limit";
 import { storage } from "./storage";
 import { dbProvider } from "./db";
 import { previewCommit } from "./lib/github-commit-format";
@@ -536,6 +550,102 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const lifecycle = await getInvoiceStripeLifecycle(invoiceId);
       if (!lifecycle) return res.status(404).json({ error: "Invoice not found" });
       return res.json(lifecycle);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // ── Phase 13.2 — Admin Security Routes ───────────────────────────────────────
+
+  // GET /api/admin/security/health — security observability (admin-only, read-only)
+  app.get("/api/admin/security/health", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      const health = await getSecurityHealth();
+      return res.json(health);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // GET /api/admin/security/events — tenant-scoped security events
+  app.get("/api/admin/security/events", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      const tenantId = req.user?.organizationId;
+      if (!tenantId) return res.status(400).json({ error_code: "MISSING_TENANT", message: "No tenant context" });
+      const eventType = req.query.event_type as SecurityEventType | undefined;
+      const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 50;
+      const events = await listSecurityEventsByTenant(tenantId, { limit, eventType });
+      return res.json({ events, count: events.length });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // GET /api/admin/security/events/recent — recent events across all tenants (admin)
+  app.get("/api/admin/security/events/recent", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 100;
+      const events = await listRecentSecurityEvents({ limit });
+      return res.json({ events, count: events.length });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // POST /api/admin/security/preview/sanitize — read-only sanitization preview
+  app.post("/api/admin/security/preview/sanitize", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      const input = req.body?.input;
+      if (typeof input === "string") {
+        const sanitized = sanitizeInput(input);
+        return res.json({
+          original: input,
+          sanitized,
+          changed: input !== sanitized,
+          explanation: explainSanitization(),
+          // INV-SEC-H10: no write performed
+          writes: false,
+        });
+      }
+      if (typeof input === "object" && input !== null) {
+        const sanitized = sanitizeObject(input);
+        return res.json({
+          original: input,
+          sanitized,
+          explanation: explainSanitization(),
+          writes: false,
+        });
+      }
+      return res.status(400).json({ error_code: "INVALID_INPUT", message: "input must be string or object" });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // POST /api/admin/security/preview/rate-limit-context — read-only rate limit context
+  app.post("/api/admin/security/preview/rate-limit-context", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      const config = getRateLimitConfig();
+      const actorId = req.user?.id ?? null;
+      const keyType = actorId && !actorId.startsWith("demo-") ? "actor_id" : "ip";
+      return res.json({
+        config,
+        currentActor: actorId,
+        effectiveKeyType: keyType,
+        rateLimitAppliesTo: "/api/*",
+        // INV-SEC-H10: no write performed
+        writes: false,
+      });
     } catch (err) {
       handleError(res, err);
     }

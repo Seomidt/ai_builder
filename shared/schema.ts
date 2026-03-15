@@ -5714,3 +5714,36 @@ export const tenantInvitations = pgTable(
 export const insertTenantInvitationSchema = createInsertSchema(tenantInvitations).omit({ id: true, createdAt: true });
 export type InsertTenantInvitation = z.infer<typeof insertTenantInvitationSchema>;
 export type TenantInvitation = typeof tenantInvitations.$inferSelect;
+
+// ─── 13.2 security_events (extends Phase 7 table) ───────────────────────────
+// The security_events table already exists from Phase 7 (session_created,
+// session_revoked, login_failed, login_success). Phase 13.2 adds operational
+// security signals (rate limiting, tenant violations, payload abuse, etc.)
+// while preserving full backward compatibility with Phase 7 event types.
+
+export const securityEvents = pgTable(
+  "security_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id"),
+    // Phase 7 legacy: user_id; Phase 13.2: actor_id (both kept for compat)
+    userId: text("user_id"),
+    actorId: text("actor_id"),
+    eventType: text("event_type").notNull(),
+    // Phase 7 legacy: ip_address; Phase 13.2: ip (both kept for compat)
+    ipAddress: text("ip_address"),
+    ip: text("ip"),
+    userAgent: text("user_agent"),
+    requestId: text("request_id"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("se_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("se_event_type_created_idx").on(t.eventType, t.createdAt),
+    index("se_request_id_idx").on(t.requestId),
+  ],
+);
+export const insertSecurityEventSchema = createInsertSchema(securityEvents).omit({ id: true, createdAt: true });
+export type InsertSecurityEvent = z.infer<typeof insertSecurityEventSchema>;
+export type SecurityEvent = typeof securityEvents.$inferSelect;
