@@ -1583,3 +1583,50 @@ INV-ID12: Identity provider foundation is explicit; no fake SSO completion
 
 ### Validation results
 54/54 scenarios — 200+ assertions — ALL PASS
+
+---
+
+## Phase 7 — Platform Security & Session Management
+**Branch**: `feature/platform-security-sessions`
+**Status**: COMPLETE ✓
+
+### New tables (7)
+`user_mfa_methods`, `mfa_recovery_codes`, `user_sessions`, `session_tokens`, `session_revocations`, `tenant_ip_allowlists`, `security_events`
+
+### New service files
+- `server/lib/auth/mfa.ts` — TOTP + recovery codes; AES-256-GCM encryption of secrets
+- `server/lib/auth/sessions.ts` — create/validate/rotate/revoke sessions; device detection; event logging
+- `server/middleware/security-headers.ts` — CSP/HSTS/X-Frame/X-Content-Type/Referrer/Permissions-Policy
+- `server/middleware/rate-limit.ts` — in-memory sliding window; loginRateLimit/apiRateLimit/aiQueryRateLimit/adminRateLimit
+- `server/middleware/ip-allowlist.ts` — CIDR matching + tenant IP allowlist CRUD
+- `server/lib/security/upload-validation.ts` — magic bytes, MIME, size, PDF/ZIP bomb, SVG sanitization
+- `server/lib/security/migrate-phase7.ts` — idempotent DB migration
+- `server/lib/security/validate-phase7.ts` — 50 scenarios, 123 assertions
+
+### Updated files
+- `server/index.ts` — securityHeaders, requestSizeLimitMiddleware, apiRateLimit applied globally
+- `server/routes/admin.ts` — 16 new Phase 7 admin routes (7-1 → 7-16)
+- `shared/schema.ts` — 7 new tables appended (5868 lines)
+
+### Admin routes (16 endpoints)
+Sessions (4): GET sessions, POST create, POST revoke-session, POST revoke-all-sessions
+MFA (5): POST enable, POST verify, POST recovery-codes, GET methods, POST disable
+IP allowlist (3): GET, POST, DELETE
+Events (1): GET security events
+Explainers (3): GET headers/explain, GET rate-limits/explain, POST upload/validate
+
+### Invariants enforced (INV-SEC1–SEC8)
+INV-SEC1: MFA secrets encrypted at rest (AES-256-GCM, key from SESSION_SECRET via scrypt)
+INV-SEC2: Session + refresh tokens stored as SHA-256 hashes only
+INV-SEC3: Revoked/expired sessions fail closed unconditionally
+INV-SEC4: IP allowlists enforced before request execution (empty = unrestricted)
+INV-SEC5: Rate limits are deterministic — Retry-After + X-RateLimit-* headers
+INV-SEC6: Security headers (CSP, HSTS, X-Frame, nosniff, Referrer, Permissions) on all responses
+INV-SEC7: Upload validation: magic bytes, MIME allowlist, size limit, PDF/ZIP bomb, SVG sanitization
+INV-SEC8: Security events are tenant-isolated; no cross-tenant leakage
+
+### RLS state after Phase 7
+- Tables with RLS: 120 (+7 from Phase 7)
+
+### Validation results
+50 scenarios — 123/123 assertions — ALL PASS

@@ -5714,3 +5714,155 @@ export const tenantInvitations = pgTable(
 export const insertTenantInvitationSchema = createInsertSchema(tenantInvitations).omit({ id: true, createdAt: true });
 export type InsertTenantInvitation = z.infer<typeof insertTenantInvitationSchema>;
 export type TenantInvitation = typeof tenantInvitations.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 7 — Platform Security & Session Management
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── 7.1 user_mfa_methods ────────────────────────────────────────────────────
+export const userMfaMethods = pgTable(
+  "user_mfa_methods",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    userId: varchar("user_id").notNull(),
+    methodType: text("method_type").notNull(),
+    secretEncrypted: text("secret_encrypted"),
+    enabled: boolean("enabled").notNull().default(false),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("umm_user_type_idx").on(t.userId, t.methodType),
+    index("umm_user_enabled_idx").on(t.userId, t.enabled),
+    check("umm_method_check", sql`method_type IN ('totp','backup_code')`),
+  ],
+);
+export const insertUserMfaMethodSchema = createInsertSchema(userMfaMethods).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertUserMfaMethod = z.infer<typeof insertUserMfaMethodSchema>;
+export type UserMfaMethod = typeof userMfaMethods.$inferSelect;
+
+// ─── 7.2 mfa_recovery_codes ──────────────────────────────────────────────────
+export const mfaRecoveryCodes = pgTable(
+  "mfa_recovery_codes",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    userId: varchar("user_id").notNull(),
+    codeHash: text("code_hash").notNull(),
+    used: boolean("used").notNull().default(false),
+    usedAt: timestamp("used_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("mrc_code_hash_idx").on(t.codeHash),
+    index("mrc_user_used_idx").on(t.userId, t.used),
+  ],
+);
+export const insertMfaRecoveryCodeSchema = createInsertSchema(mfaRecoveryCodes).omit({ id: true, createdAt: true });
+export type InsertMfaRecoveryCode = z.infer<typeof insertMfaRecoveryCodeSchema>;
+export type MfaRecoveryCode = typeof mfaRecoveryCodes.$inferSelect;
+
+// ─── 7.3 user_sessions ───────────────────────────────────────────────────────
+export const userSessions = pgTable(
+  "user_sessions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    userId: varchar("user_id").notNull(),
+    sessionTokenHash: text("session_token_hash").notNull(),
+    deviceName: text("device_name"),
+    ipAddress: text("ip_address"),
+    userAgent: text("user_agent"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    expiresAt: timestamp("expires_at").notNull(),
+    revokedAt: timestamp("revoked_at"),
+  },
+  (t) => [
+    uniqueIndex("us_token_hash_idx").on(t.sessionTokenHash),
+    index("us_user_created_idx").on(t.userId, t.createdAt),
+    index("us_user_revoked_idx").on(t.userId, t.revokedAt),
+    index("us_expires_idx").on(t.expiresAt),
+  ],
+);
+export const insertUserSessionSchema = createInsertSchema(userSessions).omit({ id: true, createdAt: true });
+export type InsertUserSession = z.infer<typeof insertUserSessionSchema>;
+export type UserSession = typeof userSessions.$inferSelect;
+
+// ─── 7.4 session_tokens ──────────────────────────────────────────────────────
+export const sessionTokens = pgTable(
+  "session_tokens",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    sessionId: varchar("session_id").notNull().references(() => userSessions.id),
+    refreshTokenHash: text("refresh_token_hash").notNull(),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    expiresAt: timestamp("expires_at").notNull(),
+  },
+  (t) => [
+    uniqueIndex("st_refresh_hash_idx").on(t.refreshTokenHash),
+    index("st_session_created_idx").on(t.sessionId, t.createdAt),
+    index("st_expires_idx").on(t.expiresAt),
+  ],
+);
+export const insertSessionTokenSchema = createInsertSchema(sessionTokens).omit({ id: true, createdAt: true });
+export type InsertSessionToken = z.infer<typeof insertSessionTokenSchema>;
+export type SessionToken = typeof sessionTokens.$inferSelect;
+
+// ─── 7.5 session_revocations ─────────────────────────────────────────────────
+export const sessionRevocations = pgTable(
+  "session_revocations",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    sessionId: varchar("session_id").notNull().references(() => userSessions.id),
+    revokedBy: varchar("revoked_by"),
+    revokedAt: timestamp("revoked_at").notNull().defaultNow(),
+    reason: text("reason"),
+  },
+  (t) => [
+    uniqueIndex("sr_session_idx").on(t.sessionId),
+    index("sr_revoked_at_idx").on(t.revokedAt),
+  ],
+);
+export const insertSessionRevocationSchema = createInsertSchema(sessionRevocations).omit({ id: true, revokedAt: true });
+export type InsertSessionRevocation = z.infer<typeof insertSessionRevocationSchema>;
+export type SessionRevocation = typeof sessionRevocations.$inferSelect;
+
+// ─── 7.6 tenant_ip_allowlists ────────────────────────────────────────────────
+export const tenantIpAllowlists = pgTable(
+  "tenant_ip_allowlists",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    ipRange: text("ip_range").notNull(),
+    description: text("description"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tia_tenant_range_idx").on(t.tenantId, t.ipRange),
+    index("tia_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+export const insertTenantIpAllowlistSchema = createInsertSchema(tenantIpAllowlists).omit({ id: true, createdAt: true });
+export type InsertTenantIpAllowlist = z.infer<typeof insertTenantIpAllowlistSchema>;
+export type TenantIpAllowlist = typeof tenantIpAllowlists.$inferSelect;
+
+// ─── 7.7 security_events ─────────────────────────────────────────────────────
+export const securityEvents = pgTable(
+  "security_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id"),
+    userId: varchar("user_id"),
+    eventType: text("event_type").notNull(),
+    ipAddress: text("ip_address"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("se_tenant_type_created_idx").on(t.tenantId, t.eventType, t.createdAt),
+    index("se_user_type_created_idx").on(t.userId, t.eventType, t.createdAt),
+    index("se_type_created_idx").on(t.eventType, t.createdAt),
+    check("se_event_type_check", sql`event_type IN ('login_success','login_failed','mfa_enabled','mfa_disabled','session_revoked','session_created','suspicious_login','ip_blocked','rate_limited','upload_rejected')`),
+  ],
+);
+export const insertSecurityEventSchema = createInsertSchema(securityEvents).omit({ id: true, createdAt: true });
+export type InsertSecurityEvent = z.infer<typeof insertSecurityEventSchema>;
+export type SecurityEvent = typeof securityEvents.$inferSelect;

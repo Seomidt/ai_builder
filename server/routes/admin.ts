@@ -6446,4 +6446,220 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 7 — Platform Security & Session Management
+  // Routes: 7-1 → 7-14
+  // INV-SEC1: MFA secrets encrypted; INV-SEC2: Session tokens hashed
+  // INV-SEC3: Revoked sessions never validate; INV-SEC4: IP allowlists enforced
+  // INV-SEC5: Rate limits deterministic; INV-SEC6: Security headers on all responses
+  // INV-SEC7: Upload validation rejects unsafe files; INV-SEC8: Security events tenant-isolated
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 7-1: GET /api/admin/security/sessions — list sessions for a user
+  app.get("/api/admin/security/sessions", async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.query as { userId?: string };
+      if (!userId) return void res.status(400).json({ error: "userId required" });
+      const { listUserSessions } = await import("../lib/auth/sessions");
+      res.json(await listUserSessions(userId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-2: GET /api/admin/security/events — list security events (tenant-scoped or all)
+  app.get("/api/admin/security/events", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, userId, eventType, limit = "50" } = req.query as Record<string, string>;
+      const pg = (await import("pg")).default;
+      const client = new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
+      await client.connect();
+      try {
+        const conditions: string[] = [];
+        const values: any[] = [];
+        if (tenantId) { conditions.push(`tenant_id = $${values.length + 1}`); values.push(tenantId); }
+        if (userId) { conditions.push(`user_id = $${values.length + 1}`); values.push(userId); }
+        if (eventType) { conditions.push(`event_type = $${values.length + 1}`); values.push(eventType); }
+        const where = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
+        const row = await client.query(
+          `SELECT id, tenant_id, user_id, event_type, ip_address, metadata, created_at FROM public.security_events ${where} ORDER BY created_at DESC LIMIT $${values.length + 1}`,
+          [...values, Math.min(parseInt(limit, 10), 500)],
+        );
+        res.json(row.rows);
+      } finally { await client.end(); }
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-3: POST /api/admin/security/revoke-session
+  app.post("/api/admin/security/revoke-session", async (req: Request, res: Response) => {
+    try {
+      const { sessionId, revokedBy, reason } = req.body as { sessionId?: string; revokedBy?: string; reason?: string };
+      if (!sessionId) return void res.status(400).json({ error: "sessionId required" });
+      const { revokeSession } = await import("../lib/auth/sessions");
+      res.json(await revokeSession({ sessionId, revokedBy, reason }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-4: POST /api/admin/security/revoke-all-sessions
+  app.post("/api/admin/security/revoke-all-sessions", async (req: Request, res: Response) => {
+    try {
+      const { userId, reason } = req.body as { userId?: string; reason?: string };
+      if (!userId) return void res.status(400).json({ error: "userId required" });
+      const { revokeAllSessionsForUser } = await import("../lib/auth/sessions");
+      res.json(await revokeAllSessionsForUser({ userId, reason }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-5: POST /api/admin/security/mfa/disable
+  app.post("/api/admin/security/mfa/disable", async (req: Request, res: Response) => {
+    try {
+      const { userId, methodType } = req.body as { userId?: string; methodType?: "totp" };
+      if (!userId) return void res.status(400).json({ error: "userId required" });
+      const { disableMfa } = await import("../lib/auth/mfa");
+      res.json(await disableMfa({ userId, methodType }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-6: POST /api/admin/security/mfa/enable
+  app.post("/api/admin/security/mfa/enable", async (req: Request, res: Response) => {
+    try {
+      const { userId, methodType = "totp" } = req.body as { userId?: string; methodType?: "totp" };
+      if (!userId) return void res.status(400).json({ error: "userId required" });
+      const { enableMfaForUser } = await import("../lib/auth/mfa");
+      res.json(await enableMfaForUser({ userId, methodType }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-7: POST /api/admin/security/mfa/verify
+  app.post("/api/admin/security/mfa/verify", async (req: Request, res: Response) => {
+    try {
+      const { userId, code } = req.body as { userId?: string; code?: string };
+      if (!userId || !code) return void res.status(400).json({ error: "userId and code required" });
+      const { verifyMfaCode } = await import("../lib/auth/mfa");
+      res.json(await verifyMfaCode({ userId, code }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-8: POST /api/admin/security/mfa/recovery-codes
+  app.post("/api/admin/security/mfa/recovery-codes", async (req: Request, res: Response) => {
+    try {
+      const { userId, count } = req.body as { userId?: string; count?: number };
+      if (!userId) return void res.status(400).json({ error: "userId required" });
+      const { generateRecoveryCodes } = await import("../lib/auth/mfa");
+      res.json(await generateRecoveryCodes({ userId, count }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-9: GET /api/admin/security/mfa/methods
+  app.get("/api/admin/security/mfa/methods", async (req: Request, res: Response) => {
+    try {
+      const { userId } = req.query as { userId?: string };
+      if (!userId) return void res.status(400).json({ error: "userId required" });
+      const { listUserMfaMethods } = await import("../lib/auth/mfa");
+      res.json(await listUserMfaMethods(userId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-10: POST /api/admin/security/sessions/create (for testing)
+  app.post("/api/admin/security/sessions/create", async (req: Request, res: Response) => {
+    try {
+      const { userId, deviceName, ipAddress, userAgent, tenantId } = req.body as Record<string, string>;
+      if (!userId) return void res.status(400).json({ error: "userId required" });
+      const { createSession } = await import("../lib/auth/sessions");
+      res.json(await createSession({ userId, deviceName, ipAddress, userAgent, tenantId }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-11: GET /api/admin/security/ip-allowlist
+  app.get("/api/admin/security/ip-allowlist", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.query as { tenantId?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const { listTenantIpAllowlist } = await import("../middleware/ip-allowlist");
+      res.json(await listTenantIpAllowlist(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-12: POST /api/admin/security/ip-allowlist
+  app.post("/api/admin/security/ip-allowlist", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, ipRange, description } = req.body as { tenantId?: string; ipRange?: string; description?: string };
+      if (!tenantId || !ipRange) return void res.status(400).json({ error: "tenantId and ipRange required" });
+      const { addIpAllowlistEntry } = await import("../middleware/ip-allowlist");
+      res.json(await addIpAllowlistEntry({ tenantId, ipRange, description }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-13: DELETE /api/admin/security/ip-allowlist
+  app.delete("/api/admin/security/ip-allowlist", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, ipRange } = req.body as { tenantId?: string; ipRange?: string };
+      if (!tenantId || !ipRange) return void res.status(400).json({ error: "tenantId and ipRange required" });
+      const { removeIpAllowlistEntry } = await import("../middleware/ip-allowlist");
+      res.json(await removeIpAllowlistEntry({ tenantId, ipRange }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-14: GET /api/admin/security/headers/explain (INV-SEC6 read-only)
+  app.get("/api/admin/security/headers/explain", async (_req: Request, res: Response) => {
+    try {
+      const { explainSecurityHeaders } = await import("../middleware/security-headers");
+      res.json(explainSecurityHeaders());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-15: GET /api/admin/security/rate-limits/explain
+  app.get("/api/admin/security/rate-limits/explain", async (_req: Request, res: Response) => {
+    try {
+      const { explainRateLimitState } = await import("../middleware/rate-limit");
+      res.json(explainRateLimitState());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7-16: POST /api/admin/security/upload/validate (INV-SEC7 read-only validation)
+  app.post("/api/admin/security/upload/validate", async (req: Request, res: Response) => {
+    try {
+      const { claimedMimeType, base64Content, filename, maxSizeBytes } = req.body as {
+        claimedMimeType?: string; base64Content?: string; filename?: string; maxSizeBytes?: number;
+      };
+      if (!claimedMimeType || !base64Content) return void res.status(400).json({ error: "claimedMimeType and base64Content required" });
+      const { validateUpload } = await import("../lib/security/upload-validation");
+      const buffer = Buffer.from(base64Content, "base64");
+      res.json(validateUpload({ buffer, claimedMimeType, filename, maxSizeBytes }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-27 compat — also fix require() in identity-compat route
+  // (already using require, but that route is Phase 6 — skip editing to avoid side effects)
 }

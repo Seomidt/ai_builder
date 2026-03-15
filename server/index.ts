@@ -3,6 +3,9 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { authMiddleware } from "./middleware/auth";
+import { securityHeaders } from "./middleware/security-headers";
+import { apiRateLimit } from "./middleware/rate-limit";
+import { requestSizeLimitMiddleware } from "./lib/security/upload-validation";
 
 const app = express();
 const httpServer = createServer(app);
@@ -13,16 +16,26 @@ declare module "http" {
   }
 }
 
+// Phase 7: Security headers on all responses (INV-SEC6)
+app.use(securityHeaders);
+
+// Phase 7: Request size limits — JSON 1MB, multipart 50MB
+app.use(requestSizeLimitMiddleware({ maxJsonBytes: 1 * 1024 * 1024, maxMultipartBytes: 50 * 1024 * 1024 }));
+
 app.use(
   express.json({
+    limit: "1mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
 
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 app.use(authMiddleware);
+
+// Phase 7: API rate limiting (INV-SEC5)
+app.use("/api", apiRateLimit);
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
