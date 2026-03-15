@@ -6770,4 +6770,229 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── PHASE 18 — FEATURE FLAGS & EXPERIMENTS ────────────────────────────────
+
+  // Route 18-1: POST /api/admin/flags
+  app.post("/api/admin/flags", async (req: Request, res: Response) => {
+    try {
+      const { createFeatureFlag } = require("../lib/feature-flags/feature-flags");
+      const { logRolloutChange } = require("../lib/feature-flags/rollout-audit");
+      const flag = await createFeatureFlag(req.body);
+      await logRolloutChange({ action: "feature_flag.created", subjectKey: flag.flagKey, metadata: { flagType: req.body.flagType } });
+      res.status(201).json(flag);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-2: GET /api/admin/flags
+  app.get("/api/admin/flags", async (req: Request, res: Response) => {
+    try {
+      const { listFeatureFlags } = require("../lib/feature-flags/feature-flags");
+      const flags = await listFeatureFlags({
+        lifecycleStatus: req.query.lifecycleStatus as string | undefined,
+        flagType: req.query.flagType as string | undefined,
+        limit: Number(req.query.limit) || 100,
+      });
+      res.json({ flags, count: flags.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-3: GET /api/admin/flags/:flagKey
+  app.get("/api/admin/flags/:flagKey", async (req: Request, res: Response) => {
+    try {
+      const { explainFeatureFlag } = require("../lib/feature-flags/feature-flags");
+      const data = await explainFeatureFlag(req.params.flagKey);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-4: POST /api/admin/flags/:flagKey/tenant-assignment
+  app.post("/api/admin/flags/:flagKey/tenant-assignment", async (req: Request, res: Response) => {
+    try {
+      const { assignFlagToTenant } = require("../lib/feature-flags/feature-assignments");
+      const { logRolloutChange } = require("../lib/feature-flags/rollout-audit");
+      const { tenantId, ...params } = req.body;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const assignment = await assignFlagToTenant(req.params.flagKey, tenantId, params);
+      await logRolloutChange({ action: "feature_assignment.created", subjectKey: assignment.id, tenantId, metadata: { flagKey: req.params.flagKey, assignmentType: "tenant" } });
+      res.status(201).json(assignment);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-5: POST /api/admin/flags/:flagKey/actor-assignment
+  app.post("/api/admin/flags/:flagKey/actor-assignment", async (req: Request, res: Response) => {
+    try {
+      const { assignFlagToActor } = require("../lib/feature-flags/feature-assignments");
+      const { logRolloutChange } = require("../lib/feature-flags/rollout-audit");
+      const { actorId, ...params } = req.body;
+      if (!actorId) return res.status(400).json({ error: "actorId required" });
+      const assignment = await assignFlagToActor(req.params.flagKey, actorId, params);
+      await logRolloutChange({ action: "feature_assignment.created", subjectKey: assignment.id, metadata: { flagKey: req.params.flagKey, assignmentType: "actor", actorId } });
+      res.status(201).json(assignment);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-6: DELETE /api/admin/flags/:flagKey/assignments/:assignmentId
+  app.delete("/api/admin/flags/:flagKey/assignments/:assignmentId", async (req: Request, res: Response) => {
+    try {
+      const { removeFlagAssignment } = require("../lib/feature-flags/feature-assignments");
+      const { logRolloutChange } = require("../lib/feature-flags/rollout-audit");
+      const result = await removeFlagAssignment(req.params.assignmentId);
+      await logRolloutChange({ action: "feature_assignment.removed", subjectKey: req.params.assignmentId, metadata: { flagKey: req.params.flagKey } });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-7: POST /api/admin/experiments
+  app.post("/api/admin/experiments", async (req: Request, res: Response) => {
+    try {
+      const { createExperiment } = require("../lib/feature-flags/experiments");
+      const { logRolloutChange } = require("../lib/feature-flags/rollout-audit");
+      const exp = await createExperiment(req.body);
+      await logRolloutChange({ action: "experiment.created", subjectKey: exp.experimentKey, tenantId: req.body.tenantId, metadata: { subjectType: req.body.subjectType } });
+      res.status(201).json(exp);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-8: POST /api/admin/experiments/:experimentKey/variants
+  app.post("/api/admin/experiments/:experimentKey/variants", async (req: Request, res: Response) => {
+    try {
+      const { createExperimentVariant } = require("../lib/feature-flags/experiments");
+      const { logRolloutChange } = require("../lib/feature-flags/rollout-audit");
+      const variant = await createExperimentVariant(req.params.experimentKey, req.body);
+      await logRolloutChange({ action: "experiment_variant.created", subjectKey: variant.variantKey, metadata: { experimentKey: req.params.experimentKey } });
+      res.status(201).json(variant);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-9: POST /api/admin/experiments/:experimentKey/start
+  app.post("/api/admin/experiments/:experimentKey/start", async (req: Request, res: Response) => {
+    try {
+      const { startExperiment } = require("../lib/feature-flags/experiments");
+      const { logRolloutChange } = require("../lib/feature-flags/rollout-audit");
+      const result = await startExperiment(req.params.experimentKey);
+      await logRolloutChange({ action: "experiment.started", subjectKey: req.params.experimentKey });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-10: POST /api/admin/experiments/:experimentKey/pause
+  app.post("/api/admin/experiments/:experimentKey/pause", async (req: Request, res: Response) => {
+    try {
+      const { pauseExperiment } = require("../lib/feature-flags/experiments");
+      const { logRolloutChange } = require("../lib/feature-flags/rollout-audit");
+      const result = await pauseExperiment(req.params.experimentKey);
+      await logRolloutChange({ action: "experiment.paused", subjectKey: req.params.experimentKey });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-11: POST /api/admin/experiments/:experimentKey/complete
+  app.post("/api/admin/experiments/:experimentKey/complete", async (req: Request, res: Response) => {
+    try {
+      const { completeExperiment } = require("../lib/feature-flags/experiments");
+      const { logRolloutChange } = require("../lib/feature-flags/rollout-audit");
+      const result = await completeExperiment(req.params.experimentKey);
+      await logRolloutChange({ action: "experiment.completed", subjectKey: req.params.experimentKey });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-12: GET /api/admin/experiments
+  app.get("/api/admin/experiments", async (req: Request, res: Response) => {
+    try {
+      const { db } = require("../db");
+      const { sql: drizzleSql } = require("drizzle-orm");
+      const tenantId = req.query.tenantId as string | undefined;
+      const status = req.query.status as string | undefined;
+      const limit = Math.min(Number(req.query.limit) || 50, 200);
+      const tenantClause = tenantId ? drizzleSql`AND tenant_id = ${tenantId}` : drizzleSql``;
+      const statusClause = status ? drizzleSql`AND lifecycle_status = ${status}` : drizzleSql``;
+      const rows = await db.execute(drizzleSql`
+        SELECT id, experiment_key, tenant_id, subject_type, lifecycle_status,
+               traffic_allocation_percent, description, created_at
+        FROM experiments WHERE 1=1 ${tenantClause} ${statusClause}
+        ORDER BY created_at DESC LIMIT ${limit}
+      `);
+      res.json({ experiments: rows.rows, count: rows.rows.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-13: GET /api/admin/experiments/:experimentKey
+  app.get("/api/admin/experiments/:experimentKey", async (req: Request, res: Response) => {
+    try {
+      const { explainExperiment } = require("../lib/feature-flags/experiments");
+      const data = await explainExperiment(req.params.experimentKey);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-14: GET /api/admin/rollouts/metrics
+  app.get("/api/admin/rollouts/metrics", async (req: Request, res: Response) => {
+    try {
+      const { summarizeRolloutMetrics, getRolloutMetrics } = require("../lib/feature-flags/rollout-observability");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [summary, metrics] = await Promise.all([
+        summarizeRolloutMetrics({ tenantId }),
+        getRolloutMetrics({ tenantId, limit: 50 }),
+      ]);
+      res.json({ summary, metrics });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-15: GET /api/admin/rollouts/resolutions
+  app.get("/api/admin/rollouts/resolutions", async (req: Request, res: Response) => {
+    try {
+      const { listRecentResolutions } = require("../lib/feature-flags/rollout-observability");
+      const data = await listRecentResolutions({
+        tenantId: req.query.tenantId as string | undefined,
+        flagKey: req.query.flagKey as string | undefined,
+        limit: Number(req.query.limit) || 50,
+      });
+      res.json({ resolutions: data, count: data.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 18-16: POST /api/admin/rollouts/preview-resolution (read-only, INV-FLAG8)
+  app.post("/api/admin/rollouts/preview-resolution", async (req: Request, res: Response) => {
+    try {
+      const { previewFlagResolution } = require("../lib/feature-flags/runtime-resolution");
+      const { flagKey, tenantId, actorId, requestId } = req.body;
+      if (!flagKey) return res.status(400).json({ error: "flagKey required" });
+      const result = await previewFlagResolution(flagKey, { tenantId, actorId, requestId });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
 }

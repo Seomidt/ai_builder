@@ -6094,3 +6094,128 @@ export const aiEvalRegressions = pgTable(
 export const insertAiEvalRegressionSchema = createInsertSchema(aiEvalRegressions).omit({ id: true, createdAt: true });
 export type InsertAiEvalRegression = z.infer<typeof insertAiEvalRegressionSchema>;
 export type AiEvalRegression = typeof aiEvalRegressions.$inferSelect;
+
+// ─── PHASE 18 — FEATURE FLAGS & EXPERIMENT PLATFORM ─────────────────────────
+
+// feature_flags — canonical flag registry (INV-FLAG1)
+export const featureFlags = pgTable(
+  "feature_flags",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    flagKey: text("flag_key").notNull().unique(),
+    flagType: text("flag_type").notNull(), // 'boolean'|'percentage_rollout'|'experiment'|'config_switch'
+    description: text("description"),
+    defaultEnabled: boolean("default_enabled").notNull().default(false),
+    defaultConfig: jsonb("default_config"),
+    lifecycleStatus: text("lifecycle_status").notNull().default("active"), // 'active'|'paused'|'archived'
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ff_lifecycle_created_idx").on(t.lifecycleStatus, t.createdAt),
+    index("ff_type_created_idx").on(t.flagType, t.createdAt),
+  ],
+);
+export const insertFeatureFlagSchema = createInsertSchema(featureFlags).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertFeatureFlag = z.infer<typeof insertFeatureFlagSchema>;
+export type FeatureFlag = typeof featureFlags.$inferSelect;
+
+// feature_flag_assignments — per-tenant/actor overrides (INV-FLAG6)
+export const featureFlagAssignments = pgTable(
+  "feature_flag_assignments",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    flagId: varchar("flag_id").notNull(),
+    tenantId: text("tenant_id"),
+    actorId: text("actor_id"),
+    assignmentType: text("assignment_type").notNull(), // 'tenant'|'actor'|'global'
+    enabled: boolean("enabled"),
+    assignedVariant: text("assigned_variant"),
+    assignedConfig: jsonb("assigned_config"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ffa_flag_created_idx").on(t.flagId, t.createdAt),
+    index("ffa_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("ffa_actor_created_idx").on(t.actorId, t.createdAt),
+    index("ffa_atype_created_idx").on(t.assignmentType, t.createdAt),
+  ],
+);
+export const insertFeatureFlagAssignmentSchema = createInsertSchema(featureFlagAssignments).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertFeatureFlagAssignment = z.infer<typeof insertFeatureFlagAssignmentSchema>;
+export type FeatureFlagAssignment = typeof featureFlagAssignments.$inferSelect;
+
+// experiments — controlled experiment registry (INV-FLAG4, INV-FLAG5)
+export const experiments = pgTable(
+  "experiments",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    experimentKey: text("experiment_key").notNull().unique(),
+    tenantId: text("tenant_id"),
+    subjectType: text("subject_type").notNull(), // 'tenant'|'actor'|'request'
+    lifecycleStatus: text("lifecycle_status").notNull().default("draft"), // 'draft'|'active'|'paused'|'completed'|'archived'
+    trafficAllocationPercent: numeric("traffic_allocation_percent", { precision: 5, scale: 2 }).notNull().default("100.00"),
+    description: text("description"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("exp_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("exp_lifecycle_created_idx").on(t.lifecycleStatus, t.createdAt),
+    index("exp_subject_created_idx").on(t.subjectType, t.createdAt),
+  ],
+);
+export const insertExperimentSchema = createInsertSchema(experiments).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertExperiment = z.infer<typeof insertExperimentSchema>;
+export type Experiment = typeof experiments.$inferSelect;
+
+// experiment_variants — traffic split variants (INV-FLAG3, INV-FLAG4)
+export const experimentVariants = pgTable(
+  "experiment_variants",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    experimentId: varchar("experiment_id").notNull(),
+    variantKey: text("variant_key").notNull(),
+    trafficPercent: numeric("traffic_percent", { precision: 5, scale: 2 }).notNull(),
+    config: jsonb("config"),
+    isControl: boolean("is_control").notNull().default(false),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ev_experiment_created_idx").on(t.experimentId, t.createdAt),
+    index("ev_variant_key_idx").on(t.variantKey),
+  ],
+);
+export const insertExperimentVariantSchema = createInsertSchema(experimentVariants).omit({ id: true, createdAt: true });
+export type InsertExperimentVariant = z.infer<typeof insertExperimentVariantSchema>;
+export type ExperimentVariant = typeof experimentVariants.$inferSelect;
+
+// feature_resolution_events — request-time resolution audit (INV-FLAG7, INV-FLAG11)
+export const featureResolutionEvents = pgTable(
+  "feature_resolution_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id"),
+    actorId: text("actor_id"),
+    requestId: text("request_id"),
+    flagKey: text("flag_key").notNull(),
+    resolutionSource: text("resolution_source").notNull(), // 'default'|'global_assignment'|'tenant_assignment'|'actor_assignment'|'experiment_variant'
+    enabled: boolean("enabled"),
+    resolvedVariant: text("resolved_variant"),
+    resolvedConfig: jsonb("resolved_config"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("fre_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("fre_actor_created_idx").on(t.actorId, t.createdAt),
+    index("fre_request_id_idx").on(t.requestId),
+    index("fre_flag_created_idx").on(t.flagKey, t.createdAt),
+    index("fre_source_created_idx").on(t.resolutionSource, t.createdAt),
+  ],
+);
+export const insertFeatureResolutionEventSchema = createInsertSchema(featureResolutionEvents).omit({ id: true, createdAt: true });
+export type InsertFeatureResolutionEvent = z.infer<typeof insertFeatureResolutionEventSchema>;
+export type FeatureResolutionEvent = typeof featureResolutionEvents.$inferSelect;
