@@ -7555,6 +7555,16 @@ export function registerAdminRoutes(app: Express): void {
     }
   });
 
+  // Route 12-9: GET /api/admin/ai/security-health — CodeQL security remediation status
+  app.get("/api/admin/ai/security-health", async (_req: Request, res: Response) => {
+    try {
+      const { securityHealth } = await import("../lib/ai/security-health");
+      res.json(securityHealth());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
   // ─────────────────────────────────────────────────────────────────────────────
   // Phase 13 — Prompt Governance & AI Safety Platform
   // Routes: 13-1 → 13-8

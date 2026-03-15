@@ -1,4 +1,15 @@
 import { createHash } from "crypto";
+import sanitizeHtml from "sanitize-html";
+
+// ─── Security constants ───────────────────────────────────────────────────────
+export const MAX_HTML_OUTPUT_CHARS = 50_000;
+export const MAX_RAW_INPUT_BYTES = 1_048_576; // 1 MB
+
+// ─── applyUnicodeNormalization ────────────────────────────────────────────────
+// Apply NFKC before embedding or chunking. Fixes lookalike attacks.
+export function applyUnicodeNormalization(text: string): string {
+  return text.normalize("NFKC");
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -108,7 +119,8 @@ export function normalizeParsedDocument(
 ): { plainText: string; sections: ParsedSection[]; warnings: string[] } {
   const warnings: string[] = [];
 
-  let normalized = rawText
+  // NFKC normalization before any further processing
+  let normalized = applyUnicodeNormalization(rawText)
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .replace(/\t/g, "  ")
@@ -235,34 +247,74 @@ function parseMarkdown(content: string): DocumentParserResult {
   };
 }
 
-// ─── HTML Parser ──────────────────────────────────────────────────────────────
+// ─── HTML Parser (hardened — CodeQL remediation) ──────────────────────────────
+// Pipeline: input → size-check → sanitize-html → plain text → NFKC → normalize
+// No regex-based HTML sanitization. No double-escaping. Stored as plain text only.
 
 function parseHtml(content: string): DocumentParserResult {
   const parserName = "html_parser";
   const parserVersion = PARSER_VERSION;
   const warnings: string[] = [];
 
-  let stripped = content
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
+  // Step 1: Reject documents > 1 MB raw input (resource exhaustion protection)
+  const rawBytes = Buffer.byteLength(content, "utf8");
+  if (rawBytes > MAX_RAW_INPUT_BYTES) {
+    return {
+      success: false,
+      error: `HTML document exceeds 1 MB raw input limit (${rawBytes} bytes). Rejected to prevent resource exhaustion.`,
+      parserName,
+      parserVersion,
+    };
+  }
+
+  // Step 2: Use sanitize-html to remove scripts, styles, and all attributes.
+  // Produces clean HTML with only structural tags, then extract visible text.
+  const cleanHtml = sanitizeHtml(content, {
+    allowedTags: ["p", "div", "span", "br", "h1", "h2", "h3", "h4", "h5", "h6",
+                  "ul", "ol", "li", "blockquote", "pre", "code", "em", "strong",
+                  "table", "thead", "tbody", "tr", "th", "td", "article", "section",
+                  "header", "footer", "main", "aside", "nav"],
+    allowedAttributes: {},          // strip ALL attributes (no href, no src, no onerror)
+    disallowedTagsMode: "discard",  // silently remove anything not in allowedTags
+    allowedSchemes: [],
+    allowedSchemesByTag: {},
+    allowProtocolRelative: false,
+    enforceHtmlBoundary: true,
+  });
+
+  // Step 3: Extract visible text from clean HTML — insert newline for block elements
+  // Then decode HTML entities ONCE to produce plain text (no double-escaping).
+  const rawVisible = cleanHtml
+    .replace(/<\/?(h[1-6]|p|div|br|li|tr|blockquote|pre|article|section|header|footer|main|aside|nav)[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")   // remove any remaining tags (inline elements)
+    .replace(/\n[ \t]+/g, "\n") // trim horizontal whitespace after newlines
+    .trim();
+
+  // Decode HTML entities once — store as plain text only. Never re-encode.
+  const visibleText = rawVisible
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
-    .replace(/&[a-z]+;/gi, " ");
+    .replace(/&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(parseInt(code, 10)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, code) => String.fromCharCode(parseInt(code, 16)));
 
-  const { plainText, sections } = normalizeParsedDocument(stripped, parserName, parserVersion);
+  // Step 4: Clamp output to MAX_HTML_OUTPUT_CHARS (plain text, store only once)
+  let plainOutput = visibleText;
+  if (plainOutput.length > MAX_HTML_OUTPUT_CHARS) {
+    warnings.push(`HTML output clamped from ${plainOutput.length} to ${MAX_HTML_OUTPUT_CHARS} characters.`);
+    plainOutput = plainOutput.slice(0, MAX_HTML_OUTPUT_CHARS);
+  }
 
-  const titleMatch = content.match(/<title[^>]*>([^<]+)<\/title>/i);
-  const h1Match = content.match(/<h1[^>]*>([^<]+)<\/h1>/i);
-  const detectedTitle = titleMatch
-    ? titleMatch[1].trim()
-    : h1Match
-    ? h1Match[1].trim()
-    : undefined;
+  // Step 5: Normalize (NFKC applied inside normalizeParsedDocument)
+  const { plainText, sections } = normalizeParsedDocument(plainOutput, parserName, parserVersion);
+
+  // Step 6: Extract title from clean sanitized HTML (plain-text title extraction only)
+  const titleMatch = cleanHtml.match(/<h1[^>]*>([^<]+)<\/h1>/i);
+  const detectedTitle = titleMatch ? titleMatch[1].trim().slice(0, 200) : undefined;
 
   return {
     success: true,
@@ -273,7 +325,12 @@ function parseHtml(content: string): DocumentParserResult {
       parserName,
       parserVersion,
       warnings,
-      metadata: { sectionCount: sections.length },
+      metadata: {
+        sectionCount: sections.length,
+        rawBytes,
+        outputChars: plainText.length,
+        clamped: visibleText.length > MAX_HTML_OUTPUT_CHARS,
+      },
     },
   };
 }
