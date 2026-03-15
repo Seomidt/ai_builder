@@ -6740,4 +6740,150 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── PHASE 23 — WEBHOOK & INTEGRATION PLATFORM ────────────────────────────
+
+  // Route 23-1: GET /api/admin/webhooks/endpoints — list all endpoints (admin)
+  app.get("/api/admin/webhooks/endpoints", async (req: Request, res: Response) => {
+    try {
+      const { listWebhookEndpoints } = require("../lib/webhooks/webhook-registry");
+      const tenantId = (req.query.tenantId as string) || "";
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await listWebhookEndpoints(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-2: POST /api/admin/webhooks/endpoints — register endpoint
+  app.post("/api/admin/webhooks/endpoints", async (req: Request, res: Response) => {
+    try {
+      const { registerWebhookEndpoint } = require("../lib/webhooks/webhook-registry");
+      const result = await registerWebhookEndpoint(req.body);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-3: PATCH /api/admin/webhooks/endpoints/:id — update endpoint
+  app.patch("/api/admin/webhooks/endpoints/:id", async (req: Request, res: Response) => {
+    try {
+      const { updateWebhookEndpoint } = require("../lib/webhooks/webhook-registry");
+      res.json(await updateWebhookEndpoint(req.params.id, req.body));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-4: DELETE /api/admin/webhooks/endpoints/:id — delete endpoint
+  app.delete("/api/admin/webhooks/endpoints/:id", async (req: Request, res: Response) => {
+    try {
+      const { deleteWebhookEndpoint } = require("../lib/webhooks/webhook-registry");
+      res.json(await deleteWebhookEndpoint(req.params.id));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-5: POST /api/admin/webhooks/endpoints/:id/rotate-secret — rotate signing secret
+  app.post("/api/admin/webhooks/endpoints/:id/rotate-secret", async (req: Request, res: Response) => {
+    try {
+      const { rotateWebhookSecret } = require("../lib/webhooks/webhook-registry");
+      res.json(await rotateWebhookSecret(req.params.id));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-6: GET /api/admin/webhooks/subscriptions — list subscriptions
+  app.get("/api/admin/webhooks/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { listTenantSubscriptions } = require("../lib/webhooks/webhook-registry");
+      const tenantId = (req.query.tenantId as string) || "";
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await listTenantSubscriptions(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-7: POST /api/admin/webhooks/subscriptions — subscribe endpoint to event type
+  app.post("/api/admin/webhooks/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { subscribeEndpoint } = require("../lib/webhooks/webhook-registry");
+      res.status(201).json(await subscribeEndpoint(req.body));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-8: DELETE /api/admin/webhooks/subscriptions — unsubscribe
+  app.delete("/api/admin/webhooks/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { unsubscribeEndpoint } = require("../lib/webhooks/webhook-registry");
+      const { endpointId, eventType } = req.body;
+      res.json(await unsubscribeEndpoint(endpointId, eventType));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-9: GET /api/admin/webhooks/deliveries — list deliveries for tenant
+  app.get("/api/admin/webhooks/deliveries", async (req: Request, res: Response) => {
+    try {
+      const { listDeliveries } = require("../lib/webhooks/webhook-delivery");
+      const tenantId = (req.query.tenantId as string) || "";
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await listDeliveries(tenantId, {
+        status: req.query.status as string,
+        eventType: req.query.eventType as string,
+        limit: req.query.limit ? Number(req.query.limit) : 50,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-10: GET /api/admin/webhooks/metrics/deliveries — delivery stats
+  app.get("/api/admin/webhooks/metrics/deliveries", async (req: Request, res: Response) => {
+    try {
+      const { getDeliveryStats } = require("../lib/webhooks/webhook-delivery");
+      const tenantId = req.query.tenantId as string | undefined;
+      res.json(await getDeliveryStats(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-11: GET /api/admin/webhooks/metrics/dispatcher — dispatcher stats
+  app.get("/api/admin/webhooks/metrics/dispatcher", async (req: Request, res: Response) => {
+    try {
+      const { getDispatcherStats } = require("../lib/webhooks/webhook-dispatcher");
+      res.json(await getDispatcherStats());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-12: POST /api/admin/webhooks/dispatch — manually emit event (testing)
+  app.post("/api/admin/webhooks/dispatch", async (req: Request, res: Response) => {
+    try {
+      const { dispatchEvent } = require("../lib/webhooks/webhook-dispatcher");
+      const { eventType, tenantId, data } = req.body;
+      res.json(await dispatchEvent({ eventType, tenantId, data: data ?? {} }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-13: POST /api/admin/webhooks/retries/process — trigger retry processing
+  app.post("/api/admin/webhooks/retries/process", async (req: Request, res: Response) => {
+    try {
+      const { processPendingRetries } = require("../lib/webhooks/webhook-dispatcher");
+      res.json(await processPendingRetries({ limit: req.body.limit ?? 50 }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }

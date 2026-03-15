@@ -6045,3 +6045,81 @@ export type InsertStripeInvoice = z.infer<typeof insertStripeInvoiceSchema>;
 export type StripeInvoice = typeof stripeInvoices.$inferSelect;
 
 // stripe_webhook_events — already defined in earlier phase (see stripeWebhookEvents above)
+
+// ─── PHASE 23 — WEBHOOK & INTEGRATION PLATFORM ───────────────────────────────
+
+// webhook_endpoints — tenant-defined outbound webhook targets
+export const webhookEndpoints = pgTable(
+  "webhook_endpoints",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    url: text("url").notNull(),
+    secret: text("secret").notNull(), // HMAC-SHA256 signing key
+    description: text("description"),
+    active: boolean("active").notNull().default(true),
+    maxRetries: integer("max_retries").notNull().default(3),
+    timeoutMs: integer("timeout_ms").notNull().default(10000),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("we23_tenant_id_idx").on(t.tenantId),
+    index("we23_active_idx").on(t.tenantId, t.active),
+  ],
+);
+export const insertWebhookEndpointSchema = createInsertSchema(webhookEndpoints).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertWebhookEndpoint = z.infer<typeof insertWebhookEndpointSchema>;
+export type WebhookEndpoint = typeof webhookEndpoints.$inferSelect;
+
+// webhook_subscriptions — maps endpoint to event types
+export const webhookSubscriptions = pgTable(
+  "webhook_subscriptions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    endpointId: varchar("endpoint_id").notNull(),
+    tenantId: text("tenant_id").notNull(),
+    eventType: text("event_type").notNull(), // e.g. "tenant.created", "invoice.paid"
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("ws23_endpoint_id_idx").on(t.endpointId),
+    index("ws23_tenant_event_idx").on(t.tenantId, t.eventType),
+  ],
+);
+export const insertWebhookSubscriptionSchema = createInsertSchema(webhookSubscriptions).omit({ id: true, createdAt: true });
+export type InsertWebhookSubscription = z.infer<typeof insertWebhookSubscriptionSchema>;
+export type WebhookSubscription = typeof webhookSubscriptions.$inferSelect;
+
+// webhook_deliveries — delivery tracking with retry state
+export const webhookDeliveries = pgTable(
+  "webhook_deliveries",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    endpointId: varchar("endpoint_id").notNull(),
+    tenantId: text("tenant_id").notNull(),
+    eventType: text("event_type").notNull(),
+    payload: jsonb("payload").notNull(),
+    status: text("status").notNull().default("pending"), // pending | delivered | failed | retrying
+    attempts: integer("attempts").notNull().default(0),
+    maxAttempts: integer("max_attempts").notNull().default(3),
+    lastAttemptAt: timestamp("last_attempt_at"),
+    nextRetryAt: timestamp("next_retry_at"),
+    deliveredAt: timestamp("delivered_at"),
+    httpStatusCode: integer("http_status_code"),
+    lastError: text("last_error"),
+    deliveryLatencyMs: integer("delivery_latency_ms"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("wd23_endpoint_id_idx").on(t.endpointId),
+    index("wd23_tenant_status_idx").on(t.tenantId, t.status),
+    index("wd23_event_type_idx").on(t.eventType),
+    index("wd23_next_retry_idx").on(t.nextRetryAt),
+  ],
+);
+export const insertWebhookDeliverySchema = createInsertSchema(webhookDeliveries).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertWebhookDelivery = z.infer<typeof insertWebhookDeliverySchema>;
+export type WebhookDelivery = typeof webhookDeliveries.$inferSelect;
