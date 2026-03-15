@@ -5410,3 +5410,307 @@ export const users = profiles;
 export const insertUserSchema = createInsertSchema(profiles).omit({ createdAt: true, updatedAt: true });
 export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof profiles.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PHASE 6 — Identity, RBAC & Actor Governance Foundation
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─── 6.1 app_user_profiles ───────────────────────────────────────────────────
+// Canonical application-level user profile (auth identity metadata, not auth.users).
+export const appUserProfiles = pgTable(
+  "app_user_profiles",
+  {
+    id: varchar("id").primaryKey(), // corresponds to Supabase auth.users.id
+    email: text("email"),
+    displayName: text("display_name"),
+    avatarUrl: text("avatar_url"),
+    status: text("status").notNull().default("active"),
+    metadata: jsonb("metadata"),
+    lastSeenAt: timestamp("last_seen_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("aup_status_created_idx").on(t.status, t.createdAt),
+    index("aup_email_idx").on(t.email),
+    check("aup_status_check", sql`status IN ('active','suspended','disabled')`),
+  ],
+);
+export const insertAppUserProfileSchema = createInsertSchema(appUserProfiles).omit({ createdAt: true, updatedAt: true });
+export type InsertAppUserProfile = z.infer<typeof insertAppUserProfileSchema>;
+export type AppUserProfile = typeof appUserProfiles.$inferSelect;
+
+// ─── 6.2 tenant_memberships ──────────────────────────────────────────────────
+export const tenantMemberships = pgTable(
+  "tenant_memberships",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    userId: varchar("user_id").notNull().references(() => appUserProfiles.id),
+    membershipStatus: text("membership_status").notNull().default("active"),
+    joinedAt: timestamp("joined_at"),
+    invitedAt: timestamp("invited_at"),
+    invitedBy: varchar("invited_by").references(() => appUserProfiles.id),
+    suspendedAt: timestamp("suspended_at"),
+    removedAt: timestamp("removed_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("tm_tenant_user_idx").on(t.tenantId, t.userId),
+    index("tm_tenant_status_created_idx").on(t.tenantId, t.membershipStatus, t.createdAt),
+    index("tm_user_status_created_idx").on(t.userId, t.membershipStatus, t.createdAt),
+    check("tm_status_check", sql`membership_status IN ('invited','active','suspended','removed')`),
+  ],
+);
+export const insertTenantMembershipSchema = createInsertSchema(tenantMemberships).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTenantMembership = z.infer<typeof insertTenantMembershipSchema>;
+export type TenantMembership = typeof tenantMemberships.$inferSelect;
+
+// ─── 6.3 roles ───────────────────────────────────────────────────────────────
+export const roles = pgTable(
+  "roles",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id"),
+    roleCode: text("role_code").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    isSystemRole: boolean("is_system_role").notNull().default(false),
+    roleScope: text("role_scope").notNull().default("tenant"),
+    lifecycleState: text("lifecycle_state").notNull().default("active"),
+    metadata: jsonb("metadata"),
+    createdBy: varchar("created_by").references(() => appUserProfiles.id),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("roles_scope_tenant_code_idx").on(t.roleScope, t.tenantId, t.roleCode),
+    index("roles_tenant_lifecycle_created_idx").on(t.tenantId, t.lifecycleState, t.createdAt),
+    index("roles_scope_code_idx").on(t.roleScope, t.roleCode),
+    check("roles_scope_check", sql`role_scope IN ('system','tenant')`),
+    check("roles_lifecycle_check", sql`lifecycle_state IN ('active','archived','disabled')`),
+  ],
+);
+export const insertRoleSchema = createInsertSchema(roles).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertRole = z.infer<typeof insertRoleSchema>;
+export type Role = typeof roles.$inferSelect;
+
+// ─── 6.4 permissions ─────────────────────────────────────────────────────────
+export const permissions = pgTable(
+  "permissions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    permissionCode: text("permission_code").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    permissionDomain: text("permission_domain").notNull(),
+    lifecycleState: text("lifecycle_state").notNull().default("active"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("permissions_code_idx").on(t.permissionCode),
+    index("permissions_domain_created_idx").on(t.permissionDomain, t.createdAt),
+    index("permissions_lifecycle_created_idx").on(t.lifecycleState, t.createdAt),
+    check("permissions_lifecycle_check", sql`lifecycle_state IN ('active','archived')`),
+  ],
+);
+export const insertPermissionSchema = createInsertSchema(permissions).omit({ id: true, createdAt: true });
+export type InsertPermission = z.infer<typeof insertPermissionSchema>;
+export type Permission = typeof permissions.$inferSelect;
+
+// ─── 6.5 role_permissions ────────────────────────────────────────────────────
+export const rolePermissions = pgTable(
+  "role_permissions",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    roleId: varchar("role_id").notNull().references(() => roles.id),
+    permissionId: varchar("permission_id").notNull().references(() => permissions.id),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("rp_role_perm_idx").on(t.roleId, t.permissionId),
+    index("rp_role_created_idx").on(t.roleId, t.createdAt),
+    index("rp_perm_created_idx").on(t.permissionId, t.createdAt),
+  ],
+);
+export const insertRolePermissionSchema = createInsertSchema(rolePermissions).omit({ id: true, createdAt: true });
+export type InsertRolePermission = z.infer<typeof insertRolePermissionSchema>;
+export type RolePermission = typeof rolePermissions.$inferSelect;
+
+// ─── 6.6 membership_roles ────────────────────────────────────────────────────
+export const membershipRoles = pgTable(
+  "membership_roles",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantMembershipId: varchar("tenant_membership_id").notNull().references(() => tenantMemberships.id),
+    roleId: varchar("role_id").notNull().references(() => roles.id),
+    assignedBy: varchar("assigned_by").references(() => appUserProfiles.id),
+    assignedAt: timestamp("assigned_at").notNull().defaultNow(),
+    metadata: jsonb("metadata"),
+  },
+  (t) => [
+    uniqueIndex("mr_membership_role_idx").on(t.tenantMembershipId, t.roleId),
+    index("mr_membership_assigned_idx").on(t.tenantMembershipId, t.assignedAt),
+    index("mr_role_assigned_idx").on(t.roleId, t.assignedAt),
+  ],
+);
+export const insertMembershipRoleSchema = createInsertSchema(membershipRoles).omit({ id: true, assignedAt: true });
+export type InsertMembershipRole = z.infer<typeof insertMembershipRoleSchema>;
+export type MembershipRole = typeof membershipRoles.$inferSelect;
+
+// ─── 6.7 service_accounts ────────────────────────────────────────────────────
+export const serviceAccounts = pgTable(
+  "service_accounts",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    name: text("name").notNull(),
+    description: text("description"),
+    serviceAccountStatus: text("service_account_status").notNull().default("active"),
+    createdBy: varchar("created_by").references(() => appUserProfiles.id),
+    revokedAt: timestamp("revoked_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("sa_tenant_status_created_idx").on(t.tenantId, t.serviceAccountStatus, t.createdAt),
+    check("sa_status_check", sql`service_account_status IN ('active','revoked','disabled')`),
+  ],
+);
+export const insertServiceAccountSchema = createInsertSchema(serviceAccounts).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertServiceAccount = z.infer<typeof insertServiceAccountSchema>;
+export type ServiceAccount = typeof serviceAccounts.$inferSelect;
+
+// ─── 6.8 service_account_keys ────────────────────────────────────────────────
+export const serviceAccountKeys = pgTable(
+  "service_account_keys",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    serviceAccountId: varchar("service_account_id").notNull().references(() => serviceAccounts.id),
+    keyPrefix: text("key_prefix").notNull(),
+    keyHash: text("key_hash").notNull(),
+    keyStatus: text("key_status").notNull().default("active"),
+    lastUsedAt: timestamp("last_used_at"),
+    expiresAt: timestamp("expires_at"),
+    createdBy: varchar("created_by").references(() => appUserProfiles.id),
+    revokedAt: timestamp("revoked_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("sak_prefix_idx").on(t.keyPrefix),
+    uniqueIndex("sak_hash_idx").on(t.keyHash),
+    index("sak_sa_status_created_idx").on(t.serviceAccountId, t.keyStatus, t.createdAt),
+    index("sak_expires_idx").on(t.expiresAt),
+    check("sak_status_check", sql`key_status IN ('active','revoked','expired')`),
+  ],
+);
+export const insertServiceAccountKeySchema = createInsertSchema(serviceAccountKeys).omit({ id: true, createdAt: true });
+export type InsertServiceAccountKey = z.infer<typeof insertServiceAccountKeySchema>;
+export type ServiceAccountKey = typeof serviceAccountKeys.$inferSelect;
+
+// ─── 6.9 api_keys ────────────────────────────────────────────────────────────
+export const apiKeys = pgTable(
+  "api_keys",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    name: text("name").notNull(),
+    keyPrefix: text("key_prefix").notNull(),
+    keyHash: text("key_hash").notNull(),
+    apiKeyStatus: text("api_key_status").notNull().default("active"),
+    createdBy: varchar("created_by").references(() => appUserProfiles.id),
+    lastUsedAt: timestamp("last_used_at"),
+    expiresAt: timestamp("expires_at"),
+    revokedAt: timestamp("revoked_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ak_prefix_idx").on(t.keyPrefix),
+    uniqueIndex("ak_hash_idx").on(t.keyHash),
+    index("ak_tenant_status_created_idx").on(t.tenantId, t.apiKeyStatus, t.createdAt),
+    index("ak_expires_idx").on(t.expiresAt),
+    check("ak_status_check", sql`api_key_status IN ('active','revoked','expired')`),
+  ],
+);
+export const insertApiKeySchema = createInsertSchema(apiKeys).omit({ id: true, createdAt: true });
+export type InsertApiKey = z.infer<typeof insertApiKeySchema>;
+export type ApiKey = typeof apiKeys.$inferSelect;
+
+// ─── 6.10 api_key_scopes ─────────────────────────────────────────────────────
+export const apiKeyScopes = pgTable(
+  "api_key_scopes",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    apiKeyId: varchar("api_key_id").notNull().references(() => apiKeys.id),
+    permissionId: varchar("permission_id").notNull().references(() => permissions.id),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("aks_key_perm_idx").on(t.apiKeyId, t.permissionId),
+    index("aks_key_created_idx").on(t.apiKeyId, t.createdAt),
+    index("aks_perm_created_idx").on(t.permissionId, t.createdAt),
+  ],
+);
+export const insertApiKeyScopeSchema = createInsertSchema(apiKeyScopes).omit({ id: true, createdAt: true });
+export type InsertApiKeyScope = z.infer<typeof insertApiKeyScopeSchema>;
+export type ApiKeyScope = typeof apiKeyScopes.$inferSelect;
+
+// ─── 6.11 identity_providers ─────────────────────────────────────────────────
+export const identityProviders = pgTable(
+  "identity_providers",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    providerType: text("provider_type").notNull(),
+    providerStatus: text("provider_status").notNull().default("draft"),
+    displayName: text("display_name").notNull(),
+    issuer: text("issuer"),
+    audience: text("audience"),
+    metadata: jsonb("metadata"),
+    createdBy: varchar("created_by").references(() => appUserProfiles.id),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("idp_tenant_status_created_idx").on(t.tenantId, t.providerStatus, t.createdAt),
+    index("idp_tenant_type_created_idx").on(t.tenantId, t.providerType, t.createdAt),
+    check("idp_type_check", sql`provider_type IN ('oidc','saml','google_workspace','azure_ad')`),
+    check("idp_status_check", sql`provider_status IN ('draft','active','disabled')`),
+  ],
+);
+export const insertIdentityProviderSchema = createInsertSchema(identityProviders).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertIdentityProvider = z.infer<typeof insertIdentityProviderSchema>;
+export type IdentityProvider = typeof identityProviders.$inferSelect;
+
+// ─── 6.12 tenant_invitations ─────────────────────────────────────────────────
+export const tenantInvitations = pgTable(
+  "tenant_invitations",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    email: text("email").notNull(),
+    invitationStatus: text("invitation_status").notNull().default("pending"),
+    invitedBy: varchar("invited_by").references(() => appUserProfiles.id),
+    tokenHash: text("token_hash").notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+    acceptedAt: timestamp("accepted_at"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ti_token_hash_idx").on(t.tokenHash),
+    index("ti_tenant_status_created_idx").on(t.tenantId, t.invitationStatus, t.createdAt),
+    index("ti_email_created_idx").on(t.email, t.createdAt),
+    index("ti_expires_idx").on(t.expiresAt),
+    check("ti_status_check", sql`invitation_status IN ('pending','accepted','expired','revoked')`),
+  ],
+);
+export const insertTenantInvitationSchema = createInsertSchema(tenantInvitations).omit({ id: true, createdAt: true });
+export type InsertTenantInvitation = z.infer<typeof insertTenantInvitationSchema>;
+export type TenantInvitation = typeof tenantInvitations.$inferSelect;

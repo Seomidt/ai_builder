@@ -6055,4 +6055,395 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // Phase 6 — Identity, RBAC & Actor Governance Foundation
+  // Routes: 6-1 → 6-27
+  // INV-ID1: Every resolved actor has explicit actor_type and tenant scope
+  // INV-ID2: Permission checks are permission-code based, not role-name based
+  // INV-ID3: Suspended/removed memberships must not grant permissions
+  // INV-ID4: Disabled/archived roles or permissions must not grant access
+  // INV-ID5: API keys and service-account keys never stored in plaintext
+  // INV-ID6: Role bindings must be tenant-safe
+  // INV-ID7: Revoked/expired keys must fail closed
+  // INV-ID8: Preview/explain endpoints perform no unexpected writes
+  // INV-ID9: Backward compatibility with current internal/admin flows
+  // INV-ID10: Cross-tenant actor or permission leakage impossible
+  // INV-ID11: System roles and bootstrap seeding must be idempotent
+  // INV-ID12: Identity-provider foundation must remain explicit and non-fake
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // --- Memberships / Invites ---
+
+  // Route 6-1: POST /api/admin/identity/tenants/:tenantId/memberships
+  app.post("/api/admin/identity/tenants/:tenantId/memberships", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { userId, invitedBy, status } = req.body as { userId?: string; invitedBy?: string; status?: "active" | "invited" };
+      if (!userId) return void res.status(400).json({ error: "userId required" });
+      const { createTenantMembership } = await import("../lib/auth/memberships");
+      const result = await createTenantMembership({ tenantId, userId, invitedBy, status });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-2: GET /api/admin/identity/tenants/:tenantId/memberships
+  app.get("/api/admin/identity/tenants/:tenantId/memberships", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { listTenantMemberships } = await import("../lib/auth/memberships");
+      const result = await listTenantMemberships(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-3: POST /api/admin/identity/memberships/:membershipId/suspend
+  app.post("/api/admin/identity/memberships/:membershipId/suspend", async (req: Request, res: Response) => {
+    try {
+      const { membershipId } = req.params;
+      const { suspendTenantMembership } = await import("../lib/auth/memberships");
+      const result = await suspendTenantMembership(membershipId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-4: POST /api/admin/identity/memberships/:membershipId/remove
+  app.post("/api/admin/identity/memberships/:membershipId/remove", async (req: Request, res: Response) => {
+    try {
+      const { membershipId } = req.params;
+      const { removeTenantMembership } = await import("../lib/auth/memberships");
+      const result = await removeTenantMembership(membershipId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-5: POST /api/admin/identity/tenants/:tenantId/invitations
+  app.post("/api/admin/identity/tenants/:tenantId/invitations", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { email, invitedBy, expiresInHours } = req.body as { email?: string; invitedBy?: string; expiresInHours?: number };
+      if (!email) return void res.status(400).json({ error: "email required" });
+      const { createTenantInvitation } = await import("../lib/auth/memberships");
+      const result = await createTenantInvitation({ tenantId, email, invitedBy, expiresInHours });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-6: POST /api/admin/identity/invitations/:invitationId/revoke
+  app.post("/api/admin/identity/invitations/:invitationId/revoke", async (req: Request, res: Response) => {
+    try {
+      const { invitationId } = req.params;
+      const { revokeTenantInvitation } = await import("../lib/auth/memberships");
+      const result = await revokeTenantInvitation(invitationId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-7: GET /api/admin/identity/tenants/:tenantId/invitations
+  app.get("/api/admin/identity/tenants/:tenantId/invitations", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const pg = (await import("pg")).default;
+      const client = new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
+      await client.connect();
+      try {
+        const row = await client.query(
+          `SELECT id, email, invitation_status, expires_at, created_at FROM public.tenant_invitations WHERE tenant_id = $1 ORDER BY created_at DESC`,
+          [tenantId],
+        );
+        res.json(row.rows);
+      } finally { await client.end(); }
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- Roles / Permissions ---
+
+  // Route 6-8: GET /api/admin/identity/permissions
+  app.get("/api/admin/identity/permissions", async (_req: Request, res: Response) => {
+    try {
+      const pg = (await import("pg")).default;
+      const client = new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
+      await client.connect();
+      try {
+        const row = await client.query(`SELECT id, permission_code, name, permission_domain, lifecycle_state FROM public.permissions ORDER BY permission_domain, permission_code`);
+        res.json(row.rows);
+      } finally { await client.end(); }
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-9: GET /api/admin/identity/tenants/:tenantId/roles
+  app.get("/api/admin/identity/tenants/:tenantId/roles", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const pg = (await import("pg")).default;
+      const client = new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
+      await client.connect();
+      try {
+        const row = await client.query(
+          `SELECT id, role_code, name, is_system_role, role_scope, lifecycle_state FROM public.roles WHERE (tenant_id = $1 OR role_scope = 'system') AND lifecycle_state = 'active' ORDER BY role_scope, role_code`,
+          [tenantId],
+        );
+        res.json(row.rows);
+      } finally { await client.end(); }
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-10: POST /api/admin/identity/tenants/:tenantId/roles/bootstrap
+  app.post("/api/admin/identity/tenants/:tenantId/roles/bootstrap", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { runIdentityBootstrap } = await import("../lib/auth/identity-bootstrap");
+      const result = await runIdentityBootstrap(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-11: POST /api/admin/identity/memberships/:membershipId/roles/:roleId
+  app.post("/api/admin/identity/memberships/:membershipId/roles/:roleId", async (req: Request, res: Response) => {
+    try {
+      const { membershipId, roleId } = req.params;
+      const { assignedBy } = req.body as { assignedBy?: string };
+      const { assignRoleToMembership } = await import("../lib/auth/memberships");
+      const result = await assignRoleToMembership({ membershipId, roleId, assignedBy });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-12: DELETE /api/admin/identity/memberships/:membershipId/roles/:roleId
+  app.delete("/api/admin/identity/memberships/:membershipId/roles/:roleId", async (req: Request, res: Response) => {
+    try {
+      const { membershipId, roleId } = req.params;
+      const { removeRoleFromMembership } = await import("../lib/auth/memberships");
+      const result = await removeRoleFromMembership({ membershipId, roleId });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-13: GET /api/admin/identity/memberships/:membershipId/access-explainer
+  app.get("/api/admin/identity/memberships/:membershipId/access-explainer", async (req: Request, res: Response) => {
+    try {
+      const { membershipId } = req.params;
+      const { explainMembershipAccess } = await import("../lib/auth/memberships");
+      const result = await explainMembershipAccess(membershipId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- Service Accounts / Keys ---
+
+  // Route 6-14: POST /api/admin/identity/tenants/:tenantId/service-accounts
+  app.post("/api/admin/identity/tenants/:tenantId/service-accounts", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { name, description, createdBy } = req.body as { name?: string; description?: string; createdBy?: string };
+      if (!name) return void res.status(400).json({ error: "name required" });
+      const { createServiceAccount } = await import("../lib/auth/key-management");
+      const result = await createServiceAccount({ tenantId, name, description, createdBy });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-15: GET /api/admin/identity/tenants/:tenantId/service-accounts
+  app.get("/api/admin/identity/tenants/:tenantId/service-accounts", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { listTenantServiceAccounts } = await import("../lib/auth/key-management");
+      const result = await listTenantServiceAccounts(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-16: POST /api/admin/identity/service-accounts/:serviceAccountId/keys
+  app.post("/api/admin/identity/service-accounts/:serviceAccountId/keys", async (req: Request, res: Response) => {
+    try {
+      const { serviceAccountId } = req.params;
+      const { createdBy, expiresAt } = req.body as { createdBy?: string; expiresAt?: string };
+      const { createServiceAccountKey } = await import("../lib/auth/key-management");
+      const result = await createServiceAccountKey({ serviceAccountId, createdBy, expiresAt: expiresAt ? new Date(expiresAt) : undefined });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-17: POST /api/admin/identity/service-account-keys/:keyId/revoke
+  app.post("/api/admin/identity/service-account-keys/:keyId/revoke", async (req: Request, res: Response) => {
+    try {
+      const { keyId } = req.params;
+      const { revokeServiceAccountKey } = await import("../lib/auth/key-management");
+      const result = await revokeServiceAccountKey(keyId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- API Keys ---
+
+  // Route 6-18: POST /api/admin/identity/tenants/:tenantId/api-keys
+  app.post("/api/admin/identity/tenants/:tenantId/api-keys", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { name, createdBy, expiresAt, permissionIds } = req.body as {
+        name?: string; createdBy?: string; expiresAt?: string; permissionIds?: string[];
+      };
+      if (!name) return void res.status(400).json({ error: "name required" });
+      const { createApiKey } = await import("../lib/auth/key-management");
+      const result = await createApiKey({ tenantId, name, createdBy, expiresAt: expiresAt ? new Date(expiresAt) : undefined, permissionIds });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-19: GET /api/admin/identity/tenants/:tenantId/api-keys
+  app.get("/api/admin/identity/tenants/:tenantId/api-keys", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { listTenantApiKeys } = await import("../lib/auth/key-management");
+      const result = await listTenantApiKeys(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-20: POST /api/admin/identity/api-keys/:keyId/revoke
+  app.post("/api/admin/identity/api-keys/:keyId/revoke", async (req: Request, res: Response) => {
+    try {
+      const { keyId } = req.params;
+      const { revokeApiKey } = await import("../lib/auth/key-management");
+      const result = await revokeApiKey(keyId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- Identity Providers ---
+
+  // Route 6-21: POST /api/admin/identity/tenants/:tenantId/providers
+  app.post("/api/admin/identity/tenants/:tenantId/providers", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { providerType, displayName, issuer, audience, createdBy } = req.body as {
+        providerType?: string; displayName?: string; issuer?: string; audience?: string; createdBy?: string;
+      };
+      if (!providerType) return void res.status(400).json({ error: "providerType required" });
+      if (!displayName) return void res.status(400).json({ error: "displayName required" });
+      const { createIdentityProvider } = await import("../lib/auth/identity-providers");
+      const result = await createIdentityProvider({ tenantId, providerType: providerType as "oidc" | "saml" | "google_workspace" | "azure_ad", displayName, issuer, audience, createdBy });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-22: GET /api/admin/identity/tenants/:tenantId/providers
+  app.get("/api/admin/identity/tenants/:tenantId/providers", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { listTenantIdentityProviders } = await import("../lib/auth/identity-providers");
+      const result = await listTenantIdentityProviders(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-23: POST /api/admin/identity/providers/:providerId/status
+  app.post("/api/admin/identity/providers/:providerId/status", async (req: Request, res: Response) => {
+    try {
+      const { providerId } = req.params;
+      const { newStatus } = req.body as { newStatus?: string };
+      if (!newStatus) return void res.status(400).json({ error: "newStatus required" });
+      const { updateIdentityProviderStatus } = await import("../lib/auth/identity-providers");
+      const result = await updateIdentityProviderStatus({ providerId, newStatus: newStatus as "draft" | "active" | "disabled" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- Explainers / Compatibility ---
+
+  // Route 6-24: GET /api/admin/identity/actors/explain (INV-ID8: read-only)
+  app.get("/api/admin/identity/actors/explain", (req: Request, res: Response) => {
+    try {
+      const { resolveRequestActor, explainResolvedActor } = require("../lib/auth/actor-resolution");
+      const actorResult = resolveRequestActor(req);
+      res.json(explainResolvedActor(actorResult));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-25: POST /api/admin/identity/preview/permission-check (INV-ID8: no writes)
+  app.post("/api/admin/identity/preview/permission-check", (req: Request, res: Response) => {
+    try {
+      const { permissionCode, tenantId } = req.body as { permissionCode?: string; tenantId?: string };
+      if (!permissionCode) return void res.status(400).json({ error: "permissionCode required" });
+      const { resolveRequestActor } = require("../lib/auth/actor-resolution");
+      const { explainPermissionDecision } = require("../lib/auth/permissions");
+      const actorResult = resolveRequestActor(req);
+      if (!actorResult.resolved) {
+        return void res.json({ granted: false, reasonCode: actorResult.reasonCode, note: "INV-ID8: no writes" });
+      }
+      const decision = explainPermissionDecision(actorResult.actor, permissionCode, tenantId);
+      res.json({ ...decision, note: "INV-ID8: Preview only. no writes performed." });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-26: GET /api/admin/identity/compatibility/state (INV-ID8: read-only)
+  app.get("/api/admin/identity/compatibility/state", (_req: Request, res: Response) => {
+    try {
+      const { explainCurrentAuthCompatibilityState } = require("../lib/auth/identity-compat");
+      res.json(explainCurrentAuthCompatibilityState());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-27: POST /api/admin/identity/compatibility/preview (INV-ID8: no writes)
+  app.post("/api/admin/identity/compatibility/preview", (req: Request, res: Response) => {
+    try {
+      const { routePattern } = req.body as { routePattern?: string };
+      if (!routePattern) return void res.status(400).json({ error: "routePattern required" });
+      const { previewIdentityMigrationImpact } = require("../lib/auth/identity-compat");
+      res.json(previewIdentityMigrationImpact(routePattern));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }

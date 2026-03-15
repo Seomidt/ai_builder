@@ -3,6 +3,8 @@ import { supabaseAdmin } from "../lib/supabase";
 import { db } from "../db";
 import { organizationMembers } from "@shared/schema";
 import { eq } from "drizzle-orm";
+import { mapCurrentUserToCanonicalActor } from "../lib/auth/identity-compat";
+import type { ResolvedActor } from "../lib/auth/actor-resolution";
 
 export interface AuthUser {
   id: string;
@@ -15,6 +17,7 @@ declare global {
   namespace Express {
     interface Request {
       user?: AuthUser;
+      resolvedActor?: ResolvedActor;
     }
   }
 }
@@ -28,6 +31,7 @@ export async function authMiddleware(
 
   if (!authHeader?.startsWith("Bearer ")) {
     req.user = getDemoUser();
+    req.resolvedActor = mapCurrentUserToCanonicalActor(req.user);
     return next();
   }
 
@@ -38,6 +42,7 @@ export async function authMiddleware(
 
     if (error || !data.user) {
       req.user = getDemoUser();
+      req.resolvedActor = mapCurrentUserToCanonicalActor(req.user);
       return next();
     }
 
@@ -56,9 +61,14 @@ export async function authMiddleware(
       role: member?.role ?? "member",
     };
 
+    // Phase 6: attach canonical resolved actor for permission-code based checks.
+    // INV-ID9: backward-compatible — req.user remains untouched.
+    req.resolvedActor = mapCurrentUserToCanonicalActor(req.user);
+
     return next();
   } catch {
     req.user = getDemoUser();
+    req.resolvedActor = mapCurrentUserToCanonicalActor(req.user);
     return next();
   }
 }
