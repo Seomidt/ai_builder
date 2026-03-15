@@ -5869,3 +5869,96 @@ export const obsTenantUsageMetrics = pgTable(
 export const insertObsTenantUsageMetricsSchema = createInsertSchema(obsTenantUsageMetrics).omit({ id: true, createdAt: true });
 export type InsertObsTenantUsageMetric = z.infer<typeof insertObsTenantUsageMetricsSchema>;
 export type ObsTenantUsageMetric = typeof obsTenantUsageMetrics.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 16 — AI Cost Governance Platform
+// Tables: tenant_ai_budgets, tenant_ai_usage_snapshots, ai_usage_alerts, ai_anomaly_events
+// INV-GOV-1: Budget checks fail-open (never throw)
+// INV-GOV-2: Hard limit blocks execution entirely
+// INV-GOV-3: Soft limit warns only — execution proceeds
+// INV-GOV-4: Tenant isolation — all governance data is strictly per-tenant
+// INV-GOV-5: All governance actions are recorded (full audit trail)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Per-tenant AI budget configuration.
+export const tenantAiBudgets = pgTable(
+  "tenant_ai_budgets",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull().unique(),
+    monthlyBudgetUsd: numeric("monthly_budget_usd", { precision: 12, scale: 4 }),
+    dailyBudgetUsd: numeric("daily_budget_usd", { precision: 12, scale: 4 }),
+    softLimitPercent: numeric("soft_limit_percent", { precision: 5, scale: 2 }).default("80"),
+    hardLimitPercent: numeric("hard_limit_percent", { precision: 5, scale: 2 }).default("100"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("tab_tenant_idx").on(t.tenantId),
+  ],
+);
+export const insertTenantAiBudgetSchema = createInsertSchema(tenantAiBudgets).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTenantAiBudget = z.infer<typeof insertTenantAiBudgetSchema>;
+export type TenantAiBudget = typeof tenantAiBudgets.$inferSelect;
+
+// Per-tenant periodic usage snapshots — captures cumulative spend at a point in time.
+export const tenantAiUsageSnapshots = pgTable(
+  "tenant_ai_usage_snapshots",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    period: text("period").notNull(),
+    tokensIn: integer("tokens_in").default(0),
+    tokensOut: integer("tokens_out").default(0),
+    costUsd: numeric("cost_usd", { precision: 12, scale: 6 }).default("0"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("taus_tenant_period_idx").on(t.tenantId, t.period),
+    index("taus_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+export const insertTenantAiUsageSnapshotSchema = createInsertSchema(tenantAiUsageSnapshots).omit({ id: true, createdAt: true });
+export type InsertTenantAiUsageSnapshot = z.infer<typeof insertTenantAiUsageSnapshotSchema>;
+export type TenantAiUsageSnapshot = typeof tenantAiUsageSnapshots.$inferSelect;
+
+// AI usage alerts — triggered when tenant usage crosses soft or hard limits.
+export const aiUsageAlerts = pgTable(
+  "ai_usage_alerts",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    alertType: text("alert_type").notNull(), // "soft_limit" | "hard_limit" | "daily_limit" | "daily_soft"
+    thresholdPercent: numeric("threshold_percent", { precision: 10, scale: 4 }).notNull(),
+    usagePercent: numeric("usage_percent", { precision: 10, scale: 4 }).notNull(),
+    triggeredAt: timestamp("triggered_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("aua_tenant_triggered_idx").on(t.tenantId, t.triggeredAt),
+    index("aua_tenant_type_idx").on(t.tenantId, t.alertType),
+  ],
+);
+export const insertAiUsageAlertSchema = createInsertSchema(aiUsageAlerts).omit({ id: true, triggeredAt: true });
+export type InsertAiUsageAlert = z.infer<typeof insertAiUsageAlertSchema>;
+export type AiUsageAlert = typeof aiUsageAlerts.$inferSelect;
+
+// Governance anomaly events — usage spikes and runaway agent detections (Phase 16).
+// Note: prefixed gov_ to avoid conflict with existing ai_anomaly_events (Phase 3H).
+export const govAnomalyEvents = pgTable(
+  "gov_anomaly_events",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    eventType: text("event_type").notNull(), // "usage_spike" | "runaway_agent" | "excessive_tokens"
+    usageSpikePercent: numeric("usage_spike_percent", { precision: 8, scale: 2 }),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("gae_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("gae_tenant_type_idx").on(t.tenantId, t.eventType),
+  ],
+);
+export const insertGovAnomalyEventSchema = createInsertSchema(govAnomalyEvents).omit({ id: true, createdAt: true });
+export type InsertGovAnomalyEvent = z.infer<typeof insertGovAnomalyEventSchema>;
+export type GovAnomalyEvent = typeof govAnomalyEvents.$inferSelect;

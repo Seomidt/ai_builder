@@ -6528,4 +6528,75 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Phase 16 — AI Cost Governance Admin Routes
+  // INV-GOV-4: All routes return strictly per-tenant or aggregate-only data.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Route 16-1: GET /api/admin/ai/budgets
+  app.get("/api/admin/ai/budgets", async (req: Request, res: Response) => {
+    try {
+      const { listAllTenantBudgets, getTenantBudget } = require("../lib/ai-governance/budget-checker");
+      const tenantId = req.query.tenantId as string | undefined;
+      const data = tenantId ? await getTenantBudget(tenantId) : await listAllTenantBudgets();
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 16-2: GET /api/admin/ai/usage
+  app.get("/api/admin/ai/usage", async (req: Request, res: Response) => {
+    try {
+      const { listAllSnapshots, listSnapshots } = require("../lib/ai-governance/usage-snapshotter");
+      const tenantId = req.query.tenantId as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const data = tenantId ? await listSnapshots(tenantId, limit) : await listAllSnapshots(limit);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 16-3: GET /api/admin/ai/anomalies
+  app.get("/api/admin/ai/anomalies", async (req: Request, res: Response) => {
+    try {
+      const { listAllAnomalyEvents, listAnomalyEvents } = require("../lib/ai-governance/anomaly-detector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const data = tenantId ? await listAnomalyEvents(tenantId, limit) : await listAllAnomalyEvents(limit);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 16-4: GET /api/admin/ai/alerts
+  app.get("/api/admin/ai/alerts", async (req: Request, res: Response) => {
+    try {
+      const { listAllAlerts, listTenantAlerts } = require("../lib/ai-governance/alert-generator");
+      const tenantId = req.query.tenantId as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const data = tenantId ? await listTenantAlerts(tenantId, limit) : await listAllAlerts(limit);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 16-5: GET /api/admin/ai/runaway-events
+  app.get("/api/admin/ai/runaway-events", async (req: Request, res: Response) => {
+    try {
+      const { listAnomalyEvents, listAllAnomalyEvents } = require("../lib/ai-governance/anomaly-detector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      // Runaway events are anomaly_events with event_type = 'runaway_agent'
+      const all = tenantId ? await listAnomalyEvents(tenantId, limit) : await listAllAnomalyEvents(limit);
+      const runaway = all.filter((e: any) => e.eventType === "runaway_agent" || e.event_type === "runaway_agent");
+      res.json(runaway);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
