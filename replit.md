@@ -1583,3 +1583,49 @@ INV-ID12: Identity provider foundation is explicit; no fake SSO completion
 
 ### Validation results
 54/54 scenarios — 200+ assertions — ALL PASS
+
+## Phase 15 — Observability & Telemetry Platform (branch: feature/observability-platform)
+
+### Overview
+Fire-and-forget telemetry collection across all AI workloads. No raw tenant data exposed in summaries (INV-OBS-2). Writes never block AI execution (INV-OBS-6).
+
+### New tables (5, all prefixed `obs_`)
+- `obs_system_metrics` — platform-level event counts and signals
+- `obs_ai_latency_metrics` — per-LLM-call latency, tokens, cost, request_id
+- `obs_retrieval_metrics` — per-retrieval-call chunks, latency, rerank flag
+- `obs_agent_runtime_metrics` — per-agent-run steps, duration, status
+- `obs_tenant_usage_metrics` — tenant-period usage aggregation
+
+### Service files (`server/lib/observability/`)
+- `latency-tracker.ts` — `recordAiLatencyMetric`, `summariseAiLatency`
+- `retrieval-tracker.ts` — `recordRetrievalMetric`, `summariseRetrievalMetrics`
+- `agent-tracker.ts` — `recordAgentRunMetric`, `summariseAgentMetrics`
+- `tenant-usage-tracker.ts` — `incrementTenantUsage`, `getTenantUsageSummary`, `listActiveTenantsForPeriod`
+- `metrics-collector.ts` — fire-and-forget wrappers: `collectAiLatency`, `collectRetrievalMetric`, `collectAgentRunMetric`, `collectSystemMetric`
+- `metrics-health.ts` — `getPlatformHealthStatus`, `detectObservabilityAnomalies`, `getSystemMetricsSummary`
+
+### Instrumentation
+- `server/lib/ai/runner.ts` — `collectAiLatency()` called fire-and-forget after successful AI call
+- `server/lib/ai/retrieval-orchestrator.ts` — `collectRetrievalMetric()` called fire-and-forget before return
+
+### Admin routes (6 endpoints)
+- `GET /api/admin/metrics/system` — system-level metric summary
+- `GET /api/admin/metrics/ai` — AI latency/token/cost summary
+- `GET /api/admin/metrics/retrieval` — retrieval query summary
+- `GET /api/admin/metrics/agents` — agent run success/duration summary
+- `GET /api/admin/metrics/tenants` — active tenant usage for current period
+- `GET /api/admin/metrics/health` — full platform health dashboard
+
+### Invariants enforced (INV-OBS-1–6)
+INV-OBS-1: All metric writes are try/catch — never throw, never break primary workflows
+INV-OBS-2: Summary endpoints return aggregates only — no raw request or tenant data
+INV-OBS-3: Single metric insert < 2000ms overhead
+INV-OBS-4: request_id preserved in raw latency records for correlation
+INV-OBS-5: All queries are tenant-scoped — cross-tenant leakage impossible
+INV-OBS-6: Fire-and-forget wrappers (collectXxx) are synchronous callers — never awaited by AI code
+
+### RLS state after Phase 15
+- Tables with RLS: 166 (+5 from Phase 15, built on Phase 6's 113+13.x baseline)
+
+### Validation results
+60/60 scenarios — 178 assertions — ALL PASS (branch: feature/observability-platform)
