@@ -193,6 +193,7 @@ shared/
 | 31 | `feature/api-security-hardening` | API Security Hardening — 106/106 assertions pass |
 | 32 | `feature/platform-ops-console` | Platform Ops UI — 8 frontend pages (dashboard, tenants, jobs, webhooks, ai, billing, recovery, security) |
 | 33 | `feature/ai-operations-assistant` | AI Operations Assistant — ops_ai_audit_logs, 6 service files, gpt-4o-mini, advisory-only; 173/173 assertions pass |
+| 34 | `feature/internationalization` | Internationalization + DB Performance — locale columns on tenants, 6 composite indexes, locale-service, i18next (en+da), formatCurrency/formatDate utils; 146/146 assertions pass |
 
 ## AI Stack — Full Pipeline (runner.ts)
 
@@ -303,7 +304,8 @@ npm run db:push   # Sync schema to DB
 
 ## Current Status & Next TODO
 
-### Completed (Phase 33, commit cadf982, branch feature/ai-operations-assistant)
+### Completed (Phase 34, commit a0e20a6, branch feature/internationalization)
+- [x] Phase 34: Internationalization + DB Performance — locale columns, 6 composite indexes, i18next (en+da), 146/146 assertions pass
 - [x] Phase 33: AI Operations Assistant — gpt-4o-mini, ops_ai_audit_logs, 6 service files, advisory-only, 173/173 assertions pass
 - [x] Phase 32: Platform Ops UI — 8 ops frontend pages (dashboard, tenants, jobs, webhooks, ai, billing, recovery, security)
 - [x] Phase 31: API Security Hardening — 106/106 assertions pass
@@ -320,6 +322,7 @@ npm run db:push   # Sync schema to DB
 | `feature/backup-disaster-recovery` | 30 | 151/151 |
 | `feature/api-security-hardening` | 31 | 106/106 |
 | `feature/ai-operations-assistant` | 33 | 173/173 |
+| `feature/internationalization` | 34 | 146/146 |
 
 ## Phase 4P — Admin Pricing & Plan Management System (complete, branch: feature/admin-pricing-plan-management)
 
