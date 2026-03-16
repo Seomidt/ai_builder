@@ -7900,4 +7900,18 @@ export function registerAdminRoutes(app: Express): void {
       res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
     } catch (err) { res.status(500).json({ error: (err as Error).message }); }
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 36 — RELEASE INTEGRITY & DEPLOY HEALTH
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // GET /api/admin/platform/deploy-health
+  app.get("/api/admin/platform/deploy-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getDeployHealth } = await import("../lib/platform/deploy-health");
+      const report = await getDeployHealth();
+      res.json(report);
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
 }

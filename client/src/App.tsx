@@ -21,6 +21,7 @@ import OpsBilling from "@/pages/ops/billing";
 import OpsRecovery from "@/pages/ops/recovery";
 import OpsSecurity from "@/pages/ops/security";
 import OpsAssistant from "@/pages/ops/assistant";
+import OpsRelease from "@/pages/ops/release";
 
 function Router() {
   return (
@@ -45,6 +46,7 @@ function Router() {
         <Route path="/ops/recovery" component={OpsRecovery} />
         <Route path="/ops/security" component={OpsSecurity} />
         <Route path="/ops/assistant" component={OpsAssistant} />
+        <Route path="/ops/release" component={OpsRelease} />
 
         <Route component={NotFound} />
       </Switch>

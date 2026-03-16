@@ -1,20 +1,21 @@
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard, Building2, Cpu, Webhook,
-  BrainCircuit, CreditCard, ShieldAlert, RefreshCcw, Bot,
+  BrainCircuit, CreditCard, ShieldAlert, RefreshCcw, Bot, ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export const opsNavItems = [
-  { href: "/ops",            label: "Dashboard",   icon: LayoutDashboard },
-  { href: "/ops/tenants",    label: "Tenants",     icon: Building2       },
-  { href: "/ops/jobs",       label: "Jobs",        icon: Cpu             },
-  { href: "/ops/webhooks",   label: "Webhooks",    icon: Webhook         },
-  { href: "/ops/ai",         label: "AI Govern",   icon: BrainCircuit    },
-  { href: "/ops/billing",    label: "Billing",     icon: CreditCard      },
-  { href: "/ops/recovery",   label: "Recovery",    icon: RefreshCcw      },
-  { href: "/ops/security",   label: "Security",    icon: ShieldAlert     },
-  { href: "/ops/assistant",  label: "AI Assistant", icon: Bot            },
+  { href: "/ops",            label: "Dashboard",      icon: LayoutDashboard },
+  { href: "/ops/tenants",    label: "Tenants",        icon: Building2       },
+  { href: "/ops/jobs",       label: "Jobs",           icon: Cpu             },
+  { href: "/ops/webhooks",   label: "Webhooks",       icon: Webhook         },
+  { href: "/ops/ai",         label: "AI Govern",      icon: BrainCircuit    },
+  { href: "/ops/billing",    label: "Billing",        icon: CreditCard      },
+  { href: "/ops/recovery",   label: "Recovery",       icon: RefreshCcw      },
+  { href: "/ops/security",   label: "Security",       icon: ShieldAlert     },
+  { href: "/ops/assistant",  label: "AI Assistant",   icon: Bot             },
+  { href: "/ops/release",    label: "Release Health", icon: ShieldCheck     },
 ];
 
 export function OpsNav() {
