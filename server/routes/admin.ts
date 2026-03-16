@@ -6599,4 +6599,38 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── Phase 30 Final — Platform Safety Endpoints ──────────────────────────────
+
+  // Route 30F-1: GET /api/admin/safety/rate-limit-state
+  // Returns current platform-wide rate limiter state: active buckets, violation count, top violators.
+  app.get("/api/admin/safety/rate-limit-state", async (req: Request, res: Response) => {
+    try {
+      const { summarizeRateLimiter, getRecentViolations } = await import("../lib/security/global-rate-limiter");
+      const summary    = summarizeRateLimiter();
+      const violations = getRecentViolations(20);
+      res.json({
+        summary,
+        recentViolations: violations,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 30F-2: GET /api/admin/safety/restart-recovery-status
+  // Returns current queue health: stalled jobs, pending retries, overall health grade.
+  app.get("/api/admin/safety/restart-recovery-status", async (req: Request, res: Response) => {
+    try {
+      const { summarizeRestartState } = await import("../lib/recovery/platform-restart-recovery");
+      const state = await summarizeRestartState();
+      res.json({
+        ...state,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
