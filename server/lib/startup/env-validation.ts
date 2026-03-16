@@ -30,6 +30,11 @@ export const ENV_VAR_REGISTRY: EnvVar[] = [
   { name: "WEBHOOK_SIGNING_SECRET",     required: "recommended", description: "Webhook payload signing secret" },
   { name: "SESSION_SECRET",             required: "recommended", description: "HTTP session signing secret" },
   { name: "GITHUB_TOKEN",              required: "optional",    description: "GitHub token for repo operations" },
+  // Phase 29 — Cloudflare R2 backup storage
+  { name: "R2_ACCOUNT_ID",             required: "optional",    description: "Cloudflare R2 account ID for backup storage" },
+  { name: "R2_ACCESS_KEY_ID",          required: "optional",    description: "Cloudflare R2 access key ID" },
+  { name: "R2_SECRET_ACCESS_KEY",      required: "optional",    description: "Cloudflare R2 secret access key" },
+  { name: "R2_BUCKET_NAME",            required: "optional",    description: "Cloudflare R2 bucket name (default: ai-platform-backups)" },
 ];
 
 // ── Validation logic ──────────────────────────────────────────────────────────

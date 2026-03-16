@@ -7611,4 +7611,156 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── Phase 29 — Backup & Disaster Recovery ─────────────────────────────────
+
+  // GET /api/admin/recovery/backup-status
+  app.get("/api/admin/recovery/backup-status", async (_req: Request, res: Response) => {
+    try {
+      const { getBackupHealthReport }  = await import("../lib/backup/backup-validator");
+      const { getBackupPolicySummary } = await import("../lib/backup/backup-policy");
+      const { validateR2Config }       = await import("../lib/backup/r2-backup");
+
+      const [health, policy, r2] = await Promise.all([
+        getBackupHealthReport(),
+        getBackupPolicySummary(),
+        Promise.resolve(validateR2Config()),
+      ]);
+
+      res.json({
+        health,
+        policy: {
+          totalPolicies:   policy.totalPolicies,
+          enabledPolicies: policy.enabledPolicies,
+          retentionRules:  policy.retentionRules,
+        },
+        r2: {
+          configured: r2.valid,
+          missing:    r2.missing,
+        },
+        checkedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/recovery/trigger-backup
+  app.post("/api/admin/recovery/trigger-backup", async (req: Request, res: Response) => {
+    try {
+      const { runDbExport }    = await import("../../../scripts/db-export");
+      const { uploadBackup }   = await import("../lib/backup/r2-backup");
+
+      const backupType = req.body?.type ?? "daily";
+      const dryRun     = req.body?.dryRun === true;
+
+      const exportResult = await runDbExport(undefined, dryRun);
+      if (!exportResult.success && !dryRun) {
+        return res.status(500).json({ error: exportResult.error ?? "Export failed", exportResult });
+      }
+
+      let uploadResult = null;
+      if (!dryRun && exportResult.outputPath) {
+        uploadResult = await uploadBackup(exportResult.outputPath, backupType);
+      }
+
+      res.json({ exportResult, uploadResult, dryRun, triggeredAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/recovery/restore-tenant
+  app.post("/api/admin/recovery/restore-tenant", async (req: Request, res: Response) => {
+    try {
+      const tenantId = req.body?.tenantId as string | undefined;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+
+      const { planTenantRestore }             = await import("../lib/backup/restore-tools");
+      const { checkTenantRestoreEligibility } = await import("../lib/backup/restore-tools");
+
+      const [plan, eligibility] = await Promise.all([
+        planTenantRestore(tenantId, true),
+        checkTenantRestoreEligibility(tenantId),
+      ]);
+
+      res.json({ plan, eligibility, tenantId, note: "Dry-run plan only — no data modified" });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/recovery/restore-table
+  app.post("/api/admin/recovery/restore-table", async (req: Request, res: Response) => {
+    try {
+      const tableName = req.body?.tableName as string | undefined;
+      if (!tableName) return res.status(400).json({ error: "tableName required" });
+
+      const { planTableRestore, checkTableRestoreEligibility } = await import("../lib/backup/restore-tools");
+
+      const [plan, eligibility] = await Promise.all([
+        planTableRestore(tableName, true),
+        checkTableRestoreEligibility(tableName),
+      ]);
+
+      res.json({ plan, eligibility, tableName, note: "Dry-run plan only — no data modified" });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/recovery/job-recovery
+  app.post("/api/admin/recovery/job-recovery", async (req: Request, res: Response) => {
+    try {
+      const { runJobRecovery, getQueueHealthSnapshot } = await import("../lib/recovery/job-recovery");
+
+      const dryRun              = req.body?.dryRun !== false;
+      const stallThresholdMins  = parseInt(req.body?.stallThresholdMinutes ?? "30", 10);
+
+      const [summary, snapshot] = await Promise.all([
+        runJobRecovery(stallThresholdMins, dryRun),
+        getQueueHealthSnapshot(stallThresholdMins),
+      ]);
+
+      res.json({ summary, snapshot, dryRun, checkedAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/recovery/webhook-replay
+  app.post("/api/admin/recovery/webhook-replay", async (req: Request, res: Response) => {
+    try {
+      const { replayFailedDeliveries, getWebhookReplayHealth } = await import("../lib/recovery/webhook-replay");
+
+      const dryRun   = req.body?.dryRun !== false;
+      const tenantId = req.body?.tenantId as string | undefined;
+      const limit    = parseInt(req.body?.limit ?? "50", 10);
+
+      const [result, health] = await Promise.all([
+        replayFailedDeliveries(tenantId, limit, dryRun),
+        getWebhookReplayHealth(),
+      ]);
+
+      res.json({ result, health, dryRun, checkedAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/recovery/stripe-reconcile
+  app.get("/api/admin/recovery/stripe-reconcile", async (_req: Request, res: Response) => {
+    try {
+      const { runStripeReconciliation, getSubscriptionHealthSummary } = await import("../lib/recovery/stripe-reconcile");
+
+      const [report, health] = await Promise.all([
+        runStripeReconciliation(),
+        getSubscriptionHealthSummary(),
+      ]);
+
+      res.json({ report, health, checkedAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }

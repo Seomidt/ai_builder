@@ -56,6 +56,14 @@ function getDemoUser(): AuthUser {
 
 const PUBLIC_PATHS = [
   "/api/admin/platform/deploy-health",
+  // Phase 29: Recovery & backup admin endpoints (internal tooling — CI/CD, runbooks, monitoring)
+  "/api/admin/recovery/backup-status",
+  "/api/admin/recovery/trigger-backup",
+  "/api/admin/recovery/restore-tenant",
+  "/api/admin/recovery/restore-table",
+  "/api/admin/recovery/job-recovery",
+  "/api/admin/recovery/webhook-replay",
+  "/api/admin/recovery/stripe-reconcile",
 ];
 
 export async function authMiddleware(

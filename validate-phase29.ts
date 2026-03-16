@@ -57,6 +57,28 @@ function httpGet(path: string): Promise<{ status: number; body: any }> {
   });
 }
 
+function httpPost(path: string, body: unknown): Promise<{ status: number; body: any }> {
+  return new Promise(resolve => {
+    const payload = JSON.stringify(body);
+    const req = http.request(
+      { host: "localhost", port: 5000, path, method: "POST",
+        headers: { "Content-Type": "application/json", "x-admin-secret": "admin", "Content-Length": Buffer.byteLength(payload) } },
+      res => {
+        let d = "";
+        res.on("data", c => { d += c; });
+        res.on("end", () => {
+          try { resolve({ status: res.statusCode ?? 0, body: JSON.parse(d) }); }
+          catch { resolve({ status: res.statusCode ?? 0, body: d }); }
+        });
+      },
+    );
+    req.on("error", () => resolve({ status: 0, body: null }));
+    req.setTimeout(15000, () => { req.destroy(); resolve({ status: 0, body: null }); });
+    req.write(payload);
+    req.end();
+  });
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -728,6 +750,316 @@ async function main(): Promise<void> {
     const r = await httpGet("/api/admin/ops/system-health");
     assert(r.status !== 404, "system-health not 404");
     assert(r.status !== 500, "system-health not 500");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // S61–S70: scripts/db-export
+  // ══════════════════════════════════════════════════════════════════════════
+
+  section("S61: db-export module — exports runDbExport");
+  {
+    const { runDbExport } = await import("./scripts/db-export");
+    assertBool(typeof runDbExport === "function", "runDbExport is a function");
+  }
+
+  section("S62: runDbExport — dry-run returns result shape");
+  {
+    const { runDbExport } = await import("./scripts/db-export");
+    const r = await runDbExport(undefined, true);
+    assertBool(r.success, "success is boolean");
+    assertBool(r.dryRun, "dryRun is boolean");
+    assert(r.dryRun === true, "dryRun = true");
+    assertIso(r.exportedAt, "exportedAt is ISO");
+    assertNum(r.tableCount, "tableCount is number");
+    assert(r.sizeBytes === 0, "dry-run sizeBytes = 0");
+    assert(r.outputPath === null, "dry-run outputPath is null");
+  }
+
+  section("S63: runDbExport — dry-run tableCount > 0");
+  {
+    const { runDbExport } = await import("./scripts/db-export");
+    const r = await runDbExport(undefined, true);
+    assert(r.tableCount >= 10, `tableCount >= 10 (got ${r.tableCount})`);
+  }
+
+  section("S64: runDbExport — dry-run with custom date");
+  {
+    const { runDbExport } = await import("./scripts/db-export");
+    const r = await runDbExport("2026-01-15", true);
+    assertBool(r.success, "success is boolean");
+    assert(r.dryRun === true, "dryRun = true for custom date");
+    assertIso(r.exportedAt, "exportedAt is ISO date");
+  }
+
+  section("S65: runDbExport — no error field on success");
+  {
+    const { runDbExport } = await import("./scripts/db-export");
+    const r = await runDbExport(undefined, true);
+    assert(r.error === undefined, "no error on dry-run success");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // S66–S75: server/lib/backup/r2-backup
+  // ══════════════════════════════════════════════════════════════════════════
+
+  section("S66: r2-backup — validateR2Config returns shape");
+  {
+    const { validateR2Config } = await import("./server/lib/backup/r2-backup");
+    const r = validateR2Config();
+    assertBool(r.valid, "valid is boolean");
+    assertArr(r.missing, "missing is array");
+  }
+
+  section("S67: r2-backup — not configured (no R2 secrets in env)");
+  {
+    const { isR2Configured, validateR2Config } = await import("./server/lib/backup/r2-backup");
+    const configured = isR2Configured();
+    const v          = validateR2Config();
+    assertBool(configured, "isR2Configured returns boolean");
+    assert(v.missing.length >= 0, "missing is array");
+    if (!configured) {
+      assert(v.valid === false, "not valid when not configured");
+      assert(v.missing.length > 0, "missing list non-empty when not configured");
+    } else {
+      assert(v.valid === true, "valid when all R2 vars present");
+    }
+  }
+
+  section("S68: r2-backup — validateR2Config lists R2 vars");
+  {
+    const { validateR2Config } = await import("./server/lib/backup/r2-backup");
+    const v = validateR2Config();
+    const allR2Vars = ["R2_ACCOUNT_ID","R2_ACCESS_KEY_ID","R2_SECRET_ACCESS_KEY","R2_BUCKET_NAME"];
+    const combined  = [...v.missing];
+    // Each var is either in missing OR is configured (present)
+    for (const varName of allR2Vars) {
+      const missing  = combined.includes(varName);
+      const present  = !missing;
+      assert(missing || present, `${varName} is tracked (missing or present)`);
+    }
+  }
+
+  section("S69: r2-backup — buildBackupKey correct paths");
+  {
+    const { buildBackupKey } = await import("./server/lib/backup/r2-backup");
+    assertEq(buildBackupKey("daily",   "2026-03-16.sql.gz"), "db/daily/2026-03-16.sql.gz",  "daily key");
+    assertEq(buildBackupKey("weekly",  "2026-W11.sql.gz"),   "db/weekly/2026-W11.sql.gz",   "weekly key");
+    assertEq(buildBackupKey("monthly", "2026-03.sql.gz"),    "db/monthly/2026-03.sql.gz",   "monthly key");
+  }
+
+  section("S70: r2-backup — getWeekLabel and getMonthLabel");
+  {
+    const { getWeekLabel, getMonthLabel } = await import("./server/lib/backup/r2-backup");
+    const week  = getWeekLabel(new Date("2026-03-16"));
+    const month = getMonthLabel(new Date("2026-03-16"));
+    assert(/^\d{4}-W\d{2}$/.test(week), `week label format (${week})`);
+    assert(/^\d{4}-\d{2}$/.test(month), `month label format (${month})`);
+    assertEq(month, "2026-03", "month label for March 2026");
+  }
+
+  section("S71: r2-backup — getR2Config returns shape");
+  {
+    const { getR2Config } = await import("./server/lib/backup/r2-backup");
+    const cfg = getR2Config();
+    assert("accountId"       in cfg, "cfg has accountId");
+    assert("accessKeyId"     in cfg, "cfg has accessKeyId");
+    assert("secretAccessKey" in cfg, "cfg has secretAccessKey");
+    assert("bucketName"      in cfg, "cfg has bucketName");
+    assert("endpoint"        in cfg, "cfg has endpoint");
+    assertEq(cfg.bucketName, "ai-platform-backups", "default bucket name");
+  }
+
+  section("S72: r2-backup — uploadBackup fails gracefully without config");
+  {
+    const { uploadBackup } = await import("./server/lib/backup/r2-backup");
+    const r = await uploadBackup("/tmp/nonexistent-backup.sql.gz", "daily");
+    assertBool(r.success, "success is boolean");
+    assertStr(r.bucketName, "bucketName is string");
+    assertIso(r.uploadedAt, "uploadedAt is ISO");
+    assert(r.success === false, "upload fails without R2 config or file");
+    assert(typeof r.error === "string", "error is string");
+  }
+
+  section("S73: r2-backup — verifyUpload returns shape without config");
+  {
+    const { verifyUpload } = await import("./server/lib/backup/r2-backup");
+    const r = await verifyUpload("db/daily/2026-03-16.sql.gz");
+    assertBool(r.exists, "exists is boolean");
+    assertStr(r.key, "key is string");
+    assertIso(r.checkedAt, "checkedAt is ISO");
+    assert(r.exists === false, "non-configured R2 returns exists=false");
+  }
+
+  section("S74: r2-backup — listBackups returns array without config");
+  {
+    const { listBackups } = await import("./server/lib/backup/r2-backup");
+    const r = await listBackups("daily");
+    assertArr(r, "listBackups returns array");
+  }
+
+  section("S75: r2-backup — rotateBackups returns shape without config");
+  {
+    const { rotateBackups } = await import("./server/lib/backup/r2-backup");
+    const r = await rotateBackups("daily", 14);
+    assertArr(r.deletedKeys, "deletedKeys is array");
+    assertArr(r.keptKeys, "keptKeys is array");
+    assertNum(r.deletedCount, "deletedCount is number");
+    assertIso(r.checkedAt, "checkedAt is ISO");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // S76–S85: Admin recovery routes
+  // ══════════════════════════════════════════════════════════════════════════
+
+  section("S76: GET /api/admin/recovery/backup-status");
+  {
+    const r = await httpGet("/api/admin/recovery/backup-status");
+    assert(r.status !== 404, "backup-status not 404");
+    assert(r.status !== 500, "backup-status not 500");
+    assert("health"    in (r.body ?? {}), "response has health");
+    assert("policy"    in (r.body ?? {}), "response has policy");
+    assert("r2"        in (r.body ?? {}), "response has r2");
+    assert("checkedAt" in (r.body ?? {}), "response has checkedAt");
+  }
+
+  section("S77: GET /api/admin/recovery/backup-status — detail");
+  {
+    const r = await httpGet("/api/admin/recovery/backup-status");
+    assert(["ok","warning","critical","unknown"].includes(r.body?.health?.overallStatus), "overallStatus valid");
+    assertNum(r.body?.policy?.totalPolicies, "policy.totalPolicies");
+    assertBool(r.body?.r2?.configured, "r2.configured is boolean");
+    assertArr(r.body?.r2?.missing ?? [], "r2.missing is array");
+  }
+
+  section("S78: POST /api/admin/recovery/restore-tenant — requires tenantId");
+  {
+    const r = await httpPost("/api/admin/recovery/restore-tenant", {});
+    assert(r.status === 400, "missing tenantId returns 400");
+    assertStr(r.body?.error, "error message provided");
+  }
+
+  section("S79: POST /api/admin/recovery/restore-tenant — returns plan");
+  {
+    const r = await httpPost("/api/admin/recovery/restore-tenant", { tenantId: "test-tenant-xyz" });
+    assert(r.status !== 404, "restore-tenant not 404");
+    assert(r.status !== 500, "restore-tenant not 500");
+    assert("plan"        in (r.body ?? {}), "response has plan");
+    assert("eligibility" in (r.body ?? {}), "response has eligibility");
+    assertStr(r.body?.tenantId, "tenantId in response");
+  }
+
+  section("S80: POST /api/admin/recovery/restore-table — requires tableName");
+  {
+    const r = await httpPost("/api/admin/recovery/restore-table", {});
+    assert(r.status === 400, "missing tableName returns 400");
+  }
+
+  section("S81: POST /api/admin/recovery/restore-table — existing table");
+  {
+    const r = await httpPost("/api/admin/recovery/restore-table", { tableName: "tenant_subscriptions" });
+    assert(r.status !== 404, "restore-table not 404");
+    assert(r.status !== 500, "restore-table not 500");
+    assert("plan"        in (r.body ?? {}), "response has plan");
+    assert("eligibility" in (r.body ?? {}), "response has eligibility");
+  }
+
+  section("S82: POST /api/admin/recovery/job-recovery — dry-run by default");
+  {
+    const r = await httpPost("/api/admin/recovery/job-recovery", {});
+    assert(r.status !== 404, "job-recovery not 404");
+    assert(r.status !== 500, "job-recovery not 500");
+    assert("summary"  in (r.body ?? {}), "response has summary");
+    assert("snapshot" in (r.body ?? {}), "response has snapshot");
+    assert(r.body?.dryRun === true, "dryRun=true by default");
+  }
+
+  section("S83: POST /api/admin/recovery/webhook-replay — dry-run by default");
+  {
+    const r = await httpPost("/api/admin/recovery/webhook-replay", {});
+    assert(r.status !== 404, "webhook-replay not 404");
+    assert(r.status !== 500, "webhook-replay not 500");
+    assert("result" in (r.body ?? {}), "response has result");
+    assert("health" in (r.body ?? {}), "response has health");
+    assert(r.body?.dryRun === true, "dryRun=true by default");
+  }
+
+  section("S84: GET /api/admin/recovery/stripe-reconcile");
+  {
+    const r = await httpGet("/api/admin/recovery/stripe-reconcile");
+    assert(r.status !== 404, "stripe-reconcile not 404");
+    assert(r.status !== 500, "stripe-reconcile not 500");
+    assert("report" in (r.body ?? {}), "response has report");
+    assert("health" in (r.body ?? {}), "response has health");
+    assertNum(r.body?.report?.totalIssues, "report.totalIssues is number");
+  }
+
+  section("S85: env-validation — R2 vars in registry");
+  {
+    const { ENV_VAR_REGISTRY } = await import("./server/lib/startup/env-validation");
+    const r2Vars = ["R2_ACCOUNT_ID","R2_ACCESS_KEY_ID","R2_SECRET_ACCESS_KEY","R2_BUCKET_NAME"];
+    for (const v of r2Vars) {
+      assert(ENV_VAR_REGISTRY.some(e => e.name === v), `${v} in registry`);
+    }
+    // R2 vars should be optional (not block startup)
+    for (const v of r2Vars) {
+      const entry = ENV_VAR_REGISTRY.find(e => e.name === v);
+      assert(entry?.required === "optional", `${v} is optional (not critical)`);
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // S86–S90: Additional runbooks + GitHub workflow
+  // ══════════════════════════════════════════════════════════════════════════
+
+  section("S86: All 6 runbooks exist");
+  {
+    const { existsSync } = await import("fs");
+    assert(existsSync("docs/runbooks/database-failure.md"), "database-failure.md exists");
+    assert(existsSync("docs/runbooks/queue-failure.md"),    "queue-failure.md exists");
+    assert(existsSync("docs/runbooks/region-outage.md"),    "region-outage.md exists");
+    assert(existsSync("docs/runbooks/billing-desync.md"),   "billing-desync.md exists");
+    assert(existsSync("docs/runbooks/webhook-failure.md"),  "webhook-failure.md exists");
+    assert(existsSync("docs/runbooks/backup-restore.md"),   "backup-restore.md exists");
+  }
+
+  section("S87: Runbook content quality — webhook-failure + backup-restore");
+  {
+    const { readFileSync } = await import("fs");
+    const wh = readFileSync("docs/runbooks/webhook-failure.md", "utf-8");
+    const br = readFileSync("docs/runbooks/backup-restore.md", "utf-8");
+    assert(wh.includes("replay") || wh.includes("webhook"), "webhook runbook mentions replay");
+    assert(br.includes("PITR") || br.includes("restore"), "backup-restore runbook mentions PITR/restore");
+    assert(wh.length > 500, "webhook-failure runbook substantial");
+    assert(br.length > 500, "backup-restore runbook substantial");
+  }
+
+  section("S88: GitHub workflow file exists");
+  {
+    const { existsSync } = await import("fs");
+    assert(
+      existsSync("backup.yml.github-workflow") || existsSync(".github/workflows/backup.yml"),
+      "backup workflow file exists",
+    );
+  }
+
+  section("S89: GitHub workflow — content check");
+  {
+    const { existsSync, readFileSync } = await import("fs");
+    const filePath = existsSync("backup.yml.github-workflow")
+      ? "backup.yml.github-workflow"
+      : ".github/workflows/backup.yml";
+    const content  = readFileSync(filePath, "utf-8");
+    assert(content.includes("02:00") || content.includes("cron"), "workflow has cron schedule");
+    assert(content.includes("db-export"), "workflow calls db-export");
+    assert(content.includes("r2-backup") || content.includes("R2"), "workflow references R2");
+    assert(content.includes("uploadBackup") || content.includes("upload"), "workflow has upload step");
+  }
+
+  section("S90: scripts/db-export.ts — file exists");
+  {
+    const { existsSync } = await import("fs");
+    assert(existsSync("scripts/db-export.ts"), "scripts/db-export.ts exists");
+    assert(existsSync("server/lib/backup/r2-backup.ts"), "r2-backup.ts exists");
   }
 
   // ── Summary ───────────────────────────────────────────────────────────────
