@@ -714,6 +714,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Phase 4P — Admin Pricing & Plan Management routes
   registerAdminRoutes(app);
 
+  // Phase 37 — Secure Authentication Platform routes
+  const { registerAuthPlatformRoutes } = await import("./routes/auth-platform");
+  registerAuthPlatformRoutes(app);
+
   return httpServer;
 }
 

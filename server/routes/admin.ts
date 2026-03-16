@@ -7914,4 +7914,143 @@ export function registerAdminRoutes(app: Express): void {
       res.json(report);
     } catch (err) { res.status(500).json({ error: (err as Error).message }); }
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 37 — AUTH SECURITY ADMIN ENDPOINTS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // GET /api/admin/auth/overview
+  app.get("/api/admin/auth/overview", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const since24h = new Date(Date.now() - 24 * 3600_000).toISOString();
+      const since7d  = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
+
+      const [failRes, sessionRes, mfaRes, eventRes] = await Promise.all([
+        db.execute<any>(sql`
+          SELECT
+            COUNT(*) FILTER (WHERE success = FALSE AND created_at >= ${since24h}::timestamptz)::int AS failures_24h,
+            COUNT(*) FILTER (WHERE success = TRUE  AND created_at >= ${since24h}::timestamptz)::int AS logins_24h,
+            COUNT(*) FILTER (WHERE success = FALSE AND created_at >= ${since7d}::timestamptz)::int  AS failures_7d
+          FROM auth_login_attempts
+        `),
+        db.execute<any>(sql`
+          SELECT
+            COUNT(*) FILTER (WHERE revoked_at IS NULL AND expires_at > NOW())::int AS active_sessions,
+            COUNT(*) FILTER (WHERE revoked_at IS NOT NULL)::int                   AS revoked_sessions
+          FROM auth_sessions
+        `),
+        db.execute<any>(sql`
+          SELECT
+            COUNT(*)::int                               AS total_users_with_mfa,
+            COUNT(*) FILTER (WHERE enabled = TRUE)::int AS mfa_enabled
+          FROM auth_mfa_totp
+        `),
+        db.execute<any>(sql`
+          SELECT COUNT(*)::int AS events_24h FROM auth_security_events
+          WHERE created_at >= ${since24h}::timestamptz
+        `),
+      ]);
+
+      res.json({
+        failures24h:     Number(failRes.rows[0]?.failures_24h ?? 0),
+        logins24h:       Number(failRes.rows[0]?.logins_24h   ?? 0),
+        failures7d:      Number(failRes.rows[0]?.failures_7d  ?? 0),
+        activeSessions:  Number(sessionRes.rows[0]?.active_sessions  ?? 0),
+        revokedSessions: Number(sessionRes.rows[0]?.revoked_sessions ?? 0),
+        mfaEnabled:      Number(mfaRes.rows[0]?.mfa_enabled ?? 0),
+        totalWithMfa:    Number(mfaRes.rows[0]?.total_users_with_mfa ?? 0),
+        securityEvents24h: Number(eventRes.rows[0]?.events_24h ?? 0),
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/auth/login-failures
+  app.get("/api/admin/auth/login-failures", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const since = new Date(Date.now() - windowHours * 3600_000).toISOString();
+
+      const res2 = await db.execute<any>(sql`
+        SELECT email_hash, ip_address, failure_reason, COUNT(*)::int AS attempts, MAX(created_at) AS last_attempt
+        FROM auth_login_attempts
+        WHERE success = FALSE AND created_at >= ${since}::timestamptz
+        GROUP BY email_hash, ip_address, failure_reason
+        ORDER BY attempts DESC
+        LIMIT 50
+      `);
+      res.json({ failures: res2.rows, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/auth/suspicious-events
+  app.get("/api/admin/auth/suspicious-events", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const since = new Date(Date.now() - windowHours * 3600_000).toISOString();
+
+      const res2 = await db.execute<any>(sql`
+        SELECT id, tenant_id, user_id, event_type, severity, ip_address, metadata_json, created_at
+        FROM auth_security_events
+        WHERE severity IN ('warning', 'critical')
+          AND created_at >= ${since}::timestamptz
+        ORDER BY created_at DESC
+        LIMIT 100
+      `);
+      res.json({ events: res2.rows, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/auth/sessions
+  app.get("/api/admin/auth/sessions", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const res2 = await db.execute<any>(sql`
+        SELECT id, user_id, tenant_id, device_label, ip_address, user_agent,
+               created_at, last_seen_at, expires_at, revoked_at, revoked_reason
+        FROM auth_sessions
+        WHERE revoked_at IS NULL AND expires_at > NOW()
+        ORDER BY last_seen_at DESC
+        LIMIT 100
+      `);
+      res.json({ sessions: res2.rows, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/auth/mfa-adoption
+  app.get("/api/admin/auth/mfa-adoption", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const res2 = await db.execute<any>(sql`
+        SELECT
+          COUNT(*)::int                               AS total_enrolled,
+          COUNT(*) FILTER (WHERE enabled = TRUE)::int AS enabled,
+          COUNT(*) FILTER (WHERE enabled = FALSE)::int AS pending_verification
+        FROM auth_mfa_totp
+      `);
+      const r = res2.rows[0] ?? {};
+      const total   = Number(r.total_enrolled ?? 0);
+      const enabled = Number(r.enabled        ?? 0);
+      res.json({
+        totalEnrolled: total,
+        enabled,
+        pendingVerification: Number(r.pending_verification ?? 0),
+        adoptionPct: total > 0 ? Math.round(enabled / total * 100) : 0,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
 }

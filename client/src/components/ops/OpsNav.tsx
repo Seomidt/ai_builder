@@ -1,7 +1,7 @@
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard, Building2, Cpu, Webhook,
-  BrainCircuit, CreditCard, ShieldAlert, RefreshCcw, Bot, ShieldCheck,
+  BrainCircuit, CreditCard, ShieldAlert, RefreshCcw, Bot, ShieldCheck, KeyRound,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -16,6 +16,7 @@ export const opsNavItems = [
   { href: "/ops/security",   label: "Security",       icon: ShieldAlert     },
   { href: "/ops/assistant",  label: "AI Assistant",   icon: Bot             },
   { href: "/ops/release",    label: "Release Health", icon: ShieldCheck     },
+  { href: "/ops/auth",       label: "Auth Security",  icon: KeyRound        },
 ];
 
 export function OpsNav() {
