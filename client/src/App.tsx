@@ -12,11 +12,20 @@ import RunDetail from "@/pages/run-detail";
 import Integrations from "@/pages/integrations";
 import Settings from "@/pages/settings";
 import NotFound from "@/pages/not-found";
+import OpsDashboard from "@/pages/ops/dashboard";
+import OpsTenants from "@/pages/ops/tenants";
+import OpsJobs from "@/pages/ops/jobs";
+import OpsWebhooks from "@/pages/ops/webhooks";
+import OpsAi from "@/pages/ops/ai";
+import OpsBilling from "@/pages/ops/billing";
+import OpsRecovery from "@/pages/ops/recovery";
+import OpsSecurity from "@/pages/ops/security";
 
 function Router() {
   return (
     <AppShell>
       <Switch>
+        {/* Platform routes */}
         <Route path="/" component={Dashboard} />
         <Route path="/projects" component={Projects} />
         <Route path="/architectures" component={Architectures} />
@@ -24,6 +33,17 @@ function Router() {
         <Route path="/runs/:id" component={RunDetail} />
         <Route path="/integrations" component={Integrations} />
         <Route path="/settings" component={Settings} />
+
+        {/* Ops Console routes */}
+        <Route path="/ops" component={OpsDashboard} />
+        <Route path="/ops/tenants" component={OpsTenants} />
+        <Route path="/ops/jobs" component={OpsJobs} />
+        <Route path="/ops/webhooks" component={OpsWebhooks} />
+        <Route path="/ops/ai" component={OpsAi} />
+        <Route path="/ops/billing" component={OpsBilling} />
+        <Route path="/ops/recovery" component={OpsRecovery} />
+        <Route path="/ops/security" component={OpsSecurity} />
+
         <Route component={NotFound} />
       </Switch>
     </AppShell>
