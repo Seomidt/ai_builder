@@ -1,170 +1,173 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  LayoutDashboard, Activity, Building2, ShieldAlert,
-  Cpu, Webhook, BrainCircuit, AlertTriangle,
+  Activity, AlertTriangle, CheckCircle2, Clock,
+  Server, ShieldAlert, Webhook, Zap, LayoutDashboard,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
 import { OpsNav } from "@/components/ops/OpsNav";
+import { MetricCard } from "@/components/ops/MetricCard";
+import { StatusPill } from "@/components/ops/StatusPill";
+import { TimeRangeFilter, TIME_RANGE_OPTIONS } from "@/components/ops/TimeRangeFilter";
+import { TrendChart } from "@/components/ops/TrendChart";
 
-interface PlatformHealth {
-  status?: string;
-  services?: { name: string; status: string; latencyMs?: number }[];
-  queueDepth?: number;
-  errorRate?: number;
-  requestsPerMinute?: number;
-  webhookFailureRate?: number;
-  aiTokenUsage?: number;
-  activeTenants?: number;
-  retrievedAt?: string;
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, string> = {
-    healthy:  "bg-green-500/15 text-green-400 border-green-500/25",
-    degraded: "bg-secondary/15 text-secondary border-secondary/25",
-    critical: "bg-destructive/15 text-destructive border-destructive/25",
-    unknown:  "bg-muted text-muted-foreground border-border",
+interface PhealthResponse {
+  summary: {
+    overallStatus: string;
+    jobsHealth:    { total: number; failed: number; stalled: number; failureRate: number };
+    webhookHealth: { total: number; failed: number; pending: number; failureRate: number };
+    latencyHealth: { p50Ms: number; p95Ms: number; p99Ms: number; sampleCount: number };
+    securityHealth:{ violations: number; recentEvents: number };
+    tenantHealth:  { total: number; active: number; suspended: number };
+    queueDepth:    number;
+    windowHours:   number;
   };
-  return (
-    <Badge variant="outline" className={`text-xs ${map[status] ?? map.unknown}`}>
-      {status}
-    </Badge>
-  );
+  explanation: { summary: string; issues: string[]; recommendations: string[] };
 }
 
-function MetricCard({ label, value, icon: Icon, subtext, testId }: {
-  label: string; value: string | number; icon: React.ElementType; subtext?: string; testId: string;
-}) {
-  return (
-    <Card className="bg-card border-card-border" data-testid={`ops-metric-${testId}`}>
-      <CardContent className="pt-5">
-        <div className="flex items-center gap-2 mb-2">
-          <Icon className="w-4 h-4 text-destructive" />
-          <p className="text-xs text-muted-foreground">{label}</p>
-        </div>
-        <p className="text-2xl font-bold" data-testid={`ops-metric-value-${testId}`}>{value}</p>
-        {subtext && <p className="text-xs text-muted-foreground mt-0.5">{subtext}</p>}
-      </CardContent>
-    </Card>
-  );
+interface TrendResponse {
+  trend: {
+    points: { bucket: string; failedJobs: number; failedWebhooks: number; avgLatencyMs: number }[];
+  };
 }
 
-export default function OpsDashboard() {
-  const { data, isLoading } = useQuery<PlatformHealth>({
-    queryKey: ["/api/admin/platform/health"],
+export default function PlatformHealthDashboard() {
+  const [windowHours, setWindowHours] = useState("24");
+
+  const { data, isLoading, isError } = useQuery<PhealthResponse>({
+    queryKey: ["/api/admin/analytics/platform-health", windowHours],
+    queryFn: () =>
+      fetch(`/api/admin/analytics/platform-health?windowHours=${windowHours}`, { credentials: "include" })
+        .then(r => r.json()),
+    refetchInterval: 60000,
   });
 
-  const statusColor = (data?.status ?? "unknown") === "healthy"
-    ? "border-green-500/30 bg-green-500/5"
-    : "border-secondary/30 bg-secondary/5";
+  const { data: trendData, isLoading: trendLoading } = useQuery<TrendResponse>({
+    queryKey: ["/api/admin/analytics/platform-health/trend", windowHours],
+    queryFn: () =>
+      fetch(`/api/admin/analytics/platform-health/trend?windowHours=${windowHours}`, { credentials: "include" })
+        .then(r => r.json()),
+    refetchInterval: 60000,
+  });
+
+  const s  = data?.summary;
+  const ex = data?.explanation;
+  const trendPoints = trendData?.trend?.points ?? [];
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex min-h-screen bg-background">
       <OpsNav />
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-6xl">
-        {/* Header */}
+      <main className="flex-1 p-6 space-y-6 max-w-6xl">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-semibold text-foreground flex items-center gap-2">
+            <h1 className="text-xl font-semibold flex items-center gap-2" data-testid="page-title">
               <LayoutDashboard className="w-5 h-5 text-destructive" />
-              Platform Operations Console
+              Platform Health
             </h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              Internal platform-wide monitoring — operator access only
-            </p>
+            <p className="text-sm text-muted-foreground mt-0.5">System-wide operational health overview</p>
           </div>
-          {!isLoading && (
-            <div className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border ${statusColor}`} data-testid="ops-system-status">
-              <Activity className="w-3.5 h-3.5 text-green-400" />
-              <span className="text-xs font-medium">System {data?.status ?? "unknown"}</span>
-            </div>
-          )}
+          <div className="flex items-center gap-3">
+            {s && <StatusPill status={s.overallStatus} testId="overall-status" />}
+            <TimeRangeFilter value={windowHours} onChange={setWindowHours}
+              options={TIME_RANGE_OPTIONS as unknown as { label: string; value: string }[]} />
+          </div>
         </div>
 
-        {/* Quick Metrics */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {isLoading ? (
-            Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24" />)
-          ) : (
-            <>
-              <MetricCard label="Active Tenants"       value={data?.activeTenants        ?? "—"} icon={Building2}   subtext="registered organizations" testId="active-tenants" />
-              <MetricCard label="Req / Minute"         value={data?.requestsPerMinute    ?? "—"} icon={Activity}    subtext="rolling 1-min average"    testId="rpm" />
-              <MetricCard label="AI Token Usage"       value={data?.aiTokenUsage         ?? "—"} icon={BrainCircuit} subtext="tokens today"             testId="token-usage" />
-              <MetricCard label="Webhook Failure Rate" value={data?.webhookFailureRate   ?? "—"} icon={Webhook}     subtext="last 24 hours"            testId="webhook-failure" />
-            </>
-          )}
-        </div>
-
-        {/* Service Health */}
-        <Card className="bg-card border-card-border">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium flex items-center gap-2">
-              <Cpu className="w-4 h-4 text-destructive" /> Service Health
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <div className="space-y-2">
-                {Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-8" />)}
-              </div>
-            ) : data?.services?.length ? (
-              <div className="space-y-2" data-testid="ops-services-list">
-                {data.services.map((svc, i) => (
-                  <div key={i} className="flex items-center justify-between py-1.5 border-b border-border last:border-0" data-testid={`ops-service-${svc.name}`}>
-                    <span className="text-sm font-medium capitalize">{svc.name}</span>
-                    <div className="flex items-center gap-3">
-                      {svc.latencyMs != null && (
-                        <span className="text-xs text-muted-foreground">{svc.latencyMs}ms</span>
-                      )}
-                      <StatusBadge status={svc.status} />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-xs text-muted-foreground" data-testid="ops-no-services-msg">
-                No service data available
-              </p>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Additional Stats */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <Card className="bg-card border-card-border">
-            <CardContent className="pt-5">
-              <div className="flex items-center gap-2 mb-2">
-                <ShieldAlert className="w-4 h-4 text-secondary" />
-                <p className="text-xs text-muted-foreground">Error Rate</p>
-              </div>
-              {isLoading ? <Skeleton className="h-8 w-20" /> : (
-                <p className="text-2xl font-bold" data-testid="ops-error-rate">
-                  {data?.errorRate != null ? `${(data.errorRate * 100).toFixed(2)}%` : "—"}
-                </p>
-              )}
+        {isError && (
+          <Card className="border-destructive/40">
+            <CardContent className="pt-4 text-sm text-destructive" data-testid="error-state">
+              Failed to load platform health data. Check admin permissions.
             </CardContent>
           </Card>
-          <Card className="bg-card border-card-border">
-            <CardContent className="pt-5">
-              <div className="flex items-center gap-2 mb-2">
-                <Cpu className="w-4 h-4 text-secondary" />
-                <p className="text-xs text-muted-foreground">Queue Depth</p>
-              </div>
-              {isLoading ? <Skeleton className="h-8 w-20" /> : (
-                <p className="text-2xl font-bold" data-testid="ops-queue-depth">
-                  {data?.queueDepth ?? "—"}
-                </p>
-              )}
+        )}
+
+        {!isError && !isLoading && ex && ex.issues.length > 0 && (
+          <Card className="border-yellow-500/30 bg-yellow-500/5">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-yellow-400" />
+                Active Issues ({ex.issues.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1">
+              {ex.issues.map((iss, i) => (
+                <p key={i} className="text-sm text-yellow-300" data-testid={`issue-${i}`}>{iss}</p>
+              ))}
             </CardContent>
           </Card>
+        )}
+
+        {!isError && !isLoading && ex && ex.issues.length === 0 && (
+          <Card className="border-green-500/30 bg-green-500/5" data-testid="healthy-state">
+            <CardContent className="pt-4 flex items-center gap-2 text-sm text-green-400">
+              <CheckCircle2 className="w-4 h-4" /> All systems operating normally
+            </CardContent>
+          </Card>
+        )}
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <MetricCard label="Overall Status" value={s?.overallStatus ?? "—"} icon={Activity}
+            colorClass={s?.overallStatus === "healthy" ? "text-green-400" : s?.overallStatus === "critical" ? "text-red-400" : "text-yellow-400"}
+            testId="metric-overall-status" loading={isLoading} />
+          <MetricCard label="Queue Depth" value={s?.queueDepth ?? 0} icon={Server}
+            subtext="Stalled + pending" testId="metric-queue-depth" loading={isLoading} />
+          <MetricCard label="Job Failure Rate" value={s ? `${s.jobsHealth.failureRate}%` : "—"} icon={Zap}
+            colorClass={s && s.jobsHealth.failureRate > 10 ? "text-red-400" : "text-green-400"}
+            subtext={`${s?.jobsHealth.failed ?? 0} failed / ${s?.jobsHealth.total ?? 0} total`}
+            testId="metric-job-failure-rate" loading={isLoading} />
+          <MetricCard label="Webhook Failure Rate" value={s ? `${s.webhookHealth.failureRate}%` : "—"} icon={Webhook}
+            colorClass={s && s.webhookHealth.failureRate > 10 ? "text-red-400" : "text-green-400"}
+            subtext={`${s?.webhookHealth.failed ?? 0} failed`}
+            testId="metric-webhook-failure-rate" loading={isLoading} />
+          <MetricCard label="p50 Latency" value={s ? `${s.latencyHealth.p50Ms}ms` : "—"} icon={Clock}
+            testId="metric-p50" loading={isLoading} />
+          <MetricCard label="p95 Latency" value={s ? `${s.latencyHealth.p95Ms}ms` : "—"} icon={Clock}
+            colorClass={s && s.latencyHealth.p95Ms > 5000 ? "text-red-400" : ""}
+            subtext={`p99: ${s?.latencyHealth.p99Ms ?? 0}ms`}
+            testId="metric-p95" loading={isLoading} />
+          <MetricCard label="Security Violations" value={s?.securityHealth.violations ?? 0} icon={ShieldAlert}
+            colorClass={s && s.securityHealth.violations > 0 ? "text-red-400" : "text-green-400"}
+            subtext={`${s?.securityHealth.recentEvents ?? 0} total events`}
+            testId="metric-security-violations" loading={isLoading} />
+          <MetricCard label="Active Tenants" value={s?.tenantHealth.active ?? 0} icon={CheckCircle2}
+            colorClass="text-green-400"
+            subtext={`${s?.tenantHealth.suspended ?? 0} suspended`}
+            testId="metric-active-tenants" loading={isLoading} />
         </div>
 
-        <p className="text-xs text-muted-foreground text-right" data-testid="ops-retrieved-at">
-          {data?.retrievedAt ? `Last updated: ${new Date(data.retrievedAt).toLocaleTimeString()}` : ""}
-        </p>
-      </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <TrendChart
+            title="Job & Webhook Failures Over Time"
+            points={trendPoints}
+            series={[
+              { key: "failedJobs",     label: "Failed Jobs",     color: "#ef4444" },
+              { key: "failedWebhooks", label: "Failed Webhooks", color: "#f97316" },
+            ]}
+            loading={trendLoading}
+            testId="chart-job-webhook-trend"
+          />
+          <TrendChart
+            title="Avg AI Latency Over Time"
+            points={trendPoints}
+            series={[{ key: "avgLatencyMs", label: "Avg Latency (ms)", color: "#6366f1" }]}
+            loading={trendLoading}
+            testId="chart-latency-trend"
+          />
+        </div>
+
+        {ex && ex.recommendations.length > 0 && (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-semibold">Recommendations</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1">
+              {ex.recommendations.map((r, i) => (
+                <p key={i} className="text-sm text-muted-foreground" data-testid={`rec-${i}`}>• {r}</p>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+      </main>
     </div>
   );
 }

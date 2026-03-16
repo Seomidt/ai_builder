@@ -7781,4 +7781,123 @@ export function registerAdminRoutes(app: Express): void {
       });
     } catch (err) { res.status(500).json({ error: (err as Error).message }); }
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 35 — PLATFORM ANALYTICS & OPS DASHBOARDS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // GET /api/admin/analytics/platform-health
+  app.get("/api/admin/analytics/platform-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getPlatformHealthSummary, explainPlatformHealth } = await import("../lib/analytics/platform-health");
+      const summary = await getPlatformHealthSummary(windowHours);
+      const explanation = explainPlatformHealth(summary);
+      res.json({ summary, explanation, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/platform-health/trend
+  app.get("/api/admin/analytics/platform-health/trend", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getPlatformHealthTrend } = await import("../lib/analytics/platform-health");
+      const trend = await getPlatformHealthTrend(windowHours);
+      res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/tenant-health
+  app.get("/api/admin/analytics/tenant-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getTenantHealthSummary, explainTenantHealth } = await import("../lib/analytics/tenant-health");
+      const summary = await getTenantHealthSummary(windowHours);
+      const explanation = explainTenantHealth(summary);
+      res.json({ summary, explanation, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/tenant-health/trend
+  app.get("/api/admin/analytics/tenant-health/trend", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getTenantHealthTrend } = await import("../lib/analytics/tenant-health");
+      const trend = await getTenantHealthTrend(windowHours);
+      res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/ai-cost
+  app.get("/api/admin/analytics/ai-cost", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getAiCostSummary, explainAiCost } = await import("../lib/analytics/ai-cost-analytics");
+      const summary = await getAiCostSummary(windowHours);
+      const explanation = explainAiCost(summary);
+      res.json({ summary, explanation, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/ai-cost/trend
+  app.get("/api/admin/analytics/ai-cost/trend", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getAiCostTrend } = await import("../lib/analytics/ai-cost-analytics");
+      const trend = await getAiCostTrend(windowHours);
+      res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/jobs-webhooks
+  app.get("/api/admin/analytics/jobs-webhooks", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getJobWebhookSummary, explainJobWebhook } = await import("../lib/analytics/job-webhook-analytics");
+      const summary = await getJobWebhookSummary(windowHours);
+      const explanation = explainJobWebhook(summary);
+      res.json({ summary, explanation, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/jobs-webhooks/trend
+  app.get("/api/admin/analytics/jobs-webhooks/trend", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getJobWebhookTrend } = await import("../lib/analytics/job-webhook-analytics");
+      const trend = await getJobWebhookTrend(windowHours);
+      res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/business-billing
+  app.get("/api/admin/analytics/business-billing", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(8760, Number(req.query.windowHours) || 720));
+      const { getBusinessBillingSummary, explainBusinessBilling } = await import("../lib/analytics/business-billing-analytics");
+      const summary = await getBusinessBillingSummary(windowHours);
+      const explanation = explainBusinessBilling(summary);
+      res.json({ summary, explanation, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/business-billing/trend
+  app.get("/api/admin/analytics/business-billing/trend", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(8760, Number(req.query.windowHours) || 720));
+      const { getBusinessBillingTrend } = await import("../lib/analytics/business-billing-analytics");
+      const trend = await getBusinessBillingTrend(windowHours);
+      res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
 }

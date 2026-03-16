@@ -1,124 +1,170 @@
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { CreditCard, TrendingUp, AlertTriangle, CheckCircle, DollarSign } from "lucide-react";
+import { CreditCard, TrendingUp, AlertTriangle, CheckCircle, DollarSign, Users } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Skeleton } from "@/components/ui/skeleton";
 import { OpsNav } from "@/components/ops/OpsNav";
+import { MetricCard } from "@/components/ops/MetricCard";
+import { TimeRangeFilter, BILLING_TIME_RANGE_OPTIONS } from "@/components/ops/TimeRangeFilter";
+import { TrendChart } from "@/components/ops/TrendChart";
+import { TopList } from "@/components/ops/TopList";
 
 interface BillingResponse {
-  health: {
-    healthy?: boolean;
-    totalSubscriptions?: number;
-    activeSubscriptions?: number;
-    failedPayments?: number;
-    totalRevenueUsd?: number;
-    anomalies?: { type: string; tenantId?: string; description: string; detectedAt?: string }[];
+  summary: {
+    tenants: { total: number; active: number; trial: number; suspended: number; deleted: number };
+    subscriptions: { active: number; canceled: number; pastDue: number };
+    invoices: { total: number; finalized: number; draft: number; totalRevenue: number; avgInvoiceValue: number };
+    payments: { total: number; succeeded: number; failed: number; successRate: number };
+    mrrEstimateUsd: number;
+    topRevenueByTenant: { tenantId: string; totalUsd: number }[];
+    windowHours: number;
   };
-  retrievedAt: string;
+  explanation: { summary: string; issues: string[]; recommendations: string[] };
 }
 
-export default function OpsBilling() {
+interface TrendResponse {
+  trend: {
+    points: { bucket: string; newTenants: number; newInvoices: number; revenueUsd: number }[];
+  };
+}
+
+export default function BillingDashboard() {
+  const [windowHours, setWindowHours] = useState("720");
+
   const { data, isLoading } = useQuery<BillingResponse>({
-    queryKey: ["/api/admin/platform/billing"],
+    queryKey: ["/api/admin/analytics/business-billing", windowHours],
+    queryFn: () =>
+      fetch(`/api/admin/analytics/business-billing?windowHours=${windowHours}`, { credentials: "include" })
+        .then(r => r.json()),
+    refetchInterval: 300000,
   });
 
-  const health = data?.health;
-  const anomalies = health?.anomalies ?? [];
+  const { data: trendData, isLoading: trendLoading } = useQuery<TrendResponse>({
+    queryKey: ["/api/admin/analytics/business-billing/trend", windowHours],
+    queryFn: () =>
+      fetch(`/api/admin/analytics/business-billing/trend?windowHours=${windowHours}`, { credentials: "include" })
+        .then(r => r.json()),
+    refetchInterval: 300000,
+  });
+
+  const s  = data?.summary;
+  const ex = data?.explanation;
+  const trendPoints = trendData?.trend?.points ?? [];
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex min-h-screen bg-background">
       <OpsNav />
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-6xl">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground flex items-center gap-2">
-            <CreditCard className="w-5 h-5 text-destructive" /> Billing Monitor
-          </h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Subscription states, invoices, and billing anomalies
-          </p>
+      <main className="flex-1 p-6 space-y-6 max-w-6xl">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-semibold flex items-center gap-2" data-testid="page-title">
+              <CreditCard className="w-5 h-5 text-destructive" /> Business & Billing
+            </h1>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Revenue, subscriptions, invoices and payment health
+            </p>
+          </div>
+          <TimeRangeFilter value={windowHours} onChange={setWindowHours}
+            options={BILLING_TIME_RANGE_OPTIONS as unknown as { label: string; value: string }[]} />
         </div>
 
-        {/* Summary Cards */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {isLoading ? (
-            Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-20" />)
-          ) : (
-            <>
-              {[
-                { label: "Total Subs",   value: health?.totalSubscriptions  ?? "—", icon: CreditCard,   testId: "total-subs" },
-                { label: "Active Subs",  value: health?.activeSubscriptions ?? "—", icon: CheckCircle,  testId: "active-subs" },
-                { label: "Failed Pymt", value: health?.failedPayments       ?? "—", icon: AlertTriangle, testId: "failed-payments" },
-                { label: "Revenue",     value: health?.totalRevenueUsd != null ? `$${Number(health.totalRevenueUsd).toFixed(2)}` : "—", icon: DollarSign, testId: "revenue" },
-              ].map(({ label, value, icon: Icon, testId }) => (
-                <Card key={testId} className="bg-card border-card-border" data-testid={`ops-billing-metric-${testId}`}>
-                  <CardContent className="pt-5">
-                    <div className="flex items-center gap-2 mb-1">
-                      <Icon className="w-4 h-4 text-destructive" />
-                      <p className="text-xs text-muted-foreground">{label}</p>
-                    </div>
-                    <p className="text-2xl font-bold" data-testid={`ops-billing-value-${testId}`}>{value}</p>
-                  </CardContent>
-                </Card>
+        {ex && ex.issues.length > 0 && (
+          <Card className="border-yellow-500/30 bg-yellow-500/5">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-yellow-400" /> Issues ({ex.issues.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1">
+              {ex.issues.map((iss, i) => (
+                <p key={i} className="text-sm text-yellow-300" data-testid={`issue-${i}`}>{iss}</p>
               ))}
-            </>
-          )}
-        </div>
-
-        {/* Health Status */}
-        {!isLoading && (
-          <Card className={`border ${health?.healthy ? "bg-green-500/5 border-green-500/25" : "bg-destructive/5 border-destructive/25"}`}>
-            <CardContent className="py-3 flex items-center gap-2">
-              {health?.healthy
-                ? <CheckCircle className="w-4 h-4 text-green-400 shrink-0" />
-                : <AlertTriangle className="w-4 h-4 text-destructive shrink-0" />}
-              <p className="text-sm" data-testid="ops-billing-health-msg">
-                Billing subsystem is <strong>{health?.healthy ? "healthy" : "degraded"}</strong>
-              </p>
             </CardContent>
           </Card>
         )}
 
-        {/* Anomalies */}
-        <Card className="bg-card border-card-border">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 text-secondary" /> Billing Anomalies
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="p-0">
-            {isLoading ? (
-              <div className="p-4 space-y-2">
-                {Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-10" />)}
-              </div>
-            ) : anomalies.length > 0 ? (
-              <div data-testid="ops-billing-anomalies-list">
-                {anomalies.map((a, i) => (
-                  <div key={i} className="flex items-start justify-between px-4 py-3 border-b border-border last:border-0"
-                    data-testid={`ops-billing-anomaly-${i}`}>
-                    <div>
-                      <div className="flex items-center gap-2 mb-0.5">
-                        <Badge variant="outline" className="text-xs bg-secondary/15 text-secondary border-secondary/25">{a.type}</Badge>
-                        {a.tenantId && <span className="text-xs font-mono text-muted-foreground">{a.tenantId}</span>}
-                      </div>
-                      <p className="text-xs text-foreground">{a.description}</p>
-                    </div>
-                    {a.detectedAt && (
-                      <span className="text-xs text-muted-foreground shrink-0 ml-3">
-                        {new Date(a.detectedAt).toLocaleDateString()}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="p-6 text-center">
-                <CheckCircle className="w-7 h-7 text-green-400/60 mx-auto mb-2" />
-                <p className="text-sm text-muted-foreground" data-testid="ops-no-anomalies-msg">No billing anomalies detected</p>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+        {!isLoading && s && s.subscriptions.pastDue === 0 && s.payments.successRate >= 99 && (
+          <Card className="border-green-500/30 bg-green-500/5" data-testid="healthy-state">
+            <CardContent className="pt-4 flex items-center gap-2 text-sm text-green-400">
+              <CheckCircle className="w-4 h-4" /> Billing health is nominal — no past-due subscriptions
+            </CardContent>
+          </Card>
+        )}
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <MetricCard label="MRR Estimate"     value={`$${s?.mrrEstimateUsd.toFixed(2) ?? "—"}`} icon={TrendingUp}
+            colorClass="text-green-400"
+            subtext="Estimated monthly recurring revenue"
+            testId="metric-mrr" loading={isLoading} />
+          <MetricCard label="Active Tenants"   value={s?.tenants.active  ?? 0} icon={Users}
+            colorClass="text-green-400" testId="metric-active-tenants" loading={isLoading} />
+          <MetricCard label="Trial Tenants"    value={s?.tenants.trial   ?? 0} icon={Users}
+            colorClass="text-blue-400" testId="metric-trial-tenants" loading={isLoading} />
+          <MetricCard label="Subscriptions"    value={s?.subscriptions.active ?? 0} icon={CreditCard}
+            subtext={`${s?.subscriptions.pastDue ?? 0} past-due`}
+            colorClass={s && s.subscriptions.pastDue > 0 ? "text-orange-400" : "text-green-400"}
+            testId="metric-subscriptions" loading={isLoading} />
+          <MetricCard label="Invoice Revenue"  value={`$${s?.invoices.totalRevenue.toFixed(2) ?? "—"}`} icon={DollarSign}
+            subtext={`${s?.invoices.finalized ?? 0} finalized invoices`}
+            testId="metric-invoice-revenue" loading={isLoading} />
+          <MetricCard label="Payment Success"  value={s ? `${s.payments.successRate}%` : "—"} icon={CheckCircle}
+            colorClass={s && s.payments.successRate < 90 ? "text-red-400" : "text-green-400"}
+            subtext={`${s?.payments.failed ?? 0} failed`}
+            testId="metric-payment-success" loading={isLoading} />
+          <MetricCard label="Canceled Subs"    value={s?.subscriptions.canceled ?? 0} icon={AlertTriangle}
+            colorClass={s && s.subscriptions.canceled > 0 ? "text-orange-400" : ""}
+            testId="metric-canceled-subs" loading={isLoading} />
+          <MetricCard label="Suspended"        value={s?.tenants.suspended ?? 0} icon={AlertTriangle}
+            colorClass={s && s.tenants.suspended > 0 ? "text-red-400" : ""}
+            testId="metric-suspended-tenants" loading={isLoading} />
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <TrendChart
+            title="Revenue Over Time"
+            points={trendPoints}
+            series={[
+              { key: "revenueUsd",  label: "Revenue (USD)", color: "#22c55e" },
+            ]}
+            loading={trendLoading}
+            testId="chart-revenue-trend"
+          />
+          <TrendChart
+            title="New Tenants & Invoices Over Time"
+            points={trendPoints}
+            series={[
+              { key: "newTenants",  label: "New Tenants",  color: "#6366f1" },
+              { key: "newInvoices", label: "New Invoices", color: "#f97316" },
+            ]}
+            loading={trendLoading}
+            testId="chart-tenants-invoices-trend"
+          />
+        </div>
+
+        <TopList
+          title="Top Revenue Tenants"
+          loading={isLoading}
+          testId="list-top-revenue"
+          emptyText="No revenue data in window"
+          items={(s?.topRevenueByTenant ?? []).map(t => ({
+            id: t.tenantId,
+            label: t.tenantId,
+            value: `$${t.totalUsd.toFixed(2)}`,
+          }))}
+        />
+
+        {ex && ex.recommendations.length > 0 && (
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-semibold">Recommendations</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1">
+              {ex.recommendations.map((r, i) => (
+                <p key={i} className="text-sm text-muted-foreground" data-testid={`rec-${i}`}>• {r}</p>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+      </main>
     </div>
   );
 }

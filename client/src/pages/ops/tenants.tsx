@@ -1,155 +1,195 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Building2, Search, ChevronRight, ChevronLeft, Activity } from "lucide-react";
+import { Building2, AlertTriangle, Users } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
 import { OpsNav } from "@/components/ops/OpsNav";
+import { MetricCard } from "@/components/ops/MetricCard";
+import { RiskBadge } from "@/components/ops/RiskBadge";
+import { TimeRangeFilter, TIME_RANGE_OPTIONS } from "@/components/ops/TimeRangeFilter";
+import { TrendChart } from "@/components/ops/TrendChart";
+import { TopList } from "@/components/ops/TopList";
 
-interface TenantItem {
-  organizationId: string;
-  name?: string;
-  plan?: string;
-  status?: string;
-  userCount?: number;
-  projectCount?: number;
+interface TenantHealthRow {
+  tenantId: string;
+  name: string;
+  status: string;
+  anomalyCount: number;
+  failedWebhooks: number;
+  failedJobs: number;
+  alertCount: number;
+  riskScore: number;
+  riskLevel: string;
 }
 
-interface TenantsResponse {
-  tenants: TenantItem[];
-  pagination: { limit: number; hasMore: boolean };
-  retrievedAt: string;
-}
-
-const PAGE_SIZE = 20;
-
-function statusColor(status: string = "active") {
-  return status === "active"
-    ? "bg-green-500/15 text-green-400 border-green-500/25"
-    : "bg-muted text-muted-foreground border-border";
-}
-
-export default function OpsTenants() {
-  const [search,  setSearch]  = useState("");
-  const [cursor,  setCursor]  = useState<string | undefined>(undefined);
-  const [stack,   setStack]   = useState<(string | undefined)[]>([]);
-
-  const queryKey = search
-    ? [`/api/admin/platform/tenants?q=${encodeURIComponent(search)}`]
-    : cursor
-    ? [`/api/admin/platform/tenants?cursor=${cursor}`]
-    : ["/api/admin/platform/tenants"];
-
-  const { data, isLoading } = useQuery<TenantsResponse>({ queryKey });
-
-  const tenants  = Array.isArray(data?.tenants) ? data!.tenants : [];
-  const hasMore  = data?.pagination.hasMore ?? false;
-
-  const nextPage = () => {
-    if (!hasMore || !tenants.length) return;
-    const lastId = tenants[tenants.length - 1]?.organizationId;
-    if (lastId) { setStack((s) => [...s, cursor]); setCursor(lastId); }
+interface TenantHealthResponse {
+  summary: {
+    totalTenants: number;
+    activeTenants: number;
+    suspendedTenants: number;
+    highRiskCount: number;
+    criticalRiskCount: number;
+    topRiskTenants: TenantHealthRow[];
+    windowHours: number;
   };
-  const prevPage = () => {
-    const s = [...stack]; const prev = s.pop();
-    setStack(s); setCursor(prev);
+  explanation: { summary: string; issues: string[]; recommendations: string[] };
+}
+
+interface TrendResponse {
+  trend: {
+    points: { bucket: string; newAnomalies: number; newAlerts: number; failedWebhooks: number }[];
   };
+}
+
+export default function TenantHealthDashboard() {
+  const [windowHours, setWindowHours] = useState("24");
+  const [search, setSearch] = useState("");
+
+  const { data, isLoading } = useQuery<TenantHealthResponse>({
+    queryKey: ["/api/admin/analytics/tenant-health", windowHours],
+    queryFn: () =>
+      fetch(`/api/admin/analytics/tenant-health?windowHours=${windowHours}`, { credentials: "include" })
+        .then(r => r.json()),
+    refetchInterval: 60000,
+  });
+
+  const { data: trendData, isLoading: trendLoading } = useQuery<TrendResponse>({
+    queryKey: ["/api/admin/analytics/tenant-health/trend", windowHours],
+    queryFn: () =>
+      fetch(`/api/admin/analytics/tenant-health/trend?windowHours=${windowHours}`, { credentials: "include" })
+        .then(r => r.json()),
+    refetchInterval: 60000,
+  });
+
+  const s  = data?.summary;
+  const ex = data?.explanation;
+  const trendPoints = trendData?.trend?.points ?? [];
+
+  const filtered = (s?.topRiskTenants ?? []).filter(t =>
+    !search || t.tenantId.toLowerCase().includes(search.toLowerCase()),
+  );
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex min-h-screen bg-background">
       <OpsNav />
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-6xl">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground flex items-center gap-2">
-            <Building2 className="w-5 h-5 text-destructive" /> Tenant Inspector
-          </h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Platform-wide tenant overview, configuration, and usage
-          </p>
+      <main className="flex-1 p-6 space-y-6 max-w-6xl">
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-xl font-semibold flex items-center gap-2" data-testid="page-title">
+              <Building2 className="w-5 h-5 text-destructive" /> Tenant Health
+            </h1>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Identify unhealthy or high-risk tenants
+            </p>
+          </div>
+          <TimeRangeFilter value={windowHours} onChange={setWindowHours}
+            options={TIME_RANGE_OPTIONS as unknown as { label: string; value: string }[]} />
         </div>
 
-        {/* Search */}
-        <div className="relative">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <Input
-            placeholder="Search tenants by name or ID…"
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setCursor(undefined); setStack([]); }}
-            className="pl-9"
-            data-testid="input-tenant-search"
+        {ex && ex.issues.length > 0 && (
+          <Card className="border-yellow-500/30 bg-yellow-500/5">
+            <CardHeader className="pb-2">
+              <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-yellow-400" /> Issues ({ex.issues.length})
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1">
+              {ex.issues.map((iss, i) => (
+                <p key={i} className="text-sm text-yellow-300" data-testid={`issue-${i}`}>{iss}</p>
+              ))}
+            </CardContent>
+          </Card>
+        )}
+
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <MetricCard label="Total Tenants"    value={s?.totalTenants    ?? 0} icon={Users}
+            testId="metric-total-tenants" loading={isLoading} />
+          <MetricCard label="Active Tenants"   value={s?.activeTenants   ?? 0} icon={Building2}
+            colorClass="text-green-400" testId="metric-active-tenants" loading={isLoading} />
+          <MetricCard label="High Risk"        value={s?.highRiskCount   ?? 0} icon={AlertTriangle}
+            colorClass={s && s.highRiskCount > 0 ? "text-orange-400" : "text-green-400"}
+            testId="metric-high-risk" loading={isLoading} />
+          <MetricCard label="Critical Risk"    value={s?.criticalRiskCount ?? 0} icon={AlertTriangle}
+            colorClass={s && s.criticalRiskCount > 0 ? "text-red-400" : "text-green-400"}
+            testId="metric-critical-risk" loading={isLoading} />
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <TrendChart
+            title="Anomalies & Alerts Over Time"
+            points={trendPoints}
+            series={[
+              { key: "newAnomalies",   label: "Anomalies",       color: "#ef4444" },
+              { key: "newAlerts",      label: "Alerts",          color: "#f97316" },
+              { key: "failedWebhooks", label: "Failed Webhooks", color: "#6366f1" },
+            ]}
+            loading={trendLoading}
+            testId="chart-tenant-trend"
+          />
+          <TopList
+            title="Top High-Risk Tenants"
+            loading={isLoading}
+            testId="list-top-risk"
+            emptyText="No high-risk tenants detected"
+            items={(s?.topRiskTenants ?? []).slice(0, 10).map(t => ({
+              id: t.tenantId,
+              label: t.tenantId,
+              value: `Score: ${t.riskScore}`,
+              subvalue: `${t.anomalyCount} anomalies · ${t.failedWebhooks} wh failures`,
+              badge: <RiskBadge level={t.riskLevel} />,
+            }))}
           />
         </div>
 
-        {/* Tenants Table */}
-        <Card className="bg-card border-card-border">
+        <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium flex items-center justify-between">
-              <span className="flex items-center gap-2">
-                <Activity className="w-4 h-4 text-destructive" />
-                Tenants ({tenants.length})
-              </span>
-              <span className="text-xs font-normal text-muted-foreground">Page {stack.length + 1}</span>
-            </CardTitle>
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-sm font-semibold">Tenant Risk Table</CardTitle>
+              <Input
+                placeholder="Search tenant ID…"
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                className="w-48 h-8 text-xs"
+                data-testid="input-tenant-search"
+              />
+            </div>
           </CardHeader>
           <CardContent className="p-0">
             {isLoading ? (
               <div className="p-4 space-y-2">
-                {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12" />)}
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <div key={i} className="h-10 bg-muted/30 rounded animate-pulse" />
+                ))}
               </div>
-            ) : tenants.length > 0 ? (
-              <div data-testid="ops-tenants-list">
-                {tenants.map((t) => (
+            ) : filtered.length === 0 ? (
+              <p className="p-6 text-sm text-center text-muted-foreground" data-testid="empty-state">
+                {search ? "No tenants match your search" : "No tenant risk data in this window"}
+              </p>
+            ) : (
+              <div data-testid="tenant-risk-table">
+                {filtered.map(t => (
                   <div
-                    key={t.organizationId}
-                    className="flex items-center justify-between px-4 py-3 border-b border-border last:border-0 hover:bg-muted/20"
-                    data-testid={`ops-tenant-row-${t.organizationId}`}
+                    key={t.tenantId}
+                    className="flex items-center justify-between px-4 py-3 border-b border-border last:border-0 hover:bg-muted/10"
+                    data-testid={`tenant-row-${t.tenantId}`}
                   >
-                    <div>
-                      <p className="text-sm font-medium" data-testid={`ops-tenant-name-${t.organizationId}`}>
-                        {t.name ?? t.organizationId}
+                    <div className="min-w-0">
+                      <p className="text-sm font-mono truncate" title={t.tenantId}>{t.tenantId}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {t.anomalyCount} anomalies · {t.failedJobs} failed jobs · {t.failedWebhooks} wh failures
                       </p>
-                      <p className="text-xs text-muted-foreground font-mono">{t.organizationId}</p>
                     </div>
-                    <div className="flex items-center gap-3">
-                      {t.plan && (
-                        <span className="text-xs text-muted-foreground capitalize">{t.plan}</span>
-                      )}
-                      {t.userCount != null && (
-                        <span className="text-xs text-muted-foreground">{t.userCount} users</span>
-                      )}
-                      <Badge variant="outline" className={`text-xs ${statusColor(t.status ?? "active")}`}
-                        data-testid={`ops-tenant-status-${t.organizationId}`}>
-                        {t.status ?? "active"}
-                      </Badge>
+                    <div className="flex items-center gap-3 ml-4 shrink-0">
+                      <span className="text-xs text-muted-foreground tabular-nums">{t.alertCount} alerts</span>
+                      <RiskBadge level={t.riskLevel} score={t.riskScore} testId={`risk-${t.tenantId}`} />
                     </div>
                   </div>
                 ))}
               </div>
-            ) : (
-              <div className="p-8 text-center">
-                <p className="text-sm text-muted-foreground" data-testid="ops-no-tenants-msg">
-                  {search ? "No tenants match your search" : "No tenants registered"}
-                </p>
-              </div>
             )}
           </CardContent>
         </Card>
-
-        {/* Pagination */}
-        <div className="flex items-center justify-between" data-testid="ops-tenants-pagination">
-          <Button variant="outline" size="sm" onClick={prevPage} disabled={stack.length === 0}
-            className="gap-1.5" data-testid="button-tenants-prev">
-            <ChevronLeft className="w-4 h-4" /> Previous
-          </Button>
-          <span className="text-xs text-muted-foreground">{tenants.length} tenants shown</span>
-          <Button variant="outline" size="sm" onClick={nextPage} disabled={!hasMore}
-            className="gap-1.5" data-testid="button-tenants-next">
-            Next <ChevronRight className="w-4 h-4" />
-          </Button>
-        </div>
-      </div>
+      </main>
     </div>
   );
 }
