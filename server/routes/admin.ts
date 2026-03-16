@@ -7041,4 +7041,122 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── Phase 25 — Platform Hardening & Edge Security ──────────────────────────
+
+  // Route 25-1: GET /api/admin/platform/health — platform health diagnostics
+  app.get("/api/admin/platform/health", async (_req: Request, res: Response) => {
+    try {
+      const { getSecurityHealthSummary } = require("../lib/observability/security-metrics");
+      const { getRateLimitStats } = require("../lib/security/rate-limit");
+      const { getAbuseStats } = require("../lib/security/abuse-detection");
+      const { PLATFORM_SECURITY_HEADERS, PLATFORM_CSP_POLICY, buildCspHeader } = require("../lib/security/security-headers");
+      const { RATE_LIMIT_POLICIES } = require("../lib/security/rate-limit");
+
+      // Check DB connectivity
+      let dbStatus = "ok";
+      try { await db.execute(sql`SELECT 1`); } catch { dbStatus = "error"; }
+
+      // Check Stripe env
+      const stripeConfigured = !!(process.env.STRIPE_SECRET_KEY);
+
+      // Check AI governance tables
+      let aiGovernanceStatus = "ok";
+      try {
+        await db.execute(sql`SELECT 1 FROM ai_policies LIMIT 1`);
+      } catch { aiGovernanceStatus = "unavailable"; }
+
+      // Check webhook queue
+      let webhookQueueStatus = "ok";
+      try {
+        await db.execute(sql`SELECT 1 FROM webhook_endpoints LIMIT 1`);
+      } catch { webhookQueueStatus = "unavailable"; }
+
+      // Check job queue
+      let jobQueueStatus = "ok";
+      try {
+        await db.execute(sql`SELECT 1 FROM background_jobs LIMIT 1`);
+      } catch { jobQueueStatus = "unavailable"; }
+
+      const securityMetrics = getSecurityHealthSummary();
+      const rateLimitStats = getRateLimitStats();
+      const abuseStats = getAbuseStats();
+
+      res.json({
+        status: "ok",
+        timestamp: new Date().toISOString(),
+        security: {
+          headersActive: PLATFORM_SECURITY_HEADERS.length,
+          headers: PLATFORM_SECURITY_HEADERS.map((h: any) => h.name),
+          cspDirectivesCount: Object.keys(PLATFORM_CSP_POLICY).length,
+          cspHeader: buildCspHeader().slice(0, 120) + "…",
+        },
+        rateLimiting: {
+          status: "active",
+          policiesCount: Object.keys(RATE_LIMIT_POLICIES).length,
+          activeKeys: rateLimitStats.activeKeys,
+          policies: rateLimitStats.policies,
+          circuitBreakers: rateLimitStats.circuitBreakers.length,
+        },
+        aiGovernance: {
+          status: aiGovernanceStatus,
+        },
+        stripe: {
+          configured: stripeConfigured,
+        },
+        webhookQueue: {
+          status: webhookQueueStatus,
+        },
+        jobQueue: {
+          status: jobQueueStatus,
+        },
+        observability: {
+          latencyRecords: securityMetrics.recordCounts.latency,
+          errorRecords: securityMetrics.recordCounts.errors,
+          violations: securityMetrics.recordCounts.violations,
+          abuseEvents: abuseStats.total,
+          flaggedAbuseEvents: abuseStats.flagged,
+        },
+        db: { status: dbStatus },
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 25-2: GET /api/admin/platform/security-metrics — security observability
+  app.get("/api/admin/platform/security-metrics", async (_req: Request, res: Response) => {
+    try {
+      const { getSecurityHealthSummary } = require("../lib/observability/security-metrics");
+      res.json(getSecurityHealthSummary());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 25-3: GET /api/admin/platform/abuse-events — abuse detection log
+  app.get("/api/admin/platform/abuse-events", async (req: Request, res: Response) => {
+    try {
+      const { getAbuseEvents } = require("../lib/security/abuse-detection");
+      res.json(getAbuseEvents({
+        tenantId:    req.query.tenantId as string | undefined,
+        category:    req.query.category as any,
+        severity:    req.query.severity as any,
+        flaggedOnly: req.query.flaggedOnly === "true",
+        limit:       req.query.limit ? Number(req.query.limit) : 50,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 25-4: GET /api/admin/platform/rate-limit-stats — rate limit overview
+  app.get("/api/admin/platform/rate-limit-stats", async (_req: Request, res: Response) => {
+    try {
+      const { getRateLimitStats } = require("../lib/security/rate-limit");
+      res.json(getRateLimitStats());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
