@@ -7695,6 +7695,57 @@ export function registerAdminRoutes(app: Express): void {
     } catch (err) { res.status(500).json({ error: (err as Error).message }); }
   });
 
+  // ── Phase 33 — Ops AI Assistant API ──────────────────────────────────────────
+
+  // Role guard helper (already defined in Phase 32 section above)
+  // isPlatformAdmin() is defined above in this function scope
+
+  // GET /api/admin/ops-ai/summary — current platform health summary from AI
+  app.get("/api/admin/ops-ai/summary", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { summariseCurrentHealth } = await import("../lib/ops-ai/health-summary");
+      const operatorId = (req.user as any)?.id ?? (req.user as any)?.sub ?? null;
+      const result = await summariseCurrentHealth(operatorId);
+      res.json({ ...result, generatedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // POST /api/admin/ops-ai/explain — explain a specific incident
+  app.post("/api/admin/ops-ai/explain", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { IncidentRequestSchema } = await import("@shared/ops-ai-schema");
+      const parsed = IncidentRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid incident request", details: parsed.error.flatten() });
+      }
+      const { explainIncident } = await import("../lib/ops-ai/incident-explainer");
+      const operatorId = (req.user as any)?.id ?? (req.user as any)?.sub ?? null;
+      const result = await explainIncident(parsed.data, operatorId);
+      res.json({ ...result, generatedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/ops-ai/history — recent AI assistant runs and audit metadata
+  app.get("/api/admin/ops-ai/history", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { listAuditRecords } = await import("../lib/ops-ai/ops-ai-audit");
+      const limit  = Math.min(Number(req.query.limit) || 50, 200);
+      const records = await listAuditRecords(limit);
+      res.json({ records, count: records.length, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+
   // GET /api/admin/platform/recovery — backup status + job recovery state
   app.get("/api/admin/platform/recovery", async (req: Request, res: Response) => {
     try {
