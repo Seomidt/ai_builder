@@ -7842,4 +7842,112 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── Phase 30: Platform Safety ─────────────────────────────────────────────
+
+  // GET /api/admin/safety/tenant-status
+  app.get("/api/admin/safety/tenant-status", async (_req: Request, res: Response) => {
+    try {
+      const {
+        getAllTenantStates,
+        getTenantTransitionHistory,
+        summarizeTenantSafety,
+      } = await import("../lib/safety/tenant-circuit-breaker");
+
+      const states   = getAllTenantStates();
+      const history  = getTenantTransitionHistory();
+      const summary  = summarizeTenantSafety();
+
+      res.json({
+        states,
+        recentTransitions: history.slice(-20).reverse(),
+        summary,
+        checkedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/safety/rate-limit-state
+  app.get("/api/admin/safety/rate-limit-state", async (_req: Request, res: Response) => {
+    try {
+      const {
+        summarizeRateLimitState,
+        getRecentViolations,
+      } = await import("../lib/security/global-rate-limiter");
+
+      const summary    = summarizeRateLimitState();
+      const violations = getRecentViolations(20);
+
+      res.json({ summary, recentViolations: violations, checkedAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/safety/platform-restart-health
+  app.get("/api/admin/safety/platform-restart-health", async (_req: Request, res: Response) => {
+    try {
+      const { summarizeRecoveryState } = await import("../lib/recovery/platform-restart-recovery");
+      const summary = await summarizeRecoveryState();
+      res.json({ summary, checkedAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/safety/tenant-unfreeze
+  app.post("/api/admin/safety/tenant-unfreeze", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, reason = "Manual admin unfreeze" } = req.body as {
+        tenantId?: string;
+        reason?:   string;
+      };
+
+      if (!tenantId) {
+        res.status(400).json({ error: "tenantId is required" });
+        return;
+      }
+
+      const {
+        unfreezeTenant,
+        explainTenantProtection,
+      } = await import("../lib/safety/tenant-circuit-breaker");
+
+      const result  = unfreezeTenant(tenantId, reason);
+      const explain = explainTenantProtection(result);
+
+      res.json({ result, explain, unfrozenAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/safety/tenant-throttle
+  app.post("/api/admin/safety/tenant-throttle", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, reason = "Manual admin throttle" } = req.body as {
+        tenantId?: string;
+        reason?:   string;
+      };
+
+      if (!tenantId) {
+        res.status(400).json({ error: "tenantId is required" });
+        return;
+      }
+
+      const {
+        throttleTenant,
+        explainTenantProtection,
+      } = await import("../lib/safety/tenant-circuit-breaker");
+
+      const result  = throttleTenant(tenantId, reason);
+      const explain = explainTenantProtection(result);
+
+      res.json({ result, explain, throttledAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
