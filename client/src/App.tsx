@@ -30,6 +30,7 @@ import AuthEmailVerify from "@/pages/auth/email-verify";
 import AuthInviteAccept from "@/pages/auth/invite-accept";
 import AuthMfaChallenge from "@/pages/auth/mfa-challenge";
 import SecuritySettings from "@/pages/settings/security";
+import OpsStorage from "@/pages/ops/storage";
 
 function Router() {
   return (
@@ -65,6 +66,7 @@ function Router() {
         <Route path="/ops/assistant" component={OpsAssistant} />
         <Route path="/ops/release" component={OpsRelease} />
         <Route path="/ops/auth" component={OpsAuthSecurity} />
+        <Route path="/ops/storage" component={OpsStorage} />
 
         <Route component={NotFound} />
       </Switch>

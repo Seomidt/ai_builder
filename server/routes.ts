@@ -718,6 +718,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   const { registerAuthPlatformRoutes } = await import("./routes/auth-platform");
   registerAuthPlatformRoutes(app);
 
+  // Cloudflare R2 Storage routes
+  const { registerR2Routes } = await import("./routes/r2");
+  registerR2Routes(app);
+
   return httpServer;
 }
 
