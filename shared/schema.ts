@@ -6217,3 +6217,105 @@ export const moderationEvents = pgTable(
 export const insertModerationEventSchema = createInsertSchema(moderationEvents).omit({ id: true, createdAt: true });
 export type InsertModerationEvent = z.infer<typeof insertModerationEventSchema>;
 export type ModerationEvent = typeof moderationEvents.$inferSelect;
+
+// ── Phase 26: Compliance, Data Retention & Governance ─────────────────────────
+// Tables: data_retention_policies, data_retention_rules, legal_holds, data_deletion_jobs
+
+// data_retention_policies — named retention policy definitions
+export const dataRetentionPolicies = pgTable(
+  "data_retention_policies",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    policyKey: text("policy_key").notNull().unique(), // e.g. "audit_events_default"
+    description: text("description").notNull(),
+    defaultRetentionDays: integer("default_retention_days").notNull().default(365),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("drp26_policy_key_idx").on(t.policyKey),
+    index("drp26_active_idx").on(t.active),
+  ],
+);
+export const insertDataRetentionPolicySchema = createInsertSchema(dataRetentionPolicies).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertDataRetentionPolicy = z.infer<typeof insertDataRetentionPolicySchema>;
+export type DataRetentionPolicy = typeof dataRetentionPolicies.$inferSelect;
+
+// data_retention_rules — per-table retention configuration
+export const dataRetentionRules = pgTable(
+  "data_retention_rules",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    policyId: varchar("policy_id").notNull().references(() => dataRetentionPolicies.id, { onDelete: "cascade" }),
+    tableName: text("table_name").notNull(), // e.g. "audit_events"
+    retentionDays: integer("retention_days").notNull().default(365),
+    archiveEnabled: boolean("archive_enabled").notNull().default(false),
+    deleteEnabled: boolean("delete_enabled").notNull().default(true),
+    tenantScoped: boolean("tenant_scoped").notNull().default(true),
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("drr26_policy_id_idx").on(t.policyId),
+    index("drr26_table_name_idx").on(t.tableName),
+    index("drr26_active_idx").on(t.active),
+  ],
+);
+export const insertDataRetentionRuleSchema = createInsertSchema(dataRetentionRules).omit({ id: true, createdAt: true });
+export type InsertDataRetentionRule = z.infer<typeof insertDataRetentionRuleSchema>;
+export type DataRetentionRule = typeof dataRetentionRules.$inferSelect;
+
+// legal_holds — tenant-level legal hold records (block deletion)
+export const legalHolds = pgTable(
+  "legal_holds",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    reason: text("reason").notNull(),
+    requestedBy: text("requested_by"),           // actor who placed the hold
+    scope: text("scope").notNull().default("all"), // all | audit_events | ai_runs | webhooks
+    active: boolean("active").notNull().default(true),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    releasedAt: timestamp("released_at"),
+    releasedBy: text("released_by"),
+  },
+  (t) => [
+    index("lh26_tenant_id_idx").on(t.tenantId),
+    index("lh26_active_idx").on(t.active),
+    index("lh26_tenant_active_idx").on(t.tenantId, t.active),
+  ],
+);
+export const insertLegalHoldSchema = createInsertSchema(legalHolds).omit({ id: true, createdAt: true });
+export type InsertLegalHold = z.infer<typeof insertLegalHoldSchema>;
+export type LegalHold = typeof legalHolds.$inferSelect;
+
+// data_deletion_jobs — async deletion workflow records
+export const dataDeletionJobs = pgTable(
+  "data_deletion_jobs",
+  {
+    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId: text("tenant_id").notNull(),
+    jobType: text("job_type").notNull(), // tenant_deletion | user_deletion | ai_run_deletion | webhook_deletion | evaluation_deletion | retention_cleanup
+    status: text("status").notNull().default("pending"), // pending | running | completed | failed | blocked_by_hold
+    targetId: text("target_id"),          // specific entity to delete
+    targetTable: text("target_table"),    // table being cleaned
+    recordsDeleted: integer("records_deleted").notNull().default(0),
+    recordsArchived: integer("records_archived").notNull().default(0),
+    blockedByHold: boolean("blocked_by_hold").notNull().default(false),
+    errorMessage: text("error_message"),
+    metadata: jsonb("metadata"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    startedAt: timestamp("started_at"),
+    completedAt: timestamp("completed_at"),
+  },
+  (t) => [
+    index("ddj26_tenant_id_idx").on(t.tenantId),
+    index("ddj26_status_idx").on(t.status),
+    index("ddj26_job_type_idx").on(t.jobType),
+    index("ddj26_created_at_idx").on(t.createdAt),
+  ],
+);
+export const insertDataDeletionJobSchema = createInsertSchema(dataDeletionJobs).omit({ id: true, createdAt: true });
+export type InsertDataDeletionJob = z.infer<typeof insertDataDeletionJobSchema>;
+export type DataDeletionJob = typeof dataDeletionJobs.$inferSelect;

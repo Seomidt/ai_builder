@@ -7159,4 +7159,209 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── Phase 26 — Compliance, Data Retention & Governance ────────────────────
+
+  // Route 26-1: GET /api/admin/compliance/retention/policies — list retention policies
+  app.get("/api/admin/compliance/retention/policies", async (req: Request, res: Response) => {
+    try {
+      const { listRetentionPolicies } = require("../lib/governance/retention-engine");
+      const activeOnly = req.query.active !== "false";
+      res.json(await listRetentionPolicies(activeOnly));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-2: POST /api/admin/compliance/retention/policies — create retention policy
+  app.post("/api/admin/compliance/retention/policies", async (req: Request, res: Response) => {
+    try {
+      const { createRetentionPolicy } = require("../lib/governance/retention-engine");
+      const { policyKey, description, defaultRetentionDays } = req.body;
+      if (!policyKey || !description) return res.status(400).json({ error: "policyKey and description required" });
+      res.status(201).json(await createRetentionPolicy({ policyKey, description, defaultRetentionDays: defaultRetentionDays ?? 365, active: true }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-3: GET /api/admin/compliance/retention/rules — list retention rules
+  app.get("/api/admin/compliance/retention/rules", async (req: Request, res: Response) => {
+    try {
+      const { listRetentionRules } = require("../lib/governance/retention-engine");
+      res.json(await listRetentionRules(req.query.policyId as string | undefined));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-4: POST /api/admin/compliance/retention/rules — create retention rule
+  app.post("/api/admin/compliance/retention/rules", async (req: Request, res: Response) => {
+    try {
+      const { createRetentionRule } = require("../lib/governance/retention-engine");
+      const { policyId, tableName, retentionDays, archiveEnabled } = req.body;
+      if (!policyId || !tableName) return res.status(400).json({ error: "policyId and tableName required" });
+      res.status(201).json(await createRetentionRule({
+        policyId, tableName,
+        retentionDays: retentionDays ?? 365,
+        archiveEnabled: archiveEnabled ?? false,
+        deleteEnabled: true, tenantScoped: true, active: true,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-5: GET /api/admin/compliance/retention/evaluate — evaluate all policies
+  app.get("/api/admin/compliance/retention/evaluate", async (_req: Request, res: Response) => {
+    try {
+      const { evaluateRetentionPolicies } = require("../lib/governance/retention-engine");
+      res.json(await evaluateRetentionPolicies());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-6: POST /api/admin/compliance/retention/schedule — schedule cleanup
+  app.post("/api/admin/compliance/retention/schedule", async (req: Request, res: Response) => {
+    try {
+      const { scheduleRetentionCleanup } = require("../lib/governance/retention-engine");
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await scheduleRetentionCleanup(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-7: GET /api/admin/compliance/retention/stats — retention engine stats
+  app.get("/api/admin/compliance/retention/stats", async (_req: Request, res: Response) => {
+    try {
+      const { getRetentionStats } = require("../lib/governance/retention-engine");
+      res.json(await getRetentionStats());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-8: GET /api/admin/compliance/legal-holds — list legal holds
+  app.get("/api/admin/compliance/legal-holds", async (req: Request, res: Response) => {
+    try {
+      const { listLegalHolds } = require("../lib/governance/legal-hold");
+      res.json(await listLegalHolds({
+        tenantId: req.query.tenantId as string | undefined,
+        activeOnly: req.query.active !== "false",
+        limit: req.query.limit ? Number(req.query.limit) : 50,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-9: POST /api/admin/compliance/legal-holds — place legal hold
+  app.post("/api/admin/compliance/legal-holds", async (req: Request, res: Response) => {
+    try {
+      const { placeLegalHold } = require("../lib/governance/legal-hold");
+      const { tenantId, reason, requestedBy, scope } = req.body;
+      if (!tenantId || !reason) return res.status(400).json({ error: "tenantId and reason required" });
+      res.status(201).json(await placeLegalHold({ tenantId, reason, requestedBy, scope }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-10: DELETE /api/admin/compliance/legal-holds/:id — release legal hold
+  app.delete("/api/admin/compliance/legal-holds/:id", async (req: Request, res: Response) => {
+    try {
+      const { releaseLegalHold } = require("../lib/governance/legal-hold");
+      const { releasedBy } = req.body;
+      res.json(await releaseLegalHold(req.params.id, releasedBy));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-11: GET /api/admin/compliance/legal-holds/stats — hold statistics
+  app.get("/api/admin/compliance/legal-holds/stats", async (_req: Request, res: Response) => {
+    try {
+      const { getLegalHoldStats } = require("../lib/governance/legal-hold");
+      res.json(await getLegalHoldStats());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-12: GET /api/admin/compliance/deletion-jobs — list deletion jobs
+  app.get("/api/admin/compliance/deletion-jobs", async (req: Request, res: Response) => {
+    try {
+      const { listDeletionJobs } = require("../lib/governance/retention-engine");
+      res.json(await listDeletionJobs({
+        tenantId: req.query.tenantId as string | undefined,
+        status:   req.query.status   as string | undefined,
+        jobType:  req.query.jobType  as string | undefined,
+        limit:    req.query.limit ? Number(req.query.limit) : 50,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-13: POST /api/admin/compliance/deletions/tenant — trigger tenant deletion
+  app.post("/api/admin/compliance/deletions/tenant", async (req: Request, res: Response) => {
+    try {
+      const { executeTenantDeletion } = require("../lib/governance/deletion-workflows");
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await executeTenantDeletion(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-14: POST /api/admin/compliance/deletions/webhook — trigger webhook deletion
+  app.post("/api/admin/compliance/deletions/webhook", async (req: Request, res: Response) => {
+    try {
+      const { executeWebhookDeletion } = require("../lib/governance/deletion-workflows");
+      const { tenantId, endpointId } = req.body;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await executeWebhookDeletion(tenantId, endpointId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-15: POST /api/admin/compliance/audit/export — export audit data
+  app.post("/api/admin/compliance/audit/export", async (req: Request, res: Response) => {
+    try {
+      const { exportAuditData } = require("../lib/governance/audit-export");
+      const { source, tenantId, startDate, endDate, format, limit } = req.body;
+      if (!source) return res.status(400).json({ error: "source required" });
+      res.json(await exportAuditData({
+        source,
+        tenantId,
+        startDate: startDate ? new Date(startDate) : undefined,
+        endDate:   endDate   ? new Date(endDate)   : undefined,
+        format:    format ?? "json",
+        limit:     limit ?? 1000,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-16: POST /api/admin/compliance/audit/export/bulk — bulk export all sources
+  app.post("/api/admin/compliance/audit/export/bulk", async (req: Request, res: Response) => {
+    try {
+      const { exportAllAuditSources } = require("../lib/governance/audit-export");
+      const { tenantId, startDate, endDate, format } = req.body;
+      res.json(await exportAllAuditSources({
+        tenantId,
+        startDate: startDate ? new Date(startDate) : undefined,
+        endDate:   endDate   ? new Date(endDate)   : undefined,
+        format:    format ?? "json",
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
