@@ -187,6 +187,12 @@ shared/
 | 4Q | `feature/billing-observability-monitoring` | Margin Monitoring — billing_metrics_snapshots, monitoring summaries, alerts |
 | 4R | `feature/automated-billing-operations` | Automated Billing Operations — billing_job_definitions, billing_job_runs, 13 predefined jobs, scheduler |
 | 4S | `feature/billing-recovery-integrity` | Billing Integrity & Recovery — billing_recovery_runs, billing_recovery_actions, scan engine, recovery engine |
+| 16 | `feature/ai-cost-governance` | AI Cost Governance — tenant_ai_budgets, usage_snapshots, usage_alerts, gov_anomaly_events; budget-checker, anomaly-detector, runaway-protection |
+| 27 | `feature/platform-ops-console` | Platform Ops Console — 8 ops pages, OpsNav, 7 `/api/admin/platform/*` routes |
+| 30 | `feature/backup-disaster-recovery` | Backup & Disaster Recovery — 151/151 assertions pass |
+| 31 | `feature/api-security-hardening` | API Security Hardening — 106/106 assertions pass |
+| 32 | `feature/platform-ops-console` | Platform Ops UI — 8 frontend pages (dashboard, tenants, jobs, webhooks, ai, billing, recovery, security) |
+| 33 | `feature/ai-operations-assistant` | AI Operations Assistant — ops_ai_audit_logs, 6 service files, gpt-4o-mini, advisory-only; 173/173 assertions pass |
 
 ## AI Stack — Full Pipeline (runner.ts)
 
@@ -297,22 +303,23 @@ npm run db:push   # Sync schema to DB
 
 ## Current Status & Next TODO
 
-### Completed (Phase 4S, commit 2abe180, branch feature/billing-recovery-integrity)
+### Completed (Phase 33, commit cadf982, branch feature/ai-operations-assistant)
+- [x] Phase 33: AI Operations Assistant — gpt-4o-mini, ops_ai_audit_logs, 6 service files, advisory-only, 173/173 assertions pass
+- [x] Phase 32: Platform Ops UI — 8 ops frontend pages (dashboard, tenants, jobs, webhooks, ai, billing, recovery, security)
+- [x] Phase 31: API Security Hardening — 106/106 assertions pass
+- [x] Phase 30: Backup & Disaster Recovery — 151/151 assertions pass
+- [x] Phase 27: Platform Ops Console — 265/265 assertions pass
+- [x] Phase 16: AI Cost Governance — 156/156 assertions pass
 - [x] Phase 4A–4S: Full monetization engine — billing, wallet, subscriptions, invoices, Stripe, jobs, integrity, recovery
-- [x] README.md updated to reflect Phase 4S architecture
 
-### Next phase
-- [ ] **Phase 5A: Document Registry & Storage Foundation**
-  - New tables: knowledge_documents, knowledge_document_versions, knowledge_storage_objects, knowledge_processing_jobs, knowledge_chunks, knowledge_embeddings, knowledge_index_state
-  - Branch: feature/document-registry (from Phase 4S tip commit 2abe180)
-  - Declaration uploaded — ready to implement
-
-### Future work
-- [ ] Admin UI for billing operations dashboard
-- [ ] Real Supabase Auth session (frontend login/signup)
-- [ ] GitHub tool execution (create branch, write files, open PR)
-- [ ] Full RLS policies on all tenant tables
-- [ ] Retention cron jobs (billing_job_runs integration in Phase 5+)
+### Open branches (not yet merged to main)
+| Branch | Phase | Assertions |
+|--------|-------|------------|
+| `feature/ai-cost-governance` | 16 | 156/156 |
+| `feature/platform-ops-console` | 27 + 32 | 265/265 |
+| `feature/backup-disaster-recovery` | 30 | 151/151 |
+| `feature/api-security-hardening` | 31 | 106/106 |
+| `feature/ai-operations-assistant` | 33 | 173/173 |
 
 ## Phase 4P — Admin Pricing & Plan Management System (complete, branch: feature/admin-pricing-plan-management)
 
@@ -1629,3 +1636,57 @@ INV-OBS-6: Fire-and-forget wrappers (collectXxx) are synchronous callers — nev
 
 ### Validation results
 60/60 scenarios — 178 assertions — ALL PASS (branch: feature/observability-platform)
+
+## Phase 33 — AI Operations Assistant (branch: feature/ai-operations-assistant, commit: cadf982)
+
+### Overview
+Advisory-only AI assistant for platform operators. Reads live telemetry, synthesises health summaries, explains incidents, correlates cross-subsystem signals, and recommends next steps. All output is observational — no mutations ever executed by the AI layer (Rule B).
+
+### New table (migration: server/lib/ops-ai/migrate-phase33.ts)
+- `ops_ai_audit_logs` — full audit trail for every AI assistant call. Columns: id, request_type, operator_id, input_scope (JSONB), response_summary, confidence, tokens_used, model_used, created_at. 4 indexes. RLS + service_role policy.
+
+### New shared schema (shared/ops-ai-schema.ts)
+- `OpsAiResponseSchema` — overall_health enum (healthy/warning/degraded/critical), summary string, top_issues[], suspected_correlations[], recommended_actions[], unknowns[]
+- `TopIssueSchema` — title, severity (SeverityLevel), evidence string, confidence (ConfidenceLevel)
+- `RecommendedActionSchema` — action, reason, priority (1|2|3)
+- `IncidentRequestSchema` — type enum (6 values), context optional
+- `AuditRecordSchema`, `ConfidenceLevel`, `SeverityLevel`, `OverallHealth`, `Priority`
+
+### Service files (server/lib/ops-ai/)
+- `ops-assistant.ts` — orchestrator: `summariseCurrentHealth`, `explainIncident`, `correlateSignals`, `recommendNextSteps`
+- `health-summary.ts` — gathers telemetry from all subsystems (jobs, webhooks, AI, billing, tenants); calls gpt-4o-mini
+- `incident-explainer.ts` — per-incident telemetry routing for 6 incident types: failed_jobs, webhook_failure_spike, billing_desync, ai_budget_spike, brownout_transition, rate_limit_surge
+- `signal-correlation.ts` — cross-subsystem correlation analysis
+- `recommendations.ts` — investigation-only next steps (no mutations)
+- `prompt-builder.ts` — sealed system prompt (`OPS_SYSTEM_PROMPT`), bounded + sanitised telemetry inputs, `buildHealthSummaryPrompt`, `buildIncidentPrompt`, `redactSecrets`
+- `ops-ai-audit.ts` — `writeAuditRecord`, `listAuditRecords`, `redactSecrets` (case-insensitive secret key matching)
+
+### Admin routes (server/routes/admin.ts — 3 endpoints, all require isPlatformAdmin)
+- `GET /api/admin/ops-ai/summary` — current platform health summary via gpt-4o-mini
+- `POST /api/admin/ops-ai/explain` — explain specific incident type (body: `{ type, context? }`)
+- `GET /api/admin/ops-ai/history` — audit log history (query: `?limit=`)
+
+### Frontend (client/src/pages/ops/assistant.tsx)
+- Health banner (color-coded by overall_health)
+- Top issues list with severity badges
+- Suspected correlations display
+- Recommended actions with priority labels
+- Unknowns section
+- Incident explainer: 6 incident type selectors + explain button
+- Audit history viewer
+- OpsNav updated with AI Assistant entry; App.tsx registered `/ops/assistant` route
+
+### Design rules enforced
+- **Rule A**: AI summarises only provided telemetry — no hallucination
+- **Rule B**: No mutation paths — advisory only. No `mutate`/`execute`/`action_taken` in responses
+- **Rule C**: All outputs grounded in real platform data
+- **Rule D**: Unknowns explicitly listed when data is insufficient
+- **Rule E**: Confidence field always present on every top_issue
+- **Rule F**: Full audit trail — every call persisted to ops_ai_audit_logs
+- **Rule G**: Secrets redacted before logging; tenant isolation enforced
+
+### Model
+- `gpt-4o-mini` via existing `chatJSON()` from `server/lib/openai-client.ts`
+
+### Validation results
+45 scenarios — 173 assertions — ALL PASS (branch: feature/ai-operations-assistant)
