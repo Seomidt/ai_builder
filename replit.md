@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 35 complete)
+# AI Builder Platform — V1 (Phase 37 complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
@@ -1693,3 +1693,86 @@ Advisory-only AI assistant for platform operators. Reads live telemetry, synthes
 
 ### Validation results
 45 scenarios — 173 assertions — ALL PASS (branch: feature/ai-operations-assistant)
+
+## Phase 16 — AI Cost Governance Platform (branch: feature/ai-cost-governance)
+
+### Overview
+Per-tenant AI spend governance with budget enforcement, usage snapshotting, anomaly detection, alert generation and runaway-agent protection. Hard limits block execution (INV-GOV-2). Soft limits warn only (INV-GOV-3). All governance actions fail-open (INV-GOV-1). Full audit trail (INV-GOV-5).
+
+### New tables (migration: server/lib/ai-governance/migrate-phase16.ts)
+- `tenant_ai_budgets` — monthly_budget_usd, daily_budget_usd, soft_limit_percent (80%), hard_limit_percent (100%)
+- `tenant_ai_usage_snapshots` — period (YYYY-MM), tokens_in, tokens_out, cost_usd
+- `ai_usage_alerts` — alert_type (soft_limit|hard_limit|daily_limit|daily_soft), threshold_percent, usage_percent, triggered_at
+- `gov_anomaly_events` — event_type (usage_spike|runaway_agent|excessive_tokens), usage_spike_percent, metadata
+
+### Service files (server/lib/ai-governance/)
+- `budget-checker.ts` — upsertTenantBudget, getTenantBudget, checkBudgetBeforeCall, getCurrentMonthSpend, getCurrentDaySpend, listAllTenantBudgets
+- `usage-snapshotter.ts` — captureUsageSnapshot, getLatestSnapshot, listSnapshots, listAllSnapshots, getCurrentPeriod
+- `anomaly-detector.ts` — detectUsageAnomaly, recordAnomalyEvent, listAnomalyEvents, detectAndRecordAnomaly
+- `alert-generator.ts` — generateUsageAlert, listAlerts, listAllAlerts, getLatestAlert
+- `runaway-protection.ts` — checkRunawayProtection, checkAndRecordRunaway, getRunawayConfig
+
+### Admin routes (server/routes/admin.ts — 5 endpoints)
+- GET /api/admin/ai/budgets — all tenant budgets
+- GET /api/admin/ai/usage — usage snapshots (filter: tenantId)
+- GET /api/admin/ai/anomalies — anomaly events (filter: tenantId)
+- GET /api/admin/ai/alerts — usage alerts (filter: tenantId)
+- GET /api/admin/ai/runaway-events — runaway agent events
+
+### Validation results
+60 scenarios — 156 assertions — ALL PASS (branch: feature/ai-cost-governance)
+
+## Phase 36 — Release Integrity & Deploy Health (branch: feature/release-integrity-deploy-health)
+
+### Overview
+Ops release health page showing config validation, env variable status, schema integrity checks and deploy health.
+
+### New services (server/lib/release/)
+- env-validator, schema-validator, deploy-health, post-deploy-check
+
+### New admin route
+- GET /api/admin/ops/release-health — full release health summary
+
+### Frontend (client/src/pages/ops/release.tsx)
+- ConfigCheckRow, EnvStatusTable, SchemaStatusTable components
+- OpsNav updated with "Release Health" entry
+
+### Validation results
+115 assertions — ALL PASS (branch: feature/release-integrity-deploy-health)
+
+## Phase 37 — Secure Authentication Platform (branch: feature/secure-auth-platform)
+
+### Overview
+Full argon2id password auth, TOTP MFA, session management, password reset, email verification, invite system, and rate-limited API. Cookie-based sessions (httpOnly, secure, sameSite:lax). Session tokens stored as SHA-256 hashes.
+
+### New tables (migration: migrations/037_auth_platform.sql — 8 tables + RLS)
+- `auth_sessions` — session_token (hashed), device_label, ip_address, user_agent, expires_at, revoked_at
+- `auth_login_attempts` — email_hash (sha256), ip_address, success, failure_reason
+- `auth_password_reset_tokens` — token_hash, used_at, expires_at
+- `auth_email_verification_tokens` — token_hash, used_at, expires_at
+- `auth_mfa_totp` — secret_encrypted (AES-256-CBC), enabled, verified_at
+- `auth_mfa_recovery_codes` — code_hash, used_at
+- `auth_invites` — token_hash, role, invited_by, accepted_at, expires_at
+- `auth_security_events` — event_type, severity, ip_address, metadata_json
+
+### Service files (server/lib/auth-platform/ — 8 files)
+- login-service.ts, session-service.ts, password-reset-service.ts, email-verification-service.ts, invite-service.ts, mfa-service.ts, auth-audit.ts, auth-security.ts
+
+### API routes (server/routes/auth-platform.ts — 15 endpoints)
+- POST /api/auth/login, /logout, /refresh
+- POST /api/auth/password-reset/request, /confirm
+- POST /api/auth/email-verification/request, /confirm
+- POST /api/auth/invite/accept
+- POST /api/auth/mfa/enroll/start, /enroll/verify, /challenge, /recovery
+- GET /api/auth/sessions; POST /api/auth/sessions/:id/revoke, /sessions/revoke-others
+
+### Admin routes (server/routes/admin.ts — 5 endpoints)
+- GET /api/admin/auth/overview, /login-failures, /suspicious-events, /sessions, /mfa-adoption
+
+### Frontend (client/src/pages/auth/ — 6 pages + settings + ops)
+- login.tsx, password-reset-request.tsx, password-reset-confirm.tsx, email-verify.tsx, invite-accept.tsx, mfa-challenge.tsx
+- settings/security.tsx — MFA enrollment + session management
+- ops/auth.tsx — Auth Security ops dashboard
+
+### Validation results
+233 assertions — ALL PASS (branch: feature/secure-auth-platform)
