@@ -7572,4 +7572,43 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── Phase 28: CI/CD & Release Governance ───────────────────────────────────
+
+  // Route 28-1: GET /api/admin/platform/deploy-health — deployment health
+  app.get("/api/admin/platform/deploy-health", async (_req: Request, res: Response) => {
+    try {
+      const { runMigrationGuard } = await import("../lib/migrations/migration-guard");
+      const { validateEnvironment, ENV_VAR_REGISTRY } = await import("../lib/startup/env-validation");
+
+      const [migrationResult, envResult] = await Promise.all([
+        runMigrationGuard(),
+        Promise.resolve(validateEnvironment(ENV_VAR_REGISTRY, process.env)),
+      ]);
+
+      const healthy = migrationResult.safe && envResult.valid;
+
+      res.status(healthy ? 200 : 503).json({
+        status:              healthy ? "healthy" : "degraded",
+        schemaVersion:       migrationResult.schemaVersion,
+        migrationStatus: {
+          safe:              migrationResult.safe,
+          pendingCount:      migrationResult.pendingMigrationsCount,
+          schemaDrift:       migrationResult.schemaDriftDetected,
+          issues:            migrationResult.issues,
+          warnings:          migrationResult.warnings,
+        },
+        environmentValidation: {
+          valid:               envResult.valid,
+          criticalMissing:     envResult.criticalMissing,
+          recommendedMissing:  envResult.recommendedMissing,
+          presentCount:        envResult.presentVars.length,
+          checkedAt:           envResult.checkedAt,
+        },
+        checkedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }

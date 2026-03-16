@@ -51,11 +51,23 @@ function getDemoUser(): AuthUser {
 
 // ── Auth middleware ───────────────────────────────────────────────────────────
 
+// ── Public paths that bypass auth ────────────────────────────────────────────
+// These are CI/CD and health-check endpoints that must be accessible without auth.
+
+const PUBLIC_PATHS = [
+  "/api/admin/platform/deploy-health",
+];
+
 export async function authMiddleware(
   req: Request,
   res: Response,
   next: NextFunction,
 ): Promise<void> {
+  // Phase 28: allow specific public paths without authentication
+  if (PUBLIC_PATHS.includes(req.path)) {
+    return next();
+  }
+
   const authHeader = req.headers.authorization;
 
   // ── No token: demo fallback (only if DEMO_MODE=true) ─────────────────────

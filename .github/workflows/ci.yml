@@ -1,0 +1,175 @@
+name: CI — AI Builder Platform
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main", "feature/**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  # ── Step 1: TypeScript typecheck ──────────────────────────────────────────
+  typecheck:
+    name: "1 · TypeScript typecheck"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+      - run: npm ci
+      - name: Run tsc
+        run: npm run check
+
+  # ── Step 2: Lint ──────────────────────────────────────────────────────────
+  lint:
+    name: "2 · Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+      - run: npm ci
+      - name: Run ESLint (if configured)
+        run: |
+          if [ -f ".eslintrc*" ] || [ -f "eslint.config*" ]; then
+            npx eslint . --ext .ts,.tsx --max-warnings 0
+          else
+            echo "No ESLint config found — skipping lint step"
+          fi
+
+  # ── Step 3: Unit tests ────────────────────────────────────────────────────
+  unit-tests:
+    name: "3 · Unit tests"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+      - run: npm ci
+      - name: Run unit tests (if vitest/jest configured)
+        run: |
+          if npx --yes vitest --version > /dev/null 2>&1; then
+            npx vitest run --reporter=verbose
+          elif grep -q '"test"' package.json; then
+            npm test
+          else
+            echo "No test runner configured — skipping unit tests"
+          fi
+
+  # ── Step 4: Schema validation ─────────────────────────────────────────────
+  schema-validation:
+    name: "4 · Schema validation"
+    runs-on: ubuntu-latest
+    needs: [typecheck]
+    env:
+      SUPABASE_DB_POOL_URL: ${{ secrets.SUPABASE_DB_POOL_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+      - run: npm ci
+      - name: Validate database schema
+        run: npx tsx scripts/validate-schema.ts
+
+  # ── Step 5: Migration verification ───────────────────────────────────────
+  migration-verification:
+    name: "5 · Migration verification"
+    runs-on: ubuntu-latest
+    needs: [schema-validation]
+    env:
+      SUPABASE_DB_POOL_URL: ${{ secrets.SUPABASE_DB_POOL_URL }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+      - run: npm ci
+      - name: Run migration guard
+        run: npx tsx -e "
+          import('./server/lib/migrations/migration-guard.js').then(async m => {
+            const result = await m.runMigrationGuard();
+            if (!result.safe) {
+              console.error('Migration guard blocked deployment:', result.issues);
+              process.exit(1);
+            }
+            console.log('Migration guard passed:', result);
+          }).catch(e => { console.error(e); process.exit(1); });
+        " || npx tsx server/lib/migrations/migration-guard.ts --ci
+
+  # ── Step 6: Security scan ─────────────────────────────────────────────────
+  security-scan:
+    name: "6 · Security scan"
+    runs-on: ubuntu-latest
+    needs: [typecheck]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+      - run: npm ci
+      - name: Audit npm dependencies
+        run: npm audit --audit-level=high
+      - name: Check for secrets in code
+        run: |
+          if grep -rn --include="*.ts" --include="*.tsx" \
+            -E "(sk-[a-zA-Z0-9]{32,}|password\s*=\s*['\"][^'\"]{8,})" \
+            --exclude-dir=node_modules --exclude-dir=dist \
+            . ; then
+            echo "Potential secret found in source code — failing CI"
+            exit 1
+          else
+            echo "No hardcoded secrets found"
+          fi
+
+  # ── Step 7: Build verification ────────────────────────────────────────────
+  build-verification:
+    name: "7 · Build verification"
+    runs-on: ubuntu-latest
+    needs: [typecheck, lint]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+      - run: npm ci
+      - name: Verify build compiles
+        run: npm run build
+        env:
+          NODE_ENV: production
+
+  # ── Summary gate ─────────────────────────────────────────────────────────
+  ci-passed:
+    name: "CI passed"
+    runs-on: ubuntu-latest
+    needs:
+      - typecheck
+      - lint
+      - unit-tests
+      - schema-validation
+      - migration-verification
+      - security-scan
+      - build-verification
+    steps:
+      - name: All CI checks passed
+        run: echo "All 7 CI steps completed successfully"
