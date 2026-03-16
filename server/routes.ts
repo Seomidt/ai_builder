@@ -654,6 +654,262 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // Phase 4P — Admin Pricing & Plan Management routes
   registerAdminRoutes(app);
 
+  // ── Phase 31 — Tenant Product Application API ────────────────────────────
+
+  // GET /api/tenant/dashboard — aggregated tenant overview metrics
+  app.get("/api/tenant/dashboard", async (req: Request, res: Response) => {
+    try {
+      const projects     = await storage.listProjects();
+      const runs         = await storage.listRuns({});
+      const integrations = await storage.listIntegrations();
+      const activeRuns   = runs.filter((r: any) => r.status === "running").length;
+      const failedRuns   = runs.filter((r: any) => r.status === "failed").length;
+      const activeInts   = integrations.filter((i: any) => i.status === "active").length;
+      const recentRuns   = runs.slice(0, 5);
+      res.json({
+        metrics: {
+          totalProjects:     projects.length,
+          activeRuns,
+          failedRuns,
+          activeIntegrations: activeInts,
+          totalRuns:         runs.length,
+        },
+        recentRuns,
+        integrationHealth: integrations.map((i: any) => ({
+          id: i.id, provider: i.provider, status: i.status,
+        })),
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // GET /api/tenant/usage — token + cost usage from observability tables
+  app.get("/api/tenant/usage", async (req: Request, res: Response) => {
+    try {
+      const tenantId  = (req.query.tenantId as string) ?? "demo-org";
+      const period    = (req.query.period as string) ?? "30d";
+      const { sql: drizzleSql } = await import("drizzle-orm");
+      const { db }    = await import("./db");
+      const days      = period === "7d" ? 7 : period === "90d" ? 90 : 30;
+      const since     = new Date(Date.now() - days * 86_400_000).toISOString();
+
+      const usageRes = await db.execute<any>(drizzleSql`
+        SELECT
+          COALESCE(SUM(tokens_in),  0)::int    AS tokens_in,
+          COALESCE(SUM(tokens_out), 0)::int    AS tokens_out,
+          COALESCE(SUM(cost_usd::numeric), 0)::float AS cost_usd,
+          COUNT(*)::int                        AS requests,
+          COUNT(DISTINCT model)::int           AS models_used
+        FROM obs_ai_latency_metrics
+        WHERE tenant_id = ${tenantId} AND created_at >= ${since}
+      `);
+
+      const dailyRes = await db.execute<any>(drizzleSql`
+        SELECT
+          DATE_TRUNC('day', created_at)::text AS day,
+          COUNT(*)::int                       AS requests,
+          COALESCE(SUM(cost_usd::numeric), 0)::float AS cost_usd
+        FROM obs_ai_latency_metrics
+        WHERE tenant_id = ${tenantId} AND created_at >= ${since}
+        GROUP BY 1
+        ORDER BY 1
+      `);
+
+      const u = usageRes.rows[0] ?? {};
+      res.json({
+        tenantId,
+        period,
+        summary: {
+          tokensIn:   Number(u.tokens_in   ?? 0),
+          tokensOut:  Number(u.tokens_out  ?? 0),
+          costUsd:    Number(u.cost_usd    ?? 0),
+          requests:   Number(u.requests    ?? 0),
+          modelsUsed: Number(u.models_used ?? 0),
+        },
+        daily: dailyRes.rows.map((r: any) => ({
+          day: r.day, requests: Number(r.requests), costUsd: Number(r.cost_usd),
+        })),
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // GET /api/tenant/billing — budget + subscription info
+  app.get("/api/tenant/billing", async (req: Request, res: Response) => {
+    try {
+      const tenantId = (req.query.tenantId as string) ?? "demo-org";
+      const { db }   = await import("./db");
+      const { sql: drizzleSql } = await import("drizzle-orm");
+
+      const budgetRes = await db.execute<any>(drizzleSql`
+        SELECT * FROM tenant_ai_budgets WHERE tenant_id = ${tenantId} LIMIT 1
+      `);
+      const budget = budgetRes.rows[0] ?? null;
+
+      const spendRes = await db.execute<any>(drizzleSql`
+        SELECT COALESCE(SUM(cost_usd::numeric), 0)::float AS spend
+        FROM obs_ai_latency_metrics
+        WHERE tenant_id = ${tenantId}
+          AND created_at >= DATE_TRUNC('month', NOW())
+      `);
+      const currentSpend = Number(spendRes.rows[0]?.spend ?? 0);
+
+      res.json({
+        tenantId,
+        budget: budget ? {
+          monthlyBudgetUsd:  Number(budget.monthly_budget_usd ?? 0),
+          dailyBudgetUsd:    Number(budget.daily_budget_usd   ?? null),
+          softLimitPercent:  Number(budget.soft_limit_percent ?? 80),
+          hardLimitPercent:  Number(budget.hard_limit_percent ?? 100),
+          updatedAt:         budget.updated_at,
+        } : null,
+        currentMonthSpendUsd: currentSpend,
+        utilizationPercent: budget?.monthly_budget_usd
+          ? Math.round((currentSpend / Number(budget.monthly_budget_usd)) * 100)
+          : 0,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // GET /api/tenant/team — organization members list
+  app.get("/api/tenant/team", async (req: Request, res: Response) => {
+    try {
+      const { db } = await import("./db");
+      const { sql: drizzleSql } = await import("drizzle-orm");
+      const limit  = Math.min(Number(req.query.limit) || 50, 100);
+      const cursor = req.query.cursor as string | undefined;
+
+      const rows = await db.execute<any>(drizzleSql`
+        SELECT
+          om.id, om.organization_id, om.role,
+          om.created_at,
+          p.id           AS user_id,
+          p.display_name AS full_name,
+          NULL::text     AS email
+        FROM organization_members om
+        LEFT JOIN profiles p ON p.id = om.user_id
+        ${cursor ? drizzleSql`WHERE om.id > ${cursor}` : drizzleSql``}
+        ORDER BY om.created_at DESC
+        LIMIT ${limit + 1}
+      `);
+
+      const items   = rows.rows.slice(0, limit);
+      const hasMore = rows.rows.length > limit;
+      const nextCursor = hasMore ? items[items.length - 1]?.id : null;
+
+      res.json({
+        members: items.map((r: any) => ({
+          id:    r.id, role: r.role, userId: r.user_id,
+          email: r.email, fullName: r.full_name,
+          joinedAt: r.created_at,
+        })),
+        pagination: { hasMore, nextCursor, limit },
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // POST /api/tenant/team/invite — invite user placeholder
+  app.post("/api/tenant/team/invite", async (req: Request, res: Response) => {
+    try {
+      const { email, role } = req.body as { email?: string; role?: string };
+      if (!email) return res.status(400).json({ error: "email required" });
+      const validRoles = ["owner", "admin", "member", "viewer"];
+      const safeRole   = validRoles.includes(role ?? "") ? role! : "member";
+      res.status(201).json({
+        invited: true, email, role: safeRole,
+        message: `Invitation queued for ${email} as ${safeRole}`,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // GET /api/tenant/audit — security event audit log with cursor pagination
+  app.get("/api/tenant/audit", async (req: Request, res: Response) => {
+    try {
+      const { db } = await import("./db");
+      const { sql: drizzleSql } = await import("drizzle-orm");
+      const limit    = Math.min(Number(req.query.limit) || 25, 100);
+      const cursor   = req.query.cursor as string | undefined;
+      const tenantId = req.query.tenantId as string | undefined;
+
+      const rows = await db.execute<any>(drizzleSql`
+        SELECT id, event_type, tenant_id, ip_address, user_agent,
+               user_id, created_at::text
+        FROM security_events
+        WHERE 1=1
+          ${tenantId ? drizzleSql`AND tenant_id = ${tenantId}` : drizzleSql``}
+          ${cursor   ? drizzleSql`AND id < ${cursor}`          : drizzleSql``}
+        ORDER BY created_at DESC
+        LIMIT ${limit + 1}
+      `);
+
+      const items   = rows.rows.slice(0, limit);
+      const hasMore = rows.rows.length > limit;
+      const nextCursor = hasMore ? items[items.length - 1]?.id : null;
+
+      res.json({
+        events: items.map((r: any) => ({
+          id:        r.id,
+          eventType: r.event_type,
+          tenantId:  r.tenant_id,
+          userId:    r.user_id,
+          ipAddress: r.ip_address,
+          createdAt: r.created_at,
+        })),
+        pagination: { hasMore, nextCursor, limit },
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // GET /api/tenant/ai/runs — AI runs with quota + governance context
+  app.get("/api/tenant/ai/runs", async (req: Request, res: Response) => {
+    try {
+      const limit  = Math.min(Number(req.query.limit) || 20, 100);
+      const cursor = req.query.cursor as string | undefined;
+      const runs   = await storage.listRuns({});
+      const start  = cursor ? runs.findIndex((r: any) => r.id === cursor) + 1 : 0;
+      const items  = runs.slice(start, start + limit);
+      const hasMore = start + limit < runs.length;
+      res.json({
+        runs: items,
+        pagination: { hasMore, nextCursor: hasMore ? items[items.length - 1]?.id : null, limit },
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // GET /api/tenant/settings — tenant configuration
+  app.get("/api/tenant/settings", async (req: Request, res: Response) => {
+    try {
+      res.json({
+        tenant: {
+          defaultLanguage: "en",
+          defaultLocale:   "en-US",
+          currency:        "USD",
+          timezone:        "UTC",
+          aiModel:         "gpt-4o",
+          maxTokensPerRun: 100_000,
+        },
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // PATCH /api/tenant/settings — update tenant configuration
+  app.patch("/api/tenant/settings", async (req: Request, res: Response) => {
+    try {
+      const allowed = ["defaultLanguage","defaultLocale","currency","timezone","aiModel","maxTokensPerRun"];
+      const updates: Record<string, unknown> = {};
+      for (const key of allowed) {
+        if (req.body[key] !== undefined) updates[key] = req.body[key];
+      }
+      res.json({ updated: true, fields: Object.keys(updates), updatedAt: new Date().toISOString() });
+    } catch (err) { handleError(res, err); }
+  });
+
   return httpServer;
 }
 

@@ -7,10 +7,11 @@ import {
   Plug,
   Settings,
   ChevronRight,
+  Building2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-const navItems = [
+const platformNav = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/projects", label: "Projects", icon: FolderKanban },
   { href: "/architectures", label: "Architectures", icon: Cpu },
@@ -21,6 +22,7 @@ const navItems = [
 
 export function Sidebar() {
   const [location] = useLocation();
+  const isTenant = location.startsWith("/tenant");
 
   return (
     <aside className="flex flex-col w-56 shrink-0 h-screen bg-sidebar border-r border-sidebar-border">
@@ -34,8 +36,12 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-        {navItems.map(({ href, label, icon: Icon }) => {
-          const isActive = href === "/" ? location === "/" : location.startsWith(href);
+        {/* Platform section */}
+        <p className="px-3 py-1.5 text-xs font-semibold text-sidebar-foreground/40 uppercase tracking-wider">
+          Platform
+        </p>
+        {platformNav.map(({ href, label, icon: Icon }) => {
+          const isActive = href === "/" ? location === "/" : location.startsWith(href) && !isTenant;
           return (
             <Link
               key={href}
@@ -54,6 +60,27 @@ export function Sidebar() {
             </Link>
           );
         })}
+
+        {/* Tenant App section */}
+        <div className="pt-3">
+          <p className="px-3 py-1.5 text-xs font-semibold text-sidebar-foreground/40 uppercase tracking-wider">
+            Tenant App
+          </p>
+          <Link
+            href="/tenant"
+            data-testid="nav-link-tenant-app"
+            className={cn(
+              "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
+              isTenant
+                ? "bg-sidebar-primary/15 text-sidebar-primary border border-sidebar-primary/25"
+                : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent",
+            )}
+          >
+            <Building2 className="w-4 h-4 shrink-0" />
+            <span className="flex-1">Tenant Portal</span>
+            {isTenant && <ChevronRight className="w-3 h-3 opacity-60" />}
+          </Link>
+        </div>
       </nav>
 
       {/* Footer */}
