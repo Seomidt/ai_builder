@@ -651,6 +651,66 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   });
 
+  // Phase 34 — Tenant locale settings (PATCH /api/tenant/settings/locale)
+  app.get("/api/tenant/locale", async (req: Request, res: Response) => {
+    try {
+      const tenantId = (req.user as any)?.organizationId ?? (req.query.tenantId as string);
+      if (!tenantId) return res.status(400).json({ error_code: "MISSING_TENANT", message: "No tenant context" });
+      const { getTenantLocale } = await import("./lib/i18n/locale-service");
+      const locale = await getTenantLocale(tenantId);
+      return res.json(locale);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.patch("/api/tenant/settings", async (req: Request, res: Response) => {
+    try {
+      const tenantId = (req.user as any)?.organizationId ?? (req.body?.tenantId as string);
+      if (!tenantId) return res.status(400).json({ error_code: "MISSING_TENANT", message: "No tenant context" });
+
+      const {
+        updateTenantLocale,
+        isValidLanguage,
+        isValidLocale,
+        isValidCurrency,
+        isValidTimezone,
+      } = await import("./lib/i18n/locale-service");
+
+      const update: Record<string, string> = {};
+      const errors: string[] = [];
+
+      if (req.body.language !== undefined) {
+        if (!isValidLanguage(req.body.language)) errors.push("Invalid language code (must be ISO 639-1/2, e.g. 'en', 'da')");
+        else update.language = req.body.language;
+      }
+      if (req.body.locale !== undefined) {
+        if (!isValidLocale(req.body.locale)) errors.push("Invalid locale (must be BCP-47, e.g. 'en-US', 'da-DK')");
+        else update.locale = req.body.locale;
+      }
+      if (req.body.currency !== undefined) {
+        if (!isValidCurrency(req.body.currency)) errors.push("Invalid currency (must be ISO 4217, e.g. 'USD', 'EUR', 'DKK')");
+        else update.currency = req.body.currency;
+      }
+      if (req.body.timezone !== undefined) {
+        if (!isValidTimezone(req.body.timezone)) errors.push("Invalid timezone (must be IANA, e.g. 'UTC', 'Europe/Copenhagen')");
+        else update.timezone = req.body.timezone;
+      }
+
+      if (errors.length > 0) {
+        return res.status(400).json({ error_code: "VALIDATION_ERROR", message: errors.join("; "), errors });
+      }
+      if (Object.keys(update).length === 0) {
+        return res.status(400).json({ error_code: "NO_FIELDS", message: "No valid locale fields provided" });
+      }
+
+      await updateTenantLocale(tenantId, update);
+      return res.json({ ok: true, updated: update });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
   // Phase 4P — Admin Pricing & Plan Management routes
   registerAdminRoutes(app);
 
