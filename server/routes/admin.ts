@@ -7364,4 +7364,212 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // ── Phase 27 — Platform Ops Console ──────────────────────────────────────────
+
+  // Route 27-1: GET /api/admin/ops/health — full system health report
+  app.get("/api/admin/ops/health", async (_req: Request, res: Response) => {
+    try {
+      const { getSystemHealthReport } = require("../lib/ops/system-health");
+      res.json(await getSystemHealthReport());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-2: GET /api/admin/ops/tenants — tenant list overview
+  app.get("/api/admin/ops/tenants", async (req: Request, res: Response) => {
+    try {
+      const { listTenantOverviews, searchTenants } = require("../lib/ops/tenant-inspector");
+      const { q, limit } = req.query;
+      if (q) {
+        return res.json(await searchTenants(q as string, limit ? Number(limit) : 20));
+      }
+      res.json(await listTenantOverviews(limit ? Number(limit) : 50));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-3: GET /api/admin/ops/tenants/:tenantId — deep tenant inspection
+  app.get("/api/admin/ops/tenants/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const { inspectTenant } = require("../lib/ops/tenant-inspector");
+      res.json(await inspectTenant(req.params.tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-4: GET /api/admin/ops/jobs — job queue summary + active jobs
+  app.get("/api/admin/ops/jobs", async (req: Request, res: Response) => {
+    try {
+      const { getJobQueueSummary, getActiveJobs, getJobTypeBreakdown } = require("../lib/ops/job-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [summary, active, breakdown] = await Promise.all([
+        getJobQueueSummary(tenantId),
+        getActiveJobs(50, tenantId),
+        getJobTypeBreakdown(tenantId),
+      ]);
+      res.json({ summary, active, breakdown });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-5: GET /api/admin/ops/jobs/failed — failed job list
+  app.get("/api/admin/ops/jobs/failed", async (req: Request, res: Response) => {
+    try {
+      const { getFailedJobs, getRetryStatus, getStaleJobs } = require("../lib/ops/job-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [failed, retryStatus, stale] = await Promise.all([
+        getFailedJobs(50, tenantId),
+        getRetryStatus(tenantId),
+        getStaleJobs(30),
+      ]);
+      res.json({ failed, retryStatus, stale });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-6: GET /api/admin/ops/jobs/throughput — job throughput metrics
+  app.get("/api/admin/ops/jobs/throughput", async (req: Request, res: Response) => {
+    try {
+      const { getJobThroughput } = require("../lib/ops/job-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const window   = req.query.window ? Number(req.query.window) : 24;
+      const validWindow = [1, 24, 168].includes(window) ? window : 24;
+      res.json(await getJobThroughput(validWindow as 1 | 24 | 168, tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-7: GET /api/admin/ops/webhooks — webhook health + reliability
+  app.get("/api/admin/ops/webhooks", async (req: Request, res: Response) => {
+    try {
+      const { getWebhookHealthSummary, getEndpointReliabilityScores } = require("../lib/ops/webhook-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [summary, reliability] = await Promise.all([
+        getWebhookHealthSummary(tenantId),
+        getEndpointReliabilityScores(tenantId),
+      ]);
+      res.json({ summary, reliability });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-8: GET /api/admin/ops/webhooks/failures — failure history + retry counts
+  app.get("/api/admin/ops/webhooks/failures", async (req: Request, res: Response) => {
+    try {
+      const { getDeliveryFailureHistory, getEndpointRetryCounts } = require("../lib/ops/webhook-inspector");
+      const tenantId    = req.query.tenantId    as string | undefined;
+      const endpointId  = req.query.endpointId  as string | undefined;
+      const [failures, retryCounts] = await Promise.all([
+        getDeliveryFailureHistory({ tenantId, endpointId }),
+        getEndpointRetryCounts(tenantId),
+      ]);
+      res.json({ failures, retryCounts });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-9: GET /api/admin/ops/evaluations — policy evaluation runs + health
+  app.get("/api/admin/ops/evaluations", async (req: Request, res: Response) => {
+    try {
+      const { getPolicyEvaluationRuns, getEvalHealthSummary, getRetentionEvaluations } = require("../lib/ops/eval-inspector");
+      const [runs, health, retention] = await Promise.all([
+        getPolicyEvaluationRuns(req.query.active !== "false"),
+        getEvalHealthSummary(),
+        getRetentionEvaluations(),
+      ]);
+      res.json({ runs, health, retention });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-10: GET /api/admin/ops/evaluations/regression — regression signals
+  app.get("/api/admin/ops/evaluations/regression", async (req: Request, res: Response) => {
+    try {
+      const { getRegressionSignals, getFailurePatterns } = require("../lib/ops/eval-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const window   = req.query.window ? Number(req.query.window) : 24;
+      const [signals, patterns] = await Promise.all([
+        getRegressionSignals(window, tenantId),
+        getFailurePatterns(168),
+      ]);
+      res.json({ signals, patterns });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-11: GET /api/admin/ops/security — security health + event summary
+  app.get("/api/admin/ops/security", async (req: Request, res: Response) => {
+    try {
+      const { getSecurityHealthSnapshot, getSecurityEventSummary, getModerationSpikes } = require("../lib/ops/security-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [snapshot, events, spikes] = await Promise.all([
+        getSecurityHealthSnapshot(),
+        getSecurityEventSummary(24, tenantId),
+        getModerationSpikes(24, 5, tenantId),
+      ]);
+      res.json({ snapshot, events, spikes });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-12: GET /api/admin/ops/security/abuse — abuse events + rate limit triggers
+  app.get("/api/admin/ops/security/abuse", async (req: Request, res: Response) => {
+    try {
+      const { getAbuseEvents, getRateLimitTriggers, getPolicyViolations } = require("../lib/ops/security-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [abuse, rateLimits, violations] = await Promise.all([
+        getAbuseEvents({ tenantId }),
+        getRateLimitTriggers(24, tenantId),
+        getPolicyViolations(168, tenantId),
+      ]);
+      res.json({ abuse, rateLimits, violations });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-13: GET /api/admin/ops/security/anomalies — anomaly event stream
+  app.get("/api/admin/ops/security/anomalies", async (req: Request, res: Response) => {
+    try {
+      const { getAnomalyEventStream } = require("../lib/ops/security-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const window   = req.query.window ? Number(req.query.window) : 24;
+      const limit    = req.query.limit  ? Number(req.query.limit)  : 100;
+      res.json(await getAnomalyEventStream(window, tenantId, limit));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-14: GET /api/admin/ops/billing — billing health overview
+  app.get("/api/admin/ops/billing", async (req: Request, res: Response) => {
+    try {
+      const { getBillingHealth } = require("../lib/ops/system-health");
+      res.json(await getBillingHealth());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-15: GET /api/admin/ops/governance — governance health
+  app.get("/api/admin/ops/governance", async (req: Request, res: Response) => {
+    try {
+      const { getGovernanceHealth } = require("../lib/ops/system-health");
+      res.json(await getGovernanceHealth());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }
