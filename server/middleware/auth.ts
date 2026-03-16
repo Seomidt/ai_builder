@@ -62,8 +62,12 @@ const PUBLIC_PATHS = [
   "/api/admin/recovery/restore-tenant",
   "/api/admin/recovery/restore-table",
   "/api/admin/recovery/job-recovery",
+  "/api/admin/recovery/job-recovery/requeue",
   "/api/admin/recovery/webhook-replay",
   "/api/admin/recovery/stripe-reconcile",
+  "/api/admin/recovery/pressure",
+  "/api/admin/recovery/brownout",
+  "/api/admin/recovery/brownout-history",
 ];
 
 export async function authMiddleware(

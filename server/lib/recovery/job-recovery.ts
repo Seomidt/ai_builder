@@ -268,3 +268,62 @@ export async function getQueueHealthSnapshot(
     await client.end();
   }
 }
+
+// ── Convenience wrappers for admin API ───────────────────────────────────────
+
+export interface RequeueJobsOptions {
+  jobIds?: string[];
+  dryRun?: boolean;
+}
+
+export interface RequeueJobsResult {
+  requested: number;
+  requeued:  number;
+  skipped:   number;
+  dryRun:    boolean;
+  jobIds:    string[];
+}
+
+export async function requeueJobs(opts: RequeueJobsOptions = {}): Promise<RequeueJobsResult> {
+  const { jobIds, dryRun = true } = opts;
+
+  if (!jobIds || jobIds.length === 0) {
+    const stalled = await detectStalledJobs(30);
+    if (stalled.length === 0) {
+      return { requested: 0, requeued: 0, skipped: 0, dryRun, jobIds: [] };
+    }
+    const results = await Promise.all(stalled.map(j => requeueJob(j.id, dryRun)));
+    const requeued = results.filter(r => r.action === "requeued").length;
+    return {
+      requested: stalled.length,
+      requeued,
+      skipped:   stalled.length - requeued,
+      dryRun,
+      jobIds:    stalled.map(j => j.id),
+    };
+  }
+
+  const results = await Promise.all(jobIds.map(id => requeueJob(id, dryRun)));
+  const requeued = results.filter(r => r.action === "requeued").length;
+  return {
+    requested: jobIds.length,
+    requeued,
+    skipped:   jobIds.length - requeued,
+    dryRun,
+    jobIds,
+  };
+}
+
+export function explainJobRecoveryState(result: RequeueJobsResult | JobRecoverySummary): string {
+  if ("requested" in result) {
+    const r = result as RequeueJobsResult;
+    if (r.requested === 0) return "No jobs required requeue. Queue is healthy.";
+    const dryLabel = r.dryRun ? " (dry-run)" : "";
+    return `Requeued ${r.requeued}/${r.requested} jobs${dryLabel}. Skipped: ${r.skipped}.`;
+  }
+  const s = result as JobRecoverySummary;
+  return [
+    `Job recovery complete.`,
+    `Stalled: ${s.stalledCount}, Requeued: ${s.requeuedCount}, Failed: ${s.failedCount}, Skipped: ${s.skippedCount}.`,
+  ].join(" ");
+}

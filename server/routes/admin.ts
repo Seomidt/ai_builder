@@ -7763,4 +7763,83 @@ export function registerAdminRoutes(app: Express): void {
       res.status(500).json({ error: (err as Error).message });
     }
   });
+
+  // POST /api/admin/recovery/job-recovery/requeue
+  // Explicit requeue of stalled/failed jobs (auditable mutation endpoint)
+  app.post("/api/admin/recovery/job-recovery/requeue", async (req: Request, res: Response) => {
+    try {
+      const { requeueJobs, explainJobRecoveryState } = await import("../lib/recovery/job-recovery");
+      const { jobIds, dryRun = true } = req.body as {
+        jobIds?: string[];
+        dryRun?: boolean;
+      };
+
+      const result  = await requeueJobs({ jobIds, dryRun });
+      const explain = explainJobRecoveryState(result);
+
+      res.json({ result, explain, dryRun, requeuedAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/recovery/pressure
+  // Read current system pressure level and all pressure signals
+  app.get("/api/admin/recovery/pressure", async (_req: Request, res: Response) => {
+    try {
+      const { getSystemPressure, summarizePressureSignals } = await import("../lib/recovery/system-pressure");
+
+      const pressure = await getSystemPressure();
+      const summary  = summarizePressureSignals(pressure.signals);
+
+      res.json({ ...pressure, summary });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/recovery/brownout
+  // Read current brownout state and active policy
+  app.get("/api/admin/recovery/brownout", async (_req: Request, res: Response) => {
+    try {
+      const {
+        getBrownoutState,
+        summarizeBrownoutState,
+        applyBrownoutPolicy,
+      } = await import("../lib/recovery/brownout-mode");
+
+      const { getSystemPressure } = await import("../lib/recovery/system-pressure");
+
+      // Apply latest pressure to brownout state (auto mode only)
+      const pressure = await getSystemPressure();
+      applyBrownoutPolicy(pressure.level);
+
+      const state   = getBrownoutState();
+      const summary = summarizeBrownoutState();
+
+      res.json({ state, summary, pressureLevel: pressure.level, checkedAt: new Date().toISOString() });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/recovery/brownout-history
+  // Read brownout transition history (last 50 transitions)
+  app.get("/api/admin/recovery/brownout-history", async (_req: Request, res: Response) => {
+    try {
+      const { getBrownoutHistory, getBrownoutState } = await import("../lib/recovery/brownout-mode");
+
+      const history = getBrownoutHistory();
+      const current = getBrownoutState();
+
+      res.json({
+        current:         current.level,
+        transitionCount: history.length,
+        history:         history.slice(-50).reverse(),
+        checkedAt:       new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
 }

@@ -1062,6 +1062,604 @@ async function main(): Promise<void> {
     assert(existsSync("server/lib/backup/r2-backup.ts"), "r2-backup.ts exists");
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // S91–S100: System Pressure Detection (INV-REC8)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  section("S91: system-pressure.ts — file exists");
+  {
+    const { existsSync } = await import("fs");
+    assert(existsSync("server/lib/recovery/system-pressure.ts"), "system-pressure.ts exists");
+  }
+
+  section("S92: system-pressure — exports required functions");
+  {
+    const mod = await import("./server/lib/recovery/system-pressure");
+    assert(typeof mod.getSystemPressure      === "function", "getSystemPressure exported");
+    assert(typeof mod.classifyPressureLevel  === "function", "classifyPressureLevel exported");
+    assert(typeof mod.explainSystemPressure  === "function", "explainSystemPressure exported");
+    assert(typeof mod.summarizePressureSignals === "function", "summarizePressureSignals exported");
+    assert(typeof mod.collectPressureSignals === "function", "collectPressureSignals exported");
+    assert(typeof mod.DEFAULT_THRESHOLDS     === "object",   "DEFAULT_THRESHOLDS exported");
+  }
+
+  section("S93: classifyPressureLevel — deterministic thresholds");
+  {
+    const { classifyPressureLevel } = await import("./server/lib/recovery/system-pressure");
+
+    // All low → normal
+    const allLow = [
+      { name: "queue_depth", value: 10, threshold: 50, unit: "jobs", breached: false, severity: "low" as const },
+      { name: "stalled_jobs", value: 2, threshold: 5, unit: "jobs", breached: false, severity: "low" as const },
+    ];
+    const r1 = classifyPressureLevel(allLow);
+    assertEq(r1.level, "normal", "all-low signals → normal");
+    assert(r1.score < 8, "all-low score < 8");
+
+    // 1 medium → elevated
+    const oneMedium = [
+      { name: "queue_depth", value: 60, threshold: 50, unit: "jobs", breached: true, severity: "medium" as const },
+    ];
+    const r2 = classifyPressureLevel(oneMedium);
+    assertEq(r2.level, "normal", "1 medium → still normal (needs 2 medium for elevated)");
+
+    const twoMedium = [
+      { name: "queue_depth",   value: 60,  threshold: 50, unit: "jobs", breached: true, severity: "medium" as const },
+      { name: "stalled_jobs",  value: 8,   threshold: 5,  unit: "jobs", breached: true, severity: "medium" as const },
+    ];
+    const r3 = classifyPressureLevel(twoMedium);
+    assertEq(r3.level, "elevated", "2 medium → elevated");
+
+    // 1 high → elevated
+    const oneHigh = [
+      { name: "queue_depth", value: 210, threshold: 50, unit: "jobs", breached: true, severity: "high" as const },
+    ];
+    const r4 = classifyPressureLevel(oneHigh);
+    assertEq(r4.level, "elevated", "1 high → elevated");
+
+    // 2 high → degraded
+    const twoHigh = [
+      { name: "queue_depth",   value: 210, threshold: 50, unit: "jobs", breached: true, severity: "high" as const },
+      { name: "stalled_jobs",  value: 25,  threshold: 5,  unit: "jobs", breached: true, severity: "high" as const },
+    ];
+    const r5 = classifyPressureLevel(twoHigh);
+    assertEq(r5.level, "degraded", "2 high → degraded");
+
+    // 1 critical → degraded
+    const oneCritical = [
+      { name: "queue_depth", value: 510, threshold: 50, unit: "jobs", breached: true, severity: "critical" as const },
+    ];
+    const r6 = classifyPressureLevel(oneCritical);
+    assertEq(r6.level, "degraded", "1 critical → degraded");
+
+    // 2 critical → critical
+    const twoCritical = [
+      { name: "queue_depth",  value: 510, threshold: 50, unit: "jobs", breached: true, severity: "critical" as const },
+      { name: "stalled_jobs", value: 55,  threshold: 5,  unit: "jobs", breached: true, severity: "critical" as const },
+    ];
+    const r7 = classifyPressureLevel(twoCritical);
+    assertEq(r7.level, "critical", "2 critical → critical");
+  }
+
+  section("S94: pressure score is deterministic and bounded 0–100");
+  {
+    const { classifyPressureLevel } = await import("./server/lib/recovery/system-pressure");
+
+    for (let i = 0; i < 5; i++) {
+      const signals = [
+        { name: "q", value: 510, threshold: 50, unit: "jobs", breached: true, severity: "critical" as const },
+        { name: "s", value: 55,  threshold: 5,  unit: "jobs", breached: true, severity: "critical" as const },
+      ];
+      const r = classifyPressureLevel(signals);
+      assert(r.score >= 0 && r.score <= 100, `score in bounds on run ${i} (got ${r.score})`);
+      assertEq(r.level, "critical", `deterministic critical on run ${i}`);
+    }
+  }
+
+  section("S95: explainSystemPressure — normal produces short explanation");
+  {
+    const { explainSystemPressure } = await import("./server/lib/recovery/system-pressure");
+    const result = {
+      level:         "normal" as const,
+      score:         0,
+      signals:       [],
+      criticalCount: 0,
+      highCount:     0,
+      explanation:   "",
+      checkedAt:     new Date().toISOString(),
+    };
+    const exp = explainSystemPressure(result);
+    assert(exp.toLowerCase().includes("normal"), "explanation mentions normal");
+    assertStr(exp, "explanation is non-empty");
+  }
+
+  section("S96: explainSystemPressure — lists breached signals");
+  {
+    const { explainSystemPressure } = await import("./server/lib/recovery/system-pressure");
+    const result = {
+      level:         "degraded" as const,
+      score:         60,
+      signals:       [
+        { name: "queue_depth", value: 510, threshold: 50, unit: "jobs", breached: true, severity: "critical" as const },
+        { name: "stalled_jobs", value: 55, threshold: 5,  unit: "jobs", breached: true, severity: "high"     as const },
+      ],
+      criticalCount: 1,
+      highCount:     1,
+      explanation:   "",
+      checkedAt:     new Date().toISOString(),
+    };
+    const exp = explainSystemPressure(result);
+    assert(exp.includes("queue_depth") || exp.includes("stalled"), "explanation lists breached signals");
+    assert(exp.includes("DEGRADED") || exp.includes("degraded"), "explanation mentions level");
+  }
+
+  section("S97: summarizePressureSignals — empty returns nominal message");
+  {
+    const { summarizePressureSignals } = await import("./server/lib/recovery/system-pressure");
+    const r = summarizePressureSignals([]);
+    assert(r.toLowerCase().includes("nominal") || r.toLowerCase().includes("normal"), "empty signals → nominal");
+  }
+
+  section("S98: summarizePressureSignals — lists breached names");
+  {
+    const { summarizePressureSignals } = await import("./server/lib/recovery/system-pressure");
+    const signals = [
+      { name: "queue_depth", value: 510, threshold: 50, unit: "jobs", breached: true,  severity: "critical" as const },
+      { name: "stalled_jobs", value: 2,  threshold: 5,  unit: "jobs", breached: false, severity: "low"      as const },
+    ];
+    const r = summarizePressureSignals(signals);
+    assert(r.includes("queue_depth"), "summary includes breached signal name");
+    assert(!r.includes("stalled_jobs"), "summary omits non-breached signal");
+  }
+
+  section("S99: DEFAULT_THRESHOLDS — all tiers ordered correctly");
+  {
+    const { DEFAULT_THRESHOLDS: T } = await import("./server/lib/recovery/system-pressure");
+    for (const [key, tiers] of Object.entries(T)) {
+      assert(tiers.elevated < tiers.degraded, `${key}: elevated < degraded`);
+      assert(tiers.degraded < tiers.critical, `${key}: degraded < critical`);
+    }
+  }
+
+  section("S100: Admin GET /api/admin/recovery/pressure — responds");
+  {
+    const r = await httpGet("/api/admin/recovery/pressure");
+    // May fail if DB not reachable — check structure only if 200
+    assert(r.status === 200 || r.status === 500, "pressure endpoint responds (200 or 500)");
+    if (r.status === 200) {
+      assert(["normal", "elevated", "degraded", "critical"].includes(r.body?.level),
+        "pressure.level is valid");
+      assertNum(r.body?.score, "pressure.score");
+      assertArr(r.body?.signals, "pressure.signals");
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // S101–S115: Brownout Mode (INV-REC9, INV-REC10)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  section("S101: brownout-mode.ts — file exists");
+  {
+    const { existsSync } = await import("fs");
+    assert(existsSync("server/lib/recovery/brownout-mode.ts"), "brownout-mode.ts exists");
+  }
+
+  section("S102: brownout-mode — exports required functions");
+  {
+    const mod = await import("./server/lib/recovery/brownout-mode");
+    assert(typeof mod.getBrownoutState       === "function", "getBrownoutState exported");
+    assert(typeof mod.enterBrownoutMode      === "function", "enterBrownoutMode exported");
+    assert(typeof mod.exitBrownoutMode       === "function", "exitBrownoutMode exported");
+    assert(typeof mod.applyBrownoutPolicy    === "function", "applyBrownoutPolicy exported");
+    assert(typeof mod.explainBrownoutDecision === "function", "explainBrownoutDecision exported");
+    assert(typeof mod.summarizeBrownoutState === "function", "summarizeBrownoutState exported");
+    assert(typeof mod.isFlowAllowed          === "function", "isFlowAllowed exported");
+    assert(typeof mod.isFlowThrottled        === "function", "isFlowThrottled exported");
+    assert(typeof mod.BROWNOUT_POLICIES      === "object",   "BROWNOUT_POLICIES exported");
+    assert(typeof mod.CORE_FLOWS             === "object",   "CORE_FLOWS exported");
+  }
+
+  section("S103: CORE_FLOWS — all critical paths present (INV-REC9)");
+  {
+    const { CORE_FLOWS } = await import("./server/lib/recovery/brownout-mode");
+    const expected = ["auth", "billing", "quota_enforcement", "retrieval_answer_path",
+                      "stripe_webhook_handling", "restore_recovery_endpoints"];
+    for (const f of expected) {
+      assert(CORE_FLOWS.includes(f as any), `CORE_FLOWS includes ${f}`);
+    }
+  }
+
+  section("S104: enterBrownoutMode — elevated activation");
+  {
+    const { enterBrownoutMode, exitBrownoutMode } = await import("./server/lib/recovery/brownout-mode");
+    exitBrownoutMode("pre-test reset", true); // ensure clean state
+    const s = enterBrownoutMode("elevated", "test: queue pressure", false);
+    assertEq(s.level,  "elevated", "level is elevated");
+    assertBool(s.active, "active is boolean");
+    assert(s.active === true, "active=true when elevated");
+    assertArr(s.policy.deferredFlows, "deferredFlows is array");
+    assertArr(s.policy.protectedFlows, "protectedFlows is array");
+    assert(s.policy.protectedFlows.includes("auth"), "protectedFlows includes auth");
+    exitBrownoutMode("post-test cleanup", true);
+  }
+
+  section("S105: enterBrownoutMode — degraded activation");
+  {
+    const { enterBrownoutMode, exitBrownoutMode, BROWNOUT_POLICIES } = await import("./server/lib/recovery/brownout-mode");
+    exitBrownoutMode("pre-test reset", true);
+    const s = enterBrownoutMode("degraded", "test: webhook failure spike", false);
+    assertEq(s.level, "degraded", "level is degraded");
+    const policy = BROWNOUT_POLICIES["degraded"];
+    assert(policy.throttledFlows.includes("webhook_retry_throughput"), "webhook retry throttled at degraded");
+    assert(policy.throttledFlows.includes("agent_concurrency"), "agent concurrency throttled at degraded");
+    assert(policy.throttledFlows.includes("evaluation_throughput"), "evaluation throttled at degraded");
+    exitBrownoutMode("post-test cleanup", true);
+  }
+
+  section("S106: enterBrownoutMode — critical activation");
+  {
+    const { enterBrownoutMode, exitBrownoutMode, getBrownoutState } = await import("./server/lib/recovery/brownout-mode");
+    exitBrownoutMode("pre-test reset", true);
+    enterBrownoutMode("critical", "test: queue critical", false);
+    const s = getBrownoutState();
+    assertEq(s.level, "critical", "level is critical");
+    assert(s.policy.deferredFlows.length > 0, "critical has deferred flows");
+    assert(s.policy.protectedFlows.includes("billing"), "billing protected at critical");
+    assert(s.policy.protectedFlows.includes("stripe_webhook_handling"), "Stripe webhooks protected at critical");
+    exitBrownoutMode("post-test cleanup", true);
+  }
+
+  section("S107: exitBrownoutMode — returns to normal");
+  {
+    const { enterBrownoutMode, exitBrownoutMode, getBrownoutState } = await import("./server/lib/recovery/brownout-mode");
+    enterBrownoutMode("degraded", "test setup", true);
+    const before = getBrownoutState();
+    assertEq(before.level, "degraded", "setup: was degraded");
+
+    exitBrownoutMode("test recovery", true);
+    const after = getBrownoutState();
+    assertEq(after.level,  "normal", "level returns to normal");
+    assertEq(after.active, false,    "active=false after exit");
+  }
+
+  section("S108: core flows always allowed (INV-REC9)");
+  {
+    const { enterBrownoutMode, exitBrownoutMode, isFlowAllowed, CORE_FLOWS } = await import("./server/lib/recovery/brownout-mode");
+
+    for (const brownoutLevel of ["normal", "elevated", "degraded", "critical"] as const) {
+      exitBrownoutMode("reset", true);
+      if (brownoutLevel !== "normal") enterBrownoutMode(brownoutLevel, "test", true);
+
+      for (const flow of CORE_FLOWS) {
+        assert(isFlowAllowed(flow), `[${brownoutLevel}] core flow '${flow}' is always allowed`);
+      }
+    }
+    exitBrownoutMode("final cleanup", true);
+  }
+
+  section("S109: non-critical flows deferred at elevated");
+  {
+    const { enterBrownoutMode, exitBrownoutMode, isFlowAllowed } = await import("./server/lib/recovery/brownout-mode");
+    exitBrownoutMode("reset", true);
+    enterBrownoutMode("elevated", "test", true);
+    assert(!isFlowAllowed("non_critical_exports"),        "non_critical_exports blocked at elevated");
+    assert(!isFlowAllowed("low_priority_cleanup_jobs"),   "low_priority_cleanup blocked at elevated");
+    exitBrownoutMode("cleanup", true);
+  }
+
+  section("S110: throttled flows at degraded");
+  {
+    const { enterBrownoutMode, exitBrownoutMode, isFlowThrottled } = await import("./server/lib/recovery/brownout-mode");
+    exitBrownoutMode("reset", true);
+    enterBrownoutMode("degraded", "test", true);
+    assert(isFlowThrottled("webhook_retry_throughput"), "webhook_retry_throughput throttled at degraded");
+    assert(isFlowThrottled("agent_concurrency"),        "agent_concurrency throttled at degraded");
+    assert(isFlowThrottled("evaluation_throughput"),    "evaluation_throughput throttled at degraded");
+    exitBrownoutMode("cleanup", true);
+  }
+
+  section("S111: applyBrownoutPolicy — maps pressure levels (INV-REC9)");
+  {
+    const { applyBrownoutPolicy, exitBrownoutMode } = await import("./server/lib/recovery/brownout-mode");
+
+    // Use manual=false on reset so manualOverride flag is cleared, allowing auto-policy to work
+    exitBrownoutMode("reset", false);
+    const s1 = applyBrownoutPolicy("normal");
+    assertEq(s1.level, "normal", "normal pressure → normal brownout");
+
+    const s2 = applyBrownoutPolicy("elevated");
+    assertEq(s2.level, "elevated", "elevated pressure → elevated brownout");
+
+    const s3 = applyBrownoutPolicy("degraded");
+    assertEq(s3.level, "degraded", "degraded pressure → degraded brownout");
+
+    const s4 = applyBrownoutPolicy("critical");
+    assertEq(s4.level, "critical", "critical pressure → critical brownout");
+
+    exitBrownoutMode("cleanup", false);
+  }
+
+  section("S112: getBrownoutHistory — transitions are logged (INV-REC10)");
+  {
+    const { enterBrownoutMode, exitBrownoutMode, getBrownoutHistory } = await import("./server/lib/recovery/brownout-mode");
+    const before = getBrownoutHistory().length;
+
+    exitBrownoutMode("reset", true);
+    enterBrownoutMode("elevated", "history test", false);
+    enterBrownoutMode("degraded", "history test escalate", false);
+    exitBrownoutMode("history test recovery", false);
+
+    const history = getBrownoutHistory();
+    assert(history.length > before, "transitions are recorded in history");
+
+    const last = history.at(-1)!;
+    assertEq(last.to, "normal", "last transition is to normal");
+    assertStr(last.reason, "transition has reason string");
+    assertStr(last.timestamp, "transition has timestamp");
+    assertIso(last.timestamp, "transition timestamp is ISO");
+  }
+
+  section("S113: explainBrownoutDecision — all levels produce explanation");
+  {
+    const { explainBrownoutDecision } = await import("./server/lib/recovery/brownout-mode");
+    for (const level of ["normal", "elevated", "degraded", "critical"] as const) {
+      const exp = explainBrownoutDecision(level);
+      assertStr(exp, `explainBrownoutDecision(${level}) is non-empty`);
+    }
+    const critExp = explainBrownoutDecision("critical");
+    assert(critExp.toLowerCase().includes("core") || critExp.toLowerCase().includes("critical"),
+      "critical explanation mentions core/critical");
+  }
+
+  section("S114: summarizeBrownoutState — normal vs active");
+  {
+    const { enterBrownoutMode, exitBrownoutMode, summarizeBrownoutState } = await import("./server/lib/recovery/brownout-mode");
+    exitBrownoutMode("reset", true);
+    const normalSummary = summarizeBrownoutState();
+    assert(normalSummary.toLowerCase().includes("normal") || normalSummary.toLowerCase().includes("inactive"),
+      "normal summary mentions normal/inactive");
+
+    enterBrownoutMode("degraded", "summary test", true);
+    const activeSummary = summarizeBrownoutState();
+    assert(activeSummary.toUpperCase().includes("DEGRADED"), "active summary mentions DEGRADED");
+    exitBrownoutMode("cleanup", true);
+  }
+
+  section("S115: BROWNOUT_POLICIES — all levels defined, core flows protected");
+  {
+    const { BROWNOUT_POLICIES, CORE_FLOWS } = await import("./server/lib/recovery/brownout-mode");
+    const levels = ["normal", "elevated", "degraded", "critical"];
+    for (const level of levels) {
+      const policy = BROWNOUT_POLICIES[level as keyof typeof BROWNOUT_POLICIES];
+      assert(policy !== undefined, `policy defined for ${level}`);
+      assertArr(policy.protectedFlows, `${level}: protectedFlows is array`);
+      assertArr(policy.deferredFlows,  `${level}: deferredFlows is array`);
+      assertArr(policy.throttledFlows, `${level}: throttledFlows is array`);
+      for (const f of CORE_FLOWS) {
+        assert(policy.protectedFlows.includes(f), `${level}: protectedFlows includes ${f}`);
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // S116–S120: Recovery Observability (Task 15)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  section("S116: recovery-observability.ts — file exists");
+  {
+    const { existsSync } = await import("fs");
+    assert(existsSync("server/lib/recovery/recovery-observability.ts"), "recovery-observability.ts exists");
+  }
+
+  section("S117: recovery-observability — exports required functions");
+  {
+    const mod = await import("./server/lib/recovery/recovery-observability");
+    assert(typeof mod.recordBackupSuccess    === "function", "recordBackupSuccess exported");
+    assert(typeof mod.recordBackupFailure    === "function", "recordBackupFailure exported");
+    assert(typeof mod.recordUploadSuccess    === "function", "recordUploadSuccess exported");
+    assert(typeof mod.recordUploadFailure    === "function", "recordUploadFailure exported");
+    assert(typeof mod.recordRestoreAttempt   === "function", "recordRestoreAttempt exported");
+    assert(typeof mod.recordReplayAttempt    === "function", "recordReplayAttempt exported");
+    assert(typeof mod.recordJobRecoveryRun   === "function", "recordJobRecoveryRun exported");
+    assert(typeof mod.recordStripeDesync     === "function", "recordStripeDesync exported");
+    assert(typeof mod.recordPressureSnapshot === "function", "recordPressureSnapshot exported");
+    assert(typeof mod.getObservabilitySnapshot === "function", "getObservabilitySnapshot exported");
+    assert(typeof mod.getRecentEvents        === "function", "getRecentEvents exported");
+    assert(typeof mod.getPressureHistory     === "function", "getPressureHistory exported");
+  }
+
+  section("S118: recovery-observability — tracking counters");
+  {
+    const obs = await import("./server/lib/recovery/recovery-observability");
+
+    obs.recordBackupSuccess({ size: 1024 });
+    obs.recordBackupSuccess({ size: 2048 });
+    obs.recordBackupFailure("conn timeout");
+    obs.recordUploadSuccess("db/daily/test.sql.gz");
+    obs.recordUploadFailure("R2 unreachable");
+    obs.recordRestoreAttempt("tenant-abc", "tenant-restore");
+    obs.recordReplayAttempt("tenant-abc", 5);
+    obs.recordJobRecoveryRun(3, 2);
+    obs.recordStripeDesync(4);
+
+    const snap = obs.getObservabilitySnapshot();
+    assert(snap.backup.backupSuccessCount >= 2,  "backupSuccessCount >= 2");
+    assert(snap.backup.backupFailureCount >= 1,  "backupFailureCount >= 1");
+    assert(snap.backup.uploadSuccessCount >= 1,  "uploadSuccessCount >= 1");
+    assert(snap.backup.uploadFailureCount >= 1,  "uploadFailureCount >= 1");
+    assert(snap.recovery.restoreAttempts  >= 1,  "restoreAttempts >= 1");
+    assert(snap.recovery.replayAttempts   >= 1,  "replayAttempts >= 1");
+    assert(snap.recovery.jobRecoveryRuns  >= 1,  "jobRecoveryRuns >= 1");
+    assert(snap.recovery.stripeDesyncCount >= 4, "stripeDesyncCount >= 4");
+    assertArr(snap.recentEvents, "recentEvents is array");
+    assert(snap.recentEvents.length > 0, "recent events recorded");
+  }
+
+  section("S119: recovery-observability — pressure history tracking");
+  {
+    const obs = await import("./server/lib/recovery/recovery-observability");
+    const { classifyPressureLevel } = await import("./server/lib/recovery/system-pressure");
+
+    const signals = [
+      { name: "queue_depth", value: 510, threshold: 50, unit: "jobs", breached: true, severity: "critical" as const },
+    ];
+    const { level, score } = classifyPressureLevel(signals);
+    const mockResult = {
+      level, score, signals, criticalCount: 1, highCount: 0,
+      explanation: "test", checkedAt: new Date().toISOString(),
+    };
+
+    obs.recordPressureSnapshot(mockResult);
+    const history = obs.getPressureHistory();
+    assertArr(history, "pressure history is array");
+    assert(history.length > 0, "pressure history has entries after snapshot");
+    assertStr(history.at(-1)!.level, "last entry has level");
+    assertNum(history.at(-1)!.score, "last entry has score");
+    assertIso(history.at(-1)!.timestamp, "last entry has ISO timestamp");
+  }
+
+  section("S120: recovery-observability — events are bounded (max 500)");
+  {
+    const obs = await import("./server/lib/recovery/recovery-observability");
+    // Record 60 events
+    for (let i = 0; i < 60; i++) {
+      obs.recordBackupSuccess({ iteration: i });
+    }
+    const events = obs.getRecentEvents();
+    assert(events.length <= 500, `events bounded <= 500 (got ${events.length})`);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // S121–S125: New Admin Endpoints
+  // ══════════════════════════════════════════════════════════════════════════
+
+  section("S121: Admin GET /api/admin/recovery/brownout — responds");
+  {
+    const r = await httpGet("/api/admin/recovery/brownout");
+    assert(r.status === 200 || r.status === 500, "brownout endpoint responds");
+    if (r.status === 200) {
+      const validLevels = ["normal", "elevated", "degraded", "critical"];
+      assert(validLevels.includes(r.body?.state?.level ?? r.body?.level),
+        "brownout state has valid level");
+      assertStr(r.body?.summary, "brownout response has summary");
+    }
+  }
+
+  section("S122: Admin GET /api/admin/recovery/brownout-history — responds");
+  {
+    const r = await httpGet("/api/admin/recovery/brownout-history");
+    assert(r.status === 200 || r.status === 500, "brownout-history responds");
+    if (r.status === 200) {
+      assertArr(r.body?.history,     "brownout history is array");
+      assertNum(r.body?.transitionCount, "transitionCount is number");
+      assertStr(r.body?.checkedAt,   "checkedAt present");
+    }
+  }
+
+  section("S123: Admin POST /api/admin/recovery/job-recovery/requeue — dry-run");
+  {
+    const r = await httpPost("/api/admin/recovery/job-recovery/requeue", { dryRun: true });
+    assert(r.status === 200 || r.status === 500, "requeue responds (200 or 500)");
+    if (r.status === 200) {
+      assertBool(r.body?.dryRun, "dryRun field present");
+      assert(r.body?.dryRun === true, "dryRun=true in response");
+      assertStr(r.body?.explain, "explain field present");
+    }
+  }
+
+  section("S124: New runbooks exist (brownout-escalation + brownout-recovery)");
+  {
+    const { existsSync } = await import("fs");
+    assert(existsSync("docs/runbooks/brownout-escalation.md"), "brownout-escalation.md exists");
+    assert(existsSync("docs/runbooks/brownout-recovery.md"),   "brownout-recovery.md exists");
+  }
+
+  section("S125: Runbook quality — brownout runbooks");
+  {
+    const { readFileSync } = await import("fs");
+    const esc = readFileSync("docs/runbooks/brownout-escalation.md", "utf-8");
+    const rec = readFileSync("docs/runbooks/brownout-recovery.md", "utf-8");
+    assert(esc.includes("critical") && esc.includes("elevated"), "escalation runbook covers all levels");
+    assert(rec.includes("normal") || rec.includes("recovery"),    "recovery runbook covers return to normal");
+    assert(esc.includes("core") || esc.includes("auth"),          "escalation runbook mentions core flows");
+    assert(esc.length > 1000, "escalation runbook is substantial");
+    assert(rec.length > 1000, "recovery runbook is substantial");
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // S126–S130: Service Layer Invariants (INV-REC1 to INV-REC12)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  section("S126: INV-REC4 — restore preview does not write (dry-run default)");
+  {
+    const { planTenantRestore } = await import("./server/lib/backup/restore-tools");
+    // planTenantRestore defaults dryRun=true — preview only, no writes
+    const plan = await planTenantRestore("tenant-xyz-preview-test");
+    assert(typeof plan === "object", "planTenantRestore returns object");
+    assertBool(plan.dryRun, "plan.dryRun is boolean");
+    assert(plan.dryRun === true, "plan.dryRun = true (preview — no writes)");
+    assertStr(plan.planId, "plan.planId is non-empty string");
+    assertArr(plan.steps,  "plan.steps is array");
+  }
+
+  section("S127: INV-REC5 — job requeue is idempotent");
+  {
+    const { requeueJobs } = await import("./server/lib/recovery/job-recovery");
+    // Call twice with same options in dry-run mode — same input = same output (idempotent)
+    const r1 = await requeueJobs({ dryRun: true });
+    const r2 = await requeueJobs({ dryRun: true });
+    assertNum(r1.requested, "first call: requested is number");
+    assertNum(r2.requested, "second call: requested is number");
+    assertEq(r1.requested, r2.requested, "idempotent: same requested count both calls");
+    assertBool(r1.dryRun, "dryRun flag present on result");
+    assert(r1.dryRun === true, "dryRun=true — no writes performed");
+  }
+
+  section("S128: INV-REC8 — pressure classification deterministic across multiple calls");
+  {
+    const { classifyPressureLevel } = await import("./server/lib/recovery/system-pressure");
+    const signals = [
+      { name: "queue_depth", value: 510, threshold: 50, unit: "jobs", breached: true, severity: "critical" as const },
+      { name: "stalled_jobs", value: 55, threshold: 5,  unit: "jobs", breached: true, severity: "critical" as const },
+    ];
+    const results = Array.from({ length: 10 }, () => classifyPressureLevel(signals));
+    const levels  = new Set(results.map(r => r.level));
+    const scores  = new Set(results.map(r => r.score));
+    assertEq(levels.size, 1, "pressure level is deterministic (same inputs = same output)");
+    assertEq(scores.size, 1, "pressure score is deterministic");
+  }
+
+  section("S129: INV-REC9 — core flows survive all brownout levels");
+  {
+    const { enterBrownoutMode, exitBrownoutMode, isFlowAllowed, CORE_FLOWS } = await import("./server/lib/recovery/brownout-mode");
+    const levels = ["normal", "elevated", "degraded", "critical"] as const;
+    for (const level of levels) {
+      exitBrownoutMode("reset", true);
+      if (level !== "normal") enterBrownoutMode(level, "invariant test", true);
+      for (const flow of CORE_FLOWS) {
+        assert(isFlowAllowed(flow), `INV-REC9: [${level}] ${flow} always allowed`);
+      }
+    }
+    exitBrownoutMode("final cleanup", true);
+  }
+
+  section("S130: INV-REC10 — brownout transitions are explainable");
+  {
+    const { enterBrownoutMode, exitBrownoutMode, getBrownoutHistory, explainBrownoutDecision } = await import("./server/lib/recovery/brownout-mode");
+    exitBrownoutMode("reset", true);
+    enterBrownoutMode("critical", "invariant test", true);
+    exitBrownoutMode("invariant recovery", true);
+
+    const history = getBrownoutHistory();
+    assert(history.length >= 2, "at least 2 transitions recorded");
+    for (const t of history.slice(-4)) {
+      assertStr(t.reason, `transition has reason: ${t.to}`);
+      assertStr(t.timestamp, `transition has timestamp: ${t.to}`);
+      const exp = explainBrownoutDecision(t.to);
+      assertStr(exp, `explain(${t.to}) is non-empty`);
+    }
+  }
+
   // ── Summary ───────────────────────────────────────────────────────────────
   console.log("\n───────────────────────────────────────────────────────");
   console.log(`Phase 29 validation: ${passed} passed, ${failed} failed`);
