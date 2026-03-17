@@ -8053,4 +8053,166 @@ export function registerAdminRoutes(app: Express): void {
       });
     } catch (err) { res.status(500).json({ error: (err as Error).message }); }
   });
+
+  // ── Phase 38 — Security Hardening & SOC2 Routes ──────────────────────────────
+
+  // GET /api/admin/security/overview
+  app.get("/api/admin/security/overview", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getSecurityReadinessChecklist, getIncidentResponseStatus, getSecurityControlCoverage } = await import("../lib/security/incident-readiness");
+      const { getEdgeReadiness } = await import("../lib/security/edge-readiness");
+      const { getRateLimitStats } = await import("../lib/security/rate-limit");
+      const checklist      = getSecurityReadinessChecklist();
+      const incidentStatus = getIncidentResponseStatus();
+      const coverage       = getSecurityControlCoverage();
+      const edgeReadiness  = getEdgeReadiness();
+      const rlStats        = getRateLimitStats();
+      res.json({
+        posture: {
+          status:          checklist.overallStatus,
+          passing:         checklist.passing,
+          warnings:        checklist.warnings,
+          failing:         checklist.failing,
+          coveragePercent: coverage.coveragePercent,
+        },
+        incidentStatus,
+        edgeReadiness,
+        rateLimitStats: rlStats,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/events
+  app.get("/api/admin/security/events", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const severity    = req.query.severity as string | undefined;
+      const since = new Date(Date.now() - windowHours * 3600_000).toISOString();
+
+      const rows = await db.execute<any>(sql`
+        SELECT id, event_type, tenant_id, actor_id, ip, metadata, created_at
+        FROM security_events
+        WHERE created_at >= ${since}::timestamptz
+        ORDER BY created_at DESC
+        LIMIT 200
+      `);
+
+      let events = rows.rows;
+      // Also pull from auth_security_events
+      let authEvents: any[] = [];
+      try {
+        const authRows = await db.execute<any>(sql`
+          SELECT id, event_type, tenant_id, user_id AS actor_id, ip_address AS ip, severity, metadata_json AS metadata, created_at
+          FROM auth_security_events
+          WHERE created_at >= ${since}::timestamptz
+          ORDER BY created_at DESC
+          LIMIT 200
+        `);
+        authEvents = authRows.rows;
+      } catch { /* table may not exist */ }
+
+      const allEvents = [...events, ...authEvents]
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .slice(0, 200);
+
+      res.json({ events: allEvents, windowHours, total: allEvents.length, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/rate-limits
+  app.get("/api/admin/security/rate-limits", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getRateLimitStats }          = await import("../lib/security/rate-limit");
+      const { getRouteGroupPolicySummary } = await import("../lib/security/api-rate-limits");
+      res.json({
+        engineStats:  getRateLimitStats(),
+        routeGroups:  getRouteGroupPolicySummary(),
+        retrievedAt:  new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/auth-health
+  app.get("/api/admin/security/auth-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+
+      const [failuresRes, sessionsRes, mfaRes] = await Promise.allSettled([
+        db.execute<any>(sql`SELECT COUNT(*)::int AS cnt FROM auth_login_attempts WHERE success = FALSE AND created_at >= ${since}::timestamptz`),
+        db.execute<any>(sql`SELECT COUNT(*)::int AS cnt FROM auth_sessions WHERE revoked_at IS NULL AND expires_at > NOW()`),
+        db.execute<any>(sql`SELECT COUNT(*) FILTER (WHERE enabled = TRUE)::int AS enabled, COUNT(*)::int AS total FROM auth_mfa_totp`),
+      ]);
+
+      res.json({
+        failedLogins24h: failuresRes.status === "fulfilled" ? (failuresRes.value.rows[0]?.cnt ?? 0) : null,
+        activeSessions:  sessionsRes.status  === "fulfilled" ? (sessionsRes.value.rows[0]?.cnt  ?? 0) : null,
+        mfaEnabled:      mfaRes.status       === "fulfilled" ? (mfaRes.value.rows[0]?.enabled    ?? 0) : null,
+        mfaTotal:        mfaRes.status       === "fulfilled" ? (mfaRes.value.rows[0]?.total      ?? 0) : null,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/deploy-health
+  app.get("/api/admin/security/deploy-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { exportDeployIntegritySnapshot } = await import("../lib/security/evidence-export");
+      res.json(exportDeployIntegritySnapshot());
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/storage-health
+  app.get("/api/admin/security/storage-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getEdgeReadiness } = await import("../lib/security/edge-readiness");
+      const edge = getEdgeReadiness();
+      res.json({
+        r2Connected:    edge.r2Connected,
+        corsReady:      edge.corsReady,
+        bucketName:     process.env.CF_R2_BUCKET_NAME ?? null,
+        notes:          edge.notes.filter(n => n.toLowerCase().includes("r2") || n.toLowerCase().includes("cors")),
+        retrievedAt:    new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/checklist
+  app.get("/api/admin/security/checklist", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getSecurityReadinessChecklist } = await import("../lib/security/incident-readiness");
+      res.json(getSecurityReadinessChecklist());
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/evidence
+  app.get("/api/admin/security/evidence", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { exportSecurityControlSnapshot, exportAuthControlSnapshot, exportRateLimitSnapshot, exportDeployIntegritySnapshot } = await import("../lib/security/evidence-export");
+      const type = req.query.type as string ?? "all";
+      if (type === "security")  return res.json(exportSecurityControlSnapshot());
+      if (type === "auth")      return res.json(exportAuthControlSnapshot());
+      if (type === "ratelimit") return res.json(exportRateLimitSnapshot());
+      if (type === "deploy")    return res.json(exportDeployIntegritySnapshot());
+      res.json({
+        security:  exportSecurityControlSnapshot(),
+        auth:      exportAuthControlSnapshot(),
+        rateLimit: exportRateLimitSnapshot(),
+        deploy:    exportDeployIntegritySnapshot(),
+        exportedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
 }
