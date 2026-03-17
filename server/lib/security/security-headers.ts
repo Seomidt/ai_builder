@@ -221,3 +221,63 @@ export function addNonceToCsp(policy: CspPolicy, nonce: string): CspPolicy {
     scriptSrc: [...policy.scriptSrc, `'nonce-${nonce}'`],
   };
 }
+
+// ── Phase 39 additions ────────────────────────────────────────────────────────
+
+import type { Response } from "express";
+
+export interface SecurityHeaderContext {
+  isProduction?:    boolean;
+  allowFraming?:    boolean;
+  extraCspOrigins?: string[];
+}
+
+/**
+ * Apply all platform security headers to an Express response.
+ */
+export function applySecurityHeaders(
+  res:     Response,
+  context: SecurityHeaderContext = {},
+): void {
+  const isProduction = context.isProduction ?? process.env.NODE_ENV === "production";
+
+  // CSP
+  const policy = getCspPolicy({ extraOrigins: context.extraCspOrigins });
+  res.setHeader("Content-Security-Policy", buildCspHeader(policy));
+
+  // HSTS — only in production
+  if (isProduction) {
+    res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload");
+  }
+
+  // Framing
+  res.setHeader("X-Frame-Options", context.allowFraming ? "SAMEORIGIN" : "DENY");
+
+  // MIME sniffing
+  res.setHeader("X-Content-Type-Options", "nosniff");
+
+  // Referrer
+  res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
+
+  // Permissions
+  res.setHeader(
+    "Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), payment=(self), usb=()",
+  );
+
+  // Extra hardening
+  res.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  res.setHeader("X-XSS-Protection", "0");
+}
+
+/**
+ * Return the current CSP policy (optionally extended with extra origins).
+ */
+export function getCspPolicy(opts: { extraOrigins?: string[] } = {}): CspPolicy {
+  const extras = opts.extraOrigins ?? [];
+  return {
+    ...PLATFORM_CSP_POLICY,
+    connectSrc: [...PLATFORM_CSP_POLICY.connectSrc, ...extras],
+  };
+}

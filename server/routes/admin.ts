@@ -8215,4 +8215,96 @@ export function registerAdminRoutes(app: Express): void {
       });
     } catch (err) { res.status(500).json({ error: (err as Error).message }); }
   });
+
+  // ── Phase 39 — Final Security Closure Routes ──────────────────────────────
+
+  // GET /api/admin/security/headers
+  app.get("/api/admin/security/headers", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { PLATFORM_SECURITY_HEADERS, buildCspHeader, PLATFORM_CSP_POLICY, validateSecurityHeaders } = await import("../lib/security/security-headers");
+      const csp = buildCspHeader(PLATFORM_CSP_POLICY);
+      const headerMap: Record<string, string> = {};
+      for (const h of PLATFORM_SECURITY_HEADERS) headerMap[h.name] = h.value;
+      headerMap["Content-Security-Policy"] = csp;
+      const validation = validateSecurityHeaders(headerMap);
+      res.json({
+        headers:    PLATFORM_SECURITY_HEADERS,
+        csp:        { policy: csp, directiveCount: csp.split(";").length },
+        validation,
+        isProduction: process.env.NODE_ENV === "production",
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/brute-force
+  app.get("/api/admin/security/brute-force", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getBruteForceStats, ESCALATION_THRESHOLDS } = await import("../lib/security/brute-force");
+      res.json({
+        stats:      getBruteForceStats(),
+        thresholds: ESCALATION_THRESHOLDS,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/sessions
+  app.get("/api/admin/security/sessions", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getSessionAdminStats } = await import("../lib/security/session-hardening");
+      const stats = await getSessionAdminStats();
+      res.json({ ...stats, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/webhook-verification
+  app.get("/api/admin/security/webhook-verification", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getWebhookVerificationStats } = await import("../lib/security/webhook-verification");
+      res.json({ ...getWebhookVerificationStats(), retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/backup-health
+  app.get("/api/admin/security/backup-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getBackupHealthSummary, getRestoreReadiness } = await import("../lib/security/backup-verify");
+      res.json({
+        health:   getBackupHealthSummary(),
+        restore:  getRestoreReadiness(),
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // POST /api/admin/security/backup-dry-run
+  app.post("/api/admin/security/backup-dry-run", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { runBackupDryRunCheck } = await import("../lib/security/backup-verify");
+      const result = await runBackupDryRunCheck();
+      res.json(result);
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/alerts
+  app.get("/api/admin/security/alerts", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getRecentAlerts, getUnresolvedCriticalCount } = await import("../lib/security/security-alerting");
+      const severity = req.query.severity as string | undefined;
+      const limit    = Math.min(200, Number(req.query.limit) || 50);
+      res.json({
+        alerts:               getRecentAlerts(limit, severity ? { severity: severity as any } : undefined),
+        unresolvedCritical:   getUnresolvedCriticalCount(),
+        retrievedAt:          new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
 }
