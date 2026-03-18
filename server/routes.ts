@@ -1,5 +1,20 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
+import { registerAdminRoutes } from "./routes/admin";
+import {
+  getSecurityHealth,
+  getSecurityViolationCounts,
+  getRateLimitStats,
+  explainSecurityHealth,
+} from "./lib/security/security-health";
+import {
+  listSecurityEventsByTenant,
+  listRecentSecurityEvents,
+  explainSecurityEvent,
+  type SecurityEventType,
+} from "./lib/security/security-events";
+import { sanitizeInput, sanitizeObject, explainSanitization } from "./lib/security/sanitize";
+import { getRateLimitConfig } from "./middleware/rate-limit";
 import { storage } from "./storage";
 import { dbProvider } from "./db";
 import { previewCommit } from "./lib/github-commit-format";
@@ -8,42 +23,82 @@ import { summarize } from "./features/ai-summarize/summarize.service";
 import { ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 import { AiError } from "./lib/ai/errors";
+import {
+  createStripeCheckoutForInvoice,
+  createStripePaymentIntentForInvoice,
+  getStripeCheckoutState,
+} from "./lib/ai/stripe-checkout";
+import { handleStripeWebhook } from "./lib/ai/stripe-webhooks";
+import {
+  listStripeWebhookEvents,
+  getStripeWebhookEventByStripeEventId,
+  getInvoiceStripeLifecycle,
+  explainStripeWebhookOutcome,
+} from "./lib/ai/stripe-webhook-summary";
 
 /**
  * Central error → HTTP response mapper.
  *
- * AI typed errors (AiError subclasses) carry their own httpStatus, errorCode,
- * and optional retryAfterSeconds — these are used directly so no guard outcome
- * ever surfaces as a generic 500.
+ * Phase 13.1 hardening:
+ *   - All responses include error_code, message, and request_id.
+ *   - Stack traces are NEVER exposed to the client.
+ *   - ForbiddenError (403) and UnauthorizedError (401) handled explicitly.
+ *   - AI typed errors (AiError subclasses) carry their own httpStatus/errorCode.
  *
- * Stable AI error payload shape:
- *   { error: "<machine_code>", message: "<human_readable>", request_id?, retry_after_seconds? }
- *
- * Phase 3H.1: Added AiError branch for correct HTTP semantics.
+ * Stable response shape: { error_code, message, request_id }
  */
 function handleError(res: Response, error: unknown, requestId?: string | null) {
+  const reqId = requestId ?? null;
+
   if (error instanceof ZodError) {
-    return res.status(400).json({ error: fromZodError(error).message });
+    return res.status(400).json({
+      error_code: "VALIDATION_ERROR",
+      message: fromZodError(error).message,
+      request_id: reqId,
+    });
   }
+
+  // Dynamic imports may produce ForbiddenError/UnauthorizedError from tenant-check.ts
+  if (error instanceof Error && (error as any).statusCode) {
+    const typedErr = error as Error & { statusCode: number; errorCode: string };
+    return res.status(typedErr.statusCode).json({
+      error_code: typedErr.errorCode ?? "ERROR",
+      message: typedErr.message,
+      request_id: reqId,
+    });
+  }
+
   if (error instanceof AiError) {
     if (error.retryAfterSeconds !== undefined) {
       res.set("Retry-After", String(error.retryAfterSeconds));
     }
     const payload: Record<string, unknown> = {
-      error: error.errorCode,
+      error_code: error.errorCode,
       message: error.message,
+      request_id: reqId,
     };
-    if (requestId) payload.request_id = requestId;
     if (error.retryAfterSeconds !== undefined) {
       payload.retry_after_seconds = error.retryAfterSeconds;
     }
     return res.status(error.httpStatus).json(payload);
   }
+
   if (error instanceof Error) {
-    const status = error.message.includes("not found") ? 404 : 500;
-    return res.status(status).json({ error: error.message });
+    // Phase 13.1: never expose stack traces — only message, and only if safe
+    const status = error.message.toLowerCase().includes("not found") ? 404 : 500;
+    const message = status === 404 ? error.message : "Internal server error";
+    return res.status(status).json({
+      error_code: status === 404 ? "NOT_FOUND" : "INTERNAL_ERROR",
+      message,
+      request_id: reqId,
+    });
   }
-  return res.status(500).json({ error: "Internal server error" });
+
+  return res.status(500).json({
+    error_code: "INTERNAL_ERROR",
+    message: "Internal server error",
+    request_id: reqId,
+  });
 }
 
 function getOrgId(req: Request): string {
@@ -358,31 +413,22 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ─── Config (server-side env state) ────────────────────────────────────────
+  // Phase 13.1 hardening: owner role required; no env values, repo names, or org IDs exposed.
 
-  app.get("/api/config/status", async (_req, res) => {
-    const projectRef = process.env.SUPABASE_URL
-      ? process.env.SUPABASE_URL.replace(/^https:\/\/([^.]+)\.supabase\.co.*$/, "$1")
-      : null;
-    res.json({
-      database: {
-        provider: dbProvider,
-        label: dbProvider === "supabase" ? "Supabase Postgres" : "PostgreSQL (Replit)",
-        projectRef,
-      },
-      supabase: {
-        url: process.env.SUPABASE_URL ? process.env.SUPABASE_URL.replace(/^(https:\/\/[^.]+).*$/, "$1…") : null,
-        connected: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
-        poolConnected: !!process.env.SUPABASE_DB_POOL_URL,
-      },
-      github: {
-        connected: !!process.env.GITHUB_TOKEN,
-        owner: process.env.GITHUB_OWNER || null,
-        repo: process.env.GITHUB_REPO || null,
-      },
-      openai: {
-        connected: !!process.env.OPENAI_API_KEY,
-      },
-    });
+  app.get("/api/config/status", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      // Return only boolean connection flags — never expose env values or identifiers
+      res.json({
+        database: !!dbProvider,
+        supabase: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
+        github: !!process.env.GITHUB_TOKEN,
+        openai: !!process.env.OPENAI_API_KEY,
+      });
+    } catch (err) {
+      handleError(res, err, (req as any).requestId ?? null);
+    }
   });
 
   // ─── AI Features ─────────────────────────────────────────────────────────────
@@ -408,6 +454,273 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       handleError(res, err, reqId);
     }
   });
+
+  // ─── Stripe Checkout & Webhook Routes (Phase 4M) ────────────────────────────
+
+  app.post("/api/stripe/checkout/:invoiceId", async (req: Request, res: Response) => {
+    try {
+      const invoiceId = String(req.params.invoiceId);
+      const body = req.body as { successUrl?: string; cancelUrl?: string };
+      const successUrl = body.successUrl;
+      const cancelUrl = body.cancelUrl;
+      if (!successUrl || !cancelUrl) {
+        return res.status(400).json({ error: "successUrl and cancelUrl are required" });
+      }
+      const result = await createStripeCheckoutForInvoice(invoiceId, successUrl, cancelUrl);
+      return res.json(result);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.post("/api/stripe/payment-intent/:invoiceId", async (req: Request, res: Response) => {
+    try {
+      const invoiceId = String(req.params.invoiceId);
+      const result = await createStripePaymentIntentForInvoice(invoiceId);
+      return res.json(result);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get("/api/stripe/state/:invoiceId", async (req: Request, res: Response) => {
+    try {
+      const invoiceId = String(req.params.invoiceId);
+      const state = await getStripeCheckoutState(invoiceId);
+      if (!state) return res.status(404).json({ error: "Invoice not found" });
+      return res.json(state);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.post("/api/stripe/webhook", async (req: Request, res: Response) => {
+    try {
+      const rawSig = req.headers["stripe-signature"];
+      const sig = Array.isArray(rawSig) ? rawSig[0] : rawSig;
+      if (!sig) {
+        return res.status(400).json({ error: "Missing stripe-signature header" });
+      }
+      const rawBody = (req as Request & { rawBody?: Buffer }).rawBody;
+      if (!rawBody) {
+        return res.status(400).json({ error: "Missing raw request body" });
+      }
+      const result = await handleStripeWebhook(rawBody, sig);
+      return res.json({ received: true, outcome: result.outcome, reason: result.reason });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get("/api/stripe/webhook-events", async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(Number(req.query.limit ?? 100), 500);
+      const events = await listStripeWebhookEvents(limit);
+      return res.json({ events, count: events.length });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get("/api/stripe/webhook-events/:stripeEventId", async (req: Request, res: Response) => {
+    try {
+      const stripeEventId = String(req.params.stripeEventId);
+      const event = await getStripeWebhookEventByStripeEventId(stripeEventId);
+      if (!event) return res.status(404).json({ error: "Event not found" });
+      return res.json(event);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get("/api/stripe/webhook-events/:stripeEventId/explain", async (req: Request, res: Response) => {
+    try {
+      const stripeEventId = String(req.params.stripeEventId);
+      const explanation = await explainStripeWebhookOutcome(stripeEventId);
+      if (!explanation) return res.status(404).json({ error: "Event not found" });
+      return res.json(explanation);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.get("/api/stripe/invoice-lifecycle/:invoiceId", async (req: Request, res: Response) => {
+    try {
+      const invoiceId = String(req.params.invoiceId);
+      const lifecycle = await getInvoiceStripeLifecycle(invoiceId);
+      if (!lifecycle) return res.status(404).json({ error: "Invoice not found" });
+      return res.json(lifecycle);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // ── Phase 13.2 — Admin Security Routes ───────────────────────────────────────
+
+  // GET /api/admin/security/health — security observability (admin-only, read-only)
+  app.get("/api/admin/security/health", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      const health = await getSecurityHealth();
+      return res.json(health);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // GET /api/admin/security/events — tenant-scoped security events
+  app.get("/api/admin/security/events", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      const tenantId = req.user?.organizationId;
+      if (!tenantId) return res.status(400).json({ error_code: "MISSING_TENANT", message: "No tenant context" });
+      const eventType = req.query.event_type as SecurityEventType | undefined;
+      const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 50;
+      const events = await listSecurityEventsByTenant(tenantId, { limit, eventType });
+      return res.json({ events, count: events.length });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // GET /api/admin/security/events/recent — recent events across all tenants (admin)
+  app.get("/api/admin/security/events/recent", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 100;
+      const events = await listRecentSecurityEvents({ limit });
+      return res.json({ events, count: events.length });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // POST /api/admin/security/preview/sanitize — read-only sanitization preview
+  app.post("/api/admin/security/preview/sanitize", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      const input = req.body?.input;
+      if (typeof input === "string") {
+        const sanitized = sanitizeInput(input);
+        return res.json({
+          original: input,
+          sanitized,
+          changed: input !== sanitized,
+          explanation: explainSanitization(),
+          // INV-SEC-H10: no write performed
+          writes: false,
+        });
+      }
+      if (typeof input === "object" && input !== null) {
+        const sanitized = sanitizeObject(input);
+        return res.json({
+          original: input,
+          sanitized,
+          explanation: explainSanitization(),
+          writes: false,
+        });
+      }
+      return res.status(400).json({ error_code: "INVALID_INPUT", message: "input must be string or object" });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // POST /api/admin/security/preview/rate-limit-context — read-only rate limit context
+  app.post("/api/admin/security/preview/rate-limit-context", async (req: Request, res: Response) => {
+    try {
+      const { requireOwnerRole } = await import("./lib/security/tenant-check");
+      requireOwnerRole(req.user?.role);
+      const config = getRateLimitConfig();
+      const actorId = req.user?.id ?? null;
+      const keyType = actorId && !actorId.startsWith("demo-") ? "actor_id" : "ip";
+      return res.json({
+        config,
+        currentActor: actorId,
+        effectiveKeyType: keyType,
+        rateLimitAppliesTo: "/api/*",
+        // INV-SEC-H10: no write performed
+        writes: false,
+      });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // Phase 34 — Tenant locale settings (PATCH /api/tenant/settings/locale)
+  app.get("/api/tenant/locale", async (req: Request, res: Response) => {
+    try {
+      const tenantId = (req.user as any)?.organizationId ?? (req.query.tenantId as string);
+      if (!tenantId) return res.status(400).json({ error_code: "MISSING_TENANT", message: "No tenant context" });
+      const { getTenantLocale } = await import("./lib/i18n/locale-service");
+      const locale = await getTenantLocale(tenantId);
+      return res.json(locale);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  app.patch("/api/tenant/settings", async (req: Request, res: Response) => {
+    try {
+      const tenantId = (req.user as any)?.organizationId ?? (req.body?.tenantId as string);
+      if (!tenantId) return res.status(400).json({ error_code: "MISSING_TENANT", message: "No tenant context" });
+
+      const {
+        updateTenantLocale,
+        isValidLanguage,
+        isValidLocale,
+        isValidCurrency,
+        isValidTimezone,
+      } = await import("./lib/i18n/locale-service");
+
+      const update: Record<string, string> = {};
+      const errors: string[] = [];
+
+      if (req.body.language !== undefined) {
+        if (!isValidLanguage(req.body.language)) errors.push("Invalid language code (must be ISO 639-1/2, e.g. 'en', 'da')");
+        else update.language = req.body.language;
+      }
+      if (req.body.locale !== undefined) {
+        if (!isValidLocale(req.body.locale)) errors.push("Invalid locale (must be BCP-47, e.g. 'en-US', 'da-DK')");
+        else update.locale = req.body.locale;
+      }
+      if (req.body.currency !== undefined) {
+        if (!isValidCurrency(req.body.currency)) errors.push("Invalid currency (must be ISO 4217, e.g. 'USD', 'EUR', 'DKK')");
+        else update.currency = req.body.currency;
+      }
+      if (req.body.timezone !== undefined) {
+        if (!isValidTimezone(req.body.timezone)) errors.push("Invalid timezone (must be IANA, e.g. 'UTC', 'Europe/Copenhagen')");
+        else update.timezone = req.body.timezone;
+      }
+
+      if (errors.length > 0) {
+        return res.status(400).json({ error_code: "VALIDATION_ERROR", message: errors.join("; "), errors });
+      }
+      if (Object.keys(update).length === 0) {
+        return res.status(400).json({ error_code: "NO_FIELDS", message: "No valid locale fields provided" });
+      }
+
+      await updateTenantLocale(tenantId, update);
+      return res.json({ ok: true, updated: update });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // Phase 4P — Admin Pricing & Plan Management routes
+  registerAdminRoutes(app);
+
+  // Phase 37 — Secure Authentication Platform routes
+  const { registerAuthPlatformRoutes } = await import("./routes/auth-platform");
+  registerAuthPlatformRoutes(app);
+
+  // Cloudflare R2 Storage routes
+  const { registerR2Routes } = await import("./routes/r2");
+  registerR2Routes(app);
 
   return httpServer;
 }

@@ -175,6 +175,30 @@ export class AiRateLimitError extends AiError {
 }
 
 /**
+ * A duplicate request arrived while the original is still in progress.
+ *
+ * Thrown by idempotency.ts when a second call with the same
+ * tenant_id + request_id arrives before the first completes.
+ * No provider call is made — the original is still executing.
+ * HTTP 409 — Conflict. Retry-After: 5 seconds.
+ */
+export class AiDuplicateInflightError extends AiError {
+  readonly requestId: string;
+
+  constructor(meta: AiErrorMeta & { requestId: string }) {
+    super(
+      `Duplicate request: request_id="${meta.requestId}" is already in progress for this tenant`,
+      meta,
+      409,
+      "duplicate_inflight",
+      5,
+    );
+    this.name = "AiDuplicateInflightError";
+    this.requestId = meta.requestId;
+  }
+}
+
+/**
  * Tenant has too many simultaneous in-flight AI requests.
  *
  * Thrown by request-safety.ts concurrency guard.
@@ -199,5 +223,61 @@ export class AiConcurrencyError extends AiError {
     this.name = "AiConcurrencyError";
     this.currentConcurrent = meta.currentConcurrent;
     this.concurrencyLimit = meta.concurrencyLimit;
+  }
+}
+
+/**
+ * Tenant wallet credit balance is at or below the hard limit.
+ *
+ * Thrown by runner.ts when the tenant's available_balance_usd <= hard_limit_usd
+ * configured on their tenant_credit_accounts row.
+ *
+ * No provider call is made. No billing row is created. No wallet debit is created.
+ * HTTP 402 — Payment Required. Signals a financial/payment boundary, not a system error.
+ *
+ * Tenant must add credits or adjust hard_limit_usd before AI calls will resume.
+ */
+export class AiWalletLimitError extends AiError {
+  constructor(meta: AiErrorMeta & { availableBalance: number; hardLimit: number }) {
+    super(
+      `AI call blocked: wallet balance ($${meta.availableBalance.toFixed(8)}) is at or below hard limit ($${meta.hardLimit.toFixed(8)})`,
+      meta,
+      402,
+      "wallet_limit_exceeded",
+    );
+    this.name = "AiWalletLimitError";
+  }
+}
+
+/**
+ * A single logical request has exceeded its per-request AI call budget.
+ *
+ * Thrown by step-budget.ts when a request identified by request_id
+ * attempts more AI provider calls than the configured limit (default: 5).
+ *
+ * No provider call is made — the budget was exhausted before the attempt.
+ * HTTP 429 — Too Many Requests. Framed as request execution limit.
+ * Retry-After: not applicable (same request_id will always be blocked).
+ */
+export class AiStepBudgetExceededError extends AiError {
+  readonly requestId: string;
+  readonly totalAiCalls: number;
+  readonly maxAiCalls: number;
+
+  constructor(meta: AiErrorMeta & {
+    requestId: string;
+    totalAiCalls: number;
+    maxAiCalls: number;
+  }) {
+    super(
+      `Step budget exceeded: request_id="${meta.requestId}" has already executed ${meta.totalAiCalls} AI calls (limit: ${meta.maxAiCalls})`,
+      meta,
+      429,
+      "step_budget_exceeded",
+    );
+    this.name = "AiStepBudgetExceededError";
+    this.requestId = meta.requestId;
+    this.totalAiCalls = meta.totalAiCalls;
+    this.maxAiCalls = meta.maxAiCalls;
   }
 }

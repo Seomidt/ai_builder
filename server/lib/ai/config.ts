@@ -117,3 +117,73 @@ export const AI_SAFETY_DEFAULTS: AiSafetyConfig = {
   requestsPerHour:          200,
   maxConcurrentRequests:      5,
 };
+
+// ── Response cache policy ─────────────────────────────────────────────────────
+
+/**
+ * Cache policy for a specific AI route/use-case.
+ *
+ * enabled          — must be true for any caching to occur. Default: false.
+ * ttlSeconds       — how long a cached entry is valid.
+ * strategy         — "response" caches the full normalized AI response text.
+ * cacheKeyVersion  — bumping this busts all existing cache entries for this route.
+ *                    Change when system prompt or route config changes materially.
+ * includeTenantScope — must always be true. Tenant isolation is not optional.
+ *
+ * Phase 3I: Only the "default" route is cache-enabled.
+ */
+export interface AiCachePolicy {
+  enabled: boolean;
+  ttlSeconds: number;
+  strategy: "response";
+  cacheKeyVersion: string;
+  includeTenantScope: true;
+}
+
+/** Disabled policy — used as fallback for all unconfigured routes */
+const CACHE_DISABLED: AiCachePolicy = {
+  enabled: false,
+  ttlSeconds: 0,
+  strategy: "response",
+  cacheKeyVersion: "v1",
+  includeTenantScope: true,
+};
+
+/**
+ * Per-route cache policies.
+ *
+ * Only routes explicitly listed here with enabled:true are cached.
+ * All other route keys fall back to CACHE_DISABLED (no caching).
+ *
+ * Route cacheability decision (Phase 3I):
+ *
+ * CACHED:
+ *   "default" — summarize route. System prompt is static, user input is
+ *               deterministic document text. Same input + same model → same output.
+ *               TTL 1 hour — summaries of the same document are stable.
+ *
+ * NOT CACHED (and why):
+ *   "heavy"    — used for complex architecture/review steps; context is
+ *                likely run-specific and user-ephemeral. Unsafe to cache.
+ *   "nano"     — trivial reformatting tasks; caching would save minimal cost.
+ *   "coding"   — code generation depends on run context; not deterministic.
+ *   "cheap"    — provider not yet wired; not in active use.
+ *   "reasoning"— provider not yet wired; not in active use.
+ */
+export const AI_CACHE_POLICIES: Record<string, AiCachePolicy> = {
+  default: {
+    enabled: true,
+    ttlSeconds: 3_600,
+    strategy: "response",
+    cacheKeyVersion: "v1",
+    includeTenantScope: true,
+  },
+};
+
+/**
+ * Resolve the cache policy for a given route key.
+ * Returns a disabled policy for any route not explicitly configured.
+ */
+export function getRouteCachePolicy(routeKey: string): AiCachePolicy {
+  return AI_CACHE_POLICIES[routeKey] ?? CACHE_DISABLED;
+}

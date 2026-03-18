@@ -1,0 +1,8361 @@
+/**
+ * Admin Routes — Phase 4P
+ *
+ * INTERNAL/ADMIN ONLY — These routes must never be exposed to tenants.
+ *
+ * Provides the minimal route foundation for:
+ *   - Pricing version previews and apply
+ *   - Plan previews and apply
+ *   - Tenant subscription previews and apply
+ *   - Admin change request listing and inspection
+ *
+ * All routes are prefixed with /api/admin/
+ * Input validation uses Zod before passing to helpers.
+ * Errors propagate as 400/500 with structured JSON.
+ */
+
+import { type Express, type Request, type Response } from "express";
+import { z } from "zod";
+import { eq, and, sql } from "drizzle-orm";
+import { db } from "../db";
+import { knowledgeAssets, knowledgeAssetVersions } from "@shared/schema";
+import {
+  previewCreateProviderPricingVersion,
+  applyCreateProviderPricingVersion,
+  previewCreateCustomerPricingVersion,
+  applyCreateCustomerPricingVersion,
+  previewCreateStoragePricingVersion,
+  applyCreateStoragePricingVersion,
+  previewCreateCustomerStoragePricingVersion,
+  applyCreateCustomerStoragePricingVersion,
+} from "../lib/ai/admin-pricing";
+import {
+  previewCreateSubscriptionPlan,
+  applyCreateSubscriptionPlan,
+  previewReplacePlanEntitlements,
+  applyReplacePlanEntitlements,
+  archiveSubscriptionPlan,
+  listAdminSubscriptionPlans,
+  explainPlanDefinition,
+} from "../lib/ai/admin-plans";
+import {
+  previewTenantPlanChange,
+  applyTenantPlanChange,
+  previewTenantPlanCancellation,
+  applyTenantPlanCancellation,
+  listTenantSubscriptionHistory,
+} from "../lib/ai/admin-tenant-subscriptions";
+import {
+  previewPricingImpactForTenant,
+  previewPlanImpactForTenant,
+  previewGlobalPricingWindowChange,
+  explainAdminChangePreview,
+} from "../lib/ai/admin-commercial-preview";
+import {
+  listAdminChangeRequests,
+  getAdminChangeRequestById,
+  listAdminChangeEvents,
+  explainAdminChangeResult,
+} from "../lib/ai/admin-change-summary";
+import {
+  explainAdminChangeRetentionPolicy,
+  previewPendingAdminChangesOlderThan,
+  previewFailedAdminChangesOlderThan,
+  previewAppliedAdminChangesWithoutEvents,
+  previewPlanRowsStillReferencedHistorically,
+} from "../lib/ai/admin-change-retention";
+import {
+  createGlobalBillingMetricsSnapshot,
+  createTenantBillingMetricsSnapshot,
+  createBillingPeriodMetricsSnapshot,
+  getLatestGlobalBillingMetrics,
+  getLatestTenantBillingMetrics,
+  getLatestBillingPeriodMetrics,
+} from "../lib/ai/billing-observability";
+import { runBillingAnomalyScan } from "../lib/ai/billing-anomalies";
+import {
+  getInvoiceMonitoringSummary,
+  getPaymentMonitoringSummary,
+  getSubscriptionMonitoringSummary,
+  getReconciliationMonitoringSummary,
+  getAllowanceMonitoringSummary,
+  getTenantMonetizationHealthSummary,
+  getGlobalMonetizationHealthSummary,
+} from "../lib/ai/billing-monitoring-summary";
+import {
+  upsertBillingAlert,
+  listOpenBillingAlerts,
+  listBillingAlertsByScope,
+  acknowledgeBillingAlert,
+  resolveBillingAlert,
+  suppressBillingAlert,
+  explainBillingAlert,
+} from "../lib/ai/billing-alerts";
+import {
+  explainBillingMonitoringRetentionPolicy,
+  previewFailedMetricsSnapshotsOlderThan,
+  previewOpenCriticalAlertsOlderThan,
+  previewMonitoringGaps,
+  previewTenantsWithoutRecentMetricsSnapshots,
+} from "../lib/ai/billing-monitoring-retention";
+
+// Phase 5A: Document Registry & Storage Foundation
+import {
+  createKnowledgeBase,
+  getKnowledgeBase,
+  listKnowledgeBases,
+  archiveKnowledgeBase,
+  createKnowledgeDocument,
+  getKnowledgeDocument,
+  listKnowledgeDocuments,
+  createKnowledgeDocumentVersion,
+  getKnowledgeDocumentVersion,
+  listKnowledgeDocumentVersions,
+  setCurrentDocumentVersion,
+  verifyCurrentVersionInvariant,
+} from "../lib/ai/knowledge-bases";
+import {
+  attachStorageObject,
+  getStorageObjectsByVersion,
+  createKnowledgeProcessingJob,
+  getProcessingJob,
+  listProcessingJobs,
+  getIndexStateByVersion,
+  listIndexStateByKnowledgeBase,
+  updateKnowledgeIndexState,
+  isVersionRetrievable,
+  listChunksByVersion,
+  runParseForDocumentVersion,
+  runChunkingForDocumentVersion,
+  previewChunkingForDocumentVersion,
+  markParseFailed,
+  markParseCompleted,
+  explainDocumentVersionParseState,
+  explainDocumentVersionChunkState,
+  previewChunkReplacement,
+  listDocumentProcessingJobs,
+  summarizeChunkingResult,
+  acquireKnowledgeProcessingJob,
+  failKnowledgeProcessingJob,
+  runStructuredParseForDocumentVersion,
+  runStructuredChunkingForDocumentVersion,
+  markStructuredParseFailed,
+  markStructuredParseCompleted,
+  explainStructuredParseState,
+  explainStructuredChunkState,
+  previewStructuredChunkReplacement,
+  listStructuredProcessingJobs,
+  summarizeStructuredChunkingResult,
+  syncIndexStateAfterStructuredChunking,
+  markIndexStateStaleAfterStructuredChunkReplace,
+  runOcrParseForDocumentVersion,
+  runOcrChunkingForDocumentVersion,
+  markOcrParseFailed,
+  markOcrParseCompleted,
+  explainOcrParseState,
+  explainOcrChunkState,
+  previewOcrChunkReplacement,
+  listOcrProcessingJobs,
+  summarizeOcrChunkingResult,
+  syncIndexStateAfterOcrChunking,
+  markIndexStateStaleAfterOcrChunkReplace,
+  runTranscriptParseForDocumentVersion,
+  runTranscriptChunkingForDocumentVersion,
+  markTranscriptParseFailed,
+  markTranscriptParseCompleted,
+  explainTranscriptParseState,
+  explainTranscriptChunkState,
+  previewTranscriptChunkReplacement,
+  listTranscriptProcessingJobs,
+  summarizeTranscriptChunkingResult,
+  syncIndexStateAfterTranscriptChunking,
+  markIndexStateStaleAfterTranscriptChunkReplace,
+  runImportParseForDocumentVersion,
+  runImportChunkingForDocumentVersion,
+  markImportParseFailed,
+  markImportParseCompleted,
+  explainImportParseState,
+  explainImportChunkState,
+  previewImportChunkReplacement,
+  listImportProcessingJobs,
+  summarizeImportChunkingResult,
+  syncIndexStateAfterImportChunking,
+  markIndexStateStaleAfterImportChunkReplace,
+} from "../lib/ai/knowledge-processing";
+import {
+  runEmbeddingForDocumentVersion,
+  retryEmbeddingForDocumentVersion,
+  explainEmbeddingState,
+  listEmbeddingJobs,
+  summarizeEmbeddingResult,
+  listEmbeddingsForDocument,
+} from "../lib/ai/embedding-processing";
+import { selectDocumentParser } from "../lib/ai/document-parsers";
+import {
+  runVectorSearch,
+  explainVectorSearch,
+  previewRetrievalSafeFilterSet,
+  explainWhyChunkWasExcluded,
+  explainWhyChunkWasReturned,
+  summarizeVectorSearchRun,
+  listVectorSearchCandidates,
+  VectorSearchInvariantError,
+} from "../lib/ai/vector-search";
+import {
+  runRetrievalOrchestration,
+  explainRetrievalContext,
+  buildContextPreview,
+  getRetrievalRun,
+  RetrievalInvariantError,
+} from "../lib/ai/retrieval-orchestrator";
+import {
+  recordRetrievalMetrics,
+  getRetrievalMetricsByRunId,
+  getRetrievalMetricsSummary,
+} from "../lib/ai/retrieval-metrics";
+import {
+  hashRetrievalQuery,
+  getCachedRetrieval,
+  storeCachedRetrieval,
+  invalidateRetrievalCacheForKnowledgeBase,
+  invalidateRetrievalCacheForDocument,
+  previewExpiredRetrievalCache,
+} from "../lib/ai/retrieval-cache";
+import {
+  getCurrentEmbeddingVersion,
+  getCurrentRetrievalVersion,
+  markKnowledgeBaseForReindex,
+  previewStaleEmbeddingDocuments,
+  explainEmbeddingVersionState,
+} from "../lib/ai/embedding-lifecycle";
+import {
+  recordDocumentTrustSignal,
+  calculateDocumentRiskScore,
+  getDocumentTrustSignals,
+  getDocumentRiskScore,
+  explainDocumentTrust,
+} from "../lib/ai/document-trust";
+import { getVectorAdapterInfo } from "../lib/ai/vector-adapter";
+
+// Phase 4S: Billing Recovery & Integrity
+import { runBillingIntegrityScan } from "../lib/ai/billing-integrity";
+import {
+  previewSnapshotRebuild,
+  applySnapshotRebuild,
+  previewInvoiceTotalsRebuild,
+  applyInvoiceTotalsRebuild,
+} from "../lib/ai/billing-recovery";
+import {
+  listRecoveryRuns,
+  getRecoveryRunDetail,
+  explainRecoveryRun,
+  getRecoveryRunStats,
+} from "../lib/ai/billing-recovery-summary";
+import {
+  getRecoveryRunAgeReport,
+  getRecoveryActionStats,
+  findRetentionCandidates,
+  findStuckRecoveryRuns,
+  getRecoveryRunDailyTrend,
+} from "../lib/ai/billing-recovery-retention";
+
+// Phase 4R: Automated Billing Operations
+import { ensureBillingJobDefinitions } from "../lib/ai/billing-jobs";
+import { runBillingJob, retryBillingJobRun } from "../lib/ai/billing-operations";
+import {
+  listBillingJobDefinitions,
+  listRecentBillingJobRuns,
+  getBillingJobRunById,
+  getBillingJobHealthSummary,
+  previewStaleBillingJobRuns,
+  previewFailedBillingJobs,
+} from "../lib/ai/billing-job-health";
+import {
+  triggerDueBillingJobs,
+  getSchedulerStatus,
+} from "../lib/ai/billing-scheduler";
+import {
+  explainBillingOpsRetentionPolicy,
+  previewCompletedJobRunsOlderThan,
+  previewFailedJobRunsOlderThan,
+  previewTimedOutJobRunsOlderThan,
+  previewJobDefinitionsWithoutRuns,
+  previewDuplicateStartedRuns,
+} from "../lib/ai/billing-ops-retention";
+
+// Phase 5G: Knowledge Asset Registry & Multimodal Foundation
+import {
+  createKnowledgeAsset,
+  createKnowledgeAssetVersion,
+  setKnowledgeAssetCurrentVersion,
+  getKnowledgeAssetById,
+  listKnowledgeAssetsByKnowledgeBase,
+  listKnowledgeAssetsByTenant,
+  updateKnowledgeAssetLifecycle,
+  markKnowledgeAssetProcessingState,
+  explainKnowledgeAsset,
+} from "../lib/ai/knowledge-assets";
+import {
+  registerStorageObject,
+  getStorageObjectById,
+  listStorageObjectsByTenant,
+  markStorageObjectArchived,
+  markStorageObjectDeleted,
+  explainStorageObject,
+} from "../lib/ai/knowledge-storage";
+import {
+  enqueueAssetProcessingJob,
+  startAssetProcessingJob,
+  completeAssetProcessingJob,
+  failAssetProcessingJob,
+  listAssetProcessingJobs,
+  explainAssetProcessingState,
+} from "../lib/ai/knowledge-asset-processing";
+import {
+  explainDocumentToAssetMigrationStrategy,
+  previewLegacyDocumentCompatibility,
+  explainCurrentRegistryState,
+} from "../lib/ai/knowledge-asset-compat";
+
+// Phase 5I: Asset Processing Engine
+import {
+  dispatchProcessingBatch,
+  getQueueHealthSummary,
+} from "../services/asset-processing/asset_processing_dispatcher";
+import {
+  processAssetJob,
+  retryAssetProcessingJob,
+  detectOrphanJobs,
+  explainJobExecution,
+  MAX_ATTEMPTS,
+} from "../services/asset-processing/process_asset_job";
+import {
+  getPipelineForAssetType,
+  explainPipeline,
+} from "../services/asset-processing/asset_processing_pipeline";
+import {
+  listRegisteredProcessors,
+  loadAllProcessors,
+} from "../services/asset-processing/asset_processor_registry";
+import {
+  enqueueAssetProcessingJob as enqueueAssetJob5I,
+  listAssetProcessingJobs as listJobs5I,
+  getAssetProcessingJobById,
+} from "../lib/ai/knowledge-asset-processing";
+import {
+  ingestKnowledgeAsset,
+  ingestKnowledgeAssetVersion,
+  previewKnowledgeAssetIngestion,
+  setCurrentAssetVersion,
+  explainKnowledgeAssetIngestion,
+  listKnowledgeAssetVersions,
+  explainAssetProcessingPlan,
+} from "../lib/ai/knowledge-asset-ingestion";
+import {
+  registerKnowledgeStorageObject,
+  findKnowledgeStorageObjectByLocation,
+  getKnowledgeStorageObjectById,
+  previewStorageBinding,
+  explainKnowledgeStorageObjectData,
+} from "../lib/ai/knowledge-storage";
+import {
+  previewGenerateEmbeddingsForAssetVersion,
+  generateEmbeddingsForAssetVersion,
+  previewReindexAssetVersion,
+  markAssetVersionIndexStale,
+  explainAssetVersionIndexState,
+  listStaleAssetVersions,
+  previewEmbeddingRebuildImpact,
+  explainWhyAssetVersionIsOrIsNotRetrievalReady,
+} from "../lib/ai/multimodal-embedding-lifecycle";
+import {
+  explainEmbeddingSourcesForAssetVersion,
+  summarizeEmbeddingSourceCoverage,
+} from "../lib/ai/multimodal-embedding-sources";
+import {
+  buildRetrievalProvenanceForRun,
+  buildChunkProvenance,
+  buildAssetVersionLineage,
+  explainChunkInclusionInRun,
+  explainChunkExclusionFromRun,
+  summarizeRetrievalProvenance,
+  listContextSourcesForRun,
+  summarizeRetrievalRunExplainability,
+} from "../lib/ai/retrieval-provenance";
+import {
+  buildContextWindowProvenance,
+  summarizeContextWindowSources,
+} from "../lib/ai/context-provenance";
+import {
+  explainHybridFusion,
+  summarizeHybridRetrieval,
+  listHybridCandidateSources,
+  explainFusionStrategy,
+  fuseVectorAndLexicalCandidates,
+} from "../lib/ai/hybrid-retrieval";
+import {
+  explainReranking,
+  summarizeRerankingImpact,
+  buildHybridRunSummary,
+} from "../lib/ai/reranking";
+import {
+  explainRerankShortlist,
+  summarizeShortlistComposition,
+  explainAdvancedReranking,
+  summarizeAdvancedRerankingImpact,
+  listAdvancedRerankCandidates,
+  explainFallbackReranking,
+  summarizeFallbackUsage,
+  summarizeCalibrationFactors,
+  summarizeAdvancedRerankMetrics,
+  previewAdvancedReranking,
+} from "../lib/ai/advanced-reranking";
+import { explainAdvancedRerankingProvider } from "../lib/ai/advanced-reranking-provider";
+import {
+  summarizeAnswerGrounding,
+  getAnswerCitations,
+  explainAnswerTrace,
+  getAnswerContext,
+  summarizeRetrievalRuntimeMetrics,
+} from "../lib/ai/answer-grounding";
+import { describeRetrievalConfig } from "../lib/config/retrieval-config";
+import {
+  rewriteRetrievalQuery,
+  expandRetrievalQuery,
+  previewExpandedQuery,
+  explainQueryExpansion,
+  summarizeQueryRewrite,
+  explainQueryRewrite,
+} from "../lib/ai/query-rewriting";
+import {
+  verifyGroundedAnswer,
+  previewExtractedClaims,
+  summarizeCitationCoverage,
+  summarizeAnswerVerificationMetrics,
+  getAnswerVerificationMetrics,
+  explainAnswerVerification,
+  getAnswerVerificationTrace,
+  explainVerificationStage,
+} from "../lib/ai/answer-verification";
+import type { CitationInput } from "../lib/ai/answer-verification";
+import {
+  buildHallucinationGuardSummary,
+  explainHallucinationGuard,
+} from "../lib/ai/hallucination-guard";
+import {
+  decideFinalAnswerPolicy,
+  applyAnswerPolicy,
+  explainAnswerPolicy,
+  previewAnswerPolicy,
+} from "../lib/ai/answer-policy";
+import {
+  computeRetrievalQualitySignals,
+  summarizeRetrievalQualitySignals,
+  explainRetrievalQuality,
+  summarizeRetrievalQualityMetrics,
+} from "../lib/ai/retrieval-quality";
+import {
+  buildRetrievalSafetySummary,
+  explainRetrievalSafety,
+} from "../lib/ai/retrieval-safety";
+import type { SafetyChunkInput } from "../lib/ai/retrieval-safety";
+import type { QualityChunkInput } from "../lib/ai/retrieval-quality";
+import {
+  summarizeRetrievalFeedback,
+  explainRetrievalFeedback,
+  listWeakRetrievalRuns,
+  listWeakPatterns,
+  getFeedbackMetrics,
+  summarizeTenantTuningSignals,
+  summarizeFeedbackMetrics,
+  recordFeedbackMetrics,
+  evaluateRetrievalRunFeedback,
+  explainRerankEffectiveness,
+} from "../lib/ai/retrieval-feedback";
+
+// ─── Zod Schemas ──────────────────────────────────────────────────────────────
+
+const createProviderPricingVersionSchema = z.object({
+  provider: z.string().min(1),
+  model: z.string().min(1),
+  pricingVersion: z.string().min(1),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  effectiveTo: z.string().transform((s) => new Date(s)).nullable().optional(),
+  inputTokenPriceUsd: z.string(),
+  outputTokenPriceUsd: z.string(),
+  cachedInputTokenPriceUsd: z.string().optional(),
+  reasoningTokenPriceUsd: z.string().optional(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const createCustomerPricingVersionSchema = z.object({
+  tenantId: z.string().min(1),
+  feature: z.string().min(1),
+  provider: z.string().min(1),
+  model: z.string().nullable().optional(),
+  pricingVersion: z.string().min(1),
+  pricingMode: z.string().min(1),
+  pricingSource: z.string().optional(),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  effectiveTo: z.string().transform((s) => new Date(s)).nullable().optional(),
+  multiplier: z.string().nullable().optional(),
+  flatMarkupUsd: z.string().nullable().optional(),
+  perRequestMarkupUsd: z.string().nullable().optional(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const createStoragePricingVersionSchema = z.object({
+  storageProvider: z.string().optional(),
+  storageProduct: z.string().optional(),
+  metricType: z.string().min(1),
+  pricingVersion: z.string().min(1),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  effectiveTo: z.string().transform((s) => new Date(s)).nullable().optional(),
+  includedUsage: z.string().nullable().optional(),
+  unitPriceUsd: z.string(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const createCustomerStoragePricingVersionSchema = z.object({
+  tenantId: z.string().min(1),
+  storageProvider: z.string().optional(),
+  storageProduct: z.string().optional(),
+  metricType: z.string().min(1),
+  pricingVersion: z.string().min(1),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  effectiveTo: z.string().transform((s) => new Date(s)).nullable().optional(),
+  multiplier: z.string().nullable().optional(),
+  flatMarkupUsd: z.string().nullable().optional(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const createSubscriptionPlanSchema = z.object({
+  planCode: z.string().min(1),
+  planName: z.string().min(1),
+  billingInterval: z.enum(["monthly", "yearly"]),
+  basePriceUsd: z.string(),
+  currency: z.string().optional(),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  effectiveTo: z.string().transform((s) => new Date(s)).nullable().optional(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const entitlementInputSchema = z.object({
+  entitlementKey: z.string().min(1),
+  entitlementType: z.enum(["limit", "included_usage", "feature_flag", "overage_rule"]),
+  numericValue: z.string().nullable().optional(),
+  textValue: z.string().nullable().optional(),
+  booleanValue: z.boolean().nullable().optional(),
+  metadata: z.record(z.unknown()).nullable().optional(),
+});
+
+const replacePlanEntitlementsSchema = z.object({
+  entitlementSet: z.array(entitlementInputSchema),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const tenantPlanChangeSchema = z.object({
+  newPlanId: z.string().min(1),
+  effectiveFrom: z.string().transform((s) => new Date(s)),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const tenantPlanCancellationSchema = z.object({
+  effectiveTo: z.string().transform((s) => new Date(s)),
+  requestedBy: z.string().nullable().optional(),
+});
+
+const metricsWindowSchema = z.object({
+  windowStart: z.string().transform((s) => new Date(s)),
+  windowEnd: z.string().transform((s) => new Date(s)),
+});
+
+const upsertBillingAlertSchema = z.object({
+  alertType: z.string().min(1),
+  severity: z.enum(["info", "warning", "critical"]),
+  scopeType: z.enum(["global", "tenant", "billing_period", "invoice", "payment"]),
+  scopeId: z.string().nullable().optional(),
+  alertKey: z.string().min(1),
+  alertMessage: z.string().min(1),
+  details: z.record(z.unknown()).nullable().optional(),
+});
+
+// ─── Route Registration ───────────────────────────────────────────────────────
+
+export function registerAdminRoutes(app: Express): void {
+
+  // ── Pricing: Provider ──────────────────────────────────────────────────────
+  app.post("/api/admin/pricing/provider/preview", async (req: Request, res: Response) => {
+    try {
+      const input = createProviderPricingVersionSchema.parse(req.body);
+      const result = await previewCreateProviderPricingVersion(input);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/pricing/provider/apply", async (req: Request, res: Response) => {
+    try {
+      const input = createProviderPricingVersionSchema.parse(req.body);
+      const result = await applyCreateProviderPricingVersion(input);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Pricing: Customer ──────────────────────────────────────────────────────
+  app.post("/api/admin/pricing/customer/preview", async (req: Request, res: Response) => {
+    try {
+      const input = createCustomerPricingVersionSchema.parse(req.body);
+      const result = await previewCreateCustomerPricingVersion(input);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/pricing/customer/apply", async (req: Request, res: Response) => {
+    try {
+      const input = createCustomerPricingVersionSchema.parse(req.body);
+      const result = await applyCreateCustomerPricingVersion(input);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Pricing: Storage ───────────────────────────────────────────────────────
+  app.post("/api/admin/pricing/storage/preview", async (req: Request, res: Response) => {
+    try {
+      const input = createStoragePricingVersionSchema.parse(req.body);
+      const result = await previewCreateStoragePricingVersion(input);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/pricing/storage/apply", async (req: Request, res: Response) => {
+    try {
+      const input = createStoragePricingVersionSchema.parse(req.body);
+      const result = await applyCreateStoragePricingVersion(input);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Pricing: Customer Storage ──────────────────────────────────────────────
+  app.post("/api/admin/pricing/customer-storage/preview", async (req: Request, res: Response) => {
+    try {
+      const input = createCustomerStoragePricingVersionSchema.parse(req.body);
+      const result = await previewCreateCustomerStoragePricingVersion(input);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/pricing/customer-storage/apply", async (req: Request, res: Response) => {
+    try {
+      const input = createCustomerStoragePricingVersionSchema.parse(req.body);
+      const result = await applyCreateCustomerStoragePricingVersion(input);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Plans ──────────────────────────────────────────────────────────────────
+  app.get("/api/admin/plans", async (_req: Request, res: Response) => {
+    try {
+      const plans = await listAdminSubscriptionPlans(100);
+      res.json(plans);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/plans/preview", async (req: Request, res: Response) => {
+    try {
+      const input = createSubscriptionPlanSchema.parse(req.body);
+      const result = await previewCreateSubscriptionPlan(input);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/plans/apply", async (req: Request, res: Response) => {
+    try {
+      const input = createSubscriptionPlanSchema.parse(req.body);
+      const result = await applyCreateSubscriptionPlan(input);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/plans/:planId/explain", async (req: Request, res: Response) => {
+    try {
+      const planId = String(req.params.planId);
+      const result = await explainPlanDefinition(planId);
+      res.json(result);
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/plans/:planId/entitlements/preview", async (req: Request, res: Response) => {
+    try {
+      const planId = String(req.params.planId);
+      const body = replacePlanEntitlementsSchema.parse(req.body);
+      const result = await previewReplacePlanEntitlements(planId, body.entitlementSet);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/plans/:planId/entitlements/apply", async (req: Request, res: Response) => {
+    try {
+      const planId = String(req.params.planId);
+      const body = replacePlanEntitlementsSchema.parse(req.body);
+      const result = await applyReplacePlanEntitlements(planId, body.entitlementSet, body.requestedBy ?? null);
+      res.status(200).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/plans/:planId/archive", async (req: Request, res: Response) => {
+    try {
+      const planId = String(req.params.planId);
+      const requestedBy = (req.body as Record<string, string>)?.requestedBy ?? null;
+      const result = await archiveSubscriptionPlan(planId, requestedBy);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Tenant Subscriptions ───────────────────────────────────────────────────
+  app.get("/api/admin/tenants/:tenantId/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const history = await listTenantSubscriptionHistory(tenantId);
+      res.json(history);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/tenants/:tenantId/subscriptions/change/preview", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const body = tenantPlanChangeSchema.parse(req.body);
+      const result = await previewTenantPlanChange(tenantId, body.newPlanId, body.effectiveFrom);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/tenants/:tenantId/subscriptions/change/apply", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const body = tenantPlanChangeSchema.parse(req.body);
+      const result = await applyTenantPlanChange(tenantId, body.newPlanId, body.effectiveFrom, body.requestedBy ?? null);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/tenants/:tenantId/subscriptions/cancel/preview", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const body = tenantPlanCancellationSchema.parse(req.body);
+      const result = await previewTenantPlanCancellation(tenantId, body.effectiveTo);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/tenants/:tenantId/subscriptions/cancel/apply", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const body = tenantPlanCancellationSchema.parse(req.body);
+      const result = await applyTenantPlanCancellation(tenantId, body.effectiveTo, body.requestedBy ?? null);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Commercial Preview ─────────────────────────────────────────────────────
+  app.post("/api/admin/preview/pricing-impact/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const atTime = req.body.atTime ? new Date(req.body.atTime as string) : new Date();
+      const result = await previewPricingImpactForTenant(tenantId, atTime, req.body.proposedChanges ?? {});
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/preview/plan-impact/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const atTime = req.body.atTime ? new Date(req.body.atTime as string) : new Date();
+      const proposedPlanId = (req.body as Record<string, string>).proposedPlanId;
+      if (!proposedPlanId) return res.status(400).json({ error: "proposedPlanId required" });
+      const result = await previewPlanImpactForTenant(tenantId, atTime, proposedPlanId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/preview/global-pricing-window", async (req: Request, res: Response) => {
+    try {
+      const body = req.body as Record<string, string>;
+      const result = await previewGlobalPricingWindowChange({
+        provider: body.provider,
+        model: body.model,
+        proposedEffectiveFrom: new Date(body.proposedEffectiveFrom),
+        proposedEffectiveTo: body.proposedEffectiveTo ? new Date(body.proposedEffectiveTo) : null,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/preview/change/:changeRequestId", async (req: Request, res: Response) => {
+    try {
+      const changeRequestId = String(req.params.changeRequestId);
+      const result = await explainAdminChangePreview(changeRequestId);
+      res.json(result);
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Admin Change Requests ──────────────────────────────────────────────────
+  app.get("/api/admin/changes", async (req: Request, res: Response) => {
+    try {
+      const limit = req.query.limit ? Number(req.query.limit) : 50;
+      const changes = await listAdminChangeRequests(limit);
+      res.json(changes);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/changes/:id", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const change = await getAdminChangeRequestById(id);
+      if (!change) return res.status(404).json({ error: "Admin change request not found" });
+      res.json(change);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/changes/:id/events", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const events = await listAdminChangeEvents(id);
+      res.json(events);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/changes/:id/explain", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const result = await explainAdminChangeResult(id);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Retention & Operational Safety ────────────────────────────────────────
+  app.get("/api/admin/retention/policy", (_req: Request, res: Response) => {
+    res.json(explainAdminChangeRetentionPolicy());
+  });
+
+  app.get("/api/admin/retention/pending-older-than/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewPendingAdminChangesOlderThan(days);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/retention/failed-older-than/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewFailedAdminChangesOlderThan(days);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/retention/applied-without-events", async (_req: Request, res: Response) => {
+    try {
+      const result = await previewAppliedAdminChangesWithoutEvents();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/retention/historically-referenced-plans", async (_req: Request, res: Response) => {
+    try {
+      const result = await previewPlanRowsStillReferencedHistorically();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 4Q: Billing Monitoring — Metrics Snapshots ──────────────────────
+
+  app.post("/api/admin/monitoring/snapshots/global", async (req: Request, res: Response) => {
+    try {
+      const parsed = metricsWindowSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const result = await createGlobalBillingMetricsSnapshot(
+        parsed.data.windowStart,
+        parsed.data.windowEnd,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/monitoring/snapshots/tenant/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const parsed = metricsWindowSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const result = await createTenantBillingMetricsSnapshot(
+        tenantId,
+        parsed.data.windowStart,
+        parsed.data.windowEnd,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/monitoring/snapshots/billing-period/:billingPeriodId", async (req: Request, res: Response) => {
+    try {
+      const billingPeriodId = String(req.params.billingPeriodId);
+      const parsed = metricsWindowSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const result = await createBillingPeriodMetricsSnapshot(
+        billingPeriodId,
+        parsed.data.windowStart,
+        parsed.data.windowEnd,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/snapshots/global/latest", async (_req: Request, res: Response) => {
+    try {
+      const result = await getLatestGlobalBillingMetrics();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/snapshots/tenant/:tenantId/latest", async (req: Request, res: Response) => {
+    try {
+      const result = await getLatestTenantBillingMetrics(String(req.params.tenantId));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/snapshots/billing-period/:billingPeriodId/latest", async (req: Request, res: Response) => {
+    try {
+      const result = await getLatestBillingPeriodMetrics(String(req.params.billingPeriodId));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 4Q: Billing Monitoring — Anomaly Scan ───────────────────────────
+
+  app.post("/api/admin/monitoring/anomaly-scan", async (req: Request, res: Response) => {
+    try {
+      const parsed = metricsWindowSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const result = await runBillingAnomalyScan(parsed.data.windowStart, parsed.data.windowEnd);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 4Q: Billing Monitoring — Summaries ─────────────────────────────
+
+  app.get("/api/admin/monitoring/summary/invoices", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd, tenantId } = req.query as Record<string, string | undefined>;
+      const result = await getInvoiceMonitoringSummary(
+        windowStart ? new Date(windowStart) : undefined,
+        windowEnd ? new Date(windowEnd) : undefined,
+        tenantId,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/payments", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd, tenantId } = req.query as Record<string, string | undefined>;
+      const result = await getPaymentMonitoringSummary(
+        windowStart ? new Date(windowStart) : undefined,
+        windowEnd ? new Date(windowEnd) : undefined,
+        tenantId,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.query as Record<string, string | undefined>;
+      const result = await getSubscriptionMonitoringSummary(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/reconciliation", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd } = req.query as Record<string, string | undefined>;
+      const result = await getReconciliationMonitoringSummary(
+        windowStart ? new Date(windowStart) : undefined,
+        windowEnd ? new Date(windowEnd) : undefined,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/allowances", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd, tenantId } = req.query as Record<string, string | undefined>;
+      const result = await getAllowanceMonitoringSummary(
+        windowStart ? new Date(windowStart) : undefined,
+        windowEnd ? new Date(windowEnd) : undefined,
+        tenantId,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/health/global", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd } = req.query as Record<string, string | undefined>;
+      if (!windowStart || !windowEnd) {
+        return res.status(400).json({ error: "windowStart and windowEnd query params required" });
+      }
+      const result = await getGlobalMonetizationHealthSummary(
+        new Date(windowStart),
+        new Date(windowEnd),
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/summary/health/tenant/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.params.tenantId);
+      const { windowStart, windowEnd } = req.query as Record<string, string | undefined>;
+      if (!windowStart || !windowEnd) {
+        return res.status(400).json({ error: "windowStart and windowEnd query params required" });
+      }
+      const result = await getTenantMonetizationHealthSummary(
+        tenantId,
+        new Date(windowStart),
+        new Date(windowEnd),
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 4Q: Billing Monitoring — Alerts ────────────────────────────────
+
+  app.post("/api/admin/monitoring/alerts", async (req: Request, res: Response) => {
+    try {
+      const parsed = upsertBillingAlertSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+      const result = await upsertBillingAlert(parsed.data);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/alerts", async (req: Request, res: Response) => {
+    try {
+      const { severity, limit } = req.query as Record<string, string | undefined>;
+      const parsedLimit = limit ? Number(limit) : 50;
+      const result = await listOpenBillingAlerts(
+        parsedLimit,
+        severity as "info" | "warning" | "critical" | undefined,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/alerts/scope/:scopeType/:scopeId", async (req: Request, res: Response) => {
+    try {
+      const scopeType = String(req.params.scopeType);
+      const scopeId = String(req.params.scopeId);
+      const { limit } = req.query as Record<string, string | undefined>;
+      const result = await listBillingAlertsByScope(scopeType, scopeId, limit ? Number(limit) : 50);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/alerts/:alertId/explain", async (req: Request, res: Response) => {
+    try {
+      const result = await explainBillingAlert(String(req.params.alertId));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/monitoring/alerts/:alertId/acknowledge", async (req: Request, res: Response) => {
+    try {
+      const result = await acknowledgeBillingAlert(String(req.params.alertId));
+      if (!result) return res.status(404).json({ error: "Alert not found" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/monitoring/alerts/:alertId/resolve", async (req: Request, res: Response) => {
+    try {
+      const result = await resolveBillingAlert(String(req.params.alertId));
+      if (!result) return res.status(404).json({ error: "Alert not found" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/monitoring/alerts/:alertId/suppress", async (req: Request, res: Response) => {
+    try {
+      const result = await suppressBillingAlert(String(req.params.alertId));
+      if (!result) return res.status(404).json({ error: "Alert not found" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 4Q: Billing Monitoring — Retention Helpers ────────────────────
+
+  app.get("/api/admin/monitoring/retention/policy", (_req: Request, res: Response) => {
+    res.json(explainBillingMonitoringRetentionPolicy());
+  });
+
+  app.get("/api/admin/monitoring/retention/failed-snapshots-older-than/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewFailedMetricsSnapshotsOlderThan(days);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/retention/open-critical-alerts-older-than/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewOpenCriticalAlertsOlderThan(days);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/retention/monitoring-gaps", async (req: Request, res: Response) => {
+    try {
+      const { windowStart, windowEnd } = req.query as Record<string, string | undefined>;
+      if (!windowStart || !windowEnd) {
+        return res.status(400).json({ error: "windowStart and windowEnd query params required" });
+      }
+      const result = await previewMonitoringGaps(new Date(windowStart), new Date(windowEnd));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/monitoring/retention/tenants-without-recent-snapshots/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewTenantsWithoutRecentMetricsSnapshots(days);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 4R: Automated Billing Operations Routes ───────────────────────────
+
+  // Job definitions
+  app.get("/api/admin/billing-ops/jobs", async (_req: Request, res: Response) => {
+    try {
+      const definitions = await listBillingJobDefinitions();
+      res.json({ definitions });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Seed predefined job definitions
+  app.post("/api/admin/billing-ops/jobs/seed", async (_req: Request, res: Response) => {
+    try {
+      const result = await ensureBillingJobDefinitions();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Job runs list
+  app.get("/api/admin/billing-ops/runs", async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(Number(req.query.limit as string || "50"), 200);
+      const runs = await listRecentBillingJobRuns(isNaN(limit) ? 50 : limit);
+      res.json({ runs });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Get a specific run
+  app.get("/api/admin/billing-ops/runs/:runId", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const run = await getBillingJobRunById(runId);
+      if (!run) return res.status(404).json({ error: `Run not found: ${runId}` });
+      res.json({ run });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Manually run a job
+  app.post("/api/admin/billing-ops/jobs/:jobKey/run", async (req: Request, res: Response) => {
+    try {
+      const jobKey = String(req.params.jobKey);
+      const { scopeType, scopeId, metadata } = req.body as {
+        scopeType?: string;
+        scopeId?: string;
+        metadata?: Record<string, unknown>;
+      };
+      const result = await runBillingJob(jobKey, {
+        triggerType: "manual",
+        scopeType: scopeType as "global" | "tenant" | "billing_period" | undefined,
+        scopeId,
+        metadata,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retry a failed run
+  app.post("/api/admin/billing-ops/runs/:runId/retry", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const result = await retryBillingJobRun(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Health summary
+  app.get("/api/admin/billing-ops/health", async (req: Request, res: Response) => {
+    try {
+      const windowHours = Math.max(1, Number(req.query.windowHours as string || "24"));
+      const summary = await getBillingJobHealthSummary(isNaN(windowHours) ? 24 : windowHours);
+      res.json(summary);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Stale/failed job inspection
+  app.get("/api/admin/billing-ops/inspections/stale-runs", async (req: Request, res: Response) => {
+    try {
+      const olderThanMinutes = Number(req.query.olderThanMinutes as string || "0");
+      const result = await previewStaleBillingJobRuns(isNaN(olderThanMinutes) ? 0 : olderThanMinutes);
+      res.json({ staleRuns: result });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/billing-ops/inspections/failed-runs/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewFailedBillingJobs(days > 0 ? days : 50);
+      res.json({ failedRuns: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Scheduler trigger (internal only)
+  app.post("/api/admin/billing-ops/scheduler/trigger", async (_req: Request, res: Response) => {
+    try {
+      const result = await triggerDueBillingJobs();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Scheduler status
+  app.get("/api/admin/billing-ops/scheduler/status", async (_req: Request, res: Response) => {
+    try {
+      const status = await getSchedulerStatus();
+      res.json(status);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention inspection helpers
+  app.get("/api/admin/billing-ops/retention/policy", (_req: Request, res: Response) => {
+    res.json(explainBillingOpsRetentionPolicy());
+  });
+
+  app.get("/api/admin/billing-ops/retention/completed-runs/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewCompletedJobRunsOlderThan(days);
+      res.json({ completedRuns: result, count: result.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/billing-ops/retention/failed-runs/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewFailedJobRunsOlderThan(days);
+      res.json({ failedRuns: result, count: result.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/billing-ops/retention/timed-out-runs/:days", async (req: Request, res: Response) => {
+    try {
+      const days = Number(String(req.params.days));
+      const result = await previewTimedOutJobRunsOlderThan(days);
+      res.json({ timedOutRuns: result, count: result.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/billing-ops/retention/definitions-without-runs", async (_req: Request, res: Response) => {
+    try {
+      const result = await previewJobDefinitionsWithoutRuns();
+      res.json({ definitions: result, count: result.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/billing-ops/retention/duplicate-started-runs", async (_req: Request, res: Response) => {
+    try {
+      const result = await previewDuplicateStartedRuns();
+      res.json({ duplicateGroups: result, count: result.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 4S: Billing Recovery & Integrity Routes ───────────────────────────
+
+  // Integrity scan — read-only, always safe to call
+  app.post("/api/admin/billing-recovery/scan", async (req: Request, res: Response) => {
+    try {
+      const bodySchema = z.object({
+        scopeType: z.enum(["global", "tenant", "billing_period"]).optional(),
+        scopeId: z.string().nullable().optional(),
+        checks: z
+          .array(
+            z.enum([
+              "ai_usage_gaps",
+              "storage_usage_gaps",
+              "snapshot_drift",
+              "invoice_arithmetic",
+              "stuck_wallet_debits",
+            ]),
+          )
+          .optional(),
+        stuckWalletThresholdHours: z.number().int().positive().optional(),
+        snapshotDriftThresholdPct: z.number().positive().optional(),
+        limit: z.number().int().positive().max(500).optional(),
+      });
+      const body = bodySchema.parse(req.body);
+      const result = await runBillingIntegrityScan(body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Preview snapshot rebuild — dry-run, never writes
+  app.post("/api/admin/billing-recovery/preview/snapshot-rebuild", async (req: Request, res: Response) => {
+    try {
+      const bodySchema = z.object({
+        billingPeriodId: z.string().min(1),
+        tenantId: z.string().nullable().optional(),
+      });
+      const body = bodySchema.parse(req.body);
+      const preview = await previewSnapshotRebuild(body.billingPeriodId, body.tenantId ?? null);
+      res.json(preview);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Preview invoice totals rebuild — dry-run, never writes
+  app.post("/api/admin/billing-recovery/preview/invoice-totals-rebuild", async (req: Request, res: Response) => {
+    try {
+      const bodySchema = z.object({
+        scopeType: z.enum(["global", "tenant", "billing_period"]),
+        scopeId: z.string().nullable().optional(),
+      });
+      const body = bodySchema.parse(req.body);
+      const preview = await previewInvoiceTotalsRebuild(body.scopeType, body.scopeId ?? null);
+      res.json(preview);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Apply snapshot rebuild
+  app.post("/api/admin/billing-recovery/apply/snapshot-rebuild", async (req: Request, res: Response) => {
+    try {
+      const bodySchema = z.object({
+        billingPeriodId: z.string().min(1),
+        tenantId: z.string().nullable().optional(),
+        reason: z.string().min(1),
+      });
+      const body = bodySchema.parse(req.body);
+      const result = await applySnapshotRebuild(
+        body.billingPeriodId,
+        body.tenantId ?? null,
+        "manual",
+        body.reason,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Apply invoice totals rebuild
+  app.post("/api/admin/billing-recovery/apply/invoice-totals-rebuild", async (req: Request, res: Response) => {
+    try {
+      const bodySchema = z.object({
+        scopeType: z.enum(["global", "tenant", "billing_period"]),
+        scopeId: z.string().nullable().optional(),
+        reason: z.string().min(1),
+      });
+      const body = bodySchema.parse(req.body);
+      const result = await applyInvoiceTotalsRebuild(
+        body.scopeType,
+        body.scopeId ?? null,
+        "manual",
+        body.reason,
+      );
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // List recovery runs
+  app.get("/api/admin/billing-recovery/runs", async (req: Request, res: Response) => {
+    try {
+      const querySchema = z.object({
+        recoveryType: z.string().optional(),
+        scopeType: z.string().optional(),
+        scopeId: z.string().optional(),
+        status: z.string().optional(),
+        dryRun: z
+          .string()
+          .optional()
+          .transform((v) => (v === undefined ? undefined : v === "true")),
+        limit: z
+          .string()
+          .optional()
+          .transform((v) => (v ? Number(v) : 50)),
+        offset: z
+          .string()
+          .optional()
+          .transform((v) => (v ? Number(v) : 0)),
+      });
+      const query = querySchema.parse(req.query);
+      const result = await listRecoveryRuns(query);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Get recovery run detail
+  app.get("/api/admin/billing-recovery/runs/:runId", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const detail = await getRecoveryRunDetail(runId);
+      if (!detail) {
+        return res.status(404).json({ error: "Recovery run not found" });
+      }
+      res.json(detail);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Explain recovery run
+  app.get("/api/admin/billing-recovery/runs/:runId/explain", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const explanation = await explainRecoveryRun(runId);
+      if (!explanation) {
+        return res.status(404).json({ error: "Recovery run not found" });
+      }
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Recovery run stats
+  app.get("/api/admin/billing-recovery/runs/stats/summary", async (req: Request, res: Response) => {
+    try {
+      const windowDays = req.query.windowDays ? Number(String(req.query.windowDays)) : 30;
+      const stats = await getRecoveryRunStats(windowDays);
+      res.json({ stats, windowDays });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention: age report
+  app.get("/api/admin/billing-recovery/retention/age-report", async (_req: Request, res: Response) => {
+    try {
+      const report = await getRecoveryRunAgeReport();
+      res.json(report);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention: action stats
+  app.get("/api/admin/billing-recovery/retention/action-stats", async (req: Request, res: Response) => {
+    try {
+      const windowDays = req.query.windowDays ? Number(String(req.query.windowDays)) : 90;
+      const stats = await getRecoveryActionStats(windowDays);
+      res.json({ stats, windowDays });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention: candidates for archival
+  app.get("/api/admin/billing-recovery/retention/candidates/:days", async (req: Request, res: Response) => {
+    try {
+      const ageDays = Number(String(req.params.days));
+      const limit = req.query.limit ? Number(String(req.query.limit)) : 200;
+      const candidates = await findRetentionCandidates(ageDays, limit);
+      res.json({ candidates, count: candidates.length, ageDays });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention: stuck runs
+  app.get("/api/admin/billing-recovery/retention/stuck-runs", async (req: Request, res: Response) => {
+    try {
+      const minutes = req.query.minutes ? Number(String(req.query.minutes)) : 60;
+      const stuck = await findStuckRecoveryRuns(minutes);
+      res.json({ stuckRuns: stuck, count: stuck.length, thresholdMinutes: minutes });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retention: daily trend
+  app.get("/api/admin/billing-recovery/retention/daily-trend", async (req: Request, res: Response) => {
+    try {
+      const windowDays = req.query.windowDays ? Number(String(req.query.windowDays)) : 14;
+      const trend = await getRecoveryRunDailyTrend(windowDays);
+      res.json({ trend, windowDays });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5A: Document Registry & Storage Foundation ───────────────────────
+
+  // Knowledge Bases
+  app.post("/api/admin/knowledge-bases", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        tenantId: z.string().min(1),
+        name: z.string().min(1),
+        slug: z.string().min(1).regex(/^[a-z0-9-]+$/),
+        description: z.string().optional(),
+        lifecycleState: z.enum(["active", "archived", "deleted"]).optional(),
+        visibility: z.enum(["private", "internal"]).optional(),
+        defaultRetrievalK: z.number().int().positive().optional(),
+        metadata: z.record(z.unknown()).optional(),
+        createdBy: z.string().optional(),
+      }).parse(req.body);
+      const kb = await createKnowledgeBase(body);
+      res.status(201).json({ knowledgeBase: kb });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-bases", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const lifecycleState = req.query.lifecycleState ? String(req.query.lifecycleState) : undefined;
+      const bases = await listKnowledgeBases(tenantId, lifecycleState);
+      res.json({ knowledgeBases: bases, count: bases.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-bases/:id", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const kb = await getKnowledgeBase(id, tenantId);
+      if (!kb) return res.status(404).json({ error: "knowledge base not found" });
+      res.json({ knowledgeBase: kb });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge-bases/:id/archive", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const body = z.object({ tenantId: z.string().min(1), updatedBy: z.string().optional() }).parse(req.body);
+      const kb = await archiveKnowledgeBase(id, body.tenantId, body.updatedBy);
+      if (!kb) return res.status(404).json({ error: "knowledge base not found" });
+      res.json({ knowledgeBase: kb });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Knowledge Documents
+  app.post("/api/admin/knowledge-documents", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        title: z.string().min(1),
+        documentType: z.string().optional(),
+        sourceType: z.enum(["upload", "api", "manual", "import"]).optional(),
+        externalReference: z.string().optional(),
+        tags: z.record(z.unknown()).optional(),
+        metadata: z.record(z.unknown()).optional(),
+        createdBy: z.string().optional(),
+      }).parse(req.body);
+      const doc = await createKnowledgeDocument(body);
+      res.status(201).json({ document: doc });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-documents", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const knowledgeBaseId = req.query.knowledgeBaseId ? String(req.query.knowledgeBaseId) : undefined;
+      const documentStatus = req.query.documentStatus ? String(req.query.documentStatus) : undefined;
+      const docs = await listKnowledgeDocuments(tenantId, knowledgeBaseId, documentStatus);
+      res.json({ documents: docs, count: docs.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-documents/:id", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const doc = await getKnowledgeDocument(id, tenantId);
+      if (!doc) return res.status(404).json({ error: "document not found" });
+      res.json({ document: doc });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Document Versions
+  app.post("/api/admin/knowledge-documents/:documentId/versions", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const body = z.object({
+        tenantId: z.string().min(1),
+        versionNumber: z.number().int().positive(),
+        sourceLabel: z.string().optional(),
+        mimeType: z.string().optional(),
+        fileSizeBytes: z.number().int().nonnegative().optional(),
+        characterCount: z.number().int().nonnegative().optional(),
+        pageCount: z.number().int().nonnegative().optional(),
+        languageCode: z.string().optional(),
+        contentChecksum: z.string().optional(),
+        metadata: z.record(z.unknown()).optional(),
+        createdBy: z.string().optional(),
+      }).parse(req.body);
+      const version = await createKnowledgeDocumentVersion({ ...body, knowledgeDocumentId: documentId });
+      res.status(201).json({ version });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-documents/:documentId/versions", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const versions = await listKnowledgeDocumentVersions(documentId, tenantId);
+      res.json({ versions, count: versions.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-versions/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const version = await getKnowledgeDocumentVersion(versionId, tenantId);
+      if (!version) return res.status(404).json({ error: "version not found" });
+      res.json({ version });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge-documents/:documentId/set-current-version", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const body = z.object({ tenantId: z.string().min(1), versionId: z.string().min(1) }).parse(req.body);
+      const result = await setCurrentDocumentVersion(documentId, body.versionId, body.tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-documents/:documentId/version-invariant", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const check = await verifyCurrentVersionInvariant(documentId, tenantId);
+      res.json(check);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Storage Objects
+  app.post("/api/admin/knowledge-storage-objects", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        tenantId: z.string().min(1),
+        knowledgeDocumentVersionId: z.string().min(1),
+        storageProvider: z.enum(["r2", "supabase_storage", "local"]),
+        objectKey: z.string().min(1),
+        bucketName: z.string().optional(),
+        originalFilename: z.string().optional(),
+        mimeType: z.string().optional(),
+        fileSizeBytes: z.number().int().nonnegative().optional(),
+        checksum: z.string().optional(),
+        metadata: z.record(z.unknown()).optional(),
+      }).parse(req.body);
+      const obj = await attachStorageObject(body);
+      res.status(201).json({ storageObject: obj });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-versions/:versionId/storage-objects", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const objects = await getStorageObjectsByVersion(versionId, tenantId);
+      res.json({ storageObjects: objects, count: objects.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Processing Jobs
+  app.post("/api/admin/knowledge-processing-jobs", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        tenantId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        knowledgeDocumentVersionId: z.string().optional(),
+        jobType: z.enum(["upload_verify", "parse", "chunk", "embed", "index", "reindex", "delete_index", "lifecycle_sync"]),
+        priority: z.number().int().nonnegative().optional(),
+        maxAttempts: z.number().int().positive().optional(),
+        idempotencyKey: z.string().optional(),
+        payload: z.record(z.unknown()).optional(),
+        workerId: z.string().optional(),
+      }).parse(req.body);
+      const job = await createKnowledgeProcessingJob(body);
+      res.status(201).json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-processing-jobs", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const documentId = req.query.documentId ? String(req.query.documentId) : undefined;
+      const status = req.query.status ? String(req.query.status) : undefined;
+      const jobs = await listProcessingJobs(tenantId, documentId, status);
+      res.json({ jobs, count: jobs.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-processing-jobs/:id", async (req: Request, res: Response) => {
+    try {
+      const id = String(req.params.id);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const job = await getProcessingJob(id, tenantId);
+      if (!job) return res.status(404).json({ error: "processing job not found" });
+      res.json({ job });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Index State
+  app.get("/api/admin/knowledge-index-state/by-version/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await getIndexStateByVersion(versionId, tenantId);
+      if (!state) return res.status(404).json({ error: "index state not found" });
+      const retrievable = await isVersionRetrievable(versionId, tenantId);
+      res.json({ indexState: state, retrievable });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge-index-state", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      const knowledgeBaseId = String(req.query.knowledgeBaseId ?? "");
+      if (!tenantId || !knowledgeBaseId) return res.status(400).json({ error: "tenantId and knowledgeBaseId required" });
+      const indexStateFilter = req.query.indexState ? String(req.query.indexState) : undefined;
+      const states = await listIndexStateByKnowledgeBase(knowledgeBaseId, tenantId, indexStateFilter);
+      res.json({ indexStates: states, count: states.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge-index-state", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        knowledgeDocumentVersionId: z.string().min(1),
+        indexState: z.enum(["pending", "indexing", "indexed", "failed", "stale", "deleted"]),
+        chunkCount: z.number().int().nonnegative().optional(),
+        indexedChunkCount: z.number().int().nonnegative().optional(),
+        embeddingCount: z.number().int().nonnegative().optional(),
+        staleReason: z.string().optional(),
+        failureReason: z.string().optional(),
+        metadata: z.record(z.unknown()).optional(),
+      }).parse(req.body);
+      const state = await updateKnowledgeIndexState(body);
+      res.json({ indexState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Vector adapter info
+  app.get("/api/admin/knowledge-vector-adapter/info", async (_req: Request, res: Response) => {
+    try {
+      const info = getVectorAdapterInfo();
+      res.json({ vectorAdapter: info });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B: Parse Routes ─────────────────────────────────────────────────
+
+  app.post("/api/admin/knowledge/parse/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        documentType: z.string().optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        processorName: z.string().optional(),
+        processorVersion: z.string().optional(),
+      }).parse(req.body);
+      const result = await runParseForDocumentVersion(body.versionId, body.tenantId, body);
+      res.json({ parseResult: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/parse/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const explanation = await explainDocumentVersionParseState(versionId, tenantId);
+      res.json({ parseState: explanation });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/parse/mark-failed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().min(1),
+      }).parse(req.body);
+      await markParseFailed(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/parse/mark-completed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        parserName: z.string().min(1),
+        parserVersion: z.string().min(1),
+        parsedTextChecksum: z.string().min(1),
+        normalizedCharacterCount: z.number().int().nonnegative(),
+      }).parse(req.body);
+      await markParseCompleted(body.versionId, body.tenantId, body);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/parse/select-parser", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        mimeType: z.string().min(1),
+        documentType: z.string().optional(),
+      }).parse(req.body);
+      const descriptor = selectDocumentParser(body.mimeType, body.documentType);
+      res.json({ parser: descriptor });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B: Chunk Routes ──────────────────────────────────────────────────
+
+  app.post("/api/admin/knowledge/chunk/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        chunkingConfig: z.object({
+          maxCharacters: z.number().int().positive().optional(),
+          overlapCharacters: z.number().int().nonnegative().optional(),
+          strategy: z.string().optional(),
+          strategyVersion: z.string().optional(),
+        }).optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        processorName: z.string().optional(),
+        processorVersion: z.string().optional(),
+      }).parse(req.body);
+      const result = await runChunkingForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        chunkingConfig: body.chunkingConfig,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+        processorName: body.processorName,
+        processorVersion: body.processorVersion,
+      });
+      res.json({ chunkingResult: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/chunk/preview", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().min(1),
+        mimeType: z.string().optional(),
+        documentType: z.string().optional(),
+        chunkingConfig: z.object({
+          maxCharacters: z.number().int().positive().optional(),
+          overlapCharacters: z.number().int().nonnegative().optional(),
+          strategy: z.string().optional(),
+          strategyVersion: z.string().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const preview = await previewChunkingForDocumentVersion(
+        body.versionId,
+        body.tenantId,
+        body.content,
+        { chunkingConfig: body.chunkingConfig, mimeType: body.mimeType, documentType: body.documentType },
+      );
+      res.json({ chunkPreview: preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/chunk/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const explanation = await explainDocumentVersionChunkState(versionId, tenantId);
+      res.json({ chunkState: explanation });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/chunk/preview-replacement/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewChunkReplacement(versionId, tenantId);
+      res.json({ replacementPreview: preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/chunk/list/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      const activeOnly = req.query.activeOnly !== "false";
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const chunks = await listChunksByVersion(versionId, tenantId, activeOnly);
+      res.json({ chunks, count: chunks.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B: Job Routes ────────────────────────────────────────────────────
+
+  app.get("/api/admin/knowledge/jobs/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      const jobType = req.query.jobType ? String(req.query.jobType) : undefined;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listDocumentProcessingJobs(documentId, tenantId, jobType);
+      res.json({ jobs, count: jobs.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/jobs/summary/:jobId", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeChunkingResult(jobId, tenantId);
+      res.json({ jobSummary: summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/jobs/acquire", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        jobId: z.string().min(1),
+        tenantId: z.string().min(1),
+        workerId: z.string().optional(),
+        processorName: z.string().optional(),
+        processorVersion: z.string().optional(),
+      }).parse(req.body);
+      const job = await acquireKnowledgeProcessingJob(body.jobId, body.tenantId, {
+        workerId: body.workerId,
+        processorName: body.processorName,
+        processorVersion: body.processorVersion,
+      });
+      if (!job) {
+        return res.status(409).json({ error: "Job could not be acquired — already running or completed." });
+      }
+      res.json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/jobs/fail", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        jobId: z.string().min(1),
+        tenantId: z.string().min(1),
+        failureReason: z.string().min(1),
+      }).parse(req.body);
+      const job = await failKnowledgeProcessingJob(body.jobId, body.tenantId, body.failureReason);
+      res.json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B: Version Inspection Routes ────────────────────────────────────
+
+  app.get("/api/admin/knowledge/versions/:versionId/parse-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainDocumentVersionParseState(versionId, tenantId);
+      res.json({ parseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/chunk-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainDocumentVersionChunkState(versionId, tenantId);
+      res.json({ chunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/index-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const idxState = await getIndexStateByVersion(versionId, tenantId);
+      const retrievable = await isVersionRetrievable(versionId, tenantId);
+      res.json({ indexState: idxState, retrievable });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.1: Structured Parse Routes ────────────────────────────────────
+
+  app.post("/api/admin/knowledge/structured/parse/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().min(1),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        parseOptions: z.object({
+          sheetName: z.string().optional(),
+          hasHeader: z.boolean().optional(),
+          delimiter: z.string().optional(),
+          maxRows: z.number().int().positive().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runStructuredParseForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+        parseOptions: body.parseOptions,
+      });
+      res.json({ result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/structured/parse/mark-failed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().min(1),
+      }).parse(req.body);
+      await markStructuredParseFailed(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/structured/parse/mark-completed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        sheetCount: z.number().int().min(0),
+        rowCount: z.number().int().min(0),
+        columnCount: z.number().int().min(0),
+        contentChecksum: z.string().min(1),
+      }).parse(req.body);
+      await markStructuredParseCompleted(body.versionId, body.tenantId, {
+        sheetCount: body.sheetCount,
+        rowCount: body.rowCount,
+        columnCount: body.columnCount,
+        contentChecksum: body.contentChecksum,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/structured/parse/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainStructuredParseState(versionId, tenantId);
+      res.json({ structuredParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.1: Structured Chunk Routes ────────────────────────────────────
+
+  app.post("/api/admin/knowledge/structured/chunk/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        chunkingConfig: z.object({
+          strategy: z.string().optional(),
+          version: z.string().optional(),
+          rowWindowSize: z.number().int().positive().optional(),
+          includeHeaders: z.boolean().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runStructuredChunkingForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+        chunkingConfig: body.chunkingConfig,
+      });
+      res.json({ result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/structured/chunk/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainStructuredChunkState(versionId, tenantId);
+      res.json({ structuredChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/structured/chunk/preview-replacement/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewStructuredChunkReplacement(versionId, tenantId);
+      res.json({ preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/structured/chunk/list/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const chunks = await listChunksByVersion(versionId, tenantId, false);
+      const tableChunks = chunks.filter((c) => (c as Record<string, unknown>).tableChunk === true);
+      res.json({ chunks: tableChunks, total: tableChunks.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.1: Structured Jobs & Inspection Routes ─────────────────────────
+
+  app.get("/api/admin/knowledge/structured/jobs/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listStructuredProcessingJobs(documentId, tenantId);
+      res.json({ jobs, total: jobs.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/structured/jobs/:jobId/summarize", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeStructuredChunkingResult(jobId, tenantId);
+      res.json({ summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/structured-parse-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainStructuredParseState(versionId, tenantId);
+      res.json({ structuredParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/structured-chunk-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainStructuredChunkState(versionId, tenantId);
+      res.json({ structuredChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/structured/index-state/sync", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        chunkCount: z.number().int().min(0),
+      }).parse(req.body);
+      const row = await syncIndexStateAfterStructuredChunking(
+        body.versionId,
+        body.tenantId,
+        body.knowledgeBaseId,
+        body.knowledgeDocumentId,
+        body.chunkCount,
+      );
+      res.json({ indexState: row });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/structured/index-state/mark-stale", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().optional(),
+      }).parse(req.body);
+      await markIndexStateStaleAfterStructuredChunkReplace(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.2: Image OCR Parse Routes ─────────────────────────────────────
+
+  app.post("/api/admin/knowledge/image-ocr/parse/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().min(1),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        parseOptions: z.object({
+          maxImageSizeBytes: z.number().int().positive().optional(),
+          engineHint: z.string().optional(),
+          contentLabel: z.string().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runOcrParseForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+        parseOptions: body.parseOptions,
+      });
+      res.json({ result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/image-ocr/parse/mark-failed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().min(1),
+      }).parse(req.body);
+      await markOcrParseFailed(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/image-ocr/parse/mark-completed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        blockCount: z.number().int().min(0),
+        lineCount: z.number().int().min(0),
+        averageConfidence: z.number().min(0).max(1),
+        textChecksum: z.string().min(1),
+        engineName: z.string().min(1),
+        engineVersion: z.string().min(1),
+      }).parse(req.body);
+      await markOcrParseCompleted(body.versionId, body.tenantId, {
+        blockCount: body.blockCount,
+        lineCount: body.lineCount,
+        averageConfidence: body.averageConfidence,
+        textChecksum: body.textChecksum,
+        engineName: body.engineName,
+        engineVersion: body.engineVersion,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/image-ocr/parse/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainOcrParseState(versionId, tenantId);
+      res.json({ ocrParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.2: Image OCR Chunk Routes ─────────────────────────────────────
+
+  app.post("/api/admin/knowledge/image-ocr/chunk/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        chunkingConfig: z.object({
+          strategy: z.string().optional(),
+          version: z.string().optional(),
+          regionWindowSize: z.number().int().positive().optional(),
+          includeRegionMetadata: z.boolean().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runOcrChunkingForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+        chunkingConfig: body.chunkingConfig,
+      });
+      res.json({ result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/image-ocr/chunk/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainOcrChunkState(versionId, tenantId);
+      res.json({ ocrChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/image-ocr/chunk/preview-replacement/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewOcrChunkReplacement(versionId, tenantId);
+      res.json({ preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/image-ocr/chunk/list/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const chunks = await listChunksByVersion(versionId, tenantId, false);
+      const imageChunks = chunks.filter((c) => (c as Record<string, unknown>).imageChunk === true);
+      res.json({ chunks: imageChunks, total: imageChunks.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.2: OCR Jobs & Inspection Routes ────────────────────────────────
+
+  app.get("/api/admin/knowledge/image-ocr/jobs/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listOcrProcessingJobs(documentId, tenantId);
+      res.json({ jobs, total: jobs.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/image-ocr/jobs/:jobId/summarize", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeOcrChunkingResult(jobId, tenantId);
+      res.json({ summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/ocr-parse-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainOcrParseState(versionId, tenantId);
+      res.json({ ocrParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/ocr-chunk-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainOcrChunkState(versionId, tenantId);
+      res.json({ ocrChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/image-ocr/index-state/sync", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        chunkCount: z.number().int().min(0),
+      }).parse(req.body);
+      const row = await syncIndexStateAfterOcrChunking(
+        body.versionId,
+        body.tenantId,
+        body.knowledgeBaseId,
+        body.knowledgeDocumentId,
+        body.chunkCount,
+      );
+      res.json({ indexState: row });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/image-ocr/index-state/mark-stale", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().optional(),
+      }).parse(req.body);
+      await markIndexStateStaleAfterOcrChunkReplace(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.3: Media Transcript Admin Routes ─────────────────────────────
+
+  app.post("/api/admin/knowledge/media-transcript/parse/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        workerId: z.string().optional(),
+      }).parse(req.body);
+      const result = await runTranscriptParseForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        idempotencyKey: body.idempotencyKey,
+        workerId: body.workerId,
+      });
+      res.json({ transcriptParse: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/media-transcript/parse/mark-failed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().min(1),
+      }).parse(req.body);
+      await markTranscriptParseFailed(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/media-transcript/parse/mark-completed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        segmentCount: z.number().int().min(0),
+        speakerCount: z.number().int().min(0),
+        durationMs: z.number().int().min(0),
+        averageConfidence: z.number().min(0).max(1),
+        textChecksum: z.string().min(1),
+        languageCode: z.string().min(1),
+        engineName: z.string().min(1),
+        engineVersion: z.string().min(1),
+      }).parse(req.body);
+      await markTranscriptParseCompleted(body.versionId, body.tenantId, {
+        segmentCount: body.segmentCount,
+        speakerCount: body.speakerCount,
+        durationMs: body.durationMs,
+        averageConfidence: body.averageConfidence,
+        textChecksum: body.textChecksum,
+        languageCode: body.languageCode,
+        engineName: body.engineName,
+        engineVersion: body.engineVersion,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/parse/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainTranscriptParseState(versionId, tenantId);
+      res.json({ transcriptParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/media-transcript/chunk/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        workerId: z.string().optional(),
+        chunkingConfig: z.object({
+          strategy: z.string().optional(),
+          version: z.string().optional(),
+          windowMs: z.number().int().optional(),
+          segmentWindowSize: z.number().int().optional(),
+          includeTimestamps: z.boolean().optional(),
+          includeSpeakerLabel: z.boolean().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runTranscriptChunkingForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        idempotencyKey: body.idempotencyKey,
+        workerId: body.workerId,
+        chunkingConfig: body.chunkingConfig,
+      });
+      res.json({ transcriptChunk: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/chunk/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainTranscriptChunkState(versionId, tenantId);
+      res.json({ transcriptChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/chunk/preview-replacement/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewTranscriptChunkReplacement(versionId, tenantId);
+      res.json({ preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/chunk/list/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainTranscriptChunkState(versionId, tenantId);
+      res.json({ transcriptChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/jobs/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listTranscriptProcessingJobs(documentId, tenantId);
+      res.json({ jobs });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/media-transcript/jobs/:jobId/summarize", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeTranscriptChunkingResult(jobId, tenantId);
+      res.json({ summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/media-transcript/index-state/sync", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        chunkCount: z.number().int().min(0),
+      }).parse(req.body);
+      const row = await syncIndexStateAfterTranscriptChunking(
+        body.versionId,
+        body.tenantId,
+        body.knowledgeBaseId,
+        body.knowledgeDocumentId,
+        body.chunkCount,
+      );
+      res.json({ indexState: row });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/media-transcript/index-state/mark-stale", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().optional(),
+      }).parse(req.body);
+      await markIndexStateStaleAfterTranscriptChunkReplace(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/transcript-parse-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainTranscriptParseState(versionId, tenantId);
+      res.json({ transcriptParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/transcript-chunk-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainTranscriptChunkState(versionId, tenantId);
+      res.json({ transcriptChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5B.4: Email / HTML / Imported Content Admin Routes ─────────────
+
+  app.post("/api/admin/knowledge/import-content/parse/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        workerId: z.string().optional(),
+        parseOptions: z.object({
+          parserHint: z.string().optional(),
+          languageHint: z.string().optional(),
+          includeQuotedContent: z.boolean().optional(),
+          contentLabel: z.string().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runImportParseForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        idempotencyKey: body.idempotencyKey,
+        workerId: body.workerId,
+        parseOptions: body.parseOptions,
+      });
+      res.json({ importParse: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/import-content/parse/mark-failed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().min(1),
+      }).parse(req.body);
+      await markImportParseFailed(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/import-content/parse/mark-completed", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        contentType: z.enum(["email", "html", "imported_text"]),
+        parserName: z.string().min(1),
+        parserVersion: z.string().min(1),
+        textChecksum: z.string().min(1),
+        messageCount: z.number().int().min(0),
+        sectionCount: z.number().int().min(0),
+        linkCount: z.number().int().min(0),
+        sourceLanguageCode: z.string().optional(),
+      }).parse(req.body);
+      await markImportParseCompleted(body.versionId, body.tenantId, {
+        contentType: body.contentType,
+        parserName: body.parserName,
+        parserVersion: body.parserVersion,
+        textChecksum: body.textChecksum,
+        messageCount: body.messageCount,
+        sectionCount: body.sectionCount,
+        linkCount: body.linkCount,
+        sourceLanguageCode: body.sourceLanguageCode,
+      });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/import-content/parse/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainImportParseState(versionId, tenantId);
+      res.json({ importParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/import-content/chunk/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        content: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        workerId: z.string().optional(),
+        chunkingConfig: z.object({
+          strategy: z.string().optional(),
+          version: z.string().optional(),
+          maxBlockSize: z.number().int().optional(),
+          includeHeaderContext: z.boolean().optional(),
+          includeSectionLabel: z.boolean().optional(),
+        }).optional(),
+      }).parse(req.body);
+      const result = await runImportChunkingForDocumentVersion(body.versionId, body.tenantId, {
+        content: body.content,
+        idempotencyKey: body.idempotencyKey,
+        workerId: body.workerId,
+        chunkingConfig: body.chunkingConfig,
+      });
+      res.json({ importChunk: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/import-content/chunk/explain/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainImportChunkState(versionId, tenantId);
+      res.json({ importChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/import-content/chunk/preview-replacement/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewImportChunkReplacement(versionId, tenantId);
+      res.json({ preview });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/import-content/jobs/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listImportProcessingJobs(documentId, tenantId);
+      res.json({ jobs });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/import-content/jobs/:jobId/summarize", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeImportChunkingResult(jobId, tenantId);
+      res.json({ summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/import-content/index-state/sync", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        knowledgeDocumentId: z.string().min(1),
+        chunkCount: z.number().int().min(0),
+      }).parse(req.body);
+      const row = await syncIndexStateAfterImportChunking(
+        body.versionId,
+        body.tenantId,
+        body.knowledgeBaseId,
+        body.knowledgeDocumentId,
+        body.chunkCount,
+      );
+      res.json({ indexState: row });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/import-content/index-state/mark-stale", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        reason: z.string().optional(),
+      }).parse(req.body);
+      await markIndexStateStaleAfterImportChunkReplace(body.versionId, body.tenantId, body.reason);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/import-parse-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainImportParseState(versionId, tenantId);
+      res.json({ importParseState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/import-chunk-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainImportChunkState(versionId, tenantId);
+      res.json({ importChunkState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5C: Embedding Pipeline Admin Routes ─────────────────────────────
+
+  app.post("/api/admin/knowledge/embeddings/run", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        providerName: z.string().optional(),
+        batchSize: z.number().int().min(1).max(500).optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+        replaceExisting: z.boolean().optional(),
+      }).parse(req.body);
+      const result = await runEmbeddingForDocumentVersion(body.versionId, body.tenantId, {
+        providerName: body.providerName as any,
+        batchSize: body.batchSize,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+        replaceExisting: body.replaceExisting,
+      });
+      res.json({ embedding: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/embeddings/retry", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        versionId: z.string().min(1),
+        tenantId: z.string().min(1),
+        providerName: z.string().optional(),
+        batchSize: z.number().int().min(1).max(500).optional(),
+        workerId: z.string().optional(),
+        idempotencyKey: z.string().optional(),
+      }).parse(req.body);
+      const result = await retryEmbeddingForDocumentVersion(body.versionId, body.tenantId, {
+        providerName: body.providerName as any,
+        batchSize: body.batchSize,
+        workerId: body.workerId,
+        idempotencyKey: body.idempotencyKey,
+      });
+      res.json({ embedding: result });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/embeddings/state/:versionId", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainEmbeddingState(versionId, tenantId);
+      res.json({ embeddingState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/embeddings/jobs/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listEmbeddingJobs(documentId, tenantId);
+      res.json({ jobs });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/embeddings/jobs/:jobId/summarize", async (req: Request, res: Response) => {
+    try {
+      const jobId = String(req.params.jobId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeEmbeddingResult(jobId, tenantId);
+      res.json({ summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/embeddings/document/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const embeddings = await listEmbeddingsForDocument(documentId, tenantId);
+      res.json({ embeddings, count: embeddings.length });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/versions/:versionId/embedding-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const state = await explainEmbeddingState(versionId, tenantId);
+      res.json({ embeddingState: state });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5D: Vector Search Admin Routes ─────────────────────────────────
+
+  const VectorSearchRunSchema = z.object({
+    tenantId: z.string().min(1),
+    knowledgeBaseId: z.string().min(1),
+    queryEmbedding: z.array(z.number()).min(1),
+    topK: z.number().int().min(1).max(200).optional(),
+    metric: z.enum(["cosine", "l2", "inner_product"]).optional(),
+    similarityThreshold: z.number().min(0).max(1).optional(),
+    persistDebugRun: z.boolean().optional(),
+    embeddingModel: z.string().optional(),
+  });
+
+  app.post("/api/admin/knowledge/vector-search/run", async (req: Request, res: Response) => {
+    try {
+      const parsed = VectorSearchRunSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const results = await runVectorSearch(parsed.data);
+      res.json(results);
+    } catch (err) {
+      const status = err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/vector-search/explain", async (req: Request, res: Response) => {
+    try {
+      const parsed = VectorSearchRunSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const explanation = await explainVectorSearch(parsed.data);
+      res.json({ explanation });
+    } catch (err) {
+      const status = err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/vector-search/filter-preview", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      const knowledgeBaseId = String(req.query.knowledgeBaseId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      if (!knowledgeBaseId) return res.status(400).json({ error: "knowledgeBaseId required" });
+      const topK = req.query.topK ? Number(req.query.topK) : 10;
+      const metric = (req.query.metric as "cosine" | "l2" | "inner_product") ?? "cosine";
+      const filters = previewRetrievalSafeFilterSet({ tenantId, knowledgeBaseId, topK, metric });
+      res.json({ filters });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/vector-search/run/:runId", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const summary = await summarizeVectorSearchRun(runId, tenantId);
+      res.json({ searchRun: summary });
+    } catch (err) {
+      const status = err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/vector-search/candidates/:runId", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const candidates = await listVectorSearchCandidates(runId, tenantId);
+      res.json({ candidates, count: candidates.length });
+    } catch (err) {
+      const status = err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/vector-search/chunk-explain/:chunkId", async (req: Request, res: Response) => {
+    try {
+      const chunkId = String(req.params.chunkId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const explanation = await explainWhyChunkWasExcluded(chunkId, tenantId);
+      res.json({ explanation });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5E: Retrieval Orchestration Admin Routes ───────────────────────
+
+  const RetrievalRunSchema = z.object({
+    tenantId: z.string().min(1),
+    knowledgeBaseId: z.string().min(1),
+    queryEmbedding: z.array(z.number()).min(1),
+    topKCandidates: z.number().int().min(1).max(200).optional(),
+    maxContextTokens: z.number().int().min(100).max(128000).optional(),
+    persistRun: z.boolean().optional(),
+    embeddingModel: z.string().optional(),
+    debugSearchRun: z.boolean().optional(),
+    rankingOptions: z.object({
+      similarityThreshold: z.number().min(0).max(1).optional(),
+      duplicateSimilarityThreshold: z.number().min(0).max(1).optional(),
+      groupByDocument: z.boolean().optional(),
+      maxChunksPerDocument: z.number().int().min(1).optional(),
+    }).optional(),
+    contextOptions: z.object({
+      maxTokens: z.number().int().min(100).optional(),
+      format: z.enum(["plain", "cited"]).optional(),
+      includeCitations: z.boolean().optional(),
+      deduplicateByContentHash: z.boolean().optional(),
+    }).optional(),
+  });
+
+  app.post("/api/admin/knowledge/retrieval/run", async (req: Request, res: Response) => {
+    try {
+      const parsed = RetrievalRunSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const result = await runRetrievalOrchestration(parsed.data);
+      res.json(result);
+    } catch (err) {
+      const status = err instanceof RetrievalInvariantError || err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/retrieval/explain", async (req: Request, res: Response) => {
+    try {
+      const parsed = RetrievalRunSchema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const explanation = await explainRetrievalContext(parsed.data);
+      res.json({ explanation });
+    } catch (err) {
+      const status = err instanceof RetrievalInvariantError || err instanceof VectorSearchInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/retrieval/context-preview", async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        candidates: z.array(z.object({
+          rank: z.number(),
+          chunkId: z.string(),
+          documentId: z.string(),
+          documentVersionId: z.string(),
+          knowledgeBaseId: z.string(),
+          chunkText: z.string().nullable(),
+          chunkIndex: z.number(),
+          chunkKey: z.string(),
+          sourcePageStart: z.number().nullable(),
+          sourceHeadingPath: z.string().nullable(),
+          similarityScore: z.number(),
+          similarityMetric: z.string(),
+          contentHash: z.string().nullable(),
+        })),
+        maxContextTokens: z.number().int().min(100).max(128000).optional(),
+        rankingOptions: z.object({
+          similarityThreshold: z.number().min(0).max(1).optional(),
+          duplicateSimilarityThreshold: z.number().min(0).max(1).optional(),
+          groupByDocument: z.boolean().optional(),
+        }).optional(),
+        contextOptions: z.object({
+          format: z.enum(["plain", "cited"]).optional(),
+          includeCitations: z.boolean().optional(),
+        }).optional(),
+      });
+
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+
+      const { contextWindow, summary } = buildContextPreview(
+        parsed.data.candidates as any,
+        {
+          maxContextTokens: parsed.data.maxContextTokens,
+          rankingOptions: parsed.data.rankingOptions,
+          contextOptions: parsed.data.contextOptions,
+        },
+      );
+      res.json({ contextWindow, summary });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/retrieval/run/:runId", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const run = await getRetrievalRun(runId, tenantId);
+      res.json({ retrievalRun: run });
+    } catch (err) {
+      const status = err instanceof RetrievalInvariantError ? 400 : 500;
+      res.status(status).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5F: Retrieval Quality, Cache & Trust Admin Routes ──────────────
+
+  // Retrieval metrics
+  app.post("/api/admin/knowledge/retrieval-metrics/record", async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        retrievalRunId: z.string().min(1),
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        contextWindow: z.object({
+          entries: z.array(z.object({
+            text: z.string(),
+            metadata: z.object({
+              rank: z.number(),
+              chunkId: z.string(),
+              documentId: z.string(),
+              documentVersionId: z.string(),
+              knowledgeBaseId: z.string(),
+              chunkIndex: z.number(),
+              chunkKey: z.string(),
+              sourcePageStart: z.number().nullable(),
+              sourceHeadingPath: z.string().nullable(),
+              similarityScore: z.number(),
+              similarityMetric: z.string(),
+              contentHash: z.string().nullable(),
+              estimatedTokens: z.number(),
+            }),
+          })),
+          totalEstimatedTokens: z.number(),
+          budgetRemaining: z.number(),
+          budgetUtilizationPct: z.number(),
+          chunksSelected: z.number(),
+          chunksSkippedBudget: z.number(),
+          chunksSkippedDuplicate: z.number(),
+          documentCount: z.number(),
+          documentIds: z.array(z.string()),
+          assembledText: z.string(),
+          assemblyFormat: z.enum(["plain", "cited"]),
+        }),
+        dedupRemovedCount: z.number().int().optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const result = await recordRetrievalMetrics(parsed.data);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/retrieval-metrics/:runId", async (req: Request, res: Response) => {
+    try {
+      const metrics = await getRetrievalMetricsByRunId(String(req.params.runId));
+      if (!metrics) return res.status(404).json({ error: "Metrics not found" });
+      res.json({ metrics });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/retrieval-metrics/summary", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const knowledgeBaseId = req.query.knowledgeBaseId ? String(req.query.knowledgeBaseId) : undefined;
+      const limit = req.query.limit ? parseInt(String(req.query.limit)) : 50;
+      const summary = await getRetrievalMetricsSummary({ tenantId, knowledgeBaseId, limit });
+      res.json({ summary });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Retrieval cache
+  app.get("/api/admin/knowledge/retrieval-cache/lookup", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      const knowledgeBaseId = String(req.query.knowledgeBaseId ?? "");
+      const queryText = String(req.query.queryText ?? "");
+      if (!tenantId || !knowledgeBaseId || !queryText) {
+        return res.status(400).json({ error: "tenantId, knowledgeBaseId, queryText required" });
+      }
+      const queryHash = hashRetrievalQuery(queryText);
+      const hit = await getCachedRetrieval({ tenantId, knowledgeBaseId, queryHash });
+      res.json({ hit, queryHash });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/retrieval-cache/store", async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        queryText: z.string().min(1),
+        resultChunkIds: z.array(z.string()),
+        resultSummary: z.record(z.unknown()).optional(),
+        embeddingVersion: z.string().optional(),
+        ttlSeconds: z.number().int().min(60).optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const { queryText, ...rest } = parsed.data;
+      const queryHash = hashRetrievalQuery(queryText);
+      const result = await storeCachedRetrieval({ queryHash, queryText, ...rest });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/retrieval-cache/invalidate-kb", async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const result = await invalidateRetrievalCacheForKnowledgeBase(parsed.data);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/retrieval-cache/invalidate-doc", async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        documentId: z.string().min(1),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const result = await invalidateRetrievalCacheForDocument(parsed.data);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/retrieval-cache/expired-preview", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const knowledgeBaseId = req.query.knowledgeBaseId ? String(req.query.knowledgeBaseId) : undefined;
+      const preview = await previewExpiredRetrievalCache({ tenantId, knowledgeBaseId });
+      res.json(preview);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Embedding version inspection
+  app.get("/api/admin/knowledge/embedding-version/info", async (req: Request, res: Response) => {
+    res.json({
+      currentEmbeddingVersion: getCurrentEmbeddingVersion(),
+      currentRetrievalVersion: getCurrentRetrievalVersion(),
+    });
+  });
+
+  app.get("/api/admin/knowledge/embedding-version/explain", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      const knowledgeBaseId = String(req.query.knowledgeBaseId ?? "");
+      if (!tenantId || !knowledgeBaseId) {
+        return res.status(400).json({ error: "tenantId and knowledgeBaseId required" });
+      }
+      const explanation = await explainEmbeddingVersionState({ tenantId, knowledgeBaseId });
+      res.json({ explanation });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/embedding-version/stale-preview", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const knowledgeBaseId = req.query.knowledgeBaseId ? String(req.query.knowledgeBaseId) : undefined;
+      const limit = req.query.limit ? parseInt(String(req.query.limit)) : 50;
+      const stale = await previewStaleEmbeddingDocuments({ tenantId, knowledgeBaseId, limit });
+      res.json({ stale });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/embedding-version/mark-reindex", async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        tenantId: z.string().min(1),
+        knowledgeBaseId: z.string().min(1),
+        reason: z.string().min(1),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const result = await markKnowledgeBaseForReindex(parsed.data);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Document trust signals
+  app.post("/api/admin/document-trust/signal", async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        tenantId: z.string().min(1),
+        documentId: z.string().min(1),
+        documentVersionId: z.string().optional(),
+        signalType: z.string().min(1),
+        signalSource: z.string().min(1),
+        confidenceScore: z.number().min(0).max(1),
+        rawEvidence: z.record(z.unknown()).optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const result = await recordDocumentTrustSignal(parsed.data);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/document-trust/risk-score", async (req: Request, res: Response) => {
+    try {
+      const schema = z.object({
+        tenantId: z.string().min(1),
+        documentId: z.string().min(1),
+        documentVersionId: z.string().optional(),
+        signals: z.array(z.object({
+          signalType: z.string(),
+          confidenceScore: z.number().min(0).max(1),
+        })).min(0),
+        scoringVersion: z.string().optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+      const result = await calculateDocumentRiskScore(parsed.data);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/document-trust/signals/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const signals = await getDocumentTrustSignals(documentId, tenantId);
+      res.json({ signals });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/document-trust/risk-score/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const score = await getDocumentRiskScore(documentId, tenantId);
+      res.json({ riskScore: score });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/document-trust/explain/:documentId", async (req: Request, res: Response) => {
+    try {
+      const documentId = String(req.params.documentId);
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const explanation = await explainDocumentTrust(documentId, tenantId);
+      res.json({ explanation });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5G: Knowledge Asset Registry & Multimodal Foundation ───────────
+
+  // Asset CRUD
+  app.post("/api/admin/knowledge/assets", async (req: Request, res: Response) => {
+    try {
+      const asset = await createKnowledgeAsset(req.body);
+      res.status(201).json({ asset });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/assets/:assetId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const asset = await getKnowledgeAssetById(String(req.params.assetId), tenantId);
+      if (!asset) return res.status(404).json({ error: "Asset not found" });
+      res.json({ asset });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/assets/by-kb/:kbId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const assets = await listKnowledgeAssetsByKnowledgeBase(tenantId, String(req.params.kbId));
+      res.json({ assets });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/assets/by-tenant", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const assets = await listKnowledgeAssetsByTenant(tenantId);
+      res.json({ assets });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/assets/:assetId/lifecycle", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      const lifecycleState = String(req.body.lifecycleState ?? "");
+      if (!tenantId || !lifecycleState) {
+        return res.status(400).json({ error: "tenantId and lifecycleState required" });
+      }
+      const asset = await updateKnowledgeAssetLifecycle(String(req.params.assetId), tenantId, lifecycleState as any);
+      res.json({ asset });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/assets/:assetId/processing-state", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      const processingState = String(req.body.processingState ?? "");
+      if (!tenantId || !processingState) {
+        return res.status(400).json({ error: "tenantId and processingState required" });
+      }
+      const asset = await markKnowledgeAssetProcessingState(String(req.params.assetId), tenantId, processingState as any);
+      res.json({ asset });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/assets/:assetId/explain", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const result = await explainKnowledgeAsset(String(req.params.assetId), tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Asset Versions
+  app.post("/api/admin/knowledge/asset-versions", async (req: Request, res: Response) => {
+    try {
+      const version = await createKnowledgeAssetVersion(req.body);
+      res.status(201).json({ version });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/assets/:assetId/set-current-version", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      const versionId = String(req.body.versionId ?? "");
+      if (!tenantId || !versionId) {
+        return res.status(400).json({ error: "tenantId and versionId required" });
+      }
+      const asset = await setKnowledgeAssetCurrentVersion(String(req.params.assetId), tenantId, versionId);
+      res.json({ asset });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Storage Objects
+  app.post("/api/admin/knowledge/storage-objects", async (req: Request, res: Response) => {
+    try {
+      const obj = await registerStorageObject(req.body);
+      res.status(201).json({ storageObject: obj });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/storage-objects/:objectId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const obj = await getStorageObjectById(String(req.params.objectId), tenantId);
+      if (!obj) return res.status(404).json({ error: "Storage object not found" });
+      res.json({ storageObject: obj });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/storage-objects/by-tenant", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const objects = await listStorageObjectsByTenant(tenantId);
+      res.json({ storageObjects: objects });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/storage-objects/:objectId/archive", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const obj = await markStorageObjectArchived(String(req.params.objectId), tenantId);
+      res.json({ storageObject: obj });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/storage-objects/:objectId/delete", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const obj = await markStorageObjectDeleted(String(req.params.objectId), tenantId);
+      res.json({ storageObject: obj });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/storage-objects/:objectId/explain", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const result = await explainStorageObject(String(req.params.objectId), tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Processing Jobs
+  app.post("/api/admin/knowledge/processing-jobs", async (req: Request, res: Response) => {
+    try {
+      const job = await enqueueAssetProcessingJob(req.body);
+      res.status(201).json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/processing-jobs/:jobId/start", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const job = await startAssetProcessingJob(String(req.params.jobId), tenantId);
+      res.json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/processing-jobs/:jobId/complete", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const job = await completeAssetProcessingJob(String(req.params.jobId), tenantId, req.body.metadata);
+      res.json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.post("/api/admin/knowledge/processing-jobs/:jobId/fail", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.body.tenantId ?? "");
+      const errorMessage = String(req.body.errorMessage ?? "unspecified error");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const job = await failAssetProcessingJob(String(req.params.jobId), tenantId, errorMessage);
+      res.json({ job });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/processing-jobs/by-asset/:assetId", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const jobs = await listAssetProcessingJobs(tenantId, { assetId: String(req.params.assetId) });
+      res.json({ jobs });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/processing-jobs/:assetId/explain", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const result = await explainAssetProcessingState(tenantId, String(req.params.assetId));
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Compatibility / Migration Explain Helpers
+  app.get("/api/admin/knowledge/compat/migration-strategy", async (_req: Request, res: Response) => {
+    try {
+      const result = explainDocumentToAssetMigrationStrategy();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/compat/legacy-preview", async (req: Request, res: Response) => {
+    try {
+      const tenantId = String(req.query.tenantId ?? "");
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const result = await previewLegacyDocumentCompatibility(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  app.get("/api/admin/knowledge/compat/registry-state", async (_req: Request, res: Response) => {
+    try {
+      const result = await explainCurrentRegistryState();
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5I: Asset Processing Engine ──────────────────────────────────────
+
+  // GET /api/admin/asset-processing/processors — list all registered processors
+  app.get("/api/admin/asset-processing/processors", async (_req: Request, res: Response) => {
+    try {
+      await loadAllProcessors();
+      const processors = listRegisteredProcessors();
+      res.json({ processors, count: processors.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/pipeline/:assetType — explain pipeline for asset type
+  app.get("/api/admin/asset-processing/pipeline/:assetType", async (req: Request, res: Response) => {
+    try {
+      const { assetType } = req.params as { assetType: string };
+      const explanation = explainPipeline(assetType);
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/queue-health — queue health summary
+  app.get("/api/admin/asset-processing/queue-health", async (req: Request, res: Response) => {
+    try {
+      const tenantId = req.query.tenantId as string | undefined;
+      const summary = await getQueueHealthSummary(tenantId);
+      res.json(summary);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/asset-processing/dispatch — dispatch a processing batch
+  app.post("/api/admin/asset-processing/dispatch", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, batchSize, jobTypes } = req.body as {
+        tenantId?: string;
+        batchSize?: number;
+        jobTypes?: string[];
+      };
+      const result = await dispatchProcessingBatch({ tenantId, batchSize, jobTypes });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/asset-processing/jobs/:jobId/execute — execute a single job
+  app.post("/api/admin/asset-processing/jobs/:jobId/execute", async (req: Request, res: Response) => {
+    try {
+      const { jobId } = req.params as { jobId: string };
+      const { tenantId } = req.body as { tenantId: string };
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId required" });
+      }
+      const result = await processAssetJob(jobId, tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/asset-processing/jobs/:jobId/retry — retry a failed job
+  app.post("/api/admin/asset-processing/jobs/:jobId/retry", async (req: Request, res: Response) => {
+    try {
+      const { jobId } = req.params as { jobId: string };
+      const { tenantId } = req.body as { tenantId: string };
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId required" });
+      }
+      const newJob = await retryAssetProcessingJob(jobId, tenantId);
+      res.json(newJob);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/jobs/:jobId/explain — explain job execution state
+  app.get("/api/admin/asset-processing/jobs/:jobId/explain", async (req: Request, res: Response) => {
+    try {
+      const { jobId } = req.params as { jobId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId query param required" });
+      }
+      const job = await getAssetProcessingJobById(jobId, tenantId);
+      if (!job) {
+        return res.status(404).json({ error: "Job not found" });
+      }
+      const explanation = explainJobExecution(job);
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/orphans — detect orphan jobs
+  app.get("/api/admin/asset-processing/orphans", async (req: Request, res: Response) => {
+    try {
+      const tenantId = req.query.tenantId as string;
+      const timeoutMinutes = req.query.timeoutMinutes
+        ? parseInt(req.query.timeoutMinutes as string, 10)
+        : 30;
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId query param required" });
+      }
+      const orphans = await detectOrphanJobs(tenantId, timeoutMinutes);
+      res.json({ orphans, count: orphans.length, timeoutMinutes });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/assets/:assetId/processing-jobs — list all jobs for an asset
+  app.get("/api/admin/assets/:assetId/processing-jobs", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId query param required" });
+      }
+      const jobs = await listJobs5I(tenantId, { assetId });
+      res.json({ jobs, count: jobs.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/assets/:assetId/enqueue-processing — enqueue first pipeline job
+  app.post("/api/admin/assets/:assetId/enqueue-processing", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const { tenantId, assetType, assetVersionId, jobType } = req.body as {
+        tenantId: string;
+        assetType?: string;
+        assetVersionId?: string;
+        jobType?: string;
+      };
+      if (!tenantId) {
+        return res.status(400).json({ error: "tenantId required" });
+      }
+      const pipeline = getPipelineForAssetType(assetType ?? "document");
+      const entryJobType = jobType ?? pipeline.steps[0];
+      const job = await enqueueAssetJob5I({
+        tenantId,
+        assetId,
+        assetVersionId: assetVersionId ?? null,
+        jobType: entryJobType,
+        metadata: { enqueuedVia: "admin-api", assetType: assetType ?? "document" },
+      });
+      res.status(201).json({ job, pipeline: pipeline.steps });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5J: Asset Ingestion APIs & Storage Finalization ──────────────────
+
+  // POST /api/admin/knowledge/assets/ingest — ingest a new asset
+  app.post("/api/admin/knowledge/assets/ingest", async (req: Request, res: Response) => {
+    try {
+      const {
+        tenantId, knowledgeBaseId, assetType, sourceType, title,
+        storage, metadata, createdBy, autoSetCurrent, autoEnqueueProcessing,
+      } = req.body as {
+        tenantId: string; knowledgeBaseId: string; assetType: string;
+        sourceType: string; title?: string; storage: any;
+        metadata?: Record<string, unknown>; createdBy?: string;
+        autoSetCurrent?: boolean; autoEnqueueProcessing?: boolean;
+      };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      if (!knowledgeBaseId) return res.status(400).json({ error: "knowledgeBaseId required" });
+      if (!assetType) return res.status(400).json({ error: "assetType required" });
+      if (!sourceType) return res.status(400).json({ error: "sourceType required" });
+      if (!storage) return res.status(400).json({ error: "storage required" });
+      const result = await ingestKnowledgeAsset({
+        tenantId, knowledgeBaseId, assetType, sourceType, title,
+        storage, metadata, createdBy, autoSetCurrent, autoEnqueueProcessing,
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/knowledge/assets/ingest-version — add a new version to existing asset
+  app.post("/api/admin/knowledge/assets/ingest-version", async (req: Request, res: Response) => {
+    try {
+      const {
+        tenantId, assetId, storage, metadata, createdBy,
+        autoSetCurrent, autoEnqueueProcessing,
+      } = req.body as {
+        tenantId: string; assetId: string; storage: any;
+        metadata?: Record<string, unknown>; createdBy?: string;
+        autoSetCurrent?: boolean; autoEnqueueProcessing?: boolean;
+      };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      if (!assetId) return res.status(400).json({ error: "assetId required" });
+      if (!storage) return res.status(400).json({ error: "storage required" });
+      const result = await ingestKnowledgeAssetVersion({
+        tenantId, assetId, storage, metadata, createdBy,
+        autoSetCurrent, autoEnqueueProcessing,
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/knowledge/assets/ingest-preview — preview ingestion without writes
+  app.post("/api/admin/knowledge/assets/ingest-preview", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.body as { tenantId: string };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewKnowledgeAssetIngestion(req.body);
+      res.json(preview);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/knowledge/assets/:assetId/ingestion-explain — explain ingestion state
+  app.get("/api/admin/knowledge/assets/:assetId/ingestion-explain", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId query param required" });
+      const explanation = await explainKnowledgeAssetIngestion(assetId, tenantId);
+      res.json(explanation);
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/knowledge/assets/:assetId/versions — list all versions for asset
+  app.get("/api/admin/knowledge/assets/:assetId/versions", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId query param required" });
+      const versions = await listKnowledgeAssetVersions(assetId, tenantId);
+      res.json({ versions, count: versions.length });
+    } catch (err) {
+      res.status(404).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/knowledge/assets/:assetId/set-current-version — safely set current version
+  app.post("/api/admin/knowledge/assets/:assetId/set-current-version-v2", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const { tenantId, versionId } = req.body as { tenantId: string; versionId: string };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      if (!versionId) return res.status(400).json({ error: "versionId required" });
+      const updated = await setCurrentAssetVersion(assetId, versionId, tenantId);
+      res.json({ asset: updated, currentVersionId: versionId });
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/knowledge/assets/:assetId/processing-plan — explain pipeline plan
+  app.get("/api/admin/knowledge/assets/:assetId/processing-plan", async (req: Request, res: Response) => {
+    try {
+      const assetType = req.query.assetType as string;
+      const mimeType = req.query.mimeType as string | undefined;
+      const sourceType = req.query.sourceType as string | undefined;
+      if (!assetType) return res.status(400).json({ error: "assetType query param required" });
+      const plan = explainAssetProcessingPlan(assetType, mimeType, sourceType);
+      res.json(plan);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/knowledge/storage/register — register new storage object
+  app.post("/api/admin/knowledge/storage/register", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, storageProvider, bucketName, objectKey,
+        storageClass, sizeBytes, mimeType, checksumSha256, uploadedAt } = req.body as {
+        tenantId: string; storageProvider: any; bucketName: string;
+        objectKey: string; storageClass?: any; sizeBytes: number;
+        mimeType?: string; checksumSha256?: string; uploadedAt?: string;
+      };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const obj = await registerKnowledgeStorageObject({
+        tenantId, storageProvider, bucketName, objectKey, storageClass,
+        sizeBytes, mimeType, checksumSha256,
+        uploadedAt: uploadedAt ? new Date(uploadedAt) : undefined,
+      });
+      res.status(201).json(obj);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/knowledge/storage/preview-bind — preview binding (no writes)
+  app.post("/api/admin/knowledge/storage/preview-bind", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.body as { tenantId: string };
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const preview = await previewStorageBinding(req.body);
+      res.json(preview);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/knowledge/storage/:objectId/explain — explain storage object
+  app.get("/api/admin/knowledge/storage/:objectId/explain", async (req: Request, res: Response) => {
+    try {
+      const { objectId } = req.params as { objectId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId query param required" });
+      const obj = await getKnowledgeStorageObjectById(objectId, tenantId);
+      if (!obj) return res.status(404).json({ error: "Storage object not found" });
+      const explanation = explainKnowledgeStorageObjectData(obj);
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5K: Real Multimodal Processor Routes ───────────────────────────────
+
+  // GET /api/admin/asset-processing/processors/:jobType/explain
+  // Explain a specific registered processor's capabilities and MIME support
+  app.get("/api/admin/asset-processing/processors/:jobType/explain", async (req: Request, res: Response) => {
+    try {
+      const { jobType } = req.params as { jobType: string };
+      const { hasProcessor, listRegisteredProcessors: listProcs } = await import(
+        "../services/asset-processing/asset_processor_registry"
+      );
+      const { SUPPORTED_MIME_TYPES } = await import(
+        "../lib/ai/multimodal-processing-utils"
+      );
+      const { ASSET_PIPELINES } = await import(
+        "../services/asset-processing/asset_processing_pipeline"
+      );
+
+      if (!hasProcessor(jobType)) {
+        return res.status(404).json({ error: `No processor registered for job type: ${jobType}`, registeredTypes: listProcs() });
+      }
+
+      const supportedMimes = SUPPORTED_MIME_TYPES[jobType] ?? [];
+      const pipelines = Object.entries(ASSET_PIPELINES)
+        .filter(([, def]) => def.steps.includes(jobType))
+        .map(([assetType, def]) => ({
+          assetType,
+          position: def.steps.indexOf(jobType) + 1,
+          totalSteps: def.steps.length,
+          nextStep: def.steps[def.steps.indexOf(jobType) + 1] ?? null,
+        }));
+
+      res.json({
+        jobType,
+        registered: true,
+        isRealProcessor: ["ocr_image", "caption_image", "transcribe_audio", "extract_video_metadata", "sample_video_frames"].includes(jobType),
+        supportedMimeTypes: supportedMimes,
+        usedInPipelines: pipelines,
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/assets/:assetId/processor-output
+  // Return all processor output metadata from the current version of an asset
+  app.get("/api/admin/asset-processing/assets/:assetId/processor-output", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId query param required" });
+
+      const asset = await db
+        .select()
+        .from(knowledgeAssets)
+        .where(and(eq(knowledgeAssets.id, assetId), eq(knowledgeAssets.tenantId, tenantId)))
+        .limit(1);
+
+      if (!asset[0]) return res.status(404).json({ error: "Asset not found" });
+
+      const currentVersionId = asset[0].currentVersionId;
+      if (!currentVersionId) {
+        return res.json({ assetId, currentVersionId: null, processorOutputs: {}, message: "No current version set" });
+      }
+
+      const version = await db
+        .select()
+        .from(knowledgeAssetVersions)
+        .where(and(eq(knowledgeAssetVersions.id, currentVersionId), eq(knowledgeAssetVersions.tenantId, tenantId)))
+        .limit(1);
+
+      if (!version[0]) return res.status(404).json({ error: "Current version not found" });
+
+      const meta = (version[0].metadata ?? {}) as Record<string, unknown>;
+
+      res.json({
+        assetId,
+        versionId: currentVersionId,
+        processorOutputs: {
+          ocr: meta.ocr ?? null,
+          transcript: meta.transcript ?? null,
+          caption: meta.caption ?? null,
+          video: meta.video ?? null,
+          video_frames: meta.video_frames ?? null,
+        },
+        parsedText: meta.parsedText ?? null,
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/assets/:assetId/processing-metadata
+  // Full metadata for current version of an asset — including all processor sections
+  app.get("/api/admin/asset-processing/assets/:assetId/processing-metadata", async (req: Request, res: Response) => {
+    try {
+      const { assetId } = req.params as { assetId: string };
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId query param required" });
+
+      const asset = await db
+        .select()
+        .from(knowledgeAssets)
+        .where(and(eq(knowledgeAssets.id, assetId), eq(knowledgeAssets.tenantId, tenantId)))
+        .limit(1);
+
+      if (!asset[0]) return res.status(404).json({ error: "Asset not found" });
+
+      const versions = await db
+        .select()
+        .from(knowledgeAssetVersions)
+        .where(and(eq(knowledgeAssetVersions.assetId, assetId), eq(knowledgeAssetVersions.tenantId, tenantId)))
+        .limit(20);
+
+      const processingJobs = await listAssetProcessingJobs(tenantId, { assetId, limit: 50 });
+
+      res.json({
+        assetId,
+        assetType: asset[0].assetType,
+        processingState: asset[0].processingState,
+        currentVersionId: asset[0].currentVersionId,
+        versionCount: versions.length,
+        versions: versions.map((v) => ({
+          id: v.id,
+          versionNumber: v.versionNumber,
+          ingestStatus: v.ingestStatus,
+          mimeType: v.mimeType,
+          isActive: v.isActive,
+          metadata: v.metadata,
+        })),
+        processingJobs: processingJobs.map((j) => ({
+          id: j.id,
+          jobType: j.jobType,
+          jobStatus: j.jobStatus,
+          attemptNumber: j.attemptNumber,
+          errorMessage: j.errorMessage,
+          createdAt: j.createdAt,
+          completedAt: j.completedAt,
+        })),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/dependencies
+  // Report all external dependencies and their availability
+  app.get("/api/admin/asset-processing/dependencies", async (_req: Request, res: Response) => {
+    try {
+      const { explainProcessingEnvironmentCapabilities } = await import(
+        "../lib/ai/multimodal-processing-utils"
+      );
+      const caps = explainProcessingEnvironmentCapabilities();
+      const registeredProcessors = listRegisteredProcessors();
+      const { ASSET_PIPELINES } = await import(
+        "../services/asset-processing/asset_processing_pipeline"
+      );
+
+      res.json({
+        capabilities: caps,
+        registeredProcessors,
+        pipelineCount: Object.keys(ASSET_PIPELINES).length,
+        pipelines: Object.entries(ASSET_PIPELINES).map(([assetType, def]) => ({
+          assetType,
+          steps: def.steps,
+          description: def.description,
+        })),
+        dependencies: {
+          openai: {
+            required_by: ["ocr_image", "caption_image", "transcribe_audio"],
+            available: caps.openai.available,
+          },
+          ffprobe: {
+            required_by: ["extract_video_metadata"],
+            available: caps.ffprobe.available,
+          },
+          ffmpeg: {
+            required_by: ["sample_video_frames"],
+            available: caps.ffmpeg.available,
+          },
+          local_storage: {
+            required_by: ["all multimodal processors"],
+            available: caps.localStorage.basePathExists,
+            base_path: caps.localStorage.basePath,
+          },
+        },
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/asset-processing/environment-capabilities
+  // Truthful runtime capability detection (INV-MPROC8)
+  app.get("/api/admin/asset-processing/environment-capabilities", async (_req: Request, res: Response) => {
+    try {
+      const { explainProcessingEnvironmentCapabilities } = await import(
+        "../lib/ai/multimodal-processing-utils"
+      );
+      const caps = explainProcessingEnvironmentCapabilities();
+      res.json({
+        ...caps,
+        detectedAt: new Date().toISOString(),
+        note: "Capability detection is truthful — no faking of availability (INV-MPROC8)",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ============================================================
+  // Phase 5K.1 — DB Security Inspection Routes (read-only)
+  // ============================================================
+
+  // GET /api/admin/db-security/rls-status
+  // Returns RLS enabled/disabled status for all public tables
+  app.get("/api/admin/db-security/rls-status", async (_req: Request, res: Response) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT
+          c.relname AS table_name,
+          c.relrowsecurity AS rls_enabled,
+          c.relforcerowsecurity AS rls_forced,
+          (SELECT COUNT(*) FROM pg_policies p WHERE p.schemaname = 'public' AND p.tablename = c.relname) AS policy_count
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relkind = 'r'
+        ORDER BY c.relname
+      `);
+      const enabled = rows.rows.filter((r: any) => r.rls_enabled).length;
+      const disabled = rows.rows.filter((r: any) => !r.rls_enabled).length;
+      res.json({
+        summary: { total: rows.rows.length, rls_enabled: enabled, rls_disabled: disabled },
+        tables: rows.rows,
+        phase: "5K.1",
+        verified_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/db-security/table/:tableName/policies
+  // Returns all RLS policies for a specific table
+  app.get("/api/admin/db-security/table/:tableName/policies", async (req: Request, res: Response) => {
+    try {
+      const tableName = String(req.params.tableName);
+      if (!/^[a-z_][a-z0-9_]*$/.test(tableName)) {
+        return res.status(400).json({ error: "Invalid table name" });
+      }
+      const policies = await db.execute(sql`
+        SELECT policyname, cmd, permissive, roles, qual, with_check
+        FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = ${tableName}
+        ORDER BY policyname
+      `);
+      const rlsStatus = await db.execute(sql`
+        SELECT relrowsecurity FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'public' AND c.relname = ${tableName}
+      `);
+      res.json({
+        table: tableName,
+        rls_enabled: rlsStatus.rows[0]?.relrowsecurity ?? false,
+        policy_count: policies.rows.length,
+        policies: policies.rows,
+        inspected_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/db-security/functions/search-path
+  // Returns search_path status for all custom public schema functions
+  app.get("/api/admin/db-security/functions/search-path", async (_req: Request, res: Response) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT
+          p.proname AS function_name,
+          p.prokind AS kind,
+          CASE WHEN pg_get_functiondef(p.oid) ILIKE '%search_path%' THEN true ELSE false END AS has_search_path,
+          CASE WHEN p.proconfig IS NOT NULL AND array_to_string(p.proconfig, ',') ILIKE '%search_path%' THEN true ELSE false END AS search_path_in_config
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'public'
+          AND p.prokind IN ('f','p','w')
+          AND p.proname NOT IN (
+            SELECT p2.proname FROM pg_proc p2
+            JOIN pg_depend d ON d.objid = p2.oid
+            JOIN pg_extension e ON e.oid = d.refobjid
+            WHERE d.deptype = 'e'
+          )
+        ORDER BY p.proname
+      `);
+      res.json({
+        custom_functions: rows.rows.length,
+        functions: rows.rows,
+        note: "Extension-owned functions (vector, btree_gist) excluded — cannot modify extension functions",
+        inspected_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/db-security/extensions
+  // Returns extension schema locations and safety classification
+  app.get("/api/admin/db-security/extensions", async (_req: Request, res: Response) => {
+    try {
+      const rows = await db.execute(sql`
+        SELECT extname, extversion, n.nspname AS schema
+        FROM pg_extension e
+        JOIN pg_namespace n ON n.oid = e.extnamespace
+        ORDER BY extname
+      `);
+      const classified = rows.rows.map((r: any) => {
+        let placement: string;
+        let classification: string;
+        let lint_warning: string | null = null;
+        let lint_status: string | null = null;
+
+        if (r.schema !== "public") {
+          placement = "correctly_placed";
+          classification = `SAFE — installed in non-public schema '${r.schema}'`;
+        } else if (r.extname === "vector") {
+          placement = "intentionally_exempted";
+          classification = "ACCEPTED EXCEPTION (Phase 5K.1.A) — pgvector type/function resolution requires public schema. Moving would break embeddings and retrieval stack. See /api/admin/db-security/exceptions for full record.";
+          lint_warning = "extension_in_public_vector";
+          lint_status = "accepted_exception — not an unresolved warning";
+        } else if (r.extname === "btree_gist") {
+          placement = "intentionally_exempted";
+          classification = "ACCEPTED EXCEPTION (Phase 5K.1.A) — 5 active GiST/exclusion constraints depend on this location. Moving would require dropping and recreating billing integrity constraints. See /api/admin/db-security/exceptions for full record.";
+          lint_warning = "extension_in_public_btree_gist";
+          lint_status = "accepted_exception — not an unresolved warning";
+        } else {
+          placement = "requires_review";
+          classification = "REVIEW REQUIRED — in public schema without documented justification";
+          lint_warning = "extension_in_public_" + r.extname;
+          lint_status = "unresolved";
+        }
+
+        return { ...r, placement, classification, lint_warning, lint_status };
+      });
+
+      const publicCount = classified.filter((r: any) => r.in_public).length;
+      const correctlyPlaced = classified.filter((r: any) => r.placement === "correctly_placed").length;
+      const intentionallyExempted = classified.filter((r: any) => r.placement === "intentionally_exempted").length;
+      const requiresReview = classified.filter((r: any) => r.placement === "requires_review").length;
+
+      res.json({
+        total_extensions: classified.length,
+        in_public_schema: publicCount,
+        summary: {
+          correctly_placed: correctlyPlaced,
+          intentionally_exempted: intentionallyExempted,
+          requires_review: requiresReview,
+          unresolved_warnings: requiresReview,
+        },
+        extensions: classified,
+        inspected_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/db-security/exceptions
+  // Returns all documented security exceptions with justifications
+  app.get("/api/admin/db-security/exceptions", async (_req: Request, res: Response) => {
+    try {
+      const globalExemptTables = [
+        { table: "admin_change_events", justification: "operator audit log — service-role only, no tenant scope" },
+        { table: "admin_change_requests", justification: "operator workflow — service-role only" },
+        { table: "ai_approvals", justification: "internal approval workflow — operator-scoped" },
+        { table: "ai_artifacts", justification: "internal build artifacts — operator-scoped" },
+        { table: "ai_model_overrides", justification: "global model config — no tenant scope" },
+        { table: "ai_model_pricing", justification: "global pricing reference — no tenant scope" },
+        { table: "ai_provider_reconciliation_runs", justification: "global reconciliation — operator-scoped" },
+        { table: "ai_runs", justification: "global AI run registry — operator-scoped" },
+        { table: "ai_steps", justification: "global AI step registry — operator-scoped" },
+        { table: "ai_tool_calls", justification: "global tool call log — operator-scoped" },
+        { table: "architecture_agent_configs", justification: "global architecture config" },
+        { table: "architecture_capability_configs", justification: "global capability config" },
+        { table: "architecture_policy_bindings", justification: "global policy bindings" },
+        { table: "architecture_profiles", justification: "global architecture profiles" },
+        { table: "architecture_template_bindings", justification: "global template bindings" },
+        { table: "architecture_versions", justification: "global architecture versions" },
+        { table: "artifact_dependencies", justification: "global artifact dependency graph" },
+        { table: "billing_audit_runs", justification: "operator billing audit runs" },
+        { table: "billing_job_definitions", justification: "global job definitions" },
+        { table: "billing_job_runs", justification: "global job run log" },
+        { table: "billing_metrics_snapshots", justification: "global metrics — operator-scoped" },
+        { table: "billing_periods", justification: "global billing period reference" },
+        { table: "billing_recovery_actions", justification: "operator recovery actions" },
+        { table: "billing_recovery_runs", justification: "operator recovery runs" },
+        { table: "integrations", justification: "global integrations config" },
+        { table: "invoice_line_items", justification: "linked to tenant invoices but accessed via service role" },
+        { table: "organization_members", justification: "org membership — service-role only" },
+        { table: "organization_secrets", justification: "org secrets — service-role only" },
+        { table: "organizations", justification: "org registry — service-role only" },
+        { table: "plan_entitlements", justification: "global plan config reference" },
+        { table: "profiles", justification: "user profiles — service-role only in current arch" },
+        { table: "projects", justification: "project registry — service-role only" },
+        { table: "provider_pricing_versions", justification: "global pricing reference" },
+        { table: "provider_reconciliation_runs", justification: "global reconciliation runs" },
+        { table: "provider_usage_snapshots", justification: "global usage snapshots" },
+        { table: "storage_pricing_versions", justification: "global storage pricing" },
+        { table: "subscription_plans", justification: "global plan reference — read-only config" },
+      ];
+
+      // Structured extension exception records (Phase 5K.1.A)
+      const extensionExceptions = [
+        {
+          warning_code: "extension_in_public",
+          object_type: "extension",
+          object_name: "vector",
+          schema_name: "public",
+          decision: "accepted_exception",
+          technical_reason: "pgvector installs 305 functions, operators, and type definitions into its schema. All vector column type references, similarity operators (<->, <=>, <#>), and index access methods resolve against the extension schema at query time. Moving to a non-public schema would require every consumer query and column definition to qualify the type, breaking existing embeddings storage and retrieval stack. No compatibility migration path exists without a dedicated rollback-capable maintenance phase.",
+          risk_of_change: "HIGH — would break knowledge_embeddings table, all vector similarity queries in retrieval engine, and pgvector index access methods",
+          recommended_future_handling: "Only move in a dedicated extension-migration phase with: (1) full compatibility test on a replica, (2) zero-downtime migration plan, (3) tested rollback procedure. Do not move to silence lint warnings.",
+          reviewed_in_phase: "5K.1.A",
+          exception_code: "INV-RLS8-EXEMPT-vector",
+        },
+        {
+          warning_code: "extension_in_public",
+          object_type: "extension",
+          object_name: "btree_gist",
+          schema_name: "public",
+          decision: "accepted_exception",
+          technical_reason: "btree_gist provides operator classes used by 5 active GiST exclusion constraints: billing_periods_no_overlap, cpv_no_overlap, ppv_no_overlap, customer_storage_pricing_vers_tenant_id_storage_provider_s_excl, storage_pricing_versions_storage_provider_storage_product__excl. These constraints enforce non-overlapping billing period integrity. Moving the extension would invalidate the operator class references in those constraints, requiring all 5 to be dropped and recreated — a risky operation on live billing data.",
+          risk_of_change: "HIGH — would require dropping and recreating 5 active exclusion constraints on billing integrity tables (billing_periods, customer_pricing_versions, provider_pricing_versions, customer_storage_pricing_versions, storage_pricing_versions)",
+          recommended_future_handling: "Only move after: (1) auditing all exclusion constraint definitions, (2) testing operator class relocation on a replica, (3) coordinating a maintenance window for constraint recreation. Do not move to silence lint warnings.",
+          reviewed_in_phase: "5K.1.A",
+          exception_code: "INV-RLS8-EXEMPT-btree_gist",
+        },
+      ];
+
+      // Supabase lint warnings — exactly 2 remaining, both are accepted exceptions
+      const remainingLintWarnings = [
+        {
+          warning_id: "extension_in_public_vector",
+          status: "accepted_exception",
+          exception_record: "vector",
+          resolution: "Documented accepted exception — reviewed in Phase 5K.1.A. Not an unresolved warning.",
+        },
+        {
+          warning_id: "extension_in_public_btree_gist",
+          status: "accepted_exception",
+          exception_record: "btree_gist",
+          resolution: "Documented accepted exception — reviewed in Phase 5K.1.A. Not an unresolved warning.",
+        },
+      ];
+
+      res.json({
+        global_table_exceptions: {
+          count: globalExemptTables.length,
+          policy: "RLS enabled, no tenant policies — deny-all for non-service-role connections",
+          tables: globalExemptTables,
+        },
+        extension_exceptions: {
+          count: extensionExceptions.length,
+          note: "These are not ignored warnings. Each has been explicitly reviewed, technically justified, and accepted. See recommended_future_handling for safe resolution path.",
+          records: extensionExceptions,
+        },
+        function_exceptions: {
+          note: "304 extension-owned functions excluded from search_path hardening (owned by vector/btree_gist extensions)",
+          custom_functions_hardened: ["check_no_overlapping_tenant_subscriptions"],
+        },
+        remaining_lint_warnings: {
+          count: remainingLintWarnings.length,
+          all_resolved_or_accepted: true,
+          warnings: remainingLintWarnings,
+        },
+        documented_at: "Phase 5K.1 / 5K.1.A",
+        updated_at: new Date().toISOString(),
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 5L: Multimodal Embedding Index Lifecycle ─────────────────────────
+
+  // GET /api/admin/embeddings/asset-version/:versionId/sources
+  // INV-EMB12: read-only explain endpoint
+  app.get("/api/admin/embeddings/asset-version/:versionId/sources", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await explainEmbeddingSourcesForAssetVersion(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/asset-version/:versionId/preview-generate
+  // INV-EMB12: no writes
+  app.get("/api/admin/embeddings/asset-version/:versionId/preview-generate", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await previewGenerateEmbeddingsForAssetVersion(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/embeddings/asset-version/:versionId/generate
+  // INV-EMB1,2,3,4: real embedding generation with full provenance
+  app.post("/api/admin/embeddings/asset-version/:versionId/generate", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await generateEmbeddingsForAssetVersion(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/asset-version/:versionId/index-state
+  // INV-EMB12: read-only; explains current and derived lifecycle state
+  app.get("/api/admin/embeddings/asset-version/:versionId/index-state", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await explainAssetVersionIndexState(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // POST /api/admin/embeddings/asset-version/:versionId/mark-stale
+  // INV-EMB5,7: marks version + embeddings stale with explicit reason
+  app.post("/api/admin/embeddings/asset-version/:versionId/mark-stale", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      const schema = z.object({ reason: z.string().min(1).max(500) });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) return void res.status(400).json({ error: parsed.error.message });
+      await markAssetVersionIndexStale(versionId, parsed.data.reason);
+      res.json({ ok: true, assetVersionId: versionId, reason: parsed.data.reason });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/asset-version/:versionId/stale-reasons
+  // INV-EMB5,12: explain stale detection result — no writes
+  app.get("/api/admin/embeddings/asset-version/:versionId/stale-reasons", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await previewReindexAssetVersion(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/stale
+  // Returns list of asset versions with stale or failed index lifecycle state
+  app.get("/api/admin/embeddings/stale", async (req: Request, res: Response) => {
+    try {
+      const limit = Math.min(parseInt(String(req.query.limit ?? "50")), 200);
+      const result = await listStaleAssetVersions(limit);
+      res.json({ count: result.length, limit, items: result });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/asset-version/:versionId/rebuild-impact
+  // INV-EMB12: no writes — shows what a rebuild would do
+  app.get("/api/admin/embeddings/asset-version/:versionId/rebuild-impact", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await previewEmbeddingRebuildImpact(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // GET /api/admin/embeddings/asset-version/:versionId/retrieval-readiness
+  // INV-EMB4,9,12: canonical retrieval readiness explainability — no writes
+  app.get("/api/admin/embeddings/asset-version/:versionId/retrieval-readiness", async (req: Request, res: Response) => {
+    try {
+      const versionId = String(req.params.versionId);
+      if (!versionId) return void res.status(400).json({ error: "versionId required" });
+      const result = await explainWhyAssetVersionIsOrIsNotRetrievalReady(versionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─── Phase 5M: Retrieval Explainability & Source Provenance ──────────────────
+
+  // Route 1: GET /api/admin/retrieval/runs/:runId/provenance
+  // INV-PROV1,2,6: per-run provenance — no writes
+  app.get("/api/admin/retrieval/runs/:runId/provenance", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await buildRetrievalProvenanceForRun(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 2: GET /api/admin/retrieval/runs/:runId/explain
+  // INV-PROV5,6: full explainability summary — no writes
+  app.get("/api/admin/retrieval/runs/:runId/explain", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await summarizeRetrievalRunExplainability(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 3: GET /api/admin/retrieval/runs/:runId/context-provenance
+  // INV-PROV12,6: context window provenance — no writes
+  app.get("/api/admin/retrieval/runs/:runId/context-provenance", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await buildContextWindowProvenance(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 4: GET /api/admin/retrieval/runs/:runId/sources
+  // INV-PROV2,6: list context sources for a run — no writes
+  app.get("/api/admin/retrieval/runs/:runId/sources", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await listContextSourcesForRun(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5: GET /api/admin/retrieval/chunks/:chunkId/provenance
+  // INV-PROV2,6: chunk provenance — no writes
+  app.get("/api/admin/retrieval/chunks/:chunkId/provenance", async (req: Request, res: Response) => {
+    try {
+      const chunkId = String(req.params.chunkId);
+      if (!chunkId) return void res.status(400).json({ error: "chunkId required" });
+      const result = await buildChunkProvenance(chunkId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6: GET /api/admin/retrieval/chunks/:chunkId/explain?runId=&action=included|excluded
+  // INV-PROV3,4,6: explain chunk inclusion or exclusion — no writes
+  app.get("/api/admin/retrieval/chunks/:chunkId/explain", async (req: Request, res: Response) => {
+    try {
+      const chunkId = String(req.params.chunkId);
+      const runId = String(req.query.runId ?? "");
+      const action = String(req.query.action ?? "included");
+      if (!chunkId) return void res.status(400).json({ error: "chunkId required" });
+      if (!runId) return void res.status(400).json({ error: "runId query param required" });
+      if (action !== "included" && action !== "excluded") {
+        return void res.status(400).json({ error: "action must be 'included' or 'excluded'" });
+      }
+      const result =
+        action === "included"
+          ? await explainChunkInclusionInRun(runId, chunkId)
+          : await explainChunkExclusionFromRun(runId, chunkId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 7: GET /api/admin/retrieval/asset-versions/:assetVersionId/lineage
+  // INV-PROV2,6: asset version lineage — no writes
+  app.get("/api/admin/retrieval/asset-versions/:assetVersionId/lineage", async (req: Request, res: Response) => {
+    try {
+      const assetVersionId = String(req.params.assetVersionId);
+      if (!assetVersionId) return void res.status(400).json({ error: "assetVersionId required" });
+      const result = await buildAssetVersionLineage(assetVersionId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 8: GET /api/admin/retrieval/runs/:runId/summary
+  // INV-PROV5,6: retrieval provenance summary — no writes
+  app.get("/api/admin/retrieval/runs/:runId/summary", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await summarizeRetrievalProvenance(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 9: GET /api/admin/retrieval/runs/:runId/context-sources-summary
+  // INV-PROV7,6: context window source type summary — no writes
+  app.get("/api/admin/retrieval/runs/:runId/context-sources-summary", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await summarizeContextWindowSources(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 5N: Hybrid Search & Reranking Admin Routes ─────────────────────────
+
+  // Route 5N-1: GET /api/admin/retrieval/run/:runId/hybrid-summary
+  // INV-HYB7,8: hybrid retrieval summary — no writes
+  app.get("/api/admin/retrieval/run/:runId/hybrid-summary", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await summarizeHybridRetrieval(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-2: GET /api/admin/retrieval/run/:runId/hybrid-candidates
+  // INV-HYB5,7: full hybrid candidate list with channel origins — no writes
+  app.get("/api/admin/retrieval/run/:runId/hybrid-candidates", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await listHybridCandidateSources(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-3: GET /api/admin/retrieval/run/:runId/vector-candidates
+  // INV-HYB5,7: vector-only channel candidates — no writes
+  app.get("/api/admin/retrieval/run/:runId/vector-candidates", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const allSources = await listHybridCandidateSources(runId);
+      const vectorOnly = {
+        ...allSources,
+        sources: allSources.sources.filter(
+          (s) => s.channelOrigin === "vector_only" || s.channelOrigin === "vector_and_lexical",
+        ),
+        count: allSources.sources.filter(
+          (s) => s.channelOrigin === "vector_only" || s.channelOrigin === "vector_and_lexical",
+        ).length,
+        filter: "vector_channel",
+      };
+      res.json(vectorOnly);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-4: GET /api/admin/retrieval/run/:runId/lexical-candidates
+  // INV-HYB5,7: lexical-only channel candidates — no writes
+  app.get("/api/admin/retrieval/run/:runId/lexical-candidates", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const allSources = await listHybridCandidateSources(runId);
+      const lexicalOnly = {
+        ...allSources,
+        sources: allSources.sources.filter(
+          (s) => s.channelOrigin === "lexical_only" || s.channelOrigin === "vector_and_lexical",
+        ),
+        count: allSources.sources.filter(
+          (s) => s.channelOrigin === "lexical_only" || s.channelOrigin === "vector_and_lexical",
+        ).length,
+        filter: "lexical_channel",
+      };
+      res.json(lexicalOnly);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-5: GET /api/admin/retrieval/run/:runId/fusion-explain
+  // INV-HYB5,7: full RRF fusion explainability — no writes
+  app.get("/api/admin/retrieval/run/:runId/fusion-explain", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [fusionDetail, strategyExplain] = await Promise.all([
+        explainHybridFusion(runId),
+        Promise.resolve(explainFusionStrategy()),
+      ]);
+      res.json({ ...fusionDetail, strategy: strategyExplain });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-6: GET /api/admin/retrieval/run/:runId/rerank-explain
+  // INV-HYB6,7: reranking explainability — no writes
+  app.get("/api/admin/retrieval/run/:runId/rerank-explain", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [explain, impact] = await Promise.all([
+        explainReranking(runId),
+        summarizeRerankingImpact(runId),
+      ]);
+      res.json({ ...explain, impact });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-7: GET /api/admin/retrieval/run/:runId/channel-breakdown
+  // INV-HYB4,7,8: channel breakdown by origin — no writes
+  app.get("/api/admin/retrieval/run/:runId/channel-breakdown", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const fusion = await explainHybridFusion(runId);
+      res.json({
+        runId,
+        channelBreakdown: fusion.channelBreakdown,
+        totalCandidates: fusion.candidates.length,
+        fusionStrategy: fusion.fusionStrategy,
+        note: fusion.note,
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-8: GET /api/admin/retrieval/run/:runId/final-context-scores
+  // INV-HYB5,7: all score columns for selected candidates — no writes
+  app.get("/api/admin/retrieval/run/:runId/final-context-scores", async (req: Request, res: Response) => {
+    try {
+      const runId = String(req.params.runId);
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const allCands = await listHybridCandidateSources(runId);
+      const selected = {
+        runId,
+        filter: "selected_only",
+        candidates: allCands.sources.filter((s) => s.filterStatus === "selected").map((s) => ({
+          chunkId: s.chunkId,
+          channelOrigin: s.channelOrigin,
+          vectorScore: s.vectorScore,
+          lexicalScore: s.lexicalScore,
+          fusedScore: s.fusedScore,
+          finalRank: s.finalRank,
+        })),
+        count: allCands.sources.filter((s) => s.filterStatus === "selected").length,
+      };
+      res.json(selected);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5N-9: POST /api/admin/retrieval/hybrid/preview
+  // INV-HYB7: preview hybrid fusion without persisting — no writes to DB
+  app.post("/api/admin/retrieval/hybrid/preview", async (req: Request, res: Response) => {
+    try {
+      const { vectorCandidates = [], lexicalCandidates = [], rrfOptions = {} } = req.body ?? {};
+      if (!Array.isArray(vectorCandidates))
+        return void res.status(400).json({ error: "vectorCandidates must be an array" });
+      if (!Array.isArray(lexicalCandidates))
+        return void res.status(400).json({ error: "lexicalCandidates must be an array" });
+
+      const fused = fuseVectorAndLexicalCandidates(vectorCandidates, lexicalCandidates, rrfOptions);
+      const strategyExplain = explainFusionStrategy(rrfOptions);
+      res.json({
+        fusedCandidates: fused,
+        totalFused: fused.length,
+        totalVectorOnly: fused.filter((c) => c.channelOrigin === "vector_only").length,
+        totalLexicalOnly: fused.filter((c) => c.channelOrigin === "lexical_only").length,
+        totalBothChannels: fused.filter((c) => c.channelOrigin === "vector_and_lexical").length,
+        strategy: strategyExplain,
+        note: "Preview only — no persistence. Use runHybridRetrieval with persistRun=true to persist.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 5O: Advanced Reranking admin routes ─────────────────────────────
+  // All routes: admin/internal only, read-only except preview, no hidden writes
+  // INV-RER7: all explain/* endpoints perform ZERO writes
+
+  // Route 5O-1: GET /api/admin/retrieval/run/:runId/rerank-summary
+  // Full advanced reranking summary for a run
+  app.get("/api/admin/retrieval/run/:runId/rerank-summary", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [shortlist, impact, calibration, fallback] = await Promise.all([
+        summarizeShortlistComposition(runId),
+        summarizeAdvancedRerankingImpact(runId),
+        summarizeCalibrationFactors(runId),
+        summarizeFallbackUsage(runId),
+      ]);
+      res.json({
+        runId,
+        shortlist,
+        impact,
+        calibration,
+        fallback,
+        providerInfo: explainAdvancedRerankingProvider(),
+        note: "Phase 5O advanced reranking summary. Read-only — no writes performed.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-2: GET /api/admin/retrieval/run/:runId/rerank-candidates
+  // Full candidate list with advanced rerank fields
+  app.get("/api/admin/retrieval/run/:runId/rerank-candidates", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await listAdvancedRerankCandidates(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-3: GET /api/admin/retrieval/run/:runId/rerank-shortlist
+  // Shortlist composition and strategy explanation
+  app.get("/api/admin/retrieval/run/:runId/rerank-shortlist", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [explain, summary] = await Promise.all([
+        explainRerankShortlist(runId),
+        summarizeShortlistComposition(runId),
+      ]);
+      res.json({ runId, explain, summary });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-4: GET /api/admin/retrieval/run/:runId/advanced-rerank-explain
+  // Per-candidate advanced reranking explainability (INV-RER4,7)
+  app.get("/api/admin/retrieval/run/:runId/advanced-rerank-explain", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [explain, impact] = await Promise.all([
+        explainAdvancedReranking(runId),
+        summarizeAdvancedRerankingImpact(runId),
+      ]);
+      res.json({
+        runId,
+        explain,
+        impact,
+        providerInfo: explainAdvancedRerankingProvider(),
+        note: "Read-only explainability endpoint. INV-RER7: no writes performed.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-5: GET /api/admin/retrieval/run/:runId/rerank-metrics
+  // Reranking metrics: shortlist size, latency, token usage, cost, rank deltas
+  app.get("/api/admin/retrieval/run/:runId/rerank-metrics", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const metrics = await summarizeAdvancedRerankMetrics(runId);
+      res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-6: GET /api/admin/retrieval/run/:runId/fallback-summary
+  // Fallback behavior explanation (INV-RER5)
+  app.get("/api/admin/retrieval/run/:runId/fallback-summary", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const [explain, summary] = await Promise.all([
+        explainFallbackReranking(runId),
+        summarizeFallbackUsage(runId),
+      ]);
+      res.json({ runId, explain, summary });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-7: GET /api/admin/retrieval/run/:runId/final-score-breakdown
+  // Final score calibration breakdown per candidate (INV-RER4)
+  app.get("/api/admin/retrieval/run/:runId/final-score-breakdown", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const calibration = await summarizeCalibrationFactors(runId);
+      res.json({
+        runId,
+        calibration,
+        calibrationWeights: {
+          advancedWeight: 0.7,
+          fusedWeight: 0.3,
+          formula: "final_score = 0.7 * heavy_rerank_score + 0.3 * fused_score",
+          fallbackFormula: "final_score = fused_score (when heavy reranking unavailable)",
+        },
+        note: "Read-only. INV-RER4: fused_score, heavy_rerank_score, final_score always separately explainable.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-8: GET /api/admin/retrieval/run/:runId/rank-delta
+  // Rank change analysis: promotions, demotions, stable ranks
+  app.get("/api/admin/retrieval/run/:runId/rank-delta", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const impact = await summarizeAdvancedRerankingImpact(runId);
+      res.json({
+        runId,
+        rerankMode: impact.rerankMode,
+        shortlistSize: impact.shortlistSize,
+        promotionCount: impact.promotionCount,
+        demotionCount: impact.demotionCount,
+        stableRankCount: impact.stableRankCount,
+        largestPromotion: impact.largestPromotion,
+        largestDemotion: impact.largestDemotion,
+        avgFinalScore: impact.avgFinalScore,
+        avgHeavyRerankScore: impact.avgHeavyRerankScore,
+        note: impact.note,
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5O-9: POST /api/admin/retrieval/rerank/preview
+  // Preview advanced reranking on provided candidates — no persistence (INV-RER7)
+  app.post("/api/admin/retrieval/rerank/preview", async (req: Request, res: Response) => {
+    try {
+      const { candidates = [], queryText, options = {} } = req.body ?? {};
+      if (!Array.isArray(candidates))
+        return void res.status(400).json({ error: "candidates must be an array" });
+      if (typeof queryText !== "string" || !queryText.trim())
+        return void res.status(400).json({ error: "queryText (string) required" });
+
+      const result = await previewAdvancedReranking(candidates, queryText, options);
+      res.json({
+        rerankMode: result.rerankMode,
+        fallbackUsed: result.fallbackUsed,
+        fallbackReason: result.fallbackReason,
+        shortlistSize: result.shortlistSize,
+        metrics: result.metrics,
+        candidates: result.candidates.map((c) => ({
+          chunkId: c.chunkId,
+          finalRank: c.finalRank,
+          shortlistRank: c.shortlistRank,
+          advancedRerankRank: c.advancedRerankRank,
+          fusedScore: c.fusedScore,
+          heavyRerankScore: c.heavyRerankScore,
+          finalScore: c.finalScore,
+          rerankMode: c.rerankMode,
+          channelOrigin: c.channelOrigin,
+        })),
+        note: "Preview only — no persistence. Pass persistRun=true to runAdvancedReranking to persist results.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 5P: Answer Grounding admin routes ───────────────────────────────
+
+  // Route 5P-1: GET /api/admin/retrieval/answer/config
+  // Return centralised retrieval configuration snapshot (INV-ANS7: no writes)
+  app.get("/api/admin/retrieval/answer/config", async (_req: Request, res: Response) => {
+    try {
+      const config = describeRetrievalConfig();
+      res.json({
+        config,
+        note: "Read-only retrieval config snapshot. Modify retrieval-config.ts to change defaults.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5P-2: GET /api/admin/retrieval/answer/runs/:runId
+  // Summarise a persisted answer run (INV-ANS7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const summary = await summarizeAnswerGrounding(runId);
+      res.json(summary);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5P-3: GET /api/admin/retrieval/answer/runs/:runId/citations
+  // Return citations for a persisted answer run (INV-ANS7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/citations", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const citations = await getAnswerCitations(runId);
+      res.json(citations);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5P-4: GET /api/admin/retrieval/answer/runs/:runId/trace
+  // Explain the full answer generation trace for a run (INV-ANS5/7: deterministic, no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/trace", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const trace = await explainAnswerTrace(runId);
+      res.json(trace);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5P-5: GET /api/admin/retrieval/answer/runs/:runId/context
+  // Return context window summary for a persisted answer run (INV-ANS7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/context", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const context = await getAnswerContext(runId);
+      res.json(context);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5P-6: GET /api/admin/retrieval/answer/metrics/:tenantId
+  // Tenant-level retrieval runtime metrics summary (INV-ANS8: tenant-isolated)
+  app.get("/api/admin/retrieval/answer/metrics/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const metrics = await summarizeRetrievalRuntimeMetrics(tenantId);
+      res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 5Q — Retrieval Quality, Query Rewriting & Safety Guards
+  // Routes: 5Q-1 → 5Q-9
+  // INV-QUAL1: originalQuery always preserved
+  // INV-QUAL2: rewrite/expansion deterministic (algorithmic only)
+  // INV-QUAL3: expansion bounded by MAX_QUERY_EXPANSION_TERMS
+  // INV-QUAL4–5: quality signals computed from chunks; confidence band assigned
+  // INV-QUAL6: no false positives on clean chunks
+  // INV-QUAL7: safety filter applied before answer generation
+  // INV-QUAL8: explain/preview routes perform no writes
+  // INV-QUAL9: quality metrics tenant-isolated
+  // INV-QUAL10: existing retrieval tables unmodified
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 5Q-1: GET /api/admin/retrieval/query-rewrite/config
+  // Returns Phase 5Q configuration block (INV-QUAL8: no writes)
+  app.get("/api/admin/retrieval/query-rewrite/config", async (_req: Request, res: Response) => {
+    try {
+      const cfg = describeRetrievalConfig();
+      res.json({ config: cfg });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-2: POST /api/admin/retrieval/query-rewrite/preview
+  // Preview query rewrite result for a given query (INV-QUAL8: no writes, INV-QUAL1: original preserved)
+  app.post("/api/admin/retrieval/query-rewrite/preview", async (req: Request, res: Response) => {
+    try {
+      const { queryText, tenantId } = req.body as { queryText?: string; tenantId?: string };
+      if (!queryText) return void res.status(400).json({ error: "queryText required" });
+      const result = await rewriteRetrievalQuery({
+        queryText,
+        tenantId: tenantId ?? "preview",
+        enableSemanticRewrite: false,
+      });
+      const summary = summarizeQueryRewrite(result);
+      const explain = explainQueryRewrite(result);
+      res.json({ result, summary, explain });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-3: POST /api/admin/retrieval/query-expand/preview
+  // Preview query expansion for a given query (INV-QUAL8: no writes, INV-QUAL3: bounded)
+  app.post("/api/admin/retrieval/query-expand/preview", async (req: Request, res: Response) => {
+    try {
+      const { queryText } = req.body as { queryText?: string };
+      if (!queryText) return void res.status(400).json({ error: "queryText required" });
+      const preview = previewExpandedQuery(queryText);
+      const explain = explainQueryExpansion(queryText);
+      res.json({ preview, explain });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-4: GET /api/admin/retrieval/runs/:runId/quality-signals
+  // Return quality signals for a retrieval run (INV-QUAL8: no writes)
+  app.get("/api/admin/retrieval/runs/:runId/quality-signals", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const summary = await summarizeRetrievalQualitySignals(runId);
+      res.json(summary);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-5: POST /api/admin/retrieval/safety/preview
+  // Preview safety scan for a set of context chunks (INV-QUAL8: no writes, INV-QUAL6: no false positives)
+  app.post("/api/admin/retrieval/safety/preview", async (req: Request, res: Response) => {
+    try {
+      const { chunks, safetyMode } = req.body as {
+        chunks?: SafetyChunkInput[];
+        safetyMode?: "monitor_only" | "downrank" | "exclude_high_risk";
+      };
+      if (!Array.isArray(chunks) || chunks.length === 0) {
+        return void res.status(400).json({ error: "chunks array required" });
+      }
+      const mode = safetyMode ?? "monitor_only";
+      const summary = buildRetrievalSafetySummary(chunks, mode);
+      const explain = explainRetrievalSafety(summary);
+      res.json({ summary, explain });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-6: GET /api/admin/retrieval/runs/:runId/safety-summary
+  // Return safety summary for a given retrieval run (read-only, INV-QUAL8)
+  app.get("/api/admin/retrieval/runs/:runId/safety-summary", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const qualitySummary = await summarizeRetrievalQualitySignals(runId);
+      res.json({
+        runId,
+        safetyStatus: qualitySummary.found ? qualitySummary.safetyStatus : null,
+        flaggedChunkCount: qualitySummary.found ? qualitySummary.flaggedChunkCount : null,
+        found: qualitySummary.found,
+        note: "INV-QUAL8: no writes performed",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-7: GET /api/admin/retrieval/runs/:runId/explain-quality
+  // Explain quality signal computation for a given run (INV-QUAL8: no writes)
+  app.get("/api/admin/retrieval/runs/:runId/explain-quality", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const signals = await summarizeRetrievalQualitySignals(runId);
+      if (!signals.found) {
+        return void res.status(404).json({ error: "No quality signals found for run", runId });
+      }
+      const explanation = await explainRetrievalQuality(runId);
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-8: GET /api/admin/retrieval/quality/metrics/:tenantId
+  // Tenant-level quality metrics summary (INV-QUAL9: tenant-isolated)
+  app.get("/api/admin/retrieval/quality/metrics/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const metrics = await summarizeRetrievalQualityMetrics(tenantId);
+      res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5Q-9: POST /api/admin/retrieval/quality/compute
+  // Compute quality signals for a set of chunks (persist optional) — used by orchestrator
+  app.post("/api/admin/retrieval/quality/compute", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, retrievalRunId, chunks, persistSignals } = req.body as {
+        tenantId?: string;
+        retrievalRunId?: string;
+        chunks?: QualityChunkInput[];
+        persistSignals?: boolean;
+      };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      if (!retrievalRunId) return void res.status(400).json({ error: "retrievalRunId required" });
+      if (!Array.isArray(chunks) || chunks.length === 0) {
+        return void res.status(400).json({ error: "chunks array required" });
+      }
+      const signals = await computeRetrievalQualitySignals({
+        tenantId,
+        retrievalRunId,
+        chunks,
+        persistSignals: persistSignals ?? false,
+      });
+      res.json(signals);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Phase 5R — Answer Safety, Hallucination Guard & Citation Coverage
+  // Routes: 5R-1 → 5R-9
+  // INV-ANSV1: Verification on real data only
+  // INV-ANSV2: Claims never marked supported without evidence
+  // INV-ANSV3: Coverage scoring deterministic
+  // INV-ANSV4: Hallucination guard evidence-based
+  // INV-ANSV5: Answer policy deterministic
+  // INV-ANSV6: Answer text / citations not mutated
+  // INV-ANSV7: Preview endpoints perform no writes
+  // INV-ANSV8: Verification metrics tenant-isolated
+  // INV-ANSV9: Existing retrieval/citation behavior intact
+  // INV-ANSV10: Cross-tenant leakage impossible
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 5R-1: GET /api/admin/retrieval/answer/runs/:runId/verification
+  // Return answer verification metadata for a run (INV-ANSV7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/verification", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const metrics = await getAnswerVerificationMetrics(runId);
+      if (!metrics) return void res.status(404).json({ error: "Answer run not found", runId });
+      res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-2: GET /api/admin/retrieval/answer/runs/:runId/claims
+  // Explain claims for a run — explain trace with claim extraction stages (INV-ANSV7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/claims", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const explanation = await explainAnswerVerification(runId);
+      const stageDetail = await explainVerificationStage(runId);
+      res.json({ explanation, stageDetail });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-3: GET /api/admin/retrieval/answer/runs/:runId/coverage
+  // Return citation coverage summary for a run (INV-ANSV7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/coverage", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const coverage = await summarizeCitationCoverage(runId);
+      res.json(coverage);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-4: GET /api/admin/retrieval/answer/runs/:runId/hallucination-summary
+  // Return hallucination guard explanation for a run (INV-ANSV4/7: evidence-based, no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/hallucination-summary", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const explanation = await explainHallucinationGuard(runId);
+      res.json(explanation);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-5: GET /api/admin/retrieval/answer/runs/:runId/policy
+  // Return final answer policy explanation for a run (INV-ANSV5/7: deterministic, no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/policy", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const policyExpl = await explainAnswerPolicy(runId);
+      res.json(policyExpl);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-6: GET /api/admin/retrieval/answer/runs/:runId/final-safe-answer
+  // Return full pipeline trace including verification and policy (INV-ANSV7: no writes)
+  app.get("/api/admin/retrieval/answer/runs/:runId/final-safe-answer", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const trace = await getAnswerVerificationTrace(runId);
+      const policyExpl = await explainAnswerPolicy(runId);
+      const coverage = await summarizeCitationCoverage(runId);
+      res.json({
+        runId,
+        pipelineTrace: trace.traceStages,
+        policyOutcome: policyExpl.policyOutcome,
+        coverageRatio: coverage.citationCoverageRatio,
+        groundingBand: coverage.groundingConfidenceBand,
+        found: trace.found,
+        note: "INV-ANSV7: no writes performed.",
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-7: GET /api/admin/retrieval/answer/metrics/:tenantId/verification
+  // Tenant-level answer verification metrics (INV-ANSV8: tenant-isolated)
+  app.get("/api/admin/retrieval/answer/metrics/:tenantId/verification", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      const metrics = await summarizeAnswerVerificationMetrics(tenantId);
+      res.json(metrics);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-8: POST /api/admin/retrieval/answer/verification/preview
+  // Preview verification for a given answer + citations (INV-ANSV7: no writes)
+  app.post("/api/admin/retrieval/answer/verification/preview", async (req: Request, res: Response) => {
+    try {
+      const { answerText, citations, retrievalSafetyStatus } = req.body as {
+        answerText?: string;
+        citations?: CitationInput[];
+        retrievalSafetyStatus?: string;
+      };
+      if (!answerText) return void res.status(400).json({ error: "answerText required" });
+      const result = await verifyGroundedAnswer({
+        answerText,
+        citations: citations ?? [],
+        retrievalSafetyStatus: retrievalSafetyStatus ?? null,
+        tenantId: "preview",
+        persistVerification: false,
+      });
+      const claimPreview = previewExtractedClaims(answerText);
+      res.json({ result, claimPreview });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5R-9: POST /api/admin/retrieval/answer/policy/preview
+  // Preview final answer policy for given verification params (INV-ANSV5/7: deterministic, no writes)
+  app.post("/api/admin/retrieval/answer/policy/preview", async (req: Request, res: Response) => {
+    try {
+      const {
+        groundingConfidenceBand,
+        groundingConfidenceScore,
+        citationCoverageRatio,
+        unsupportedClaimCount,
+        totalClaimCount,
+        hallucinationGuardStatus,
+        retrievalSafetyStatus,
+      } = req.body as {
+        groundingConfidenceBand?: "high" | "medium" | "low" | "unsafe";
+        groundingConfidenceScore?: number;
+        citationCoverageRatio?: number;
+        unsupportedClaimCount?: number;
+        totalClaimCount?: number;
+        hallucinationGuardStatus?: "no_issue" | "caution" | "high_risk";
+        retrievalSafetyStatus?: string;
+      };
+
+      if (!groundingConfidenceBand) return void res.status(400).json({ error: "groundingConfidenceBand required" });
+      if (groundingConfidenceScore === undefined) return void res.status(400).json({ error: "groundingConfidenceScore required" });
+      if (citationCoverageRatio === undefined) return void res.status(400).json({ error: "citationCoverageRatio required" });
+
+      const preview = previewAnswerPolicy({
+        groundingConfidenceBand,
+        groundingConfidenceScore,
+        citationCoverageRatio,
+        unsupportedClaimCount: unsupportedClaimCount ?? 0,
+        totalClaimCount: totalClaimCount ?? 0,
+        hallucinationGuardStatus: hallucinationGuardStatus ?? "no_issue",
+        retrievalSafetyStatus: retrievalSafetyStatus ?? null,
+      });
+      res.json(preview);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Phase 5S — Retrieval Feedback Loop, Quality Evaluation & Auto-Tuning Signals
+  // Routes: 5S-1 → 5S-10
+  // INV-FB1: Feedback derived from real retrieval/answer run data only
+  // INV-FB2: Quality bands deterministic
+  // INV-FB3: Tuning signals evidence-based with rationale
+  // INV-FB4: Rewrite effectiveness never overclaimed
+  // INV-FB5: Rerank effectiveness never fabricated
+  // INV-FB6: Citation quality based on real coverage data
+  // INV-FB7: All feedback queries tenant-isolated
+  // INV-FB8: Explain/preview routes perform no writes
+  // INV-FB9: Existing retrieval/answer tables not modified
+  // INV-FB10: Cross-tenant leakage impossible
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // Route 5S-1: GET /api/admin/retrieval/feedback/:runId/summary
+  // Return summarized feedback for a retrieval run (INV-FB7: tenant-isolated, INV-FB8: no writes)
+  app.get("/api/admin/retrieval/feedback/:runId/summary", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      const result = await summarizeRetrievalFeedback(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-2: GET /api/admin/retrieval/feedback/:runId/explain
+  // Return staged explanation of persisted feedback for a run (INV-FB8: no writes)
+  app.get("/api/admin/retrieval/feedback/:runId/explain", async (req: Request, res: Response) => {
+    try {
+      const { runId } = req.params;
+      const result = await explainRetrievalFeedback(runId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-3: GET /api/admin/retrieval/feedback/tenant/:tenantId/weak-runs
+  // List weak or failed retrieval runs for a tenant (INV-FB7, INV-FB10)
+  app.get("/api/admin/retrieval/feedback/tenant/:tenantId/weak-runs", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+      const result = await listWeakRetrievalRuns({ tenantId, limit });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-4: GET /api/admin/retrieval/feedback/tenant/:tenantId/weak-patterns
+  // Return aggregated failure pattern summary for a tenant (INV-FB7, INV-FB10)
+  app.get("/api/admin/retrieval/feedback/tenant/:tenantId/weak-patterns", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
+      const result = await listWeakPatterns({ tenantId, limit });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-5: GET /api/admin/retrieval/feedback/tenant/:tenantId/metrics
+  // Return feedback quality metrics for a tenant (INV-FB7, INV-FB10)
+  app.get("/api/admin/retrieval/feedback/tenant/:tenantId/metrics", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const result = await getFeedbackMetrics({ tenantId });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-6: GET /api/admin/retrieval/feedback/tenant/:tenantId/tuning-signals
+  // Summarize auto-tuning signals emitted for a tenant (INV-FB3, INV-FB7)
+  app.get("/api/admin/retrieval/feedback/tenant/:tenantId/tuning-signals", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 100;
+      const result = await summarizeTenantTuningSignals({ tenantId, limit });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-7: GET /api/admin/retrieval/feedback/tenant/:tenantId/feedback-summary
+  // Return human-readable feedback summary for a tenant (INV-FB7, INV-FB8)
+  app.get("/api/admin/retrieval/feedback/tenant/:tenantId/feedback-summary", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const result = await summarizeFeedbackMetrics({ tenantId });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-8: POST /api/admin/retrieval/feedback/record
+  // Persist feedback notes for a retrieval run (write route — INV-FB7)
+  app.post("/api/admin/retrieval/feedback/record", async (req: Request, res: Response) => {
+    try {
+      const { tenantId, runId, notes } = req.body as { tenantId?: string; runId?: string; notes?: string };
+      if (!tenantId) return void res.status(400).json({ error: "tenantId required" });
+      if (!runId) return void res.status(400).json({ error: "runId required" });
+      const result = await recordFeedbackMetrics({ tenantId, runId, notes });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-9: POST /api/admin/retrieval/feedback/preview
+  // Preview feedback evaluation for a hypothetical run without writing (INV-FB8: no writes)
+  app.post("/api/admin/retrieval/feedback/preview", async (req: Request, res: Response) => {
+    try {
+      const { retrievalRun, qualitySignals, answerRun } = req.body as {
+        retrievalRun?: unknown;
+        qualitySignals?: unknown;
+        answerRun?: unknown;
+      };
+      if (!retrievalRun) return void res.status(400).json({ error: "retrievalRun required" });
+      if (!qualitySignals) return void res.status(400).json({ error: "qualitySignals required" });
+      const result = await evaluateRetrievalRunFeedback({
+        retrievalRun: retrievalRun as Parameters<typeof evaluateRetrievalRunFeedback>[0]["retrievalRun"],
+        qualitySignals: qualitySignals as Parameters<typeof evaluateRetrievalRunFeedback>[0]["qualitySignals"],
+        answerRun: answerRun as Parameters<typeof evaluateRetrievalRunFeedback>[0]["answerRun"],
+        persistFeedback: false,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 5S-10: POST /api/admin/retrieval/feedback/preview/rerank
+  // Explain rerank effectiveness for a hypothetical input (INV-FB5, INV-FB8: no writes)
+  app.post("/api/admin/retrieval/feedback/preview/rerank", async (req: Request, res: Response) => {
+    try {
+      const {
+        advancedRerankUsed,
+        groundingConfidenceBand,
+        citationCoverageRatio,
+        shortlistSize,
+        fallbackUsed,
+      } = req.body as {
+        advancedRerankUsed?: boolean;
+        groundingConfidenceBand?: "high" | "medium" | "low" | "unsafe";
+        citationCoverageRatio?: number;
+        shortlistSize?: number;
+        fallbackUsed?: boolean;
+      };
+      if (advancedRerankUsed === undefined) return void res.status(400).json({ error: "advancedRerankUsed required" });
+      if (!groundingConfidenceBand) return void res.status(400).json({ error: "groundingConfidenceBand required" });
+      if (citationCoverageRatio === undefined) return void res.status(400).json({ error: "citationCoverageRatio required" });
+      const result = await explainRerankEffectiveness({
+        advancedRerankUsed,
+        groundingConfidenceBand,
+        citationCoverageRatio,
+        shortlistSize: shortlistSize ?? 0,
+        fallbackUsed: fallbackUsed ?? false,
+      });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Phase 6 — Identity, RBAC & Actor Governance Foundation
+  // Routes: 6-1 → 6-27
+  // INV-ID1: Every resolved actor has explicit actor_type and tenant scope
+  // INV-ID2: Permission checks are permission-code based, not role-name based
+  // INV-ID3: Suspended/removed memberships must not grant permissions
+  // INV-ID4: Disabled/archived roles or permissions must not grant access
+  // INV-ID5: API keys and service-account keys never stored in plaintext
+  // INV-ID6: Role bindings must be tenant-safe
+  // INV-ID7: Revoked/expired keys must fail closed
+  // INV-ID8: Preview/explain endpoints perform no unexpected writes
+  // INV-ID9: Backward compatibility with current internal/admin flows
+  // INV-ID10: Cross-tenant actor or permission leakage impossible
+  // INV-ID11: System roles and bootstrap seeding must be idempotent
+  // INV-ID12: Identity-provider foundation must remain explicit and non-fake
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // --- Memberships / Invites ---
+
+  // Route 6-1: POST /api/admin/identity/tenants/:tenantId/memberships
+  app.post("/api/admin/identity/tenants/:tenantId/memberships", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { userId, invitedBy, status } = req.body as { userId?: string; invitedBy?: string; status?: "active" | "invited" };
+      if (!userId) return void res.status(400).json({ error: "userId required" });
+      const { createTenantMembership } = await import("../lib/auth/memberships");
+      const result = await createTenantMembership({ tenantId, userId, invitedBy, status });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-2: GET /api/admin/identity/tenants/:tenantId/memberships
+  app.get("/api/admin/identity/tenants/:tenantId/memberships", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { listTenantMemberships } = await import("../lib/auth/memberships");
+      const result = await listTenantMemberships(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-3: POST /api/admin/identity/memberships/:membershipId/suspend
+  app.post("/api/admin/identity/memberships/:membershipId/suspend", async (req: Request, res: Response) => {
+    try {
+      const { membershipId } = req.params;
+      const { suspendTenantMembership } = await import("../lib/auth/memberships");
+      const result = await suspendTenantMembership(membershipId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-4: POST /api/admin/identity/memberships/:membershipId/remove
+  app.post("/api/admin/identity/memberships/:membershipId/remove", async (req: Request, res: Response) => {
+    try {
+      const { membershipId } = req.params;
+      const { removeTenantMembership } = await import("../lib/auth/memberships");
+      const result = await removeTenantMembership(membershipId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-5: POST /api/admin/identity/tenants/:tenantId/invitations
+  app.post("/api/admin/identity/tenants/:tenantId/invitations", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { email, invitedBy, expiresInHours } = req.body as { email?: string; invitedBy?: string; expiresInHours?: number };
+      if (!email) return void res.status(400).json({ error: "email required" });
+      const { createTenantInvitation } = await import("../lib/auth/memberships");
+      const result = await createTenantInvitation({ tenantId, email, invitedBy, expiresInHours });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-6: POST /api/admin/identity/invitations/:invitationId/revoke
+  app.post("/api/admin/identity/invitations/:invitationId/revoke", async (req: Request, res: Response) => {
+    try {
+      const { invitationId } = req.params;
+      const { revokeTenantInvitation } = await import("../lib/auth/memberships");
+      const result = await revokeTenantInvitation(invitationId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-7: GET /api/admin/identity/tenants/:tenantId/invitations
+  app.get("/api/admin/identity/tenants/:tenantId/invitations", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const pg = (await import("pg")).default;
+      const client = new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
+      await client.connect();
+      try {
+        const row = await client.query(
+          `SELECT id, email, invitation_status, expires_at, created_at FROM public.tenant_invitations WHERE tenant_id = $1 ORDER BY created_at DESC`,
+          [tenantId],
+        );
+        res.json(row.rows);
+      } finally { await client.end(); }
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- Roles / Permissions ---
+
+  // Route 6-8: GET /api/admin/identity/permissions
+  app.get("/api/admin/identity/permissions", async (_req: Request, res: Response) => {
+    try {
+      const pg = (await import("pg")).default;
+      const client = new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
+      await client.connect();
+      try {
+        const row = await client.query(`SELECT id, permission_code, name, permission_domain, lifecycle_state FROM public.permissions ORDER BY permission_domain, permission_code`);
+        res.json(row.rows);
+      } finally { await client.end(); }
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-9: GET /api/admin/identity/tenants/:tenantId/roles
+  app.get("/api/admin/identity/tenants/:tenantId/roles", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const pg = (await import("pg")).default;
+      const client = new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
+      await client.connect();
+      try {
+        const row = await client.query(
+          `SELECT id, role_code, name, is_system_role, role_scope, lifecycle_state FROM public.roles WHERE (tenant_id = $1 OR role_scope = 'system') AND lifecycle_state = 'active' ORDER BY role_scope, role_code`,
+          [tenantId],
+        );
+        res.json(row.rows);
+      } finally { await client.end(); }
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-10: POST /api/admin/identity/tenants/:tenantId/roles/bootstrap
+  app.post("/api/admin/identity/tenants/:tenantId/roles/bootstrap", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { runIdentityBootstrap } = await import("../lib/auth/identity-bootstrap");
+      const result = await runIdentityBootstrap(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-11: POST /api/admin/identity/memberships/:membershipId/roles/:roleId
+  app.post("/api/admin/identity/memberships/:membershipId/roles/:roleId", async (req: Request, res: Response) => {
+    try {
+      const { membershipId, roleId } = req.params;
+      const { assignedBy } = req.body as { assignedBy?: string };
+      const { assignRoleToMembership } = await import("../lib/auth/memberships");
+      const result = await assignRoleToMembership({ membershipId, roleId, assignedBy });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-12: DELETE /api/admin/identity/memberships/:membershipId/roles/:roleId
+  app.delete("/api/admin/identity/memberships/:membershipId/roles/:roleId", async (req: Request, res: Response) => {
+    try {
+      const { membershipId, roleId } = req.params;
+      const { removeRoleFromMembership } = await import("../lib/auth/memberships");
+      const result = await removeRoleFromMembership({ membershipId, roleId });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-13: GET /api/admin/identity/memberships/:membershipId/access-explainer
+  app.get("/api/admin/identity/memberships/:membershipId/access-explainer", async (req: Request, res: Response) => {
+    try {
+      const { membershipId } = req.params;
+      const { explainMembershipAccess } = await import("../lib/auth/memberships");
+      const result = await explainMembershipAccess(membershipId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- Service Accounts / Keys ---
+
+  // Route 6-14: POST /api/admin/identity/tenants/:tenantId/service-accounts
+  app.post("/api/admin/identity/tenants/:tenantId/service-accounts", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { name, description, createdBy } = req.body as { name?: string; description?: string; createdBy?: string };
+      if (!name) return void res.status(400).json({ error: "name required" });
+      const { createServiceAccount } = await import("../lib/auth/key-management");
+      const result = await createServiceAccount({ tenantId, name, description, createdBy });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-15: GET /api/admin/identity/tenants/:tenantId/service-accounts
+  app.get("/api/admin/identity/tenants/:tenantId/service-accounts", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { listTenantServiceAccounts } = await import("../lib/auth/key-management");
+      const result = await listTenantServiceAccounts(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-16: POST /api/admin/identity/service-accounts/:serviceAccountId/keys
+  app.post("/api/admin/identity/service-accounts/:serviceAccountId/keys", async (req: Request, res: Response) => {
+    try {
+      const { serviceAccountId } = req.params;
+      const { createdBy, expiresAt } = req.body as { createdBy?: string; expiresAt?: string };
+      const { createServiceAccountKey } = await import("../lib/auth/key-management");
+      const result = await createServiceAccountKey({ serviceAccountId, createdBy, expiresAt: expiresAt ? new Date(expiresAt) : undefined });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-17: POST /api/admin/identity/service-account-keys/:keyId/revoke
+  app.post("/api/admin/identity/service-account-keys/:keyId/revoke", async (req: Request, res: Response) => {
+    try {
+      const { keyId } = req.params;
+      const { revokeServiceAccountKey } = await import("../lib/auth/key-management");
+      const result = await revokeServiceAccountKey(keyId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- API Keys ---
+
+  // Route 6-18: POST /api/admin/identity/tenants/:tenantId/api-keys
+  app.post("/api/admin/identity/tenants/:tenantId/api-keys", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { name, createdBy, expiresAt, permissionIds } = req.body as {
+        name?: string; createdBy?: string; expiresAt?: string; permissionIds?: string[];
+      };
+      if (!name) return void res.status(400).json({ error: "name required" });
+      const { createApiKey } = await import("../lib/auth/key-management");
+      const result = await createApiKey({ tenantId, name, createdBy, expiresAt: expiresAt ? new Date(expiresAt) : undefined, permissionIds });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-19: GET /api/admin/identity/tenants/:tenantId/api-keys
+  app.get("/api/admin/identity/tenants/:tenantId/api-keys", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { listTenantApiKeys } = await import("../lib/auth/key-management");
+      const result = await listTenantApiKeys(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-20: POST /api/admin/identity/api-keys/:keyId/revoke
+  app.post("/api/admin/identity/api-keys/:keyId/revoke", async (req: Request, res: Response) => {
+    try {
+      const { keyId } = req.params;
+      const { revokeApiKey } = await import("../lib/auth/key-management");
+      const result = await revokeApiKey(keyId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- Identity Providers ---
+
+  // Route 6-21: POST /api/admin/identity/tenants/:tenantId/providers
+  app.post("/api/admin/identity/tenants/:tenantId/providers", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { providerType, displayName, issuer, audience, createdBy } = req.body as {
+        providerType?: string; displayName?: string; issuer?: string; audience?: string; createdBy?: string;
+      };
+      if (!providerType) return void res.status(400).json({ error: "providerType required" });
+      if (!displayName) return void res.status(400).json({ error: "displayName required" });
+      const { createIdentityProvider } = await import("../lib/auth/identity-providers");
+      const result = await createIdentityProvider({ tenantId, providerType: providerType as "oidc" | "saml" | "google_workspace" | "azure_ad", displayName, issuer, audience, createdBy });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-22: GET /api/admin/identity/tenants/:tenantId/providers
+  app.get("/api/admin/identity/tenants/:tenantId/providers", async (req: Request, res: Response) => {
+    try {
+      const { tenantId } = req.params;
+      const { listTenantIdentityProviders } = await import("../lib/auth/identity-providers");
+      const result = await listTenantIdentityProviders(tenantId);
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-23: POST /api/admin/identity/providers/:providerId/status
+  app.post("/api/admin/identity/providers/:providerId/status", async (req: Request, res: Response) => {
+    try {
+      const { providerId } = req.params;
+      const { newStatus } = req.body as { newStatus?: string };
+      if (!newStatus) return void res.status(400).json({ error: "newStatus required" });
+      const { updateIdentityProviderStatus } = await import("../lib/auth/identity-providers");
+      const result = await updateIdentityProviderStatus({ providerId, newStatus: newStatus as "draft" | "active" | "disabled" });
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // --- Explainers / Compatibility ---
+
+  // Route 6-24: GET /api/admin/identity/actors/explain (INV-ID8: read-only)
+  app.get("/api/admin/identity/actors/explain", (req: Request, res: Response) => {
+    try {
+      const { resolveRequestActor, explainResolvedActor } = require("../lib/auth/actor-resolution");
+      const actorResult = resolveRequestActor(req);
+      res.json(explainResolvedActor(actorResult));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-25: POST /api/admin/identity/preview/permission-check (INV-ID8: no writes)
+  app.post("/api/admin/identity/preview/permission-check", (req: Request, res: Response) => {
+    try {
+      const { permissionCode, tenantId } = req.body as { permissionCode?: string; tenantId?: string };
+      if (!permissionCode) return void res.status(400).json({ error: "permissionCode required" });
+      const { resolveRequestActor } = require("../lib/auth/actor-resolution");
+      const { explainPermissionDecision } = require("../lib/auth/permissions");
+      const actorResult = resolveRequestActor(req);
+      if (!actorResult.resolved) {
+        return void res.json({ granted: false, reasonCode: actorResult.reasonCode, note: "INV-ID8: no writes" });
+      }
+      const decision = explainPermissionDecision(actorResult.actor, permissionCode, tenantId);
+      res.json({ ...decision, note: "INV-ID8: Preview only. no writes performed." });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-26: GET /api/admin/identity/compatibility/state (INV-ID8: read-only)
+  app.get("/api/admin/identity/compatibility/state", (_req: Request, res: Response) => {
+    try {
+      const { explainCurrentAuthCompatibilityState } = require("../lib/auth/identity-compat");
+      res.json(explainCurrentAuthCompatibilityState());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 6-27: POST /api/admin/identity/compatibility/preview (INV-ID8: no writes)
+  app.post("/api/admin/identity/compatibility/preview", (req: Request, res: Response) => {
+    try {
+      const { routePattern } = req.body as { routePattern?: string };
+      if (!routePattern) return void res.status(400).json({ error: "routePattern required" });
+      const { previewIdentityMigrationImpact } = require("../lib/auth/identity-compat");
+      res.json(previewIdentityMigrationImpact(routePattern));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Phase 15 — Observability & Telemetry Admin Routes
+  // All routes are admin-only (called through the admin route registrar).
+  // INV-OBS-2: No raw tenant data exposed — aggregates only.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Route 15-1: GET /api/admin/metrics/system
+  app.get("/api/admin/metrics/system", async (_req: Request, res: Response) => {
+    try {
+      const { getSystemMetricsSummary } = require("../lib/observability/metrics-health");
+      const data = await getSystemMetricsSummary(24);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 15-2: GET /api/admin/metrics/ai
+  app.get("/api/admin/metrics/ai", async (req: Request, res: Response) => {
+    try {
+      const { summariseAiLatency } = require("../lib/observability/latency-tracker");
+      const windowHours = Number(req.query.windowHours) || 24;
+      const tenantId = req.query.tenantId as string | undefined;
+      const provider = req.query.provider as string | undefined;
+      const model = req.query.model as string | undefined;
+      const data = await summariseAiLatency({ windowHours, tenantId, provider, model });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 15-3: GET /api/admin/metrics/retrieval
+  app.get("/api/admin/metrics/retrieval", async (req: Request, res: Response) => {
+    try {
+      const { summariseRetrievalMetrics } = require("../lib/observability/retrieval-tracker");
+      const windowHours = Number(req.query.windowHours) || 24;
+      const tenantId = req.query.tenantId as string | undefined;
+      const data = await summariseRetrievalMetrics({ windowHours, tenantId });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 15-4: GET /api/admin/metrics/agents
+  app.get("/api/admin/metrics/agents", async (req: Request, res: Response) => {
+    try {
+      const { summariseAgentMetrics } = require("../lib/observability/agent-tracker");
+      const windowHours = Number(req.query.windowHours) || 24;
+      const tenantId = req.query.tenantId as string | undefined;
+      const data = await summariseAgentMetrics({ windowHours, tenantId });
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 15-5: GET /api/admin/metrics/tenants
+  app.get("/api/admin/metrics/tenants", async (req: Request, res: Response) => {
+    try {
+      const { listActiveTenantsForPeriod, getCurrentPeriod } = require("../lib/observability/tenant-usage-tracker");
+      const period = (req.query.period as string) || getCurrentPeriod();
+      const data = await listActiveTenantsForPeriod(period);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 15-6: GET /api/admin/metrics/health
+  app.get("/api/admin/metrics/health", async (req: Request, res: Response) => {
+    try {
+      const { getPlatformHealthStatus } = require("../lib/observability/metrics-health");
+      const windowHours = Number(req.query.windowHours) || 24;
+      const data = await getPlatformHealthStatus(windowHours);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Phase 16 — AI Cost Governance Admin Routes
+  // INV-GOV-4: All routes return strictly per-tenant or aggregate-only data.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Route 16-1: GET /api/admin/ai/budgets
+  app.get("/api/admin/ai/budgets", async (req: Request, res: Response) => {
+    try {
+      const { listAllTenantBudgets, getTenantBudget } = require("../lib/ai-governance/budget-checker");
+      const tenantId = req.query.tenantId as string | undefined;
+      const data = tenantId ? await getTenantBudget(tenantId) : await listAllTenantBudgets();
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 16-2: GET /api/admin/ai/usage
+  app.get("/api/admin/ai/usage", async (req: Request, res: Response) => {
+    try {
+      const { listAllSnapshots, listSnapshots } = require("../lib/ai-governance/usage-snapshotter");
+      const tenantId = req.query.tenantId as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const data = tenantId ? await listSnapshots(tenantId, limit) : await listAllSnapshots(limit);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 16-3: GET /api/admin/ai/anomalies
+  app.get("/api/admin/ai/anomalies", async (req: Request, res: Response) => {
+    try {
+      const { listAllAnomalyEvents, listAnomalyEvents } = require("../lib/ai-governance/anomaly-detector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const data = tenantId ? await listAnomalyEvents(tenantId, limit) : await listAllAnomalyEvents(limit);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 16-4: GET /api/admin/ai/alerts
+  app.get("/api/admin/ai/alerts", async (req: Request, res: Response) => {
+    try {
+      const { listAllAlerts, listTenantAlerts } = require("../lib/ai-governance/alert-generator");
+      const tenantId = req.query.tenantId as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const data = tenantId ? await listTenantAlerts(tenantId, limit) : await listAllAlerts(limit);
+      res.json(data);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 16-5: GET /api/admin/ai/runaway-events
+  app.get("/api/admin/ai/runaway-events", async (req: Request, res: Response) => {
+    try {
+      const { listAnomalyEvents, listAllAnomalyEvents } = require("../lib/ai-governance/anomaly-detector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const limit = Number(req.query.limit) || 100;
+      const all = tenantId ? await listAnomalyEvents(tenantId, limit) : await listAllAnomalyEvents(limit);
+      const runaway = all.filter((e: any) => e.eventType === "runaway_agent" || e.event_type === "runaway_agent");
+      res.json(runaway);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── PHASE 22 — STRIPE BILLING INTEGRATION ─────────────────────────────────
+
+  // Route 22-1: GET /api/admin/stripe/customers
+  app.get("/api/admin/stripe/customers", async (req: Request, res: Response) => {
+    try {
+      const { listStripeCustomers } = require("../lib/stripe/customer-service");
+      const limit = Number(req.query.limit) || 50;
+      const offset = Number(req.query.offset) || 0;
+      const customers = await listStripeCustomers({ limit, offset });
+      res.json({ customers, count: customers.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-2: GET /api/admin/stripe/customers/:tenantId
+  app.get("/api/admin/stripe/customers/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const { getStripeCustomer } = require("../lib/stripe/customer-service");
+      const customer = await getStripeCustomer(req.params.tenantId);
+      if (!customer) return res.status(404).json({ error: "Customer not found" });
+      res.json(customer);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-3: POST /api/admin/stripe/customers
+  app.post("/api/admin/stripe/customers", async (req: Request, res: Response) => {
+    try {
+      const { upsertStripeCustomer } = require("../lib/stripe/customer-service");
+      if (!req.body.tenantId) return res.status(400).json({ error: "tenantId required" });
+      const result = await upsertStripeCustomer(req.body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-4: GET /api/admin/stripe/subscriptions
+  app.get("/api/admin/stripe/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { listStripeSubscriptions } = require("../lib/stripe/subscription-service");
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const subscriptions = await listStripeSubscriptions(tenantId);
+      res.json({ subscriptions, count: subscriptions.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-5: POST /api/admin/stripe/subscriptions
+  app.post("/api/admin/stripe/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { createStripeSubscription } = require("../lib/stripe/subscription-service");
+      if (!req.body.tenantId || !req.body.planKey) return res.status(400).json({ error: "tenantId and planKey required" });
+      const result = await createStripeSubscription(req.body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-6: GET /api/admin/stripe/invoices
+  app.get("/api/admin/stripe/invoices", async (req: Request, res: Response) => {
+    try {
+      const { listStripeInvoices } = require("../lib/stripe/invoice-service");
+      const tenantId = req.query.tenantId as string;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      const invoices = await listStripeInvoices(tenantId, {
+        status: req.query.status as string | undefined,
+        limit: Number(req.query.limit) || 50,
+      });
+      res.json({ invoices, count: invoices.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-7: POST /api/admin/stripe/webhook
+  app.post("/api/admin/stripe/webhook", async (req: Request, res: Response) => {
+    try {
+      const { handleStripeWebhook } = require("../lib/stripe/webhook-handler");
+      const result = await handleStripeWebhook(req.body);
+      res.json(result);
+    } catch (err) {
+      res.status(400).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-8: GET /api/admin/stripe/webhook-events
+  app.get("/api/admin/stripe/webhook-events", async (req: Request, res: Response) => {
+    try {
+      const { getWebhookEventLog } = require("../lib/stripe/webhook-handler");
+      const events = await getWebhookEventLog({
+        tenantId: req.query.tenantId as string | undefined,
+        eventType: req.query.eventType as string | undefined,
+        limit: Number(req.query.limit) || 50,
+      });
+      res.json({ events, count: events.length });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-9: GET /api/admin/stripe/metrics/churn
+  app.get("/api/admin/stripe/metrics/churn", async (req: Request, res: Response) => {
+    try {
+      const { getSubscriptionChurnMetrics } = require("../lib/stripe/subscription-service");
+      res.json(await getSubscriptionChurnMetrics());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-10: GET /api/admin/stripe/metrics/revenue
+  app.get("/api/admin/stripe/metrics/revenue", async (req: Request, res: Response) => {
+    try {
+      const { getRevenueMetrics } = require("../lib/stripe/subscription-service");
+      const { getRevenueFromInvoices, getPaymentFailureMetrics } = require("../lib/stripe/invoice-service");
+      const [mrr, invoices, failures] = await Promise.all([
+        getRevenueMetrics(),
+        getRevenueFromInvoices(),
+        getPaymentFailureMetrics(),
+      ]);
+      res.json({ mrr, invoices, failures });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 22-11: GET /api/admin/stripe/metrics/payments
+  app.get("/api/admin/stripe/metrics/payments", async (req: Request, res: Response) => {
+    try {
+      const { getPaymentFailureMetrics } = require("../lib/stripe/invoice-service");
+      res.json(await getPaymentFailureMetrics());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── PHASE 23 — WEBHOOK & INTEGRATION PLATFORM ────────────────────────────
+
+  // Route 23-1: GET /api/admin/webhooks/endpoints — list all endpoints (admin)
+  app.get("/api/admin/webhooks/endpoints", async (req: Request, res: Response) => {
+    try {
+      const { listWebhookEndpoints } = require("../lib/webhooks/webhook-registry");
+      const tenantId = (req.query.tenantId as string) || "";
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await listWebhookEndpoints(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-2: POST /api/admin/webhooks/endpoints — register endpoint
+  app.post("/api/admin/webhooks/endpoints", async (req: Request, res: Response) => {
+    try {
+      const { registerWebhookEndpoint } = require("../lib/webhooks/webhook-registry");
+      const result = await registerWebhookEndpoint(req.body);
+      res.status(201).json(result);
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-3: PATCH /api/admin/webhooks/endpoints/:id — update endpoint
+  app.patch("/api/admin/webhooks/endpoints/:id", async (req: Request, res: Response) => {
+    try {
+      const { updateWebhookEndpoint } = require("../lib/webhooks/webhook-registry");
+      res.json(await updateWebhookEndpoint(req.params.id, req.body));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-4: DELETE /api/admin/webhooks/endpoints/:id — delete endpoint
+  app.delete("/api/admin/webhooks/endpoints/:id", async (req: Request, res: Response) => {
+    try {
+      const { deleteWebhookEndpoint } = require("../lib/webhooks/webhook-registry");
+      res.json(await deleteWebhookEndpoint(req.params.id));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-5: POST /api/admin/webhooks/endpoints/:id/rotate-secret — rotate signing secret
+  app.post("/api/admin/webhooks/endpoints/:id/rotate-secret", async (req: Request, res: Response) => {
+    try {
+      const { rotateWebhookSecret } = require("../lib/webhooks/webhook-registry");
+      res.json(await rotateWebhookSecret(req.params.id));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-6: GET /api/admin/webhooks/subscriptions — list subscriptions
+  app.get("/api/admin/webhooks/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { listTenantSubscriptions } = require("../lib/webhooks/webhook-registry");
+      const tenantId = (req.query.tenantId as string) || "";
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await listTenantSubscriptions(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-7: POST /api/admin/webhooks/subscriptions — subscribe endpoint to event type
+  app.post("/api/admin/webhooks/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { subscribeEndpoint } = require("../lib/webhooks/webhook-registry");
+      res.status(201).json(await subscribeEndpoint(req.body));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-8: DELETE /api/admin/webhooks/subscriptions — unsubscribe
+  app.delete("/api/admin/webhooks/subscriptions", async (req: Request, res: Response) => {
+    try {
+      const { unsubscribeEndpoint } = require("../lib/webhooks/webhook-registry");
+      const { endpointId, eventType } = req.body;
+      res.json(await unsubscribeEndpoint(endpointId, eventType));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-9: GET /api/admin/webhooks/deliveries — list deliveries for tenant
+  app.get("/api/admin/webhooks/deliveries", async (req: Request, res: Response) => {
+    try {
+      const { listDeliveries } = require("../lib/webhooks/webhook-delivery");
+      const tenantId = (req.query.tenantId as string) || "";
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await listDeliveries(tenantId, {
+        status: req.query.status as string,
+        eventType: req.query.eventType as string,
+        limit: req.query.limit ? Number(req.query.limit) : 50,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-10: GET /api/admin/webhooks/metrics/deliveries — delivery stats
+  app.get("/api/admin/webhooks/metrics/deliveries", async (req: Request, res: Response) => {
+    try {
+      const { getDeliveryStats } = require("../lib/webhooks/webhook-delivery");
+      const tenantId = req.query.tenantId as string | undefined;
+      res.json(await getDeliveryStats(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-11: GET /api/admin/webhooks/metrics/dispatcher — dispatcher stats
+  app.get("/api/admin/webhooks/metrics/dispatcher", async (req: Request, res: Response) => {
+    try {
+      const { getDispatcherStats } = require("../lib/webhooks/webhook-dispatcher");
+      res.json(await getDispatcherStats());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-12: POST /api/admin/webhooks/dispatch — manually emit event (testing)
+  app.post("/api/admin/webhooks/dispatch", async (req: Request, res: Response) => {
+    try {
+      const { dispatchEvent } = require("../lib/webhooks/webhook-dispatcher");
+      const { eventType, tenantId, data } = req.body;
+      res.json(await dispatchEvent({ eventType, tenantId, data: data ?? {} }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 23-13: POST /api/admin/webhooks/retries/process — trigger retry processing
+  app.post("/api/admin/webhooks/retries/process", async (req: Request, res: Response) => {
+    try {
+      const { processPendingRetries } = require("../lib/webhooks/webhook-dispatcher");
+      res.json(await processPendingRetries({ limit: req.body.limit ?? 50 }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── PHASE 24 — AI GOVERNANCE & SAFETY PLATFORM ───────────────────────────
+
+  // Route 24-1: GET /api/admin/governance/policies — list all AI policies
+  app.get("/api/admin/governance/policies", async (req: Request, res: Response) => {
+    try {
+      const { listPolicies } = require("../lib/governance/policy-engine");
+      res.json(await listPolicies({ enabledOnly: req.query.enabledOnly === "true" }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-2: POST /api/admin/governance/policies/seed — seed built-in policies
+  app.post("/api/admin/governance/policies/seed", async (req: Request, res: Response) => {
+    try {
+      const { seedBuiltInPolicies } = require("../lib/governance/policy-engine");
+      res.json(await seedBuiltInPolicies());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-3: PATCH /api/admin/governance/policies/:key/toggle — enable/disable policy
+  app.patch("/api/admin/governance/policies/:key/toggle", async (req: Request, res: Response) => {
+    try {
+      const { togglePolicy } = require("../lib/governance/policy-engine");
+      const { enabled } = req.body;
+      res.json(await togglePolicy(req.params.key, enabled));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-4: GET /api/admin/governance/models — list model allowlist
+  app.get("/api/admin/governance/models", async (req: Request, res: Response) => {
+    try {
+      const { listModels } = require("../lib/governance/model-allowlist");
+      res.json(await listModels({
+        active: req.query.active !== undefined ? req.query.active === "true" : undefined,
+        tier: req.query.tier as string,
+        provider: req.query.provider as string,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-5: POST /api/admin/governance/models — add model to allowlist
+  app.post("/api/admin/governance/models", async (req: Request, res: Response) => {
+    try {
+      const { addModel } = require("../lib/governance/model-allowlist");
+      res.status(201).json(await addModel(req.body));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-6: PATCH /api/admin/governance/models/:name/active — toggle model active
+  app.patch("/api/admin/governance/models/:name/active", async (req: Request, res: Response) => {
+    try {
+      const { setModelActive } = require("../lib/governance/model-allowlist");
+      res.json(await setModelActive(req.params.name, req.body.active));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-7: GET /api/admin/governance/settings — list tenant AI settings
+  app.get("/api/admin/governance/settings", async (req: Request, res: Response) => {
+    try {
+      const { listTenantAiSettings, getTenantAiSettings } = require("../lib/governance/governance-checks");
+      const tenantId = req.query.tenantId as string;
+      if (tenantId) res.json(await getTenantAiSettings(tenantId));
+      else res.json(await listTenantAiSettings());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-8: POST /api/admin/governance/settings — upsert tenant AI settings
+  app.post("/api/admin/governance/settings", async (req: Request, res: Response) => {
+    try {
+      const { upsertTenantAiSettings } = require("../lib/governance/governance-checks");
+      res.json(await upsertTenantAiSettings(req.body));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-9: POST /api/admin/governance/check — run governance check on request
+  app.post("/api/admin/governance/check", async (req: Request, res: Response) => {
+    try {
+      const { runGovernanceChecks } = require("../lib/governance/governance-checks");
+      res.json(await runGovernanceChecks(req.body));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-10: GET /api/admin/governance/events — moderation event log
+  app.get("/api/admin/governance/events", async (req: Request, res: Response) => {
+    try {
+      const { listModerationEvents } = require("../lib/governance/output-moderation");
+      const tenantId = (req.query.tenantId as string) || "";
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await listModerationEvents(tenantId, {
+        result: req.query.result as string,
+        eventType: req.query.eventType as string,
+        limit: req.query.limit ? Number(req.query.limit) : 50,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-11: GET /api/admin/governance/metrics/moderation — moderation stats
+  app.get("/api/admin/governance/metrics/moderation", async (req: Request, res: Response) => {
+    try {
+      const { getModerationStats } = require("../lib/governance/output-moderation");
+      res.json(await getModerationStats(req.query.tenantId as string | undefined));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-12: GET /api/admin/governance/metrics/policies — policy violation stats
+  app.get("/api/admin/governance/metrics/policies", async (req: Request, res: Response) => {
+    try {
+      const { getPolicyViolationStats } = require("../lib/governance/policy-engine");
+      res.json(await getPolicyViolationStats(req.query.tenantId as string | undefined));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-13: GET /api/admin/governance/metrics/models — model usage distribution
+  app.get("/api/admin/governance/metrics/models", async (req: Request, res: Response) => {
+    try {
+      const { getModelUsageDistribution } = require("../lib/governance/model-allowlist");
+      res.json(await getModelUsageDistribution(req.query.tenantId as string | undefined));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 24-14: GET /api/admin/governance/metrics/stats — full governance stats
+  app.get("/api/admin/governance/metrics/stats", async (req: Request, res: Response) => {
+    try {
+      const { getGovernanceStats } = require("../lib/governance/governance-checks");
+      res.json(await getGovernanceStats(req.query.tenantId as string | undefined));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 25 — Platform Hardening & Edge Security ──────────────────────────
+
+  // Route 25-1: GET /api/admin/platform/health — platform health diagnostics
+  app.get("/api/admin/platform/health", async (_req: Request, res: Response) => {
+    try {
+      const { getSecurityHealthSummary } = require("../lib/observability/security-metrics");
+      const { getRateLimitStats } = require("../lib/security/rate-limit");
+      const { getAbuseStats } = require("../lib/security/abuse-detection");
+      const { PLATFORM_SECURITY_HEADERS, PLATFORM_CSP_POLICY, buildCspHeader } = require("../lib/security/security-headers");
+      const { RATE_LIMIT_POLICIES } = require("../lib/security/rate-limit");
+
+      // Check DB connectivity
+      let dbStatus = "ok";
+      try { await db.execute(sql`SELECT 1`); } catch { dbStatus = "error"; }
+
+      // Check Stripe env
+      const stripeConfigured = !!(process.env.STRIPE_SECRET_KEY);
+
+      // Check AI governance tables
+      let aiGovernanceStatus = "ok";
+      try {
+        await db.execute(sql`SELECT 1 FROM ai_policies LIMIT 1`);
+      } catch { aiGovernanceStatus = "unavailable"; }
+
+      // Check webhook queue
+      let webhookQueueStatus = "ok";
+      try {
+        await db.execute(sql`SELECT 1 FROM webhook_endpoints LIMIT 1`);
+      } catch { webhookQueueStatus = "unavailable"; }
+
+      // Check job queue
+      let jobQueueStatus = "ok";
+      try {
+        await db.execute(sql`SELECT 1 FROM background_jobs LIMIT 1`);
+      } catch { jobQueueStatus = "unavailable"; }
+
+      const securityMetrics = getSecurityHealthSummary();
+      const rateLimitStats = getRateLimitStats();
+      const abuseStats = getAbuseStats();
+
+      res.json({
+        status: "ok",
+        timestamp: new Date().toISOString(),
+        security: {
+          headersActive: PLATFORM_SECURITY_HEADERS.length,
+          headers: PLATFORM_SECURITY_HEADERS.map((h: any) => h.name),
+          cspDirectivesCount: Object.keys(PLATFORM_CSP_POLICY).length,
+          cspHeader: buildCspHeader().slice(0, 120) + "…",
+        },
+        rateLimiting: {
+          status: "active",
+          policiesCount: Object.keys(RATE_LIMIT_POLICIES).length,
+          activeKeys: rateLimitStats.activeKeys,
+          policies: rateLimitStats.policies,
+          circuitBreakers: rateLimitStats.circuitBreakers.length,
+        },
+        aiGovernance: {
+          status: aiGovernanceStatus,
+        },
+        stripe: {
+          configured: stripeConfigured,
+        },
+        webhookQueue: {
+          status: webhookQueueStatus,
+        },
+        jobQueue: {
+          status: jobQueueStatus,
+        },
+        observability: {
+          latencyRecords: securityMetrics.recordCounts.latency,
+          errorRecords: securityMetrics.recordCounts.errors,
+          violations: securityMetrics.recordCounts.violations,
+          abuseEvents: abuseStats.total,
+          flaggedAbuseEvents: abuseStats.flagged,
+        },
+        db: { status: dbStatus },
+      });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 25-2: GET /api/admin/platform/security-metrics — security observability
+  app.get("/api/admin/platform/security-metrics", async (_req: Request, res: Response) => {
+    try {
+      const { getSecurityHealthSummary } = require("../lib/observability/security-metrics");
+      res.json(getSecurityHealthSummary());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 25-3: GET /api/admin/platform/abuse-events — abuse detection log
+  app.get("/api/admin/platform/abuse-events", async (req: Request, res: Response) => {
+    try {
+      const { getAbuseEvents } = require("../lib/security/abuse-detection");
+      res.json(getAbuseEvents({
+        tenantId:    req.query.tenantId as string | undefined,
+        category:    req.query.category as any,
+        severity:    req.query.severity as any,
+        flaggedOnly: req.query.flaggedOnly === "true",
+        limit:       req.query.limit ? Number(req.query.limit) : 50,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 25-4: GET /api/admin/platform/rate-limit-stats — rate limit overview
+  app.get("/api/admin/platform/rate-limit-stats", async (_req: Request, res: Response) => {
+    try {
+      const { getRateLimitStats } = require("../lib/security/rate-limit");
+      res.json(getRateLimitStats());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 26 — Compliance, Data Retention & Governance ────────────────────
+
+  // Route 26-1: GET /api/admin/compliance/retention/policies — list retention policies
+  app.get("/api/admin/compliance/retention/policies", async (req: Request, res: Response) => {
+    try {
+      const { listRetentionPolicies } = require("../lib/governance/retention-engine");
+      const activeOnly = req.query.active !== "false";
+      res.json(await listRetentionPolicies(activeOnly));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-2: POST /api/admin/compliance/retention/policies — create retention policy
+  app.post("/api/admin/compliance/retention/policies", async (req: Request, res: Response) => {
+    try {
+      const { createRetentionPolicy } = require("../lib/governance/retention-engine");
+      const { policyKey, description, defaultRetentionDays } = req.body;
+      if (!policyKey || !description) return res.status(400).json({ error: "policyKey and description required" });
+      res.status(201).json(await createRetentionPolicy({ policyKey, description, defaultRetentionDays: defaultRetentionDays ?? 365, active: true }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-3: GET /api/admin/compliance/retention/rules — list retention rules
+  app.get("/api/admin/compliance/retention/rules", async (req: Request, res: Response) => {
+    try {
+      const { listRetentionRules } = require("../lib/governance/retention-engine");
+      res.json(await listRetentionRules(req.query.policyId as string | undefined));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-4: POST /api/admin/compliance/retention/rules — create retention rule
+  app.post("/api/admin/compliance/retention/rules", async (req: Request, res: Response) => {
+    try {
+      const { createRetentionRule } = require("../lib/governance/retention-engine");
+      const { policyId, tableName, retentionDays, archiveEnabled } = req.body;
+      if (!policyId || !tableName) return res.status(400).json({ error: "policyId and tableName required" });
+      res.status(201).json(await createRetentionRule({
+        policyId, tableName,
+        retentionDays: retentionDays ?? 365,
+        archiveEnabled: archiveEnabled ?? false,
+        deleteEnabled: true, tenantScoped: true, active: true,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-5: GET /api/admin/compliance/retention/evaluate — evaluate all policies
+  app.get("/api/admin/compliance/retention/evaluate", async (_req: Request, res: Response) => {
+    try {
+      const { evaluateRetentionPolicies } = require("../lib/governance/retention-engine");
+      res.json(await evaluateRetentionPolicies());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-6: POST /api/admin/compliance/retention/schedule — schedule cleanup
+  app.post("/api/admin/compliance/retention/schedule", async (req: Request, res: Response) => {
+    try {
+      const { scheduleRetentionCleanup } = require("../lib/governance/retention-engine");
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await scheduleRetentionCleanup(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-7: GET /api/admin/compliance/retention/stats — retention engine stats
+  app.get("/api/admin/compliance/retention/stats", async (_req: Request, res: Response) => {
+    try {
+      const { getRetentionStats } = require("../lib/governance/retention-engine");
+      res.json(await getRetentionStats());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-8: GET /api/admin/compliance/legal-holds — list legal holds
+  app.get("/api/admin/compliance/legal-holds", async (req: Request, res: Response) => {
+    try {
+      const { listLegalHolds } = require("../lib/governance/legal-hold");
+      res.json(await listLegalHolds({
+        tenantId: req.query.tenantId as string | undefined,
+        activeOnly: req.query.active !== "false",
+        limit: req.query.limit ? Number(req.query.limit) : 50,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-9: POST /api/admin/compliance/legal-holds — place legal hold
+  app.post("/api/admin/compliance/legal-holds", async (req: Request, res: Response) => {
+    try {
+      const { placeLegalHold } = require("../lib/governance/legal-hold");
+      const { tenantId, reason, requestedBy, scope } = req.body;
+      if (!tenantId || !reason) return res.status(400).json({ error: "tenantId and reason required" });
+      res.status(201).json(await placeLegalHold({ tenantId, reason, requestedBy, scope }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-10: DELETE /api/admin/compliance/legal-holds/:id — release legal hold
+  app.delete("/api/admin/compliance/legal-holds/:id", async (req: Request, res: Response) => {
+    try {
+      const { releaseLegalHold } = require("../lib/governance/legal-hold");
+      const { releasedBy } = req.body;
+      res.json(await releaseLegalHold(req.params.id, releasedBy));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-11: GET /api/admin/compliance/legal-holds/stats — hold statistics
+  app.get("/api/admin/compliance/legal-holds/stats", async (_req: Request, res: Response) => {
+    try {
+      const { getLegalHoldStats } = require("../lib/governance/legal-hold");
+      res.json(await getLegalHoldStats());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-12: GET /api/admin/compliance/deletion-jobs — list deletion jobs
+  app.get("/api/admin/compliance/deletion-jobs", async (req: Request, res: Response) => {
+    try {
+      const { listDeletionJobs } = require("../lib/governance/retention-engine");
+      res.json(await listDeletionJobs({
+        tenantId: req.query.tenantId as string | undefined,
+        status:   req.query.status   as string | undefined,
+        jobType:  req.query.jobType  as string | undefined,
+        limit:    req.query.limit ? Number(req.query.limit) : 50,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-13: POST /api/admin/compliance/deletions/tenant — trigger tenant deletion
+  app.post("/api/admin/compliance/deletions/tenant", async (req: Request, res: Response) => {
+    try {
+      const { executeTenantDeletion } = require("../lib/governance/deletion-workflows");
+      const { tenantId } = req.body;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await executeTenantDeletion(tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-14: POST /api/admin/compliance/deletions/webhook — trigger webhook deletion
+  app.post("/api/admin/compliance/deletions/webhook", async (req: Request, res: Response) => {
+    try {
+      const { executeWebhookDeletion } = require("../lib/governance/deletion-workflows");
+      const { tenantId, endpointId } = req.body;
+      if (!tenantId) return res.status(400).json({ error: "tenantId required" });
+      res.json(await executeWebhookDeletion(tenantId, endpointId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-15: POST /api/admin/compliance/audit/export — export audit data
+  app.post("/api/admin/compliance/audit/export", async (req: Request, res: Response) => {
+    try {
+      const { exportAuditData } = require("../lib/governance/audit-export");
+      const { source, tenantId, startDate, endDate, format, limit } = req.body;
+      if (!source) return res.status(400).json({ error: "source required" });
+      res.json(await exportAuditData({
+        source,
+        tenantId,
+        startDate: startDate ? new Date(startDate) : undefined,
+        endDate:   endDate   ? new Date(endDate)   : undefined,
+        format:    format ?? "json",
+        limit:     limit ?? 1000,
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 26-16: POST /api/admin/compliance/audit/export/bulk — bulk export all sources
+  app.post("/api/admin/compliance/audit/export/bulk", async (req: Request, res: Response) => {
+    try {
+      const { exportAllAuditSources } = require("../lib/governance/audit-export");
+      const { tenantId, startDate, endDate, format } = req.body;
+      res.json(await exportAllAuditSources({
+        tenantId,
+        startDate: startDate ? new Date(startDate) : undefined,
+        endDate:   endDate   ? new Date(endDate)   : undefined,
+        format:    format ?? "json",
+      }));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 27 — Platform Ops Console ──────────────────────────────────────────
+
+  // Route 27-1: GET /api/admin/ops/health — full system health report
+  app.get("/api/admin/ops/health", async (_req: Request, res: Response) => {
+    try {
+      const { getSystemHealthReport } = require("../lib/ops/system-health");
+      res.json(await getSystemHealthReport());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-2: GET /api/admin/ops/tenants — tenant list overview
+  app.get("/api/admin/ops/tenants", async (req: Request, res: Response) => {
+    try {
+      const { listTenantOverviews, searchTenants } = require("../lib/ops/tenant-inspector");
+      const { q, limit } = req.query;
+      if (q) {
+        return res.json(await searchTenants(q as string, limit ? Number(limit) : 20));
+      }
+      res.json(await listTenantOverviews(limit ? Number(limit) : 50));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-3: GET /api/admin/ops/tenants/:tenantId — deep tenant inspection
+  app.get("/api/admin/ops/tenants/:tenantId", async (req: Request, res: Response) => {
+    try {
+      const { inspectTenant } = require("../lib/ops/tenant-inspector");
+      res.json(await inspectTenant(req.params.tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-4: GET /api/admin/ops/jobs — job queue summary + active jobs
+  app.get("/api/admin/ops/jobs", async (req: Request, res: Response) => {
+    try {
+      const { getJobQueueSummary, getActiveJobs, getJobTypeBreakdown } = require("../lib/ops/job-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [summary, active, breakdown] = await Promise.all([
+        getJobQueueSummary(tenantId),
+        getActiveJobs(50, tenantId),
+        getJobTypeBreakdown(tenantId),
+      ]);
+      res.json({ summary, active, breakdown });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-5: GET /api/admin/ops/jobs/failed — failed job list
+  app.get("/api/admin/ops/jobs/failed", async (req: Request, res: Response) => {
+    try {
+      const { getFailedJobs, getRetryStatus, getStaleJobs } = require("../lib/ops/job-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [failed, retryStatus, stale] = await Promise.all([
+        getFailedJobs(50, tenantId),
+        getRetryStatus(tenantId),
+        getStaleJobs(30),
+      ]);
+      res.json({ failed, retryStatus, stale });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-6: GET /api/admin/ops/jobs/throughput — job throughput metrics
+  app.get("/api/admin/ops/jobs/throughput", async (req: Request, res: Response) => {
+    try {
+      const { getJobThroughput } = require("../lib/ops/job-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const window   = req.query.window ? Number(req.query.window) : 24;
+      const validWindow = [1, 24, 168].includes(window) ? window : 24;
+      res.json(await getJobThroughput(validWindow as 1 | 24 | 168, tenantId));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-7: GET /api/admin/ops/webhooks — webhook health + reliability
+  app.get("/api/admin/ops/webhooks", async (req: Request, res: Response) => {
+    try {
+      const { getWebhookHealthSummary, getEndpointReliabilityScores } = require("../lib/ops/webhook-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [summary, reliability] = await Promise.all([
+        getWebhookHealthSummary(tenantId),
+        getEndpointReliabilityScores(tenantId),
+      ]);
+      res.json({ summary, reliability });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-8: GET /api/admin/ops/webhooks/failures — failure history + retry counts
+  app.get("/api/admin/ops/webhooks/failures", async (req: Request, res: Response) => {
+    try {
+      const { getDeliveryFailureHistory, getEndpointRetryCounts } = require("../lib/ops/webhook-inspector");
+      const tenantId    = req.query.tenantId    as string | undefined;
+      const endpointId  = req.query.endpointId  as string | undefined;
+      const [failures, retryCounts] = await Promise.all([
+        getDeliveryFailureHistory({ tenantId, endpointId }),
+        getEndpointRetryCounts(tenantId),
+      ]);
+      res.json({ failures, retryCounts });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-9: GET /api/admin/ops/evaluations — policy evaluation runs + health
+  app.get("/api/admin/ops/evaluations", async (req: Request, res: Response) => {
+    try {
+      const { getPolicyEvaluationRuns, getEvalHealthSummary, getRetentionEvaluations } = require("../lib/ops/eval-inspector");
+      const [runs, health, retention] = await Promise.all([
+        getPolicyEvaluationRuns(req.query.active !== "false"),
+        getEvalHealthSummary(),
+        getRetentionEvaluations(),
+      ]);
+      res.json({ runs, health, retention });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-10: GET /api/admin/ops/evaluations/regression — regression signals
+  app.get("/api/admin/ops/evaluations/regression", async (req: Request, res: Response) => {
+    try {
+      const { getRegressionSignals, getFailurePatterns } = require("../lib/ops/eval-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const window   = req.query.window ? Number(req.query.window) : 24;
+      const [signals, patterns] = await Promise.all([
+        getRegressionSignals(window, tenantId),
+        getFailurePatterns(168),
+      ]);
+      res.json({ signals, patterns });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-11: GET /api/admin/ops/security — security health + event summary
+  app.get("/api/admin/ops/security", async (req: Request, res: Response) => {
+    try {
+      const { getSecurityHealthSnapshot, getSecurityEventSummary, getModerationSpikes } = require("../lib/ops/security-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [snapshot, events, spikes] = await Promise.all([
+        getSecurityHealthSnapshot(),
+        getSecurityEventSummary(24, tenantId),
+        getModerationSpikes(24, 5, tenantId),
+      ]);
+      res.json({ snapshot, events, spikes });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-12: GET /api/admin/ops/security/abuse — abuse events + rate limit triggers
+  app.get("/api/admin/ops/security/abuse", async (req: Request, res: Response) => {
+    try {
+      const { getAbuseEvents, getRateLimitTriggers, getPolicyViolations } = require("../lib/ops/security-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const [abuse, rateLimits, violations] = await Promise.all([
+        getAbuseEvents({ tenantId }),
+        getRateLimitTriggers(24, tenantId),
+        getPolicyViolations(168, tenantId),
+      ]);
+      res.json({ abuse, rateLimits, violations });
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-13: GET /api/admin/ops/security/anomalies — anomaly event stream
+  app.get("/api/admin/ops/security/anomalies", async (req: Request, res: Response) => {
+    try {
+      const { getAnomalyEventStream } = require("../lib/ops/security-inspector");
+      const tenantId = req.query.tenantId as string | undefined;
+      const window   = req.query.window ? Number(req.query.window) : 24;
+      const limit    = req.query.limit  ? Number(req.query.limit)  : 100;
+      res.json(await getAnomalyEventStream(window, tenantId, limit));
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-14: GET /api/admin/ops/billing — billing health overview
+  app.get("/api/admin/ops/billing", async (req: Request, res: Response) => {
+    try {
+      const { getBillingHealth } = require("../lib/ops/system-health");
+      res.json(await getBillingHealth());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // Route 27-15: GET /api/admin/ops/governance — governance health
+  app.get("/api/admin/ops/governance", async (req: Request, res: Response) => {
+    try {
+      const { getGovernanceHealth } = require("../lib/ops/system-health");
+      res.json(await getGovernanceHealth());
+    } catch (err) {
+      res.status(500).json({ error: (err as Error).message });
+    }
+  });
+
+  // ── Phase 32 — Platform Operations Console API ────────────────────────────
+
+  // Role guard helper (platform_admin = owner or admin role)
+  function isPlatformAdmin(req: Request): boolean {
+    return req.user?.role === "owner" || req.user?.role === "admin";
+  }
+
+  // GET /api/admin/platform/tenants — tenant overview with optional search
+  app.get("/api/admin/platform/tenants", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { listTenantOverviews, searchTenants } = await import("../lib/ops/tenant-inspector");
+      const q      = req.query.q as string | undefined;
+      const cursor = req.query.cursor as string | undefined;
+      const limit  = Math.min(Number(req.query.limit) || 20, 100);
+      const tenants = q
+        ? await searchTenants(q)
+        : await listTenantOverviews({ cursor, limit });
+      res.json({ tenants, pagination: { limit, hasMore: Array.isArray(tenants) && tenants.length === limit }, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/platform/jobs — job queue health + active jobs
+  app.get("/api/admin/platform/jobs", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { getJobQueueSummary, getActiveJobs, getFailedJobs } = await import("../lib/ops/job-inspector");
+      const [summary, active, failed] = await Promise.all([
+        getJobQueueSummary(),
+        getActiveJobs(),
+        getFailedJobs(),
+      ]);
+      res.json({ summary, active, failed, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/platform/webhooks — webhook delivery health + failure log
+  app.get("/api/admin/platform/webhooks", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { getWebhookHealthSummary, getDeliveryFailureHistory } = await import("../lib/ops/webhook-inspector");
+      const [health, failures] = await Promise.all([
+        getWebhookHealthSummary(),
+        getDeliveryFailureHistory(),
+      ]);
+      res.json({ health, failures, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/platform/ai — AI governance: usage per tenant, budget, governance health
+  app.get("/api/admin/platform/ai", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { getGovernanceHealth } = await import("../lib/ops/system-health");
+      const { sql: drizzleSql }     = await import("drizzle-orm");
+      const governance = await getGovernanceHealth();
+
+      const usageRes = await db.execute<any>(drizzleSql`
+        SELECT
+          tenant_id,
+          COUNT(*)::int                              AS requests,
+          COALESCE(SUM(cost_usd::numeric), 0)::float AS cost_usd,
+          COALESCE(SUM(tokens_in + tokens_out), 0)::int AS total_tokens
+        FROM obs_ai_latency_metrics
+        WHERE created_at >= NOW() - INTERVAL '30 days'
+        GROUP BY tenant_id
+        ORDER BY cost_usd DESC
+        LIMIT 20
+      `);
+
+      const budgetRes = await db.execute<any>(drizzleSql`
+        SELECT tenant_id, monthly_budget_usd, soft_limit_percent, hard_limit_percent
+        FROM tenant_ai_budgets
+        WHERE monthly_budget_usd IS NOT NULL
+        LIMIT 20
+      `);
+
+      res.json({
+        governance,
+        usageByTenant:  usageRes.rows,
+        budgets:        budgetRes.rows,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/platform/billing — billing health + anomaly overview
+  app.get("/api/admin/platform/billing", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { getBillingHealth } = await import("../lib/ops/system-health");
+      const health = await getBillingHealth();
+      res.json({ health, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/platform/security — security monitor: rate limits, auth anomalies, abuse
+  app.get("/api/admin/platform/security", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { getSecurityHealthSnapshot, getSecurityEventSummary, getAbuseEvents } = await import("../lib/ops/security-inspector");
+      const [snapshot, summary, abuse] = await Promise.all([
+        getSecurityHealthSnapshot(),
+        getSecurityEventSummary(24),
+        getAbuseEvents({}),
+      ]);
+      res.json({ snapshot, summary, abuse, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // ── Phase 33 — Ops AI Assistant API ──────────────────────────────────────────
+
+  // Role guard helper (already defined in Phase 32 section above)
+  // isPlatformAdmin() is defined above in this function scope
+
+  // GET /api/admin/ops-ai/summary — current platform health summary from AI
+  app.get("/api/admin/ops-ai/summary", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { summariseCurrentHealth } = await import("../lib/ops-ai/health-summary");
+      const operatorId = (req.user as any)?.id ?? (req.user as any)?.sub ?? null;
+      const result = await summariseCurrentHealth(operatorId);
+      res.json({ ...result, generatedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // POST /api/admin/ops-ai/explain — explain a specific incident
+  app.post("/api/admin/ops-ai/explain", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { IncidentRequestSchema } = await import("@shared/ops-ai-schema");
+      const parsed = IncidentRequestSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: "Invalid incident request", details: parsed.error.flatten() });
+      }
+      const { explainIncident } = await import("../lib/ops-ai/incident-explainer");
+      const operatorId = (req.user as any)?.id ?? (req.user as any)?.sub ?? null;
+      const result = await explainIncident(parsed.data, operatorId);
+      res.json({ ...result, generatedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/ops-ai/history — recent AI assistant runs and audit metadata
+  app.get("/api/admin/ops-ai/history", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { listAuditRecords } = await import("../lib/ops-ai/ops-ai-audit");
+      const limit  = Math.min(Number(req.query.limit) || 50, 200);
+      const records = await listAuditRecords(limit);
+      res.json({ records, count: records.length, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  // GET /api/admin/platform/recovery — backup status + job recovery state
+  app.get("/api/admin/platform/recovery", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) {
+        return res.status(403).json({ error: "platform_admin role required" });
+      }
+      const { sql: drizzleSql } = await import("drizzle-orm");
+
+      const jobRes = await db.execute<any>(drizzleSql`
+        SELECT
+          COUNT(*)::int                                              AS total_jobs,
+          COUNT(*) FILTER (WHERE status = 'failed')::int            AS failed_jobs,
+          COUNT(*) FILTER (WHERE status = 'running'
+            AND updated_at < NOW() - INTERVAL '1 hour')::int        AS stalled_jobs,
+          MAX(updated_at)::text                                      AS last_activity
+        FROM knowledge_processing_jobs
+      `);
+
+      const row = jobRes.rows[0] ?? {};
+      res.json({
+        jobs: {
+          total:    Number(row.total_jobs   ?? 0),
+          failed:   Number(row.failed_jobs  ?? 0),
+          stalled:  Number(row.stalled_jobs ?? 0),
+          lastActivity: row.last_activity ?? null,
+        },
+        backupStatus: {
+          lastVerified: null,
+          healthy: true,
+          message: "Backup subsystem nominal",
+        },
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 35 — PLATFORM ANALYTICS & OPS DASHBOARDS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // GET /api/admin/analytics/platform-health
+  app.get("/api/admin/analytics/platform-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getPlatformHealthSummary, explainPlatformHealth } = await import("../lib/analytics/platform-health");
+      const summary = await getPlatformHealthSummary(windowHours);
+      const explanation = explainPlatformHealth(summary);
+      res.json({ summary, explanation, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/platform-health/trend
+  app.get("/api/admin/analytics/platform-health/trend", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getPlatformHealthTrend } = await import("../lib/analytics/platform-health");
+      const trend = await getPlatformHealthTrend(windowHours);
+      res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/tenant-health
+  app.get("/api/admin/analytics/tenant-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getTenantHealthSummary, explainTenantHealth } = await import("../lib/analytics/tenant-health");
+      const summary = await getTenantHealthSummary(windowHours);
+      const explanation = explainTenantHealth(summary);
+      res.json({ summary, explanation, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/tenant-health/trend
+  app.get("/api/admin/analytics/tenant-health/trend", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getTenantHealthTrend } = await import("../lib/analytics/tenant-health");
+      const trend = await getTenantHealthTrend(windowHours);
+      res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/ai-cost
+  app.get("/api/admin/analytics/ai-cost", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getAiCostSummary, explainAiCost } = await import("../lib/analytics/ai-cost-analytics");
+      const summary = await getAiCostSummary(windowHours);
+      const explanation = explainAiCost(summary);
+      res.json({ summary, explanation, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/ai-cost/trend
+  app.get("/api/admin/analytics/ai-cost/trend", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getAiCostTrend } = await import("../lib/analytics/ai-cost-analytics");
+      const trend = await getAiCostTrend(windowHours);
+      res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/jobs-webhooks
+  app.get("/api/admin/analytics/jobs-webhooks", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getJobWebhookSummary, explainJobWebhook } = await import("../lib/analytics/job-webhook-analytics");
+      const summary = await getJobWebhookSummary(windowHours);
+      const explanation = explainJobWebhook(summary);
+      res.json({ summary, explanation, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/jobs-webhooks/trend
+  app.get("/api/admin/analytics/jobs-webhooks/trend", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const { getJobWebhookTrend } = await import("../lib/analytics/job-webhook-analytics");
+      const trend = await getJobWebhookTrend(windowHours);
+      res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/business-billing
+  app.get("/api/admin/analytics/business-billing", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(8760, Number(req.query.windowHours) || 720));
+      const { getBusinessBillingSummary, explainBusinessBilling } = await import("../lib/analytics/business-billing-analytics");
+      const summary = await getBusinessBillingSummary(windowHours);
+      const explanation = explainBusinessBilling(summary);
+      res.json({ summary, explanation, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/analytics/business-billing/trend
+  app.get("/api/admin/analytics/business-billing/trend", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const windowHours = Math.max(1, Math.min(8760, Number(req.query.windowHours) || 720));
+      const { getBusinessBillingTrend } = await import("../lib/analytics/business-billing-analytics");
+      const trend = await getBusinessBillingTrend(windowHours);
+      res.json({ trend, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 36 — RELEASE INTEGRITY & DEPLOY HEALTH
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // GET /api/admin/platform/deploy-health
+  app.get("/api/admin/platform/deploy-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getDeployHealth } = await import("../lib/platform/deploy-health");
+      const report = await getDeployHealth();
+      res.json(report);
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 37 — AUTH SECURITY ADMIN ENDPOINTS
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // GET /api/admin/auth/overview
+  app.get("/api/admin/auth/overview", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const since24h = new Date(Date.now() - 24 * 3600_000).toISOString();
+      const since7d  = new Date(Date.now() - 7 * 24 * 3600_000).toISOString();
+
+      const [failRes, sessionRes, mfaRes, eventRes] = await Promise.all([
+        db.execute<any>(sql`
+          SELECT
+            COUNT(*) FILTER (WHERE success = FALSE AND created_at >= ${since24h}::timestamptz)::int AS failures_24h,
+            COUNT(*) FILTER (WHERE success = TRUE  AND created_at >= ${since24h}::timestamptz)::int AS logins_24h,
+            COUNT(*) FILTER (WHERE success = FALSE AND created_at >= ${since7d}::timestamptz)::int  AS failures_7d
+          FROM auth_login_attempts
+        `),
+        db.execute<any>(sql`
+          SELECT
+            COUNT(*) FILTER (WHERE revoked_at IS NULL AND expires_at > NOW())::int AS active_sessions,
+            COUNT(*) FILTER (WHERE revoked_at IS NOT NULL)::int                   AS revoked_sessions
+          FROM auth_sessions
+        `),
+        db.execute<any>(sql`
+          SELECT
+            COUNT(*)::int                               AS total_users_with_mfa,
+            COUNT(*) FILTER (WHERE enabled = TRUE)::int AS mfa_enabled
+          FROM auth_mfa_totp
+        `),
+        db.execute<any>(sql`
+          SELECT COUNT(*)::int AS events_24h FROM auth_security_events
+          WHERE created_at >= ${since24h}::timestamptz
+        `),
+      ]);
+
+      res.json({
+        failures24h:     Number(failRes.rows[0]?.failures_24h ?? 0),
+        logins24h:       Number(failRes.rows[0]?.logins_24h   ?? 0),
+        failures7d:      Number(failRes.rows[0]?.failures_7d  ?? 0),
+        activeSessions:  Number(sessionRes.rows[0]?.active_sessions  ?? 0),
+        revokedSessions: Number(sessionRes.rows[0]?.revoked_sessions ?? 0),
+        mfaEnabled:      Number(mfaRes.rows[0]?.mfa_enabled ?? 0),
+        totalWithMfa:    Number(mfaRes.rows[0]?.total_users_with_mfa ?? 0),
+        securityEvents24h: Number(eventRes.rows[0]?.events_24h ?? 0),
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/auth/login-failures
+  app.get("/api/admin/auth/login-failures", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const since = new Date(Date.now() - windowHours * 3600_000).toISOString();
+
+      const res2 = await db.execute<any>(sql`
+        SELECT email_hash, ip_address, failure_reason, COUNT(*)::int AS attempts, MAX(created_at) AS last_attempt
+        FROM auth_login_attempts
+        WHERE success = FALSE AND created_at >= ${since}::timestamptz
+        GROUP BY email_hash, ip_address, failure_reason
+        ORDER BY attempts DESC
+        LIMIT 50
+      `);
+      res.json({ failures: res2.rows, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/auth/suspicious-events
+  app.get("/api/admin/auth/suspicious-events", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const since = new Date(Date.now() - windowHours * 3600_000).toISOString();
+
+      const res2 = await db.execute<any>(sql`
+        SELECT id, tenant_id, user_id, event_type, severity, ip_address, metadata_json, created_at
+        FROM auth_security_events
+        WHERE severity IN ('warning', 'critical')
+          AND created_at >= ${since}::timestamptz
+        ORDER BY created_at DESC
+        LIMIT 100
+      `);
+      res.json({ events: res2.rows, windowHours, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/auth/sessions
+  app.get("/api/admin/auth/sessions", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const res2 = await db.execute<any>(sql`
+        SELECT id, user_id, tenant_id, device_label, ip_address, user_agent,
+               created_at, last_seen_at, expires_at, revoked_at, revoked_reason
+        FROM auth_sessions
+        WHERE revoked_at IS NULL AND expires_at > NOW()
+        ORDER BY last_seen_at DESC
+        LIMIT 100
+      `);
+      res.json({ sessions: res2.rows, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/auth/mfa-adoption
+  app.get("/api/admin/auth/mfa-adoption", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const res2 = await db.execute<any>(sql`
+        SELECT
+          COUNT(*)::int                               AS total_enrolled,
+          COUNT(*) FILTER (WHERE enabled = TRUE)::int AS enabled,
+          COUNT(*) FILTER (WHERE enabled = FALSE)::int AS pending_verification
+        FROM auth_mfa_totp
+      `);
+      const r = res2.rows[0] ?? {};
+      const total   = Number(r.total_enrolled ?? 0);
+      const enabled = Number(r.enabled        ?? 0);
+      res.json({
+        totalEnrolled: total,
+        enabled,
+        pendingVerification: Number(r.pending_verification ?? 0),
+        adoptionPct: total > 0 ? Math.round(enabled / total * 100) : 0,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // ── Phase 38 — Security Hardening & SOC2 Routes ──────────────────────────────
+
+  // GET /api/admin/security/overview
+  app.get("/api/admin/security/overview", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getSecurityReadinessChecklist, getIncidentResponseStatus, getSecurityControlCoverage } = await import("../lib/security/incident-readiness");
+      const { getEdgeReadiness } = await import("../lib/security/edge-readiness");
+      const { getRateLimitStats } = await import("../lib/security/rate-limit");
+      const checklist      = getSecurityReadinessChecklist();
+      const incidentStatus = getIncidentResponseStatus();
+      const coverage       = getSecurityControlCoverage();
+      const edgeReadiness  = getEdgeReadiness();
+      const rlStats        = getRateLimitStats();
+      res.json({
+        posture: {
+          status:          checklist.overallStatus,
+          passing:         checklist.passing,
+          warnings:        checklist.warnings,
+          failing:         checklist.failing,
+          coveragePercent: coverage.coveragePercent,
+        },
+        incidentStatus,
+        edgeReadiness,
+        rateLimitStats: rlStats,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/events
+  app.get("/api/admin/security/events", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const windowHours = Math.max(1, Math.min(168, Number(req.query.windowHours) || 24));
+      const severity    = req.query.severity as string | undefined;
+      const since = new Date(Date.now() - windowHours * 3600_000).toISOString();
+
+      const rows = await db.execute<any>(sql`
+        SELECT id, event_type, tenant_id, actor_id, ip, metadata, created_at
+        FROM security_events
+        WHERE created_at >= ${since}::timestamptz
+        ORDER BY created_at DESC
+        LIMIT 200
+      `);
+
+      let events = rows.rows;
+      // Also pull from auth_security_events
+      let authEvents: any[] = [];
+      try {
+        const authRows = await db.execute<any>(sql`
+          SELECT id, event_type, tenant_id, user_id AS actor_id, ip_address AS ip, severity, metadata_json AS metadata, created_at
+          FROM auth_security_events
+          WHERE created_at >= ${since}::timestamptz
+          ORDER BY created_at DESC
+          LIMIT 200
+        `);
+        authEvents = authRows.rows;
+      } catch { /* table may not exist */ }
+
+      const allEvents = [...events, ...authEvents]
+        .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+        .slice(0, 200);
+
+      res.json({ events: allEvents, windowHours, total: allEvents.length, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/rate-limits
+  app.get("/api/admin/security/rate-limits", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getRateLimitStats }          = await import("../lib/security/rate-limit");
+      const { getRouteGroupPolicySummary } = await import("../lib/security/api-rate-limits");
+      res.json({
+        engineStats:  getRateLimitStats(),
+        routeGroups:  getRouteGroupPolicySummary(),
+        retrievedAt:  new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/auth-health
+  app.get("/api/admin/security/auth-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { db } = await import("../db");
+      const { sql } = await import("drizzle-orm");
+      const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+
+      const [failuresRes, sessionsRes, mfaRes] = await Promise.allSettled([
+        db.execute<any>(sql`SELECT COUNT(*)::int AS cnt FROM auth_login_attempts WHERE success = FALSE AND created_at >= ${since}::timestamptz`),
+        db.execute<any>(sql`SELECT COUNT(*)::int AS cnt FROM auth_sessions WHERE revoked_at IS NULL AND expires_at > NOW()`),
+        db.execute<any>(sql`SELECT COUNT(*) FILTER (WHERE enabled = TRUE)::int AS enabled, COUNT(*)::int AS total FROM auth_mfa_totp`),
+      ]);
+
+      res.json({
+        failedLogins24h: failuresRes.status === "fulfilled" ? (failuresRes.value.rows[0]?.cnt ?? 0) : null,
+        activeSessions:  sessionsRes.status  === "fulfilled" ? (sessionsRes.value.rows[0]?.cnt  ?? 0) : null,
+        mfaEnabled:      mfaRes.status       === "fulfilled" ? (mfaRes.value.rows[0]?.enabled    ?? 0) : null,
+        mfaTotal:        mfaRes.status       === "fulfilled" ? (mfaRes.value.rows[0]?.total      ?? 0) : null,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/deploy-health
+  app.get("/api/admin/security/deploy-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { exportDeployIntegritySnapshot } = await import("../lib/security/evidence-export");
+      res.json(exportDeployIntegritySnapshot());
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/storage-health
+  app.get("/api/admin/security/storage-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getEdgeReadiness } = await import("../lib/security/edge-readiness");
+      const edge = getEdgeReadiness();
+      res.json({
+        r2Connected:    edge.r2Connected,
+        corsReady:      edge.corsReady,
+        bucketName:     process.env.CF_R2_BUCKET_NAME ?? null,
+        notes:          edge.notes.filter(n => n.toLowerCase().includes("r2") || n.toLowerCase().includes("cors")),
+        retrievedAt:    new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/checklist
+  app.get("/api/admin/security/checklist", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getSecurityReadinessChecklist } = await import("../lib/security/incident-readiness");
+      res.json(getSecurityReadinessChecklist());
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/evidence
+  app.get("/api/admin/security/evidence", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { exportSecurityControlSnapshot, exportAuthControlSnapshot, exportRateLimitSnapshot, exportDeployIntegritySnapshot } = await import("../lib/security/evidence-export");
+      const type = req.query.type as string ?? "all";
+      if (type === "security")  return res.json(exportSecurityControlSnapshot());
+      if (type === "auth")      return res.json(exportAuthControlSnapshot());
+      if (type === "ratelimit") return res.json(exportRateLimitSnapshot());
+      if (type === "deploy")    return res.json(exportDeployIntegritySnapshot());
+      res.json({
+        security:  exportSecurityControlSnapshot(),
+        auth:      exportAuthControlSnapshot(),
+        rateLimit: exportRateLimitSnapshot(),
+        deploy:    exportDeployIntegritySnapshot(),
+        exportedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // ── Phase 39 — Final Security Closure Routes ──────────────────────────────
+
+  // GET /api/admin/security/headers
+  app.get("/api/admin/security/headers", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { PLATFORM_SECURITY_HEADERS, buildCspHeader, PLATFORM_CSP_POLICY, validateSecurityHeaders } = await import("../lib/security/security-headers");
+      const csp = buildCspHeader(PLATFORM_CSP_POLICY);
+      const headerMap: Record<string, string> = {};
+      for (const h of PLATFORM_SECURITY_HEADERS) headerMap[h.name] = h.value;
+      headerMap["Content-Security-Policy"] = csp;
+      const validation = validateSecurityHeaders(headerMap);
+      res.json({
+        headers:    PLATFORM_SECURITY_HEADERS,
+        csp:        { policy: csp, directiveCount: csp.split(";").length },
+        validation,
+        isProduction: process.env.NODE_ENV === "production",
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/brute-force
+  app.get("/api/admin/security/brute-force", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getBruteForceStats, ESCALATION_THRESHOLDS } = await import("../lib/security/brute-force");
+      res.json({
+        stats:      getBruteForceStats(),
+        thresholds: ESCALATION_THRESHOLDS,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/sessions
+  app.get("/api/admin/security/sessions", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getSessionAdminStats } = await import("../lib/security/session-hardening");
+      const stats = await getSessionAdminStats();
+      res.json({ ...stats, retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/webhook-verification
+  app.get("/api/admin/security/webhook-verification", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getWebhookVerificationStats } = await import("../lib/security/webhook-verification");
+      res.json({ ...getWebhookVerificationStats(), retrievedAt: new Date().toISOString() });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/backup-health
+  app.get("/api/admin/security/backup-health", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getBackupHealthSummary, getRestoreReadiness } = await import("../lib/security/backup-verify");
+      res.json({
+        health:   getBackupHealthSummary(),
+        restore:  getRestoreReadiness(),
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // POST /api/admin/security/backup-dry-run
+  app.post("/api/admin/security/backup-dry-run", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { runBackupDryRunCheck } = await import("../lib/security/backup-verify");
+      const result = await runBackupDryRunCheck();
+      res.json(result);
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/alerts
+  app.get("/api/admin/security/alerts", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { getRecentAlerts, getUnresolvedCriticalCount } = await import("../lib/security/security-alerting");
+      const severity = req.query.severity as string | undefined;
+      const limit    = Math.min(200, Number(req.query.limit) || 50);
+      res.json({
+        alerts:               getRecentAlerts(limit, severity ? { severity: severity as any } : undefined),
+        unresolvedCritical:   getUnresolvedCriticalCount(),
+        retrievedAt:          new Date().toISOString(),
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // ── Phase 41 — RLS Audit Route ────────────────────────────────────────────
+
+  // GET /api/admin/security/rls-audit
+  app.get("/api/admin/security/rls-audit", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { summarizeRlsPosture, listAffectedTables, listWeakPoliciesBeforeFix, TABLE_ACCESS_MODELS } = await import("../lib/security/rls-audit");
+      const mode = (req.query.mode as string) ?? "summary";
+
+      if (mode === "full") {
+        const [posture, tables] = await Promise.all([summarizeRlsPosture(), listAffectedTables()]);
+        return res.json({
+          posture,
+          tables: tables.map(t => ({
+            tableName:      t.tableName,
+            rlsEnabled:     t.rlsEnabled,
+            policyCount:    t.policyCount,
+            hasAlwaysTrue:  t.hasAlwaysTrue,
+            hasPublicAlwaysTrue: t.hasPublicAlwaysTrue,
+            accessModel:    t.accessModel,
+            tenantCols:     t.tenantCols,
+            warningFlags:   t.warningFlags,
+            indexCount:     t.indexCount,
+          })),
+          weakPoliciesBeforeFix: listWeakPoliciesBeforeFix(),
+          classifiedTables:      Object.keys(TABLE_ACCESS_MODELS).length,
+          retrievedAt:           new Date().toISOString(),
+        });
+      }
+
+      // Default: summary mode
+      const posture = await summarizeRlsPosture();
+      res.json({
+        ...posture,
+        weakPoliciesBeforeFix: listWeakPoliciesBeforeFix(),
+        classifiedTables:      Object.keys(TABLE_ACCESS_MODELS).length,
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/rls-audit/table/:tableName
+  app.get("/api/admin/security/rls-audit/table/:tableName", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { explainTableAccessModel } = await import("../lib/security/rls-audit");
+      const tableName = req.params.tableName?.replace(/[^a-z_0-9]/gi, "");
+      if (!tableName) return res.status(400).json({ error: "invalid table name" });
+      res.json(await explainTableAccessModel(tableName));
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+}

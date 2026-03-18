@@ -4,12 +4,10 @@
  * SERVER-ONLY: This module must never be imported from client/ code.
  *
  * runAiCall() is the single function all future AI features should call.
- * It resolves provider + model via the router, enforces request safety,
- * runs usage guardrails, invokes the provider adapter, estimates cost,
- * logs usage, and normalises errors.
- *
- * Features never need to know which provider, model, pricing, safety limit,
- * or budget state is used. No business logic, no prompts, no retries.
+ * It resolves provider + model via the router, enforces idempotency,
+ * enforces request safety, runs usage guardrails, checks the response cache,
+ * invokes the provider adapter, estimates cost, logs usage, writes to cache,
+ * and normalises errors.
  *
  * Phase 3C: routes through router.ts → providers/registry.ts → provider adapter
  * Phase 3E: async routing with tenant/global DB overrides
@@ -17,23 +15,45 @@
  * Phase 3G: AI usage guardrails — budget_mode policy + hard stop via guards.ts
  * Final hardening: cost basis fields, blocked status, pricing source/version
  * Phase 3H: request safety — token cap, rate limit, concurrency guard
+ * Phase 3H.1: correct HTTP status codes + Retry-After support
+ * Phase 3I: tenant-safe response cache — hit/miss/write observability
+ * Phase 3J: idempotency + retry-storm protection
  *
  * Request flow:
- *   1. Resolve route (provider + model)
- *   2. Get provider adapter
- *   3. Resolve effective safety config (tenant DB override → global defaults)
- *   4. Token cap precheck (blocks oversized input before provider call)
- *   5. Rate limit check (RPM + RPH)
- *   6. Concurrency guard acquire (process-local slot)
- *   7. Budget/usage guard (existing per-period cost guardrail)
- *   8. Budget mode policy (verbosity reduction)
- *   9. Provider call with centrally enforced maxOutputTokens
- *  10. Usage logging + threshold events
- *  11. Concurrency slot release (in finally — always runs)
+ *   1.  Resolve route (provider + model)
+ *   2.  Get provider adapter
+ *   3.  Idempotency check (when request_id present):
+ *       └─ duplicate_inflight → 409 Conflict (no provider call)
+ *       └─ duplicate_replay   → return stored result (no provider call, no cost row)
+ *       └─ owned              → proceed; release in finally
+ *   4.  Resolve effective safety config (tenant DB override → global defaults)
+ *   5.  Token cap precheck (blocks oversized input before provider call)
+ *   6.  Rate limit check (RPM + RPH)
+ *   7.  Concurrency guard acquire (process-local slot)
+ *   8.  Budget/usage guard (existing per-period cost guardrail)
+ *   9.  Budget mode policy (verbosity reduction)
+ *  10.  Cache policy resolve + lookup
+ *       └─ HIT  → record cache_hit event → return cached result (no provider call)
+ *       └─ MISS → record cache_miss event → continue to step 11
+ *  11.  Provider call with centrally enforced maxOutputTokens
+ *  12.  Usage logging + threshold events
+ *  13.  Cache write (success only, if route is cacheable)
+ *  14.  Mark request completed (idempotency state update)
+ *  15.  Concurrency slot release + idempotency ownership release (in finally)
+ *
+ * Idempotency accounting (Phase 3J):
+ *   - duplicate_inflight:  no provider call, no ai_usage row, 409 returned
+ *   - duplicate_replay:    no provider call, no ai_usage row, stored result returned
+ *   - First execution:     normal ai_usage row written; idempotency state = completed
+ *
+ * Cache accounting decision (Phase 3I):
+ *   - Cache HIT:  NO ai_usage row written (zero provider cost). Observable via ai_cache_events.
+ *   - Cache MISS: Normal ai_usage success row written (provider cost applies).
+ *   - Cache WRITE: ai_cache_events cache_write row written after successful provider call.
  */
 
 import OpenAI from "openai";
-import { AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS } from "./config";
+import { AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS, getRouteCachePolicy } from "./config";
 import { resolveRoute } from "./router";
 import { getProvider } from "./providers/registry";
 import { logAiUsage } from "./usage";
@@ -55,6 +75,18 @@ import {
   releaseConcurrencySlot,
 } from "./request-safety";
 import {
+  lookupCachedResponse,
+  storeCachedResponse,
+} from "./response-cache";
+import {
+  beginAiRequest,
+  markAiRequestCompleted,
+  markAiRequestFailed,
+  releaseAiRequestOwnership,
+} from "./idempotency";
+// Phase 15: Observability — fire-and-forget, never throws (INV-OBS-1, INV-OBS-6)
+import { collectAiLatency } from "../observability/metrics-collector";
+import {
   AiUnavailableError,
   AiTimeoutError,
   AiQuotaError,
@@ -63,8 +95,21 @@ import {
   AiTokenCapError,
   AiRateLimitError,
   AiConcurrencyError,
+  AiDuplicateInflightError,
+  AiStepBudgetExceededError,
+  AiWalletLimitError,
   type AiErrorMeta,
 } from "./errors";
+import { checkWalletHardLimit } from "./wallet";
+import { acquireAiStep, recordStepCompleted } from "./step-budget";
+import { assertTenantFeatureEntitled } from "./entitlement-enforcement";
+import {
+  recordRequestStartedEvent,
+  recordProviderCallStartedEvent,
+  recordRequestCompletedEvent,
+  recordRequestReplayedEvent,
+  recordCacheHitReplayedEvent,
+} from "./billing-events";
 import type { AiCallContext, AiCallResult } from "./types";
 import type { AiUsageLimit } from "@shared/schema";
 
@@ -77,15 +122,20 @@ export interface AiCallInput {
  * Execute a single AI call with full lifecycle management.
  *
  * Safety guarantees:
+ *   - No provider call is made if request is a known duplicate (inflight or completed)
  *   - No provider call is made if token cap, rate limit, or concurrency check fails
- *   - Concurrency slot is always released (success, error, or safety block)
- *   - Provider/model is NEVER switched by safety logic — same route always used
+ *   - No provider call is made on a cache hit
+ *   - Concurrency slot is always released (success, cache hit, error, or safety block)
+ *   - Idempotency ownership is always released (success, replay, error, safety block)
+ *   - Provider/model is NEVER switched by safety, cache, or idempotency logic
  *   - All safety blocks are recorded in request_safety_events for traceability
- *   - Existing ai_usage and aggregate accounting is not affected by safety blocks
+ *   - Cache hits are recorded in ai_cache_events — not in ai_usage (no cost row)
+ *   - Duplicate replays do NOT create new ai_usage provider-cost rows
+ *   - Only successful, non-empty provider responses are written to cache
  *
  * @param context  Identity, routing, and tracing metadata from the caller
  * @param input    System prompt and user input for the model
- * @returns        Normalised AiCallResult on success
+ * @returns        Normalised AiCallResult on success (provider, cache, or replay)
  * @throws         Typed AiError subclass on failure — always after logging
  */
 export async function runAiCall(
@@ -123,12 +173,71 @@ export async function runAiCall(
     throw aiErr;
   }
 
-  // ── Step 3: Resolve effective safety config ───────────────────────────────────
-  // Loads tenant DB override if present, falls back to AI_SAFETY_DEFAULTS.
-  // Fail-open on DB error — returns global defaults.
+  // ── Step 3: Idempotency check ─────────────────────────────────────────────────
+  // Only when tenantId + requestId are both present.
+  // No request_id → proceed normally (Case A in spec).
+  let idpOwned = false;
+  let idpStateId = "";
+  let idpInflightKey = "";
+
+  if (tenantId && context.requestId) {
+    const idpResult = await beginAiRequest({
+      tenantId,
+      requestId: context.requestId,
+      routeKey: modelKey,
+      provider: route.provider,
+      model: route.model,
+    });
+
+    if (idpResult.outcome === "duplicate_inflight") {
+      // Case C — another execution of this request_id is in progress
+      const latencyMs = Date.now() - startMs;
+      const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
+      emitRunnerLog({
+        feature, model: route.model, latencyMs, guardState: "normal",
+        success: false, error: "duplicate_inflight",
+      });
+      throw new AiDuplicateInflightError({ ...meta, requestId: context.requestId });
+    }
+
+    if (idpResult.outcome === "duplicate_replay") {
+      // Case D — prior completed result available; return it without any provider call
+      const latencyMs = Date.now() - startMs;
+      // Phase 4F: request_replayed event — idempotency replay path.
+      if (tenantId) {
+        recordRequestReplayedEvent({
+          tenantId,
+          requestId: context.requestId ?? null,
+          replaySource: "idempotency",
+        });
+      }
+      emitRunnerLog({
+        feature, model: route.model, latencyMs, guardState: "normal",
+        success: true, duplicateReplay: true,
+      });
+      return idpResult.payload;
+    }
+
+    // outcome = "owned" — we have exclusive execution rights
+    idpOwned = true;
+    idpStateId = idpResult.stateId;
+    idpInflightKey = idpResult.inflightKey;
+
+    // Phase 4F: request_started event — ownership acquired, execution begins.
+    if (tenantId) {
+      recordRequestStartedEvent({
+        tenantId,
+        requestId: context.requestId ?? null,
+        routeKey: modelKey,
+        provider: route.provider,
+        model: route.model,
+      });
+    }
+  }
+
+  // ── Step 4: Resolve effective safety config ───────────────────────────────────
   const safetyConfig = await resolveEffectiveSafetyConfig(tenantId);
 
-  // Shared meta for all safety errors (latency will be ~0ms — checks are pre-flight)
   const safetyMeta: AiErrorMeta = { feature, model: route.model, latencyMs: Date.now() - startMs };
   const safetyContext = {
     tenantId: tenantId ?? "anonymous",
@@ -140,9 +249,7 @@ export async function runAiCall(
     meta: safetyMeta,
   };
 
-  // ── Step 4: Token cap precheck ───────────────────────────────────────────────
-  // Rejects oversized inputs before any API spend.
-  // Uses chars/4 approximation. Never silently trims.
+  // ── Step 5: Token cap precheck ───────────────────────────────────────────────
   if (tenantId) {
     await checkTokenCap({
       userInput: input.userInput,
@@ -151,9 +258,7 @@ export async function runAiCall(
     });
   }
 
-  // ── Step 5: Rate limit check ─────────────────────────────────────────────────
-  // Checks requests_per_minute and requests_per_hour.
-  // Both windows use rolling counts from ai_usage. Fail-open on DB error.
+  // ── Step 6: Rate limit check ─────────────────────────────────────────────────
   if (tenantId) {
     await checkRateLimit({
       safetyConfig,
@@ -161,9 +266,7 @@ export async function runAiCall(
     });
   }
 
-  // ── Step 6: Concurrency guard acquire ────────────────────────────────────────
-  // Process-local in-flight counter per tenant.
-  // MUST be released in the finally block below.
+  // ── Step 7: Concurrency guard acquire ────────────────────────────────────────
   let concurrencyAcquired = false;
   if (tenantId) {
     await acquireConcurrencySlot({
@@ -173,11 +276,12 @@ export async function runAiCall(
     concurrencyAcquired = true;
   }
 
-  try {
-    // ── Step 7: Budget/usage guardrail ─────────────────────────────────────────
-    // If tenantId is absent, guardrails are skipped entirely.
-    // Guard DB failures are caught inside guards.ts — they return null/0 safely.
+  // Phase 3L: tracks the step number acquired for the current provider call.
+  // null = no step was acquired (cache hit, replay, pre-flight block, or no request_id).
+  let acquiredStepNumber: number | null = null;
 
+  try {
+    // ── Step 8: Budget/usage guardrail ─────────────────────────────────────────
     let guardState: AiUsageState = "normal";
     let guardLimit: AiUsageLimit | null = null;
     let guardCurrentUsageUsd = 0;
@@ -194,7 +298,6 @@ export async function runAiCall(
       }
     }
 
-    // Hard stop — log status="blocked" and throw. No provider call.
     if (guardState === "blocked") {
       const latencyMs = Date.now() - startMs;
       const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
@@ -226,21 +329,130 @@ export async function runAiCall(
       throw new AiBudgetExceededError(meta);
     }
 
-    // ── Step 8: Budget mode policy ──────────────────────────────────────────────
+    // ── Step 8.5: Wallet hard-limit check (Phase 4C) ────────────────────────────
+    // Placement: after budget guard (step 8), before provider call path.
+    // Only runs for tenant-scoped calls. Anonymous calls skip wallet enforcement.
+    //
+    // If available_balance_usd <= hard_limit_usd on tenant_credit_accounts,
+    // throws AiWalletLimitError (402). No provider call, no billing row, no debit.
+    //
+    // Fail-open: DB errors on the check allow the call through (see wallet.ts).
+    // Hard limit default is 0 — tenant with no credits account is blocked by default.
+    if (tenantId) {
+      const walletMeta: AiErrorMeta = { feature, model: route.model, latencyMs: Date.now() - startMs };
+      await checkWalletHardLimit({ tenantId, meta: walletMeta });
+    }
+
+    // ── Step 8.7: Feature entitlement enforcement (Phase 4O) ─────────────────────
+    // Placement: after wallet hard-limit (step 8.5), before cache lookup / provider call.
+    // Only runs for tenant-scoped calls. Anonymous calls skip entitlement check.
+    //
+    // If feature flag is disabled on the tenant's active plan, throws EntitlementBlockedError.
+    // No provider call, no ai_usage row, no billing row for blocked features.
+    // No active subscription = fail-open (existing tenants not blocked during migration).
+    if (tenantId && feature) {
+      await assertTenantFeatureEntitled(tenantId, feature);
+    }
+
+    // ── Step 9: Budget mode policy ──────────────────────────────────────────────
     const effectiveSystemPrompt =
       guardState === "budget_mode"
         ? `${BUDGET_MODE_POLICY.systemPromptPrefix}${input.systemPrompt}`
         : input.systemPrompt;
 
-    // Enforce output token cap centrally.
-    // Safety cap (from config/DB) applies always.
-    // Budget mode further restricts to 512 tokens (more conservative wins).
     const effectiveMaxOutputTokens =
       guardState === "budget_mode"
         ? Math.min(BUDGET_MODE_POLICY.maxOutputTokens, safetyConfig.maxOutputTokens)
         : safetyConfig.maxOutputTokens;
 
-    // ── Step 9: Provider call ───────────────────────────────────────────────────
+    // ── Step 10: Cache policy resolve + lookup ───────────────────────────────────
+    // Only tenant-scoped calls use the cache. Anonymous calls skip caching entirely.
+    // Cache lookup uses the effective system prompt (post-budget-mode adjustment)
+    // so budget_mode and normal responses are keyed separately.
+    const cachePolicy = getRouteCachePolicy(modelKey);
+
+    if (cachePolicy.enabled && tenantId) {
+      const cacheCtx = {
+        tenantId,
+        routeKey: modelKey,
+        provider: route.provider,
+        model: route.model,
+        maxOutputTokens: effectiveMaxOutputTokens,
+        systemPrompt: effectiveSystemPrompt,
+        userInput: input.userInput,
+        requestId: context.requestId,
+        feature,
+      };
+
+      const lookup = await lookupCachedResponse(cacheCtx);
+
+      if (lookup.hit) {
+        // Cache HIT — return without any provider call or usage cost row.
+        // Idempotency + concurrency slots released in finally block.
+        //
+        // Phase 4E.2 fix — cache hit idempotency finalization:
+        // Before returning, mark the idempotency state as completed so that
+        // future requests with the same request_id receive duplicate_replay
+        // instead of duplicate_inflight (which would happen if the state
+        // remained in_progress indefinitely after a cache hit).
+        if (idpOwned && idpStateId && tenantId && context.requestId) {
+          void markAiRequestCompleted({
+            stateId: idpStateId,
+            tenantId,
+            requestId: context.requestId,
+            routeKey: modelKey,
+            provider: route.provider,
+            model: route.model,
+            responsePayload: lookup.result,
+          });
+        }
+        // Phase 4F: cache_hit_replayed event — cache hit, no provider call.
+        recordCacheHitReplayedEvent({
+          tenantId,
+          requestId: context.requestId ?? null,
+          routeKey: modelKey,
+        });
+        emitRunnerLog({
+          feature,
+          model: route.model,
+          latencyMs: Date.now() - startMs,
+          guardState,
+          success: true,
+          cacheHit: true,
+        });
+        return lookup.result;
+      }
+      // Cache MISS — cache_miss event already recorded inside lookupCachedResponse.
+    }
+
+    // ── Step 10.5 (Phase 3L): Step budget acquire ────────────────────────────────
+    // Runs ONLY on the provider-call path (after cache miss or cache-disabled).
+    // Cache hits, duplicate replays, and pre-flight blocks never reach this point.
+    // If over the per-request step limit, throws AiStepBudgetExceededError.
+    if (tenantId && context.requestId) {
+      acquiredStepNumber = await acquireAiStep({
+        tenantId,
+        requestId: context.requestId,
+        feature,
+        routeKey: modelKey,
+        provider: route.provider,
+        model: route.model,
+        meta: { feature, model: route.model, latencyMs: Date.now() - startMs },
+      });
+    }
+
+    // ── Step 11: Provider call ───────────────────────────────────────────────────
+    // Phase 4F: provider_call_started event — about to invoke the AI provider.
+    if (tenantId) {
+      recordProviderCallStartedEvent({
+        tenantId,
+        requestId: context.requestId ?? null,
+        provider: route.provider,
+        model: route.model,
+        routeKey: modelKey,
+      });
+    }
+
     const result = await provider.generateText({
       model: route.model,
       systemPrompt: effectiveSystemPrompt,
@@ -257,7 +469,7 @@ export async function runAiCall(
     const inputTokensBillable = result.usage?.input_tokens ?? null;
     const outputTokensBillable = result.usage?.output_tokens ?? null;
 
-    // ── Step 10: Usage logging + threshold events ───────────────────────────────
+    // ── Step 12: Usage logging + threshold events ───────────────────────────────
     void logAiUsage({
       feature,
       provider: route.provider,
@@ -280,6 +492,18 @@ export async function runAiCall(
       reasoningTokens: result.usage?.reasoning_tokens ?? 0,
     });
 
+    // Phase 15: Record AI latency telemetry — fire-and-forget (INV-OBS-1, INV-OBS-6)
+    collectAiLatency({
+      tenantId: tenantId ?? null,
+      model: route.model,
+      provider: route.provider,
+      latencyMs,
+      tokensIn: result.usage?.input_tokens ?? null,
+      tokensOut: result.usage?.output_tokens ?? null,
+      costUsd: estimatedCostUsd ?? null,
+      requestId: context.requestId ?? null,
+    });
+
     if (tenantId && guardLimit && guardState !== "normal") {
       void maybeRecordThresholdEvent({
         tenantId,
@@ -290,9 +514,20 @@ export async function runAiCall(
       });
     }
 
-    emitRunnerLog({ feature, model: route.model, latencyMs, guardState, success: true, estimatedCostUsd });
+    // Phase 3L: Record step completed for a successful provider call.
+    if (tenantId && context.requestId && acquiredStepNumber !== null) {
+      recordStepCompleted({
+        tenantId,
+        requestId: context.requestId,
+        stepNumber: acquiredStepNumber,
+        routeKey: modelKey,
+        feature,
+        provider: route.provider,
+        model: route.model,
+      });
+    }
 
-    return {
+    const finalResult: AiCallResult = {
       text: result.text,
       usage: result.usage
         ? {
@@ -306,20 +541,99 @@ export async function runAiCall(
       feature,
     };
 
+    // ── Step 13: Cache write (success only, cacheable routes only) ───────────────
+    // Only runs on cache miss + successful provider call + non-empty response.
+    // Blocked/error outcomes never reach this point.
+    // storeCachedResponse is fail-open — errors are swallowed internally.
+    if (cachePolicy.enabled && tenantId) {
+      void storeCachedResponse(
+        {
+          tenantId,
+          routeKey: modelKey,
+          provider: route.provider,
+          model: route.model,
+          maxOutputTokens: effectiveMaxOutputTokens,
+          systemPrompt: effectiveSystemPrompt,
+          userInput: input.userInput,
+          requestId: context.requestId,
+          feature,
+        },
+        finalResult,
+      );
+    }
+
+    // ── Step 14: Mark request completed (idempotency state → completed) ──────────
+    // Stores normalised response for future duplicate replay.
+    // No ai_usage row on replay — cost is zero for subsequent identical requests.
+    if (idpOwned && idpStateId && tenantId && context.requestId) {
+      void markAiRequestCompleted({
+        stateId: idpStateId,
+        tenantId,
+        requestId: context.requestId,
+        routeKey: modelKey,
+        provider: route.provider,
+        model: route.model,
+        responsePayload: finalResult,
+      });
+    }
+
+    // Phase 4F: request_completed event — normal provider-call path finished successfully.
+    if (tenantId) {
+      recordRequestCompletedEvent({
+        tenantId,
+        requestId: context.requestId ?? null,
+        latencyMs,
+      });
+    }
+
+    emitRunnerLog({ feature, model: route.model, latencyMs, guardState, success: true, estimatedCostUsd });
+
+    return finalResult;
+
   } catch (err) {
-    // Re-throw typed safety/budget errors without wrapping them in a generic error
     if (
       err instanceof AiTokenCapError ||
       err instanceof AiRateLimitError ||
       err instanceof AiConcurrencyError ||
-      err instanceof AiBudgetExceededError
+      err instanceof AiBudgetExceededError ||
+      err instanceof AiDuplicateInflightError ||
+      // Phase 3L: step budget exceeded is a pre-flight block — no provider call made.
+      err instanceof AiStepBudgetExceededError ||
+      // Phase 4C: wallet hard-limit block — no provider call, no billing row, no debit.
+      err instanceof AiWalletLimitError
     ) {
+      // Safety/idempotency blocks — mark failed if we own a state row
+      if (idpOwned && idpStateId && tenantId && context.requestId) {
+        void markAiRequestFailed({
+          stateId: idpStateId,
+          tenantId,
+          requestId: context.requestId,
+          routeKey: modelKey,
+          provider: route.provider,
+          model: route.model,
+          errorCode: (err as { errorCode?: string }).errorCode ?? "safety_block",
+        });
+      }
       throw err;
     }
 
     const latencyMs = Date.now() - startMs;
     const meta: AiErrorMeta = { feature, model: route.model, latencyMs };
     const aiErr = normalizeError(err, meta);
+
+    // Phase 3L: provider call was attempted (step was acquired) but failed.
+    // Count this as a completed step — the provider attempt consumed a slot.
+    if (tenantId && context.requestId && acquiredStepNumber !== null) {
+      recordStepCompleted({
+        tenantId,
+        requestId: context.requestId,
+        stepNumber: acquiredStepNumber,
+        routeKey: modelKey,
+        feature,
+        provider: route.provider,
+        model: route.model,
+      });
+    }
 
     void logAiUsage({
       feature,
@@ -334,15 +648,32 @@ export async function runAiCall(
       estimatedCostUsd: null,
     });
 
+    // Mark idempotency state as failed — allows safe retry
+    if (idpOwned && idpStateId && tenantId && context.requestId) {
+      void markAiRequestFailed({
+        stateId: idpStateId,
+        tenantId,
+        requestId: context.requestId,
+        routeKey: modelKey,
+        provider: route.provider,
+        model: route.model,
+        errorCode: aiErr.errorCode,
+      });
+    }
+
     emitRunnerLog({ feature, model: route.model, latencyMs, guardState: "normal", success: false, error: aiErr.message });
     throw aiErr;
 
   } finally {
-    // ── Step 11: Always release concurrency slot ────────────────────────────────
-    // Runs on success, error, safety block, and budget block.
-    // No slot leak possible — if acquire succeeded, release always runs.
+    // ── Step 15: Always release slots ───────────────────────────────────────────
+    // Runs on success, cache hit, replay, error, safety block, and budget block.
     if (concurrencyAcquired && tenantId) {
       releaseConcurrencySlot(tenantId);
+    }
+    // Release idempotency inflight ownership.
+    // Must run even on throw — prevents stale in-process registry entries.
+    if (idpOwned && idpInflightKey) {
+      releaseAiRequestOwnership(idpInflightKey);
     }
   }
 }
@@ -378,15 +709,19 @@ function emitRunnerLog(entry: {
   success: boolean;
   error?: string;
   estimatedCostUsd?: number | null;
+  cacheHit?: boolean;
+  duplicateReplay?: boolean;
 }): void {
   const status = entry.success ? "✓" : "✗";
   const guardSuffix = entry.guardState !== "normal" ? ` | guard=${entry.guardState}` : "";
+  const cacheSuffix = entry.cacheHit ? " | cache=HIT" : "";
+  const replaySuffix = entry.duplicateReplay ? " | idp=REPLAY" : "";
   const errSuffix = entry.error ? ` | error="${entry.error.slice(0, 120)}"` : "";
   const costSuffix =
     entry.estimatedCostUsd != null
       ? ` | cost=$${entry.estimatedCostUsd.toFixed(8)}`
       : "";
   console.log(
-    `[ai:runner] ${status} feature=${entry.feature} model=${entry.model} latency=${entry.latencyMs}ms${costSuffix}${guardSuffix}${errSuffix}`,
+    `[ai:runner] ${status} feature=${entry.feature} model=${entry.model} latency=${entry.latencyMs}ms${costSuffix}${cacheSuffix}${replaySuffix}${guardSuffix}${errSuffix}`,
   );
 }

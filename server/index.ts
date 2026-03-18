@@ -3,9 +3,21 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { authMiddleware } from "./middleware/auth";
+import { requestIdMiddleware, structuredLoggingMiddleware } from "./middleware/request-id";
+import { securityHeaders } from "./middleware/security-headers";
+import { cspMiddleware } from "./middleware/csp";
+import { responseSecurityMiddleware } from "./middleware/response-security";
+import { globalApiLimiter } from "./middleware/rate-limit";
 
 const app = express();
 const httpServer = createServer(app);
+
+// Phase 13.2: security headers — FIRST, before all routes and body parsing
+app.use(securityHeaders);
+// Phase 13.2: explicit CSP header
+app.use(cspMiddleware);
+// Phase 13.2: response header hardening (overrides specific helmet defaults)
+app.use(responseSecurityMiddleware);
 
 declare module "http" {
   interface IncomingMessage {
@@ -13,15 +25,25 @@ declare module "http" {
   }
 }
 
+// Phase 13.2: JSON body limit 1mb — rejects oversized payloads (INV-SEC-H4)
 app.use(
   express.json({
+    limit: "1mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
+// Phase 13.2: urlencoded limit aligned to 1mb
+app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 
-app.use(express.urlencoded({ extended: false }));
+// Phase 13.1: request ID + structured logging (before auth so all requests are traced)
+app.use(requestIdMiddleware);
+app.use(structuredLoggingMiddleware);
+
+// Phase 13.2: global API rate limiter — 1000 req/15 min per actor/IP (replaces Phase 13.1 inline)
+app.use("/api", globalApiLimiter);
+
 app.use(authMiddleware);
 
 export function log(message: string, source = "express") {
@@ -64,17 +86,21 @@ app.use((req, res, next) => {
 (async () => {
   await registerRoutes(httpServer, app);
 
-  app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  // Phase 13.1 hardened global error handler — structured response, no stack traces
+  app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
+    const requestId = (req as any).requestId ?? null;
 
-    console.error("Internal Server Error:", err);
+    if (res.headersSent) return;
 
-    if (res.headersSent) {
-      return next(err);
-    }
+    // Never expose stack traces to clients
+    const message = status < 500 ? (err.message || "Bad request") : "Internal server error";
 
-    return res.status(status).json({ message });
+    return res.status(status).json({
+      error_code: err.code || err.errorCode || (status < 500 ? "CLIENT_ERROR" : "INTERNAL_ERROR"),
+      message,
+      request_id: requestId,
+    });
   });
 
   // importantly only setup vite in development and after

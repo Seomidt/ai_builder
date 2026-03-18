@@ -7,6 +7,7 @@ import {
   Plug,
   Settings,
   ChevronRight,
+  ShieldAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -19,8 +20,13 @@ const navItems = [
   { href: "/settings", label: "Settings", icon: Settings },
 ];
 
+const opsItems = [
+  { href: "/ops", label: "Ops Console", icon: ShieldAlert },
+];
+
 export function Sidebar() {
   const [location] = useLocation();
+  const isOpsSection = location.startsWith("/ops");
 
   return (
     <aside className="flex flex-col w-56 shrink-0 h-screen bg-sidebar border-r border-sidebar-border">
@@ -35,16 +41,43 @@ export function Sidebar() {
       {/* Navigation */}
       <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
         {navItems.map(({ href, label, icon: Icon }) => {
-          const isActive = href === "/" ? location === "/" : location.startsWith(href);
+          const isActive = href === "/" ? location === "/" : location.startsWith(href) && !isOpsSection;
           return (
             <Link
               key={href}
               href={href}
-              data-testid={`nav-link-${label.toLowerCase()}`}
+              data-testid={`nav-link-${label.toLowerCase().replace(/\s/g, "-")}`}
               className={cn(
                 "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
                 isActive
                   ? "bg-sidebar-primary/15 text-sidebar-primary border border-sidebar-primary/25"
+                  : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent",
+              )}
+            >
+              <Icon className="w-4 h-4 shrink-0" />
+              <span className="flex-1">{label}</span>
+              {isActive && <ChevronRight className="w-3 h-3 opacity-60" />}
+            </Link>
+          );
+        })}
+
+        {/* Ops Console section */}
+        <div className="pt-3 pb-1">
+          <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40 mb-0.5">
+            Platform Ops
+          </p>
+        </div>
+        {opsItems.map(({ href, label, icon: Icon }) => {
+          const isActive = location.startsWith(href);
+          return (
+            <Link
+              key={href}
+              href={href}
+              data-testid={`nav-link-${label.toLowerCase().replace(/\s/g, "-")}`}
+              className={cn(
+                "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
+                isActive
+                  ? "bg-destructive/15 text-destructive border border-destructive/25"
                   : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent",
               )}
             >

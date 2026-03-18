@@ -132,6 +132,30 @@ export async function resolveEffectiveSafetyConfig(tenantId: string | null | und
 // ── Current request count ─────────────────────────────────────────────────────
 
 /**
+ * In-process fallback rate limiter: max 5 requests per minute per tenant.
+ * Used when the DB check fails to enforce fail-closed behavior.
+ * Map: tenantId → [timestamp, ...] sliding window of request timestamps.
+ *
+ * Returns the current count in the sliding window.
+ * Also records the current request timestamp.
+ * Callers compare the returned count against FALLBACK_LIMIT_PER_MINUTE.
+ */
+export const FALLBACK_LIMIT_PER_MINUTE = 5;
+const fallbackWindowMs = 60_000;
+const fallbackRequestMap = new Map<string, number[]>();
+
+function getFallbackCount(tenantId: string): number {
+  const now = Date.now();
+  const cutoff = now - fallbackWindowMs;
+  const existing = (fallbackRequestMap.get(tenantId) ?? []).filter(
+    (ts) => ts > cutoff,
+  );
+  // Record this request attempt
+  fallbackRequestMap.set(tenantId, [...existing, now]);
+  return existing.length; // count BEFORE this request
+}
+
+/**
  * Count the number of AI requests made by a tenant in a rolling time window.
  *
  * Counts rows in ai_usage for the given tenant within the last windowSeconds.
@@ -140,7 +164,10 @@ export async function resolveEffectiveSafetyConfig(tenantId: string | null | und
  * Rate-limited calls go to request_safety_events instead of ai_usage, so the
  * count naturally stays at or below the limit (self-limiting by design).
  *
- * Returns 0 on DB failure (fail-open — prefer allowing calls over false blocks).
+ * Phase 13.1 hardening: FAIL CLOSED on DB failure.
+ *   - DB failure triggers in-process fallback (max 5 req/min per tenant).
+ *   - Transient connection errors use the fallback limit.
+ *   - Persistent failures reject via in-process fallback.
  */
 export async function getCurrentRequestCount(
   tenantId: string,
@@ -160,13 +187,22 @@ export async function getCurrentRequestCount(
     return rows[0]?.total ?? 0;
   } catch (err) {
     console.warn(
-      "[ai:request-safety] Failed to count requests for tenant",
+      "[ai:request-safety] DB check failed — applying in-process fallback limit for tenant",
       tenantId,
       "window=",
       windowSeconds,
       ":",
       err instanceof Error ? err.message : err,
     );
+    // Phase 13.1: fail-closed — apply in-process fallback rather than allow all through.
+    // getFallbackCount records this request and returns the count before this request.
+    // If count >= FALLBACK_LIMIT_PER_MINUTE, return the limit so checkRateLimit blocks.
+    const fallbackCount = getFallbackCount(tenantId);
+    if (fallbackCount >= FALLBACK_LIMIT_PER_MINUTE) {
+      // Return a value >= requestsPerMinute to trigger block in checkRateLimit
+      return AI_SAFETY_DEFAULTS.requestsPerMinute;
+    }
+    // Under fallback limit — return 0 to allow through (but we've recorded the attempt)
     return 0;
   }
 }

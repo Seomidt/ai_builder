@@ -24,6 +24,9 @@ import { sql } from "drizzle-orm";
 import { db } from "../../db";
 import { aiUsage, tenantAiUsagePeriods } from "@shared/schema";
 import { getCurrentPeriod } from "./usage-periods";
+import { runAnomalyDetection } from "./anomaly-detector";
+import { maybeRecordAiBillingUsage } from "./billing";
+import { recordUsageRecordedEvent } from "./billing-events";
 
 export interface LogAiUsagePayload {
   tenantId?: string | null;
@@ -102,62 +105,169 @@ export interface LogAiUsagePayload {
  *   "error"   — provider call failed — aggregate is NOT updated
  *   "blocked" — guardrail hard-stop — aggregate is NOT updated (no provider usage occurred)
  *
- * Fire-and-forget: any database error is caught and logged to console only.
- * The calling code never sees a thrown error from this function.
+ * Phase 13.1 hardening: usage insert and period aggregate are wrapped in a single
+ * Drizzle transaction. Billing events and anomaly detection remain fire-and-forget.
+ */
+/**
+ * Insert a row into ai_usage and, on success, atomically upsert the period aggregate.
+ *
+ * Phase 13.1 hardening — Billing Atomicity:
+ *   The usage insert and period aggregate upsert are wrapped in a single Drizzle
+ *   transaction so they either both commit or both roll back. This prevents partial
+ *   writes where an ai_usage row exists without an updated period aggregate.
+ *
+ *   Billing event (maybeRecordAiBillingUsage) and anomaly detection remain
+ *   fire-and-forget outside the transaction — they are best-effort and must not
+ *   block or roll back the core usage write.
  */
 export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
-  let inserted: { id: string }[];
+  let insertedId: string | null = null;
 
   try {
-    inserted = await db
-      .insert(aiUsage)
-      .values({
-        tenantId: payload.tenantId ?? null,
-        userId: payload.userId ?? null,
-        requestId: payload.requestId ?? null,
-        feature: payload.feature,
-        provider: payload.provider ?? null,
-        model: payload.model,
-        promptTokens: payload.promptTokens ?? 0,
-        completionTokens: payload.completionTokens ?? 0,
-        totalTokens: payload.totalTokens ?? 0,
-        inputPreview: payload.inputPreview ?? null,
-        status: payload.status,
-        errorMessage: payload.errorMessage ?? null,
-        latencyMs: payload.latencyMs ?? null,
-        estimatedCostUsd: payload.estimatedCostUsd != null
-          ? String(payload.estimatedCostUsd)
-          : null,
-        pricingSource: payload.pricingSource ?? null,
-        pricingVersion: payload.pricingVersion ?? null,
-        inputTokensBillable: payload.inputTokensBillable ?? null,
-        outputTokensBillable: payload.outputTokensBillable ?? null,
-        cachedInputTokens: payload.cachedInputTokens ?? 0,
-        reasoningTokens: payload.reasoningTokens ?? 0,
-      })
-      .onConflictDoNothing()
-      .returning({ id: aiUsage.id });
+    // Phase 13.1: wrap usage insert + period aggregate in a single transaction
+    await db.transaction(async (tx) => {
+      const inserted = await tx
+        .insert(aiUsage)
+        .values({
+          tenantId: payload.tenantId ?? null,
+          userId: payload.userId ?? null,
+          requestId: payload.requestId ?? null,
+          feature: payload.feature,
+          provider: payload.provider ?? null,
+          model: payload.model,
+          promptTokens: payload.promptTokens ?? 0,
+          completionTokens: payload.completionTokens ?? 0,
+          totalTokens: payload.totalTokens ?? 0,
+          inputPreview: payload.inputPreview ?? null,
+          status: payload.status,
+          errorMessage: payload.errorMessage ?? null,
+          latencyMs: payload.latencyMs ?? null,
+          estimatedCostUsd: payload.estimatedCostUsd != null
+            ? String(payload.estimatedCostUsd)
+            : null,
+          pricingSource: payload.pricingSource ?? null,
+          pricingVersion: payload.pricingVersion ?? null,
+          inputTokensBillable: payload.inputTokensBillable ?? null,
+          outputTokensBillable: payload.outputTokensBillable ?? null,
+          cachedInputTokens: payload.cachedInputTokens ?? 0,
+          reasoningTokens: payload.reasoningTokens ?? 0,
+        })
+        .onConflictDoNothing()
+        .returning({ id: aiUsage.id });
+
+      // Duplicate request_id — skip aggregate (no double-count)
+      if (inserted.length === 0) {
+        console.warn(
+          "[ai/usage] Duplicate request_id detected — skipping log:",
+          payload.requestId,
+          "tenant:", payload.tenantId,
+        );
+        return; // exits the transaction cleanly
+      }
+
+      insertedId = inserted[0].id;
+
+      // Only aggregate successful calls with a known tenant — inside same transaction
+      if (payload.status === "success" && payload.tenantId) {
+        const { periodStart, periodEnd } = getCurrentPeriod();
+        const cost = payload.estimatedCostUsd ?? 0;
+        const inputTokens = payload.promptTokens ?? 0;
+        const outputTokens = payload.completionTokens ?? 0;
+        const tokens = payload.totalTokens ?? 0;
+
+        await tx
+          .insert(tenantAiUsagePeriods)
+          .values({
+            tenantId: payload.tenantId,
+            periodStart,
+            periodEnd,
+            totalCostUsd: String(cost),
+            totalRequests: 1,
+            totalInputTokens: inputTokens,
+            totalOutputTokens: outputTokens,
+            totalTokens: tokens,
+          })
+          .onConflictDoUpdate({
+            target: [
+              tenantAiUsagePeriods.tenantId,
+              tenantAiUsagePeriods.periodStart,
+              tenantAiUsagePeriods.periodEnd,
+            ],
+            set: {
+              totalCostUsd: sql`${tenantAiUsagePeriods.totalCostUsd} + excluded.total_cost_usd`,
+              totalRequests: sql`${tenantAiUsagePeriods.totalRequests} + excluded.total_requests`,
+              totalInputTokens: sql`${tenantAiUsagePeriods.totalInputTokens} + excluded.total_input_tokens`,
+              totalOutputTokens: sql`${tenantAiUsagePeriods.totalOutputTokens} + excluded.total_output_tokens`,
+              totalTokens: sql`${tenantAiUsagePeriods.totalTokens} + excluded.total_tokens`,
+              updatedAt: sql`now()`,
+            },
+          });
+      }
+    });
   } catch (err) {
-    // Logging must never crash the application
-    console.error("[ai/usage] Failed to log AI usage:", err instanceof Error ? err.message : err);
+    // Transaction rolled back — logging must never crash the application
+    console.error("[ai/usage] Transaction failed — usage not logged:", err instanceof Error ? err.message : err);
     return;
   }
 
-  // Empty result means the insert was a no-op due to duplicate request_id
-  if (inserted.length === 0) {
-    console.warn(
-      "[ai/usage] Duplicate request_id detected — skipping log:",
-      payload.requestId,
-      "tenant:", payload.tenantId,
-    );
-    return;
+  if (!insertedId) return; // duplicate or rolled back
+
+  // Phase 4F: fire usage_recorded billing event after committed transaction.
+  // Best-effort — never blocks billing or runtime flow.
+  if (payload.tenantId && payload.status === "success") {
+    recordUsageRecordedEvent({
+      tenantId: payload.tenantId,
+      requestId: payload.requestId ?? null,
+      usageId: insertedId,
+      provider: payload.provider ?? null,
+      model: payload.model,
+      estimatedCostUsd: payload.estimatedCostUsd ?? null,
+    });
   }
 
-  // Only aggregate successful calls with a known tenant.
-  // "error" and "blocked" rows must not increment the aggregate — no provider usage occurred.
+  // Only aggregate and bill successful calls with a known tenant.
   if (payload.status !== "success" || !payload.tenantId) return;
 
-  await upsertUsagePeriodAggregate(payload);
+  // Phase 4A: billing write after confirmed committed transaction.
+  // Fire-and-forget — billing failure must never break AI runtime.
+  maybeRecordAiBillingUsage({
+    usageId: insertedId,
+    tenantId: payload.tenantId,
+    requestId: payload.requestId ?? null,
+    feature: payload.feature,
+    routeKey: null,
+    provider: payload.provider ?? null,
+    model: payload.model,
+    inputTokensBillable: payload.inputTokensBillable ?? payload.promptTokens ?? 0,
+    outputTokensBillable: payload.outputTokensBillable ?? payload.completionTokens ?? 0,
+    totalTokensBillable: payload.totalTokens ?? 0,
+    providerCostUsd: payload.estimatedCostUsd ?? 0,
+  }).catch((err) => {
+    console.error(
+      "[ai/usage] Billing write error (suppressed):",
+      err instanceof Error ? err.message : err,
+    );
+  });
+
+  // Phase 3K: anomaly detection after confirmed committed transaction.
+  // Fire-and-forget — must never block or throw into the caller.
+  runAnomalyDetection({
+    tenantId: payload.tenantId,
+    requestId: payload.requestId,
+    feature: payload.feature,
+    routeKey: null,
+    provider: payload.provider,
+    model: payload.model,
+    estimatedCostUsd: payload.estimatedCostUsd,
+    totalTokens: payload.totalTokens,
+    completionTokens: payload.completionTokens,
+    outputTokensBillable: payload.outputTokensBillable,
+  }).catch((err) => {
+    console.error(
+      "[ai/usage] Anomaly detection error (suppressed):",
+      err instanceof Error ? err.message : err,
+    );
+  });
 }
 
 /**
