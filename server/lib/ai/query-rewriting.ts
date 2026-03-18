@@ -102,13 +102,22 @@ const SYNONYM_EXPANSIONS: Record<string, string[]> = {
  * Normalize a retrieval query deterministically (INV-QUAL2).
  * Preserves semantic content; strips only redundant whitespace and punctuation artifacts.
  */
+// Phase 42 fix: cap input length to prevent resource exhaustion on pathological inputs.
+// The regex patterns in this function are linear (character classes, no nested groups),
+// but unbounded input length still creates O(n) memory and CPU pressure.
+const MAX_QUERY_INPUT_LENGTH = 2_000;
+
 export function normalizeRetrievalQuery(query: string): string {
   if (!query || typeof query !== "string") return "";
-  return query
+  // Cap input length BEFORE any regex processing — prevents resource exhaustion
+  const capped = query.length > MAX_QUERY_INPUT_LENGTH
+    ? query.slice(0, MAX_QUERY_INPUT_LENGTH)
+    : query;
+  return capped
     .trim()
-    .replace(/\s+/g, " ")           // condense multiple spaces
-    .replace(/^[^\w]+|[^\w?!]+$/g, "") // strip leading/trailing non-word except ? !
-    .normalize("NFKC");             // unicode normalize
+    .replace(/\s+/g, " ")              // condense multiple spaces (safe: char class, O(n))
+    .replace(/^[^\w]+|[^\w?!]+$/g, "") // strip leading/trailing non-word except ? ! (safe: anchored char class)
+    .normalize("NFKC");                // unicode normalize
 }
 
 // ── Expansion ─────────────────────────────────────────────────────────────────

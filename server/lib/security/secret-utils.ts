@@ -136,8 +136,16 @@ export function generateSecret(params?: {
     case "base64":         return buf.toString("base64");
     case "urlsafe-base64": return buf.toString("base64url");
     case "alphanumeric": {
+      // Phase 42 fix: modulo bias removed.
+      // chars.length = 62, which does NOT evenly divide 256, so `b % 62` is biased.
+      // Use crypto.randomInt(0, chars.length) which uses rejection sampling internally
+      // and guarantees a uniform distribution over [0, chars.length).
       const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-      return Array.from(buf).map(b => chars[b % chars.length]).join("");
+      const result: string[] = [];
+      for (let i = 0; i < bytes; i++) {
+        result.push(chars[crypto.randomInt(0, chars.length)]);
+      }
+      return result.join("");
     }
   }
 }

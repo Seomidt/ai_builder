@@ -210,7 +210,7 @@ export async function getJobThroughput(
         FROM knowledge_processing_jobs
         WHERE status IN ('queued','running')
           AND created_at >= '${cutoff}'
-          ${filter.replace("AND", "AND")}
+          ${filter}
         GROUP BY DATE_TRUNC('minute', created_at)
       ) t
     `)),

@@ -15,6 +15,7 @@
 
 import { createHash } from "crypto";
 import { KnowledgeInvariantError } from "./knowledge-bases";
+import { sanitizePlainTextInput } from "../security/content-sanitizer";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -496,17 +497,14 @@ export async function parseImportedDocumentVersion(
 
 // ─── Utility functions ────────────────────────────────────────────────────────
 
+// Phase 42 fix: replaced naive regex strip + manual entity decode chain.
+// Old: /<script[^>]*>[\s\S]*?<\/script>/gi missed </script > (space before >)
+// Old: .replace(/&amp;/g, "&") caused double-unescape on double-encoded input
+// New: sanitizePlainTextInput handles all script variants + encoding layers safely.
 function stripTags(html: string): string {
-  return html
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
+  return sanitizePlainTextInput(html)
+    .replace(/&nbsp;/g, " ")  // sanitizePlainTextInput passes &nbsp; as literal — decode it
+    .replace(/\s{2,}/g, " ")
     .trim();
 }
 

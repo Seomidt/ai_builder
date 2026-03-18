@@ -6,6 +6,7 @@
 
 import pg from "pg";
 import crypto from "crypto";
+import { extractKeyPrefix, verifyKeyHash } from "./key-management";
 
 function getClient(): pg.Client {
   return new pg.Client({
@@ -109,22 +110,33 @@ export async function resolveServiceAccountActor(params: {
   tenantId: string;
 }): Promise<ActorResolutionResult> {
   const { presentedKey, tenantId } = params;
-  const keyHash = crypto.createHash("sha256").update(presentedKey).digest("hex");
+  // Phase 42: lookup by key_prefix (not by hash) — supports argon2id (non-deterministic).
+  const keyPrefix = extractKeyPrefix(presentedKey);
+  if (!keyPrefix) {
+    return { resolved: false, reason: "Service account key has invalid format", reasonCode: "ACTOR_NOT_RESOLVED" };
+  }
   const client = getClient();
   await client.connect();
   try {
     const keyRow = await client.query(
-      `SELECT sak.id, sak.service_account_id, sak.key_status, sak.expires_at,
+      `SELECT sak.id, sak.service_account_id, sak.key_status, sak.expires_at, sak.key_hash,
               sa.tenant_id, sa.service_account_status
        FROM public.service_account_keys sak
        JOIN public.service_accounts sa ON sa.id = sak.service_account_id
-       WHERE sak.key_hash = $1`,
-      [keyHash],
+       WHERE sak.key_prefix = $1`,
+      [keyPrefix],
     );
     if (keyRow.rows.length === 0) {
       return { resolved: false, reason: "Service account key not found", reasonCode: "ACTOR_NOT_RESOLVED" };
     }
-    const k = keyRow.rows[0];
+    // Verify hash in code — handles argon2id (new) and SHA-256 (legacy) transparently
+    let k: typeof keyRow.rows[0] | null = null;
+    for (const candidate of keyRow.rows) {
+      if (await verifyKeyHash(presentedKey, candidate.key_hash)) { k = candidate; break; }
+    }
+    if (!k) {
+      return { resolved: false, reason: "Service account key not found", reasonCode: "ACTOR_NOT_RESOLVED" };
+    }
 
     if (k.tenant_id !== tenantId) {
       return { resolved: false, reason: "Key tenant mismatch", reasonCode: "TENANT_SCOPE_MISMATCH" };
@@ -171,20 +183,31 @@ export async function resolveApiKeyActor(params: {
   tenantId: string;
 }): Promise<ActorResolutionResult> {
   const { presentedKey, tenantId } = params;
-  const keyHash = crypto.createHash("sha256").update(presentedKey).digest("hex");
+  // Phase 42: lookup by key_prefix (not by hash) — supports argon2id (non-deterministic).
+  const keyPrefix = extractKeyPrefix(presentedKey);
+  if (!keyPrefix) {
+    return { resolved: false, reason: "API key has invalid format", reasonCode: "ACTOR_NOT_RESOLVED" };
+  }
   const client = getClient();
   await client.connect();
   try {
     const keyRow = await client.query(
-      `SELECT ak.id, ak.tenant_id, ak.api_key_status, ak.expires_at
+      `SELECT ak.id, ak.tenant_id, ak.api_key_status, ak.expires_at, ak.key_hash
        FROM public.api_keys ak
-       WHERE ak.key_hash = $1`,
-      [keyHash],
+       WHERE ak.key_prefix = $1`,
+      [keyPrefix],
     );
     if (keyRow.rows.length === 0) {
       return { resolved: false, reason: "API key not found", reasonCode: "ACTOR_NOT_RESOLVED" };
     }
-    const k = keyRow.rows[0];
+    // Verify hash in code — handles argon2id (new) and SHA-256 (legacy) transparently
+    let k: typeof keyRow.rows[0] | null = null;
+    for (const candidate of keyRow.rows) {
+      if (await verifyKeyHash(presentedKey, candidate.key_hash)) { k = candidate; break; }
+    }
+    if (!k) {
+      return { resolved: false, reason: "API key not found", reasonCode: "ACTOR_NOT_RESOLVED" };
+    }
 
     if (k.tenant_id !== tenantId) {
       return { resolved: false, reason: "API key tenant mismatch", reasonCode: "TENANT_SCOPE_MISMATCH" };

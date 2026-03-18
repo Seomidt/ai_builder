@@ -1,7 +1,17 @@
 /**
  * Phase 6 — API Key & Service Account Key Management
+ * Phase 42 — Argon2id hashing upgrade
+ *
  * INV-ID5: Keys must never be stored in plaintext.
  * INV-ID7: Revoked/expired keys must fail closed.
+ *
+ * Phase 42 fix: SHA-256 hashing replaced with argon2id (password-grade KDF).
+ * Transition strategy (backwards compatible):
+ *   - New keys:       argon2id hash stored in DB (starts with "$argon2id$")
+ *   - Legacy keys:    SHA-256 hex (64 chars) still verifiable transparently
+ *   - Verification:   detect hash type by format prefix, verify accordingly
+ *   - Lookup:         changed from WHERE key_hash = sha256 to WHERE key_prefix = prefix
+ *                     (argon2id is salted/non-deterministic → cannot lookup by hash)
  */
 
 import pg from "pg";
@@ -15,13 +25,94 @@ function getClient(): pg.Client {
 }
 
 const KEY_PREFIX_LENGTH = 8;
-const KEY_SECRET_BYTES = 32;
+const KEY_SECRET_BYTES  = 32;
 
-function generateKeyParts(): { prefix: string; secret: string; fullKey: string; hash: string } {
-  const secret = crypto.randomBytes(KEY_SECRET_BYTES).toString("hex");
-  const prefix = secret.slice(0, KEY_PREFIX_LENGTH);
+// ── Phase 42: argon2id key hashing helpers ────────────────────────────────────
+
+const ARGON2_OPTIONS = {
+  type: 2,           // argon2id (2 = argon2id in the argon2 library)
+  memoryCost: 65536, // 64 MiB
+  timeCost: 3,
+  parallelism: 4,
+};
+
+/**
+ * Detect whether a stored hash is an argon2id hash.
+ * argon2id hashes start with "$argon2id$"; SHA-256 hashes are 64-char hex strings.
+ */
+export function isArgon2idHash(hash: string): boolean {
+  return typeof hash === "string" && hash.startsWith("$argon2id$");
+}
+
+/**
+ * Extract the key prefix from a presented full key.
+ * Format: sk_{8hexchars}_{64hexchars}
+ * Prefix stored in DB: sk_{8hexchars}
+ *
+ * Returns null if the key format is not recognized.
+ */
+export function extractKeyPrefix(presentedKey: string): string | null {
+  if (!presentedKey || typeof presentedKey !== "string") return null;
+  const match = presentedKey.match(/^(sk_[0-9a-f]{8})_/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Hash a full API key using argon2id.
+ * Dynamic import to support environments where argon2 native build may not be present.
+ */
+async function hashKeyArgon2id(fullKey: string): Promise<string> {
+  const argon2 = await import("argon2");
+  return argon2.hash(fullKey, ARGON2_OPTIONS);
+}
+
+/**
+ * Verify a presented key against a stored hash.
+ * Supports both argon2id (new) and SHA-256 (legacy) hashes.
+ *
+ * On successful SHA-256 verification, the caller should schedule a re-hash
+ * with argon2id (transparent upgrade). This function does NOT do the re-hash.
+ */
+export async function verifyKeyHash(
+  presentedKey: string,
+  storedHash:   string,
+): Promise<boolean> {
+  if (!presentedKey || !storedHash) return false;
+
+  if (isArgon2idHash(storedHash)) {
+    try {
+      const argon2 = await import("argon2");
+      return await argon2.verify(storedHash, presentedKey);
+    } catch {
+      return false;
+    }
+  }
+
+  // Legacy: SHA-256 (64-char hex) comparison
+  try {
+    const legacyHash = crypto.createHash("sha256").update(presentedKey).digest("hex");
+    if (legacyHash.length !== storedHash.length) return false;
+    return crypto.timingSafeEqual(
+      Buffer.from(legacyHash, "utf8"),
+      Buffer.from(storedHash, "utf8"),
+    );
+  } catch {
+    return false;
+  }
+}
+
+// ── Key generation ────────────────────────────────────────────────────────────
+
+async function generateKeyParts(): Promise<{
+  prefix:  string;
+  secret:  string;
+  fullKey: string;
+  hash:    string;
+}> {
+  const secret  = crypto.randomBytes(KEY_SECRET_BYTES).toString("hex");
+  const prefix  = secret.slice(0, KEY_PREFIX_LENGTH);
   const fullKey = `sk_${prefix}_${secret}`;
-  const hash = crypto.createHash("sha256").update(fullKey).digest("hex");
+  const hash    = await hashKeyArgon2id(fullKey); // argon2id hash
   return { prefix: `sk_${prefix}`, secret, fullKey, hash };
 }
 
@@ -62,7 +153,7 @@ export async function createServiceAccountKey(params: {
   note: string;
 }> {
   const { serviceAccountId, expiresAt, createdBy } = params;
-  const { prefix, fullKey, hash } = generateKeyParts();
+  const { prefix, fullKey, hash } = await generateKeyParts(); // argon2id hash
 
   const client = getClient();
   await client.connect();
@@ -75,10 +166,10 @@ export async function createServiceAccountKey(params: {
       [serviceAccountId, prefix, hash, expiresAt ?? null, createdBy ?? null],
     );
     return {
-      keyId: row.rows[0].id,
-      keyPrefix: prefix,
+      keyId:       row.rows[0].id,
+      keyPrefix:   prefix,
       plaintextKey: fullKey,
-      note: "INV-ID5: Plaintext returned once. Hash stored only. Rotation requires explicit createServiceAccountKey call.",
+      note: "INV-ID5: Plaintext returned once. argon2id hash stored only. Rotation requires explicit createServiceAccountKey call.",
     };
   } finally {
     await client.end();
@@ -110,6 +201,9 @@ export async function revokeServiceAccountKey(keyId: string): Promise<{ revoked:
 
 // ─── verifyPresentedServiceAccountKey ────────────────────────────────────────
 // INV-ID7: Revoked/expired keys fail closed.
+//
+// Phase 42: lookup changed from WHERE key_hash=sha256 to WHERE key_prefix=prefix
+// to support argon2id (non-deterministic). Hash verification done in code.
 
 export async function verifyPresentedServiceAccountKey(params: {
   presentedKey: string;
@@ -121,20 +215,31 @@ export async function verifyPresentedServiceAccountKey(params: {
   denialReason?: string;
 }> {
   const { presentedKey, tenantId } = params;
-  const keyHash = crypto.createHash("sha256").update(presentedKey).digest("hex");
+  const keyPrefix = extractKeyPrefix(presentedKey);
+  if (!keyPrefix) return { valid: false, denialReason: "Invalid key format" };
+
   const client = getClient();
   await client.connect();
   try {
-    const row = await client.query(
-      `SELECT sak.id, sak.service_account_id, sak.key_status, sak.expires_at,
+    // Look up by prefix (compatible with both argon2id and legacy SHA-256 stored hashes)
+    const rows = await client.query(
+      `SELECT sak.id, sak.service_account_id, sak.key_status, sak.expires_at, sak.key_hash,
               sa.tenant_id, sa.service_account_status
        FROM public.service_account_keys sak
        JOIN public.service_accounts sa ON sa.id = sak.service_account_id
-       WHERE sak.key_hash = $1`,
-      [keyHash],
+       WHERE sak.key_prefix = $1`,
+      [keyPrefix],
     );
-    if (row.rows.length === 0) return { valid: false, denialReason: "Key not found" };
-    const k = row.rows[0];
+    if (rows.rows.length === 0) return { valid: false, denialReason: "Key not found" };
+
+    // Verify hash in code — supports both argon2id (new) and SHA-256 (legacy)
+    let k: typeof rows.rows[0] | null = null;
+    for (const candidate of rows.rows) {
+      const hashMatch = await verifyKeyHash(presentedKey, candidate.key_hash);
+      if (hashMatch) { k = candidate; break; }
+    }
+    if (!k) return { valid: false, denialReason: "Key not found" };
+
     if (k.tenant_id !== tenantId) return { valid: false, denialReason: "Tenant mismatch" };
     if (k.key_status !== "active") return { valid: false, denialReason: `Key status: ${k.key_status}` };
     if (k.expires_at && new Date(k.expires_at) < new Date()) {
@@ -165,7 +270,7 @@ export async function createApiKey(params: {
   note: string;
 }> {
   const { tenantId, name, createdBy, expiresAt, permissionIds } = params;
-  const { prefix, fullKey, hash } = generateKeyParts();
+  const { prefix, fullKey, hash } = await generateKeyParts(); // argon2id hash
 
   const client = getClient();
   await client.connect();
@@ -196,7 +301,7 @@ export async function createApiKey(params: {
       keyPrefix: prefix,
       plaintextKey: fullKey,
       permissionsBound,
-      note: "INV-ID5: Plaintext returned once at creation only. Hash stored only.",
+      note: "INV-ID5: Plaintext returned once at creation only. argon2id hash stored only.",
     };
   } finally {
     await client.end();
@@ -221,6 +326,9 @@ export async function revokeApiKey(keyId: string): Promise<{ revoked: boolean; i
 }
 
 // ─── verifyPresentedApiKey ────────────────────────────────────────────────────
+//
+// Phase 42: lookup changed from WHERE key_hash=sha256 to WHERE key_prefix=prefix
+// to support argon2id (non-deterministic). Hash verification done in code.
 
 export async function verifyPresentedApiKey(params: {
   presentedKey: string;
@@ -232,16 +340,29 @@ export async function verifyPresentedApiKey(params: {
   denialReason?: string;
 }> {
   const { presentedKey, tenantId } = params;
-  const keyHash = crypto.createHash("sha256").update(presentedKey).digest("hex");
+  const keyPrefix = extractKeyPrefix(presentedKey);
+  if (!keyPrefix) return { valid: false, denialReason: "Invalid key format" };
+
   const client = getClient();
   await client.connect();
   try {
-    const row = await client.query(
-      `SELECT id, tenant_id, api_key_status, expires_at FROM public.api_keys WHERE key_hash = $1`,
-      [keyHash],
+    // Look up by prefix (compatible with both argon2id and legacy SHA-256)
+    const rows = await client.query(
+      `SELECT id, tenant_id, api_key_status, expires_at, key_hash
+       FROM public.api_keys
+       WHERE key_prefix = $1`,
+      [keyPrefix],
     );
-    if (row.rows.length === 0) return { valid: false, denialReason: "API key not found" };
-    const k = row.rows[0];
+    if (rows.rows.length === 0) return { valid: false, denialReason: "API key not found" };
+
+    // Verify hash in code — supports both argon2id (new) and SHA-256 (legacy)
+    let k: typeof rows.rows[0] | null = null;
+    for (const candidate of rows.rows) {
+      const hashMatch = await verifyKeyHash(presentedKey, candidate.key_hash);
+      if (hashMatch) { k = candidate; break; }
+    }
+    if (!k) return { valid: false, denialReason: "API key not found" };
+
     if (k.tenant_id !== tenantId) return { valid: false, denialReason: "Tenant mismatch" };
     if (k.api_key_status !== "active") return { valid: false, denialReason: `Key status: ${k.api_key_status}` };
     if (k.expires_at && new Date(k.expires_at) < new Date()) return { valid: false, denialReason: "Key expired" };
@@ -327,23 +448,25 @@ export async function explainKeyState(keyId: string, keyType: "api_key" | "servi
   isActive: boolean;
   isExpired: boolean;
   isRevoked: boolean;
+  hashScheme: string;
   note: string;
 }> {
   const client = getClient();
   await client.connect();
   try {
-    const table = keyType === "api_key" ? "api_keys" : "service_account_keys";
+    const table     = keyType === "api_key" ? "api_keys" : "service_account_keys";
     const statusCol = keyType === "api_key" ? "api_key_status" : "key_status";
     const row = await client.query(
-      `SELECT ${statusCol} as status, expires_at, revoked_at FROM public.${table} WHERE id = $1`,
+      `SELECT ${statusCol} as status, expires_at, revoked_at, key_hash FROM public.${table} WHERE id = $1`,
       [keyId],
     );
     if (row.rows.length === 0) {
-      return { keyId, keyType, status: null, isActive: false, isExpired: false, isRevoked: false, note: "Key not found." };
+      return { keyId, keyType, status: null, isActive: false, isExpired: false, isRevoked: false, hashScheme: "unknown", note: "Key not found." };
     }
-    const k = row.rows[0];
+    const k         = row.rows[0];
     const isExpired = k.expires_at ? new Date(k.expires_at) < new Date() : false;
     const isRevoked = k.status === "revoked";
+    const hashScheme = isArgon2idHash(k.key_hash ?? "") ? "argon2id" : "sha256-legacy";
     return {
       keyId,
       keyType,
@@ -351,6 +474,7 @@ export async function explainKeyState(keyId: string, keyType: "api_key" | "servi
       isActive: k.status === "active" && !isExpired,
       isExpired,
       isRevoked,
+      hashScheme,
       note: "INV-ID7: Revoked/expired keys fail closed. INV-ID8: Read-only explain.",
     };
   } finally {

@@ -423,3 +423,75 @@ export async function recordAiRequestStateEvent(params: {
     console.error("[ai:idempotency] recordAiRequestStateEvent failed:", err);
   }
 }
+
+// ── Phase 42: Named helper aliases ───────────────────────────────────────────
+//
+// These named functions provide explicit, spec-named wrappers around the
+// existing idempotency primitives. They are used in the cache-hit finalization
+// path and in validation coverage.
+//
+// Context: runner.ts already calls markAiRequestCompleted() inline on cache hit
+// (the Phase 4E.2 fix). These helpers provide named, testable entry points.
+
+/**
+ * Finalize a cache-hit execution as completed.
+ *
+ * When a cache hit is used instead of a provider call, the idempotency row
+ * must be transitioned from in_progress → completed so that future retries
+ * with the same requestId receive duplicate_replay instead of duplicate_inflight.
+ *
+ * Wraps markAiRequestCompleted() with explicit "cache_hit_finalized" event.
+ * Fail-open — never throws.
+ */
+export async function finalizeCachedAiRequest(params: {
+  stateId:         string;
+  tenantId:        string;
+  requestId:       string;
+  routeKey:        string;
+  provider:        string;
+  model:           string;
+  responsePayload: AiCallResult;
+}): Promise<void> {
+  if (!params.stateId || !params.tenantId || !params.requestId) return;
+  await markAiRequestCompleted(params);
+  void recordAiRequestStateEvent({
+    tenantId:  params.tenantId,
+    requestId: params.requestId,
+    eventType: "cache_hit_finalized",
+    routeKey:  params.routeKey,
+    provider:  params.provider,
+    model:     params.model,
+    reason:    "idempotency_state_finalized_on_cache_hit",
+  });
+}
+
+/**
+ * Ensure the idempotency state is in a terminal state before returning.
+ *
+ * Call this in the finally block or immediately before any early return in
+ * runAiCall() when a result is available. If the state is still in_progress,
+ * it is transitioned to completed. If no stateId is present, this is a no-op.
+ *
+ * Fail-open — never throws.
+ */
+export async function ensureTerminalStateBeforeReturn(params: {
+  stateId?:        string | null;
+  tenantId?:       string | null;
+  requestId?:      string | null;
+  routeKey:        string;
+  provider:        string;
+  model:           string;
+  responsePayload: AiCallResult | null;
+}): Promise<void> {
+  const { stateId, tenantId, requestId, responsePayload } = params;
+  if (!stateId || !tenantId || !requestId || !responsePayload) return;
+  await markAiRequestCompleted({
+    stateId,
+    tenantId,
+    requestId,
+    routeKey: params.routeKey,
+    provider: params.provider,
+    model:    params.model,
+    responsePayload,
+  });
+}

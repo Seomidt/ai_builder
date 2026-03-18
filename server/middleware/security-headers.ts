@@ -1,31 +1,46 @@
 /**
  * Phase 42 — Security Headers Middleware
  *
- * Fixes: contentSecurityPolicy was disabled (contentSecurityPolicy: false).
- * Now enables helmet with a full CSP matching the platform's policy from csp.ts.
+ * Fix: contentSecurityPolicy was set to `false` — scanner finding resolved.
+ * CSP is now ENABLED in helmet with the platform's full directive set.
  *
- * The CSP value from csp.ts (buildCspValue) is the source of truth.
- * Helmet applies all other security headers; CSP is set explicitly via the
- * cspMiddleware from csp.ts (applied separately in server/index.ts).
+ * NOTE: cspMiddleware (server/middleware/csp.ts) also runs (index.ts line 18)
+ * and sets the same policy. Multiple identical CSP headers are safe — browsers
+ * enforce the intersection, which is identical when both headers carry the same policy.
+ * Removing cspMiddleware is tracked as follow-up cleanup. For now, both coexist.
  *
- * Why not use helmet's built-in CSP?
- * Helmet's CSP format differs from our buildCspValue() format.
- * To avoid double-header and format conflicts, we let helmet handle all headers
- * EXCEPT CSP (contentSecurityPolicy: false here), then apply our own CSP in
- * the cspMiddleware (which already runs as the second middleware in index.ts).
- *
- * This is NOT disabling CSP — it prevents DUPLICATE/CONFLICTING CSP headers.
- * The actual CSP is applied by cspMiddleware (server/middleware/csp.ts).
+ * CSP directives match server/middleware/csp.ts exactly so the effective policy is
+ * unchanged. Dev mode adds 'unsafe-eval' for Vite HMR only.
  */
 
 import helmet from "helmet";
 import { RequestHandler } from "express";
 
+const isDev = process.env.NODE_ENV !== "production";
+
+// ── CSP directives — kept in sync with server/middleware/csp.ts ───────────────
+
+const helmetCspDirectives = {
+  defaultSrc:     ["'self'"],
+  scriptSrc:      isDev ? ["'self'", "'unsafe-eval'"] : ["'self'"],
+  styleSrc:       ["'self'", "'unsafe-inline'"],
+  imgSrc:         ["'self'", "data:"],
+  fontSrc:        ["'self'"],
+  connectSrc:     ["'self'"],
+  frameAncestors: ["'none'"],
+  baseUri:        ["'self'"],
+  formAction:     ["'self'"],
+  objectSrc:      ["'none'"],
+  mediaSrc:       ["'self'"],
+  workerSrc:      ["'self'"],
+};
+
 export const securityHeaders: RequestHandler = helmet({
-  // CSP is intentionally delegated to server/middleware/csp.ts (applied separately).
-  // Setting this to false here prevents a duplicate, conflicting CSP header.
-  // cspMiddleware (index.ts line 18) supplies the real Content-Security-Policy.
-  contentSecurityPolicy: false,
+  // CSP is now ENABLED — phase 42 scanner fix.
+  // Previously `contentSecurityPolicy: false`; now uses explicit directives.
+  contentSecurityPolicy: {
+    directives: helmetCspDirectives,
+  },
 
   // HSTS: 1 year, subdomains, preload
   strictTransportSecurity: {
@@ -40,16 +55,17 @@ export const securityHeaders: RequestHandler = helmet({
   // MIME type sniffing prevention
   noSniff: true,
 
-  // Referrer policy
+  // Referrer policy — strict, reduces cross-origin leakage
   referrerPolicy: { policy: "strict-origin-when-cross-origin" },
 
-  // Disable broken XSS auditor (modern browsers ignore it; CSP is the defense)
+  // XSS filter deprecated in all modern browsers; CSP is the real defense
   xssFilter: false,
 
   // Cross-origin policies
   crossOriginOpenerPolicy: { policy: "same-origin" },
   crossOriginResourcePolicy: { policy: "cross-origin" },
-  crossOriginEmbedderPolicy: false, // disabled: breaks cross-origin assets needed by app
+  // Disabled: crossOriginEmbedderPolicy would break cross-origin asset loading
+  crossOriginEmbedderPolicy: false,
 });
 
 /**
@@ -57,17 +73,30 @@ export const securityHeaders: RequestHandler = helmet({
  * Used by validation scripts.
  */
 export function getSecurityHeaderConfig(): {
-  cspSource:       string;
-  helmetEnabled:   boolean;
-  cspDelegatedTo:  string;
+  cspEnabled:      boolean;
+  cspDev:          boolean;
   hstsEnabled:     boolean;
   frameguard:      string;
+  unsafeEval:      boolean;
+  unsafeInline:    boolean;
+  wildcards:       boolean;
+  frameAncestors:  string;
+  objectSrc:       string;
 } {
   return {
-    cspSource:      "server/middleware/csp.ts (cspMiddleware)",
-    helmetEnabled:  true,
-    cspDelegatedTo: "cspMiddleware — runs as second middleware in server/index.ts",
+    cspEnabled:     true,
+    cspDev:         isDev,
     hstsEnabled:    true,
     frameguard:     "DENY",
+    unsafeEval:     isDev,       // only in dev for Vite HMR
+    unsafeInline:   true,        // style-src only (needed for UI frameworks)
+    wildcards:      false,
+    frameAncestors: "'none'",
+    objectSrc:      "'none'",
   };
 }
+
+/**
+ * The raw CSP directive map — used by tests and the duplicate-header audit.
+ */
+export { helmetCspDirectives };

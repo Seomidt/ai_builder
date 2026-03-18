@@ -8,6 +8,7 @@
 import type { Express, Request, Response } from "express";
 import rateLimit from "express-rate-limit";
 import cookieParser from "cookie-parser";
+import { requireCsrf, issueCsrfToken } from "../middleware/csrf";
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60_000,
@@ -37,6 +38,23 @@ function getSessionToken(req: Request): string | null {
 
 export function registerAuthPlatformRoutes(app: Express): void {
   app.use(cookieParser());
+
+  // ── Phase 42: CSRF protection ────────────────────────────────────────────
+  // Apply requireCsrf to ALL /api/auth/* routes.
+  // requireCsrf is a no-op for safe methods (GET, HEAD, OPTIONS),
+  // so read-only routes (e.g. GET /api/auth/sessions) are not affected.
+  // State-changing routes (all POST below) must include X-CSRF-Token header
+  // matching the csrf_token cookie issued by GET /api/auth/csrf.
+  app.use("/api/auth", requireCsrf);
+
+  // ── GET /api/auth/csrf ── Issue CSRF token ────────────────────────────────
+  // Call this endpoint when the app first loads (or before showing any auth form).
+  // Sets the csrf_token cookie and returns the token in the response body.
+  // Include the token as X-CSRF-Token header on all subsequent state-changing requests.
+  app.get("/api/auth/csrf", (_req: Request, res: Response) => {
+    const token = issueCsrfToken(res);
+    return res.json({ csrfToken: token });
+  });
 
   // ── POST /api/auth/login ─────────────────────────────────────────────────
   app.post("/api/auth/login", strictLimiter, async (req: Request, res: Response) => {

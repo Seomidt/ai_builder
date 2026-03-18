@@ -109,7 +109,14 @@ const PROMPT_ABUSE_PATTERNS = [
   { pattern: /(?:[^\s]+\s){500,}/, reason: "Abnormally long single-sentence prompt (>500 words no structure)" },
   { pattern: /([\u0000-\u001f]|\\\d{1,3}){20,}/, reason: "Excessive control/escape characters" },
   { pattern: /\b(eval|exec|system|subprocess|os\.)\s*\(/, reason: "Code injection attempt" },
-  { pattern: /<script[\s>].*?<\/script>/is, reason: "Script injection attempt" },
+  // Phase 42 fix: hardened regex handles all dangerous variants:
+  //   <script>...</script>        — standard
+  //   <SCRIPT>...</SCRIPT>        — uppercase (i flag)
+  //   <script >...</script >      — space before >
+  //   <script\n>...</script\n>    — newline before >
+  //   multi-line script blocks    — [\s\S] instead of .
+  // Previous: /<script[\s>].*?<\/script>/is — missed </script > (space before >)
+  { pattern: /<script\b[^>]*>[\s\S]*?<\/script\s*>/is, reason: "Script injection attempt" },
   { pattern: /\bSELECT\b.*\bFROM\b.*\bWHERE\b/i, reason: "SQL injection in prompt" },
 ];
 

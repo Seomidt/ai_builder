@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import { sanitizePlainTextInput } from "../security/content-sanitizer";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -242,17 +243,13 @@ function parseHtml(content: string): DocumentParserResult {
   const parserVersion = PARSER_VERSION;
   const warnings: string[] = [];
 
-  let stripped = content
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&[a-z]+;/gi, " ");
+  // Phase 42 fix:
+  // - Old regex /<script[\s\S]*?<\/script>/gi missed </script > (space before >)
+  // - Naive entity decode chain (.replace(/&amp;/g, "&") etc.) causes double-unescape
+  // Use sanitizePlainTextInput which handles all script variants and entity decoding safely.
+  let stripped = sanitizePlainTextInput(content)
+    .replace(/&nbsp;/g, " ") // sanitizePlainTextInput preserves &nbsp; as literal — decode it
+    .replace(/\s{2,}/g, " ");
 
   const { plainText, sections } = normalizeParsedDocument(stripped, parserName, parserVersion);
 
