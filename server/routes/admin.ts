@@ -8307,4 +8307,55 @@ export function registerAdminRoutes(app: Express): void {
       });
     } catch (err) { res.status(500).json({ error: (err as Error).message }); }
   });
+
+  // ── Phase 41 — RLS Audit Route ────────────────────────────────────────────
+
+  // GET /api/admin/security/rls-audit
+  app.get("/api/admin/security/rls-audit", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { summarizeRlsPosture, listAffectedTables, listWeakPoliciesBeforeFix, TABLE_ACCESS_MODELS } = await import("../lib/security/rls-audit");
+      const mode = (req.query.mode as string) ?? "summary";
+
+      if (mode === "full") {
+        const [posture, tables] = await Promise.all([summarizeRlsPosture(), listAffectedTables()]);
+        return res.json({
+          posture,
+          tables: tables.map(t => ({
+            tableName:      t.tableName,
+            rlsEnabled:     t.rlsEnabled,
+            policyCount:    t.policyCount,
+            hasAlwaysTrue:  t.hasAlwaysTrue,
+            hasPublicAlwaysTrue: t.hasPublicAlwaysTrue,
+            accessModel:    t.accessModel,
+            tenantCols:     t.tenantCols,
+            warningFlags:   t.warningFlags,
+            indexCount:     t.indexCount,
+          })),
+          weakPoliciesBeforeFix: listWeakPoliciesBeforeFix(),
+          classifiedTables:      Object.keys(TABLE_ACCESS_MODELS).length,
+          retrievedAt:           new Date().toISOString(),
+        });
+      }
+
+      // Default: summary mode
+      const posture = await summarizeRlsPosture();
+      res.json({
+        ...posture,
+        weakPoliciesBeforeFix: listWeakPoliciesBeforeFix(),
+        classifiedTables:      Object.keys(TABLE_ACCESS_MODELS).length,
+      });
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
+
+  // GET /api/admin/security/rls-audit/table/:tableName
+  app.get("/api/admin/security/rls-audit/table/:tableName", async (req: Request, res: Response) => {
+    try {
+      if (!isPlatformAdmin(req)) return res.status(403).json({ error: "platform_admin role required" });
+      const { explainTableAccessModel } = await import("../lib/security/rls-audit");
+      const tableName = req.params.tableName?.replace(/[^a-z_0-9]/gi, "");
+      if (!tableName) return res.status(400).json({ error: "invalid table name" });
+      res.json(await explainTableAccessModel(tableName));
+    } catch (err) { res.status(500).json({ error: (err as Error).message }); }
+  });
 }
