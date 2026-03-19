@@ -1,19 +1,58 @@
 /**
- * Phase 41 — RLS Audit / Explainer
+ * Phase 41 → Phase 45B — RLS Audit / Explainer
  * Live inspection of RLS policy status across all public tables.
  *
- * Access model classifications:
- *   A = TENANT-SCOPED    — tenant_id / organization_id enforced per row
- *   B = PLATFORM-ADMIN   — service_role only; no authenticated policy needed
- *   C = INTERNAL-SYSTEM  — service_role only; backend writes exclusively
+ * Access model classifications (Phase 45B extended):
+ *   tenant_scoped        — Row-level isolation; tenant reads/writes own rows
+ *   mixed_tenant_admin   — Tenant reads own; admin/service_role sees all
+ *   platform_admin_only  — Platform config; admin/service_role only
+ *   service_role_only    — Backend writes only; no tenant RLS policies needed
+ *   system_internal      — Infrastructure/audit; service_role only
+ *   legacy_internal      — Legacy tables; no active app ownership
+ *
+ * Legacy aliases (backward compat):
+ *   TENANT-SCOPED  → tenant_scoped
+ *   PLATFORM-ADMIN → platform_admin_only
+ *   INTERNAL-SYSTEM → system_internal
+ *   MIXED          → mixed_tenant_admin
  */
 
 import { db }  from "../../db";
 import { sql } from "drizzle-orm";
+import {
+  TABLE_GOVERNANCE,
+  type GovernanceAccessModel,
+  type GovernanceTableMeta,
+  isApplicationOwnedTable,
+  isSupabaseInternalTable,
+  isLegacyTable,
+  detectGovernanceMismatches,
+  countByModel,
+  getTablesByModel,
+} from "./table-governance";
 
-// ── Access model classification ───────────────────────────────────────────────
+// Re-export governance helpers for downstream consumers
+export {
+  TABLE_GOVERNANCE,
+  type GovernanceAccessModel,
+  isApplicationOwnedTable,
+  isSupabaseInternalTable,
+  isLegacyTable,
+  detectGovernanceMismatches,
+  countByModel,
+  getTablesByModel,
+};
 
-export type AccessModel = "TENANT-SCOPED" | "PLATFORM-ADMIN" | "INTERNAL-SYSTEM" | "MIXED" | "UNKNOWN";
+// ── Legacy access model type (backward compat) ────────────────────────────────
+
+export type AccessModel =
+  | GovernanceAccessModel
+  // Legacy aliases kept for backward compatibility
+  | "TENANT-SCOPED"
+  | "PLATFORM-ADMIN"
+  | "INTERNAL-SYSTEM"
+  | "MIXED"
+  | "UNKNOWN";
 
 export interface TableAccessMeta {
   tableName:    string;
@@ -23,76 +62,41 @@ export interface TableAccessMeta {
 }
 
 /**
- * Canonical access model for every affected table.
- * Kept as a static map for fast audit queries without DB round-trips.
+ * Canonical access model registry — bridges Phase 41 legacy format
+ * to the Phase 45B GovernanceTableMeta registry in table-governance.ts.
+ * Populated from TABLE_GOVERNANCE for full coverage.
  */
-export const TABLE_ACCESS_MODELS: Record<string, TableAccessMeta> = {
-  // ── Tenant-scoped (A) ────────────────────────────────────────────────────
-  ai_agent_runs:               { tableName: "ai_agent_runs",               accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI agent run records — tenant owns all runs" },
-  ai_agents:                   { tableName: "ai_agents",                   accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI agent definitions per tenant" },
-  ai_anomaly_configs:          { tableName: "ai_anomaly_configs",          accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Tenant anomaly detection config" },
-  ai_anomaly_events:           { tableName: "ai_anomaly_events",           accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Tenant anomaly events (Phase 3H)" },
-  ai_eval_cases:               { tableName: "ai_eval_cases",               accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI eval test cases" },
-  ai_eval_datasets:            { tableName: "ai_eval_datasets",            accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI eval datasets" },
-  ai_eval_regressions:         { tableName: "ai_eval_regressions",         accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI eval regressions" },
-  ai_eval_results:             { tableName: "ai_eval_results",             accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI eval results" },
-  ai_eval_runs:                { tableName: "ai_eval_runs",                accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI eval runs" },
-  ai_usage_alerts:             { tableName: "ai_usage_alerts",             accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI usage alerts per tenant" },
-  data_deletion_jobs:          { tableName: "data_deletion_jobs",          accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Tenant data deletion job status (read-only)" },
-  experiments:                 { tableName: "experiments",                 accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Tenant experiments" },
-  gov_anomaly_events:          { tableName: "gov_anomaly_events",          accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI governance anomaly events (Phase 16)" },
-  obs_agent_runtime_metrics:   { tableName: "obs_agent_runtime_metrics",   accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Agent runtime observability per tenant" },
-  obs_ai_latency_metrics:      { tableName: "obs_ai_latency_metrics",      accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI latency observability per tenant" },
-  obs_retrieval_metrics:       { tableName: "obs_retrieval_metrics",       accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Retrieval observability per tenant" },
-  obs_tenant_usage_metrics:    { tableName: "obs_tenant_usage_metrics",    accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Tenant-level usage observability" },
-  security_events:             { tableName: "security_events",             accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Security events — tenants read own events" },
-  stripe_customers:            { tableName: "stripe_customers",            accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Stripe customer records" },
-  stripe_invoices:             { tableName: "stripe_invoices",             accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Stripe invoices" },
-  stripe_subscriptions:        { tableName: "stripe_subscriptions",        accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Stripe subscriptions" },
-  tenant_ai_budgets:           { tableName: "tenant_ai_budgets",           accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI cost budgets (Phase 16)" },
-  tenant_ai_usage_snapshots:   { tableName: "tenant_ai_usage_snapshots",   accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "AI usage snapshots (Phase 16)" },
-  tenant_plans:                { tableName: "tenant_plans",                accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Tenant plan assignments" },
-  usage_counters:              { tableName: "usage_counters",              accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Quota usage counters" },
-  rollout_audit_log:           { tableName: "rollout_audit_log",           accessModel: "TENANT-SCOPED",   tenantKey: "tenant_id",       description: "Feature rollout audit log" },
+export const TABLE_ACCESS_MODELS: Record<string, TableAccessMeta> = (() => {
+  const map: Record<string, TableAccessMeta> = {};
+  for (const [key, meta] of Object.entries(TABLE_GOVERNANCE)) {
+    map[key] = {
+      tableName:   meta.tableName,
+      accessModel: meta.model,
+      tenantKey:   meta.tenantKey,
+      description: meta.description,
+    };
+  }
+  return map;
+})();
 
-  // ── Platform-admin (B) ───────────────────────────────────────────────────
-  ai_policies:                 { tableName: "ai_policies",                 accessModel: "PLATFORM-ADMIN",  tenantKey: null,              description: "Platform AI policy config — admin only" },
-  data_retention_policies:     { tableName: "data_retention_policies",     accessModel: "PLATFORM-ADMIN",  tenantKey: null,              description: "Platform-wide data retention policies" },
-  data_retention_rules:        { tableName: "data_retention_rules",        accessModel: "PLATFORM-ADMIN",  tenantKey: null,              description: "Platform-wide data retention rules" },
-  model_allowlists:            { tableName: "model_allowlists",            accessModel: "PLATFORM-ADMIN",  tenantKey: null,              description: "Allowed AI models — platform config" },
-  plans:                       { tableName: "plans",                       accessModel: "PLATFORM-ADMIN",  tenantKey: null,              description: "Billing plan definitions" },
-  plan_entitlements:           { tableName: "plan_entitlements",           accessModel: "PLATFORM-ADMIN",  tenantKey: null,              description: "Billing plan entitlements" },
-  subscription_plans:          { tableName: "subscription_plans",          accessModel: "PLATFORM-ADMIN",  tenantKey: null,              description: "Subscription plan catalog" },
-  supported_currencies:        { tableName: "supported_currencies",        accessModel: "PLATFORM-ADMIN",  tenantKey: null,              description: "Supported currencies list" },
-  supported_languages:         { tableName: "supported_languages",         accessModel: "PLATFORM-ADMIN",  tenantKey: null,              description: "Supported languages list" },
-  obs_system_metrics:          { tableName: "obs_system_metrics",          accessModel: "PLATFORM-ADMIN",  tenantKey: null,              description: "Platform-wide system metrics" },
-
-  // ── Internal system (C) ─────────────────────────────────────────────────
-  legal_holds:                 { tableName: "legal_holds",                 accessModel: "INTERNAL-SYSTEM", tenantKey: null,              description: "Compliance legal holds — backend only" },
-  ops_ai_audit_logs:           { tableName: "ops_ai_audit_logs",           accessModel: "INTERNAL-SYSTEM", tenantKey: null,              description: "Platform AI ops audit log — backend only" },
-  admin_change_events:         { tableName: "admin_change_events",         accessModel: "INTERNAL-SYSTEM", tenantKey: null,              description: "Platform admin change events" },
-  admin_change_requests:       { tableName: "admin_change_requests",       accessModel: "INTERNAL-SYSTEM", tenantKey: null,              description: "Platform admin change requests" },
-  session_tokens:              { tableName: "session_tokens",              accessModel: "INTERNAL-SYSTEM", tenantKey: null,              description: "Session token store — backend only" },
-  session_revocations:         { tableName: "session_revocations",         accessModel: "INTERNAL-SYSTEM", tenantKey: null,              description: "Session revocations — backend only" },
-  auth_sessions:               { tableName: "auth_sessions",               accessModel: "INTERNAL-SYSTEM", tenantKey: "tenant_id",       description: "Auth sessions — backend written only" },
-  mfa_recovery_codes:          { tableName: "mfa_recovery_codes",          accessModel: "INTERNAL-SYSTEM", tenantKey: null,              description: "MFA recovery codes — backend only" },
-  billing_job_runs:            { tableName: "billing_job_runs",            accessModel: "INTERNAL-SYSTEM", tenantKey: null,              description: "Billing job run records" },
-  service_account_keys:        { tableName: "service_account_keys",        accessModel: "INTERNAL-SYSTEM", tenantKey: null,              description: "Service account credentials" },
-};
+/** Returns all table names covered by TABLE_ACCESS_MODELS. */
+export function listAffectedTableNames(): string[] {
+  return Object.keys(TABLE_ACCESS_MODELS);
+}
 
 // ── Live policy inspection ─────────────────────────────────────────────────────
 
 export interface LiveTableStatus {
-  tableName:      string;
-  rlsEnabled:     boolean;
-  policyCount:    number;
-  hasAlwaysTrue:  boolean;
+  tableName:           string;
+  rlsEnabled:          boolean;
+  policyCount:         number;
+  hasAlwaysTrue:       boolean;
   hasPublicAlwaysTrue: boolean;
-  policies:       Array<{ name: string; cmd: string; roles: string[]; using: string | null; check: string | null }>;
-  tenantCols:     string[];
-  accessModel:    AccessModel;
-  warningFlags:   string[];
-  indexCount:     number;
+  policies:            Array<{ name: string; cmd: string; roles: string[]; using: string | null; check: string | null }>;
+  tenantCols:          string[];
+  accessModel:         AccessModel;
+  warningFlags:        string[];
+  indexCount:          number;
 }
 
 export async function listAffectedTables(): Promise<LiveTableStatus[]> {
@@ -145,6 +149,7 @@ export async function listAffectedTables(): Promise<LiveTableStatus[]> {
     if (r.has_always_true && !r.has_public_always_true) warnings.push("SERVICE_ROLE_ALWAYS_TRUE_LINT");
     if (r.rls_enabled && Number(r.policy_count) === 0)  warnings.push("NO_POLICY");
     if (tenantCols.length > 0 && Number(r.policy_count) === 0) warnings.push("TENANT_TABLE_NO_POLICY");
+    if (!meta) warnings.push("UNCLASSIFIED_TENANT_TABLE: not in TABLE_ACCESS_MODELS — add classification");
 
     return {
       tableName:           r.tablename,
@@ -154,7 +159,7 @@ export async function listAffectedTables(): Promise<LiveTableStatus[]> {
       hasPublicAlwaysTrue: r.has_public_always_true ?? false,
       policies:            policies,
       tenantCols,
-      accessModel:         meta?.accessModel ?? "UNKNOWN",
+      accessModel:         (meta?.accessModel ?? "UNKNOWN") as AccessModel,
       warningFlags:        warnings,
       indexCount:          indexMap[r.tablename] ?? 0,
     };
@@ -180,15 +185,16 @@ export async function explainTableAccessModel(tableName: string): Promise<{
 }
 
 export async function summarizeRlsPosture(): Promise<{
-  totalTables:          number;
-  rlsEnabled:           number;
-  publicAlwaysTrue:     number;
+  totalTables:           number;
+  rlsEnabled:            number;
+  publicAlwaysTrue:      number;
   serviceRoleAlwaysTrue: number;
-  noPolicy:             number;
-  tenantTableNoPolicy:  number;
-  criticalIssues:       string[];
-  lintIssues:           string[];
-  generatedAt:          string;
+  noPolicy:              number;
+  tenantTableNoPolicy:   number;
+  unclassified:          number;
+  criticalIssues:        string[];
+  lintIssues:            string[];
+  generatedAt:           string;
 }> {
   const all = await listAffectedTables();
   const criticalIssues: string[] = [];
@@ -206,6 +212,7 @@ export async function summarizeRlsPosture(): Promise<{
     serviceRoleAlwaysTrue: all.filter(t => t.hasAlwaysTrue && !t.hasPublicAlwaysTrue).length,
     noPolicy:              all.filter(t => t.rlsEnabled && t.policyCount === 0).length,
     tenantTableNoPolicy:   all.filter(t => t.warningFlags.includes("TENANT_TABLE_NO_POLICY")).length,
+    unclassified:          all.filter(t => t.accessModel === "UNKNOWN").length,
     criticalIssues,
     lintIssues,
     generatedAt:           new Date().toISOString(),

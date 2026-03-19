@@ -1,0 +1,54 @@
+{
+  "title": "Ops Console",
+  "subtitle": "Platform operations and administration",
+  "nav": {
+    "dashboard": "Dashboard",
+    "tenants": "Tenants",
+    "jobs": "Jobs",
+    "webhooks": "Webhooks",
+    "ai": "AI",
+    "billing": "Billing",
+    "recovery": "Recovery",
+    "security": "Security",
+    "assistant": "Assistant",
+    "release": "Release",
+    "auth": "Auth Security",
+    "storage": "Storage"
+  },
+  "sections": {
+    "overview": "Overview",
+    "systemHealth": "System Health",
+    "recentActivity": "Recent Activity",
+    "alerts": "Alerts"
+  },
+  "tenants": {
+    "title": "Tenants",
+    "total": "Total tenants",
+    "active": "Active",
+    "suspended": "Suspended",
+    "noTenants": "No tenants found"
+  },
+  "jobs": {
+    "title": "Jobs",
+    "running": "Running jobs",
+    "queued": "Queued",
+    "failed": "Failed",
+    "noJobs": "No jobs in queue"
+  },
+  "security": {
+    "title": "Security",
+    "recentEvents": "Recent security events",
+    "noEvents": "No recent events"
+  },
+  "storage": {
+    "title": "Storage",
+    "totalFiles": "Total files",
+    "totalSize": "Total size",
+    "consistency": "Consistency"
+  },
+  "status": {
+    "healthy": "Healthy",
+    "degraded": "Degraded",
+    "outage": "Outage"
+  }
+}

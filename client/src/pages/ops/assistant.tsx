@@ -1,428 +1,390 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import {
-  BrainCircuit, RefreshCcw, AlertTriangle, CheckCircle,
-  ChevronDown, ChevronUp, History, Zap, ShieldAlert, Info,
-} from "lucide-react";
+import { apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { OpsNav } from "@/components/ops/OpsNav";
-import { apiRequest, queryClient } from "@/lib/queryClient";
-import { useToast } from "@/hooks/use-toast";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { AlertTriangle, CheckCircle, Info, Zap, RefreshCw, Shield } from "lucide-react";
 
-// ── Types (mirrors shared/ops-ai-schema.ts) ───────────────────────────────────
+const INTENT_LABELS: Record<string, string> = {
+  platform_health_summary: "Platform Health Summary",
+  tenant_usage_summary: "Tenant Usage Summary",
+  ai_cost_summary: "AI Cost Summary",
+  anomaly_explanation: "Anomaly Explanation",
+  billing_health_summary: "Billing Health Summary",
+  retention_summary: "Retention Summary",
+  support_debug_summary: "Support Debug Summary",
+  security_summary: "Security Summary",
+  storage_health_summary: "Storage Health Summary",
+  weekly_ops_digest: "Weekly Ops Digest",
+};
 
-interface TopIssue {
-  title: string;
-  severity: "low" | "medium" | "high" | "critical";
-  evidence: string[];
-  confidence: "low" | "medium" | "high";
+const TENANT_REQUIRED_INTENTS = ["tenant_usage_summary", "support_debug_summary"];
+
+type Severity = "info" | "warning" | "critical" | "ok";
+type Priority = "low" | "medium" | "high" | "critical";
+
+interface Finding {
+  area: string;
+  observation: string;
+  severity: Severity;
+  metric?: string;
+  value?: string | number;
 }
-interface SuspectedCorrelation {
-  title: string;
-  reasoning: string;
-  confidence: "low" | "medium" | "high";
+
+interface Risk {
+  risk: string;
+  likelihood: string;
+  impact: string;
+  mitigation?: string;
 }
+
 interface RecommendedAction {
   action: string;
-  reason: string;
-  priority: 1 | 2 | 3;
+  priority: Priority;
+  owner?: string;
+  rationale: string;
 }
-interface OpsAiResponse {
-  overall_health: "good" | "warning" | "critical";
+
+interface OpsResponse {
+  intent: string;
+  scope: string;
+  organizationId: string | null;
   summary: string;
-  top_issues: TopIssue[];
-  suspected_correlations: SuspectedCorrelation[];
-  recommended_actions: RecommendedAction[];
-  unknowns: string[];
-  generatedAt?: string;
+  findings: Finding[];
+  risks: Risk[];
+  recommendedActions: RecommendedAction[];
+  confidence: "high" | "medium" | "low" | "insufficient_data";
+  dataFreshness: string;
+  sourcesUsed: string[];
+  generatedAt: string;
+  [key: string]: unknown;
 }
 
-interface AuditRecord {
-  id: string;
-  requestType: string;
-  operatorId: string | null;
-  responseSummary: string | null;
-  confidence: string | null;
-  tokensUsed: number | null;
-  modelUsed: string | null;
-  createdAt: string;
+interface DigestData {
+  weekStart: string;
+  weekEnd: string;
+  highlights: string[];
+  riskSignals: string[];
+  platformHealth: { systemStatus: string; recentAnomalyCount: number; totalEventsLast7d: number };
+  aiCost: { totalSnapshotCostUsd: number; recentAlertCount: number };
+  billing: { activeSubscriptions: number; overdueInvoices: number };
+  security: { totalEvents: number; criticalCount: number };
 }
 
-// ── Severity / confidence colour maps ────────────────────────────────────────
-
-function severityColor(s: string) {
-  return { critical: "bg-destructive/15 text-destructive border-destructive/25",
-           high:     "bg-secondary/15 text-secondary border-secondary/25",
-           medium:   "bg-primary/15 text-primary border-primary/25",
-           low:      "bg-muted text-muted-foreground border-border" }[s] ?? "bg-muted text-muted-foreground border-border";
+function severityIcon(severity: Severity) {
+  if (severity === "critical") return <AlertTriangle className="h-4 w-4 text-red-500" />;
+  if (severity === "warning") return <AlertTriangle className="h-4 w-4 text-yellow-500" />;
+  if (severity === "ok") return <CheckCircle className="h-4 w-4 text-green-500" />;
+  return <Info className="h-4 w-4 text-blue-500" />;
 }
 
-function confidenceColor(c: string) {
-  return { high: "text-green-400", medium: "text-secondary", low: "text-muted-foreground" }[c] ?? "text-muted-foreground";
-}
-
-function healthColor(h: string) {
-  return { good: "bg-green-500/5 border-green-500/25 text-green-400",
-           warning: "bg-secondary/5 border-secondary/25 text-secondary",
-           critical: "bg-destructive/5 border-destructive/25 text-destructive" }[h] ?? "bg-muted border-border text-muted-foreground";
-}
-
-function healthIcon(h: string) {
-  if (h === "good")     return <CheckCircle className="w-4 h-4" />;
-  if (h === "critical") return <AlertTriangle className="w-4 h-4" />;
-  return <AlertTriangle className="w-4 h-4" />;
-}
-
-const INCIDENT_TYPES = [
-  { value: "failed_jobs",           label: "Failed Jobs" },
-  { value: "webhook_failure_spike", label: "Webhook Failure Spike" },
-  { value: "billing_desync",        label: "Billing Desync" },
-  { value: "ai_budget_spike",       label: "AI Budget Spike" },
-  { value: "brownout_transition",   label: "Brownout Transition" },
-  { value: "rate_limit_surge",      label: "Rate Limit Surge" },
-];
-
-// ── Sub-components ────────────────────────────────────────────────────────────
-
-function HealthBanner({ response }: { response: OpsAiResponse }) {
+function priorityBadge(priority: Priority) {
+  const colors: Record<Priority, string> = {
+    critical: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",
+    high: "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200",
+    medium: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200",
+    low: "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300",
+  };
   return (
-    <div className={`flex items-start gap-3 px-4 py-3 rounded-lg border ${healthColor(response.overall_health)}`}
-      data-testid="ops-ai-health-banner">
-      {healthIcon(response.overall_health)}
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-semibold capitalize">{response.overall_health.replace("_", " ")}</p>
-        <p className="text-xs mt-0.5" data-testid="ops-ai-summary-text">{response.summary}</p>
-      </div>
-      {response.generatedAt && (
-        <span className="text-xs opacity-60 shrink-0">
-          {new Date(response.generatedAt).toLocaleTimeString()}
-        </span>
-      )}
-    </div>
+    <span className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ${colors[priority]}`}>
+      {priority.toUpperCase()}
+    </span>
   );
 }
 
-function TopIssuesCard({ issues }: { issues: TopIssue[] }) {
-  const [expanded, setExpanded] = useState<number | null>(null);
-  if (!issues.length) return (
-    <Card className="bg-card border-card-border" data-testid="ops-ai-top-issues">
-      <CardContent className="py-4 text-center text-sm text-muted-foreground">No top issues detected</CardContent>
-    </Card>
-  );
-  return (
-    <Card className="bg-card border-card-border" data-testid="ops-ai-top-issues">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium flex items-center gap-2">
-          <AlertTriangle className="w-4 h-4 text-destructive" /> Top Issues ({issues.length})
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="p-0">
-        {issues.map((issue, i) => (
-          <div key={i} className="border-b border-border last:border-0" data-testid={`ops-ai-issue-${i}`}>
-            <button
-              className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-muted/20 transition-colors"
-              onClick={() => setExpanded(expanded === i ? null : i)}
-              data-testid={`button-expand-issue-${i}`}
-            >
-              <div className="flex items-center gap-2 flex-1 min-w-0">
-                <Badge variant="outline" className={`text-xs shrink-0 ${severityColor(issue.severity)}`}
-                  data-testid={`ops-ai-issue-severity-${i}`}>
-                  {issue.severity}
-                </Badge>
-                <span className="text-sm font-medium truncate">{issue.title}</span>
-              </div>
-              <div className="flex items-center gap-2 ml-3 shrink-0">
-                <span className={`text-xs ${confidenceColor(issue.confidence)}`}
-                  data-testid={`ops-ai-issue-confidence-${i}`}>
-                  {issue.confidence} conf.
-                </span>
-                {expanded === i ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-              </div>
-            </button>
-            {expanded === i && issue.evidence.length > 0 && (
-              <div className="px-4 pb-3 pt-0" data-testid={`ops-ai-issue-evidence-${i}`}>
-                <ul className="space-y-1">
-                  {issue.evidence.map((e, j) => (
-                    <li key={j} className="text-xs text-muted-foreground flex items-start gap-1.5">
-                      <span className="shrink-0 mt-0.5 text-destructive">•</span> {e}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
+function confidenceBadge(confidence: string) {
+  if (confidence === "high") return <Badge className="bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">High confidence</Badge>;
+  if (confidence === "medium") return <Badge className="bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">Medium confidence</Badge>;
+  if (confidence === "low") return <Badge className="bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200">Low confidence</Badge>;
+  return <Badge variant="outline">Insufficient data</Badge>;
 }
-
-function CorrelationsCard({ correlations }: { correlations: SuspectedCorrelation[] }) {
-  if (!correlations.length) return null;
-  return (
-    <Card className="bg-card border-card-border" data-testid="ops-ai-correlations">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium flex items-center gap-2">
-          <Zap className="w-4 h-4 text-primary" /> Suspected Correlations ({correlations.length})
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="p-0">
-        {correlations.map((c, i) => (
-          <div key={i} className="px-4 py-3 border-b border-border last:border-0" data-testid={`ops-ai-correlation-${i}`}>
-            <div className="flex items-center justify-between mb-1">
-              <p className="text-sm font-medium">{c.title}</p>
-              <span className={`text-xs ${confidenceColor(c.confidence)}`}
-                data-testid={`ops-ai-correlation-confidence-${i}`}>
-                {c.confidence} conf.
-              </span>
-            </div>
-            <p className="text-xs text-muted-foreground">{c.reasoning}</p>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-function ActionsCard({ actions }: { actions: RecommendedAction[] }) {
-  if (!actions.length) return null;
-  return (
-    <Card className="bg-card border-card-border" data-testid="ops-ai-actions">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium flex items-center gap-2">
-          <CheckCircle className="w-4 h-4 text-green-400" /> Recommended Actions
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="p-0">
-        {[...actions].sort((a, b) => a.priority - b.priority).map((act, i) => (
-          <div key={i} className="flex items-start gap-3 px-4 py-3 border-b border-border last:border-0"
-            data-testid={`ops-ai-action-${i}`}>
-            <div className="flex items-center justify-center w-5 h-5 rounded-full bg-primary/15 text-primary text-xs font-bold shrink-0 mt-0.5">
-              {act.priority}
-            </div>
-            <div>
-              <p className="text-sm font-medium" data-testid={`ops-ai-action-text-${i}`}>{act.action}</p>
-              <p className="text-xs text-muted-foreground mt-0.5">{act.reason}</p>
-            </div>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-function UnknownsCard({ unknowns }: { unknowns: string[] }) {
-  if (!unknowns.length) return null;
-  return (
-    <Card className="bg-card border-card-border" data-testid="ops-ai-unknowns">
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium flex items-center gap-2">
-          <Info className="w-4 h-4 text-muted-foreground" /> Uncertainties
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="p-0">
-        {unknowns.map((u, i) => (
-          <div key={i} className="px-4 py-2 border-b border-border last:border-0">
-            <p className="text-xs text-muted-foreground" data-testid={`ops-ai-unknown-${i}`}>{u}</p>
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-// ── Main Page ────────────────────────────────────────────────────────────────
 
 export default function OpsAssistant() {
-  const { toast } = useToast();
-  const [incidentType, setIncidentType] = useState<string>("");
-  const [showHistory, setShowHistory] = useState(false);
+  const [selectedIntent, setSelectedIntent] = useState("platform_health_summary");
+  const [tenantId, setTenantId] = useState("");
+  const [queryResult, setQueryResult] = useState<OpsResponse | null>(null);
+  const [queryError, setQueryError] = useState<string | null>(null);
 
-  const { data: summary, isLoading: summaryLoading, refetch: refetchSummary } =
-    useQuery<OpsAiResponse>({
-      queryKey: ["/api/admin/ops-ai/summary"],
-    });
-
-  const { data: history, isLoading: historyLoading } =
-    useQuery<{ records: AuditRecord[]; count: number }>({
-      queryKey: ["/api/admin/ops-ai/history"],
-      enabled: showHistory,
-    });
-
-  const explainMutation = useMutation({
-    mutationFn: (type: string) =>
-      apiRequest<OpsAiResponse>("POST", "/api/admin/ops-ai/explain", {
-        type,
-        windowHours: 24,
-      }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/admin/ops-ai/history"] });
-      toast({ title: "Incident analysis complete" });
-    },
-    onError: (err: Error) => toast({ title: "Analysis failed", description: err.message, variant: "destructive" }),
+  const { data: digestData, isLoading: digestLoading, refetch: refetchDigest } = useQuery<{ data: DigestData }>({
+    queryKey: ["/api/admin/ai-ops/weekly-digest"],
   });
 
-  return (
-    <div className="flex flex-col h-full">
-      <OpsNav />
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-4xl">
-        {/* Header */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-semibold text-foreground flex items-center gap-2">
-              <BrainCircuit className="w-5 h-5 text-destructive" /> AI Operations Assistant
-            </h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
-              Advisory only — AI interprets platform telemetry, never executes actions
-            </p>
-          </div>
-          <Button variant="outline" size="sm" className="gap-1.5"
-            onClick={() => refetchSummary()}
-            disabled={summaryLoading}
-            data-testid="button-refresh-summary">
-            <RefreshCcw className={`w-3.5 h-3.5 ${summaryLoading ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
-        </div>
+  const queryMutation = useMutation({
+    mutationFn: async () => {
+      const body: Record<string, string> = { intent: selectedIntent };
+      if (TENANT_REQUIRED_INTENTS.includes(selectedIntent) && tenantId) {
+        body.tenantId = tenantId;
+        body.organizationId = tenantId;
+      }
+      const res = await apiRequest("POST", "/api/admin/ai-ops/query", body);
+      return res.json() as Promise<{ data: OpsResponse; error?: string }>;
+    },
+    onSuccess: (result) => {
+      if (result.error) {
+        setQueryError(result.error);
+        setQueryResult(null);
+      } else {
+        setQueryResult(result.data);
+        setQueryError(null);
+      }
+    },
+    onError: (err: Error) => {
+      setQueryError(err.message);
+      setQueryResult(null);
+    },
+  });
 
-        {/* Disclaimer */}
-        <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-muted/30 border border-border">
-          <ShieldAlert className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" />
-          <p className="text-xs text-muted-foreground" data-testid="ops-ai-disclaimer">
-            AI outputs are advisory only. Confidence levels indicate data quality. Always verify with raw telemetry before acting.
+  const digest = digestData?.data;
+  const needsTenant = TENANT_REQUIRED_INTENTS.includes(selectedIntent);
+
+  return (
+    <div className="p-6 space-y-6 max-w-5xl mx-auto">
+      <div className="flex items-center gap-3">
+        <Shield className="h-6 w-6 text-primary" />
+        <div>
+          <h1 className="text-2xl font-bold" data-testid="text-page-title">AI Ops Assistant</h1>
+          <p className="text-sm text-muted-foreground">
+            Admin-only · Structured operational intelligence · Advisory only
           </p>
         </div>
+      </div>
 
-        {/* Section 1: Health Summary */}
-        <div className="space-y-3" data-testid="ops-ai-health-section">
-          <h2 className="text-sm font-semibold text-foreground">Overall Health Summary</h2>
-          {summaryLoading ? (
+      {/* Weekly Digest */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between pb-3">
+          <CardTitle className="text-base font-semibold">Weekly Ops Digest</CardTitle>
+          <Button
+            variant="ghost"
+            size="sm"
+            data-testid="button-refresh-digest"
+            onClick={() => refetchDigest()}
+            disabled={digestLoading}
+          >
+            <RefreshCw className={`h-4 w-4 mr-1 ${digestLoading ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+        </CardHeader>
+        <CardContent>
+          {digestLoading ? (
             <div className="space-y-2">
-              <Skeleton className="h-20" />
-              <Skeleton className="h-32" />
+              <Skeleton className="h-4 w-3/4" />
+              <Skeleton className="h-4 w-1/2" />
+              <Skeleton className="h-4 w-2/3" />
             </div>
-          ) : summary ? (
-            <>
-              <HealthBanner response={summary} />
-              <TopIssuesCard issues={summary.top_issues ?? []} />
-              <CorrelationsCard correlations={summary.suspected_correlations ?? []} />
-              <ActionsCard actions={summary.recommended_actions ?? []} />
-              <UnknownsCard unknowns={summary.unknowns ?? []} />
-            </>
-          ) : (
-            <div className="py-8 text-center">
-              <BrainCircuit className="w-8 h-8 text-muted-foreground/40 mx-auto mb-2" />
-              <p className="text-sm text-muted-foreground" data-testid="ops-ai-no-summary-msg">
-                No summary available. Click Refresh to generate one.
-              </p>
-            </div>
-          )}
-        </div>
-
-        {/* Section 2: Incident Explainer */}
-        <div className="space-y-3" data-testid="ops-ai-incident-section">
-          <h2 className="text-sm font-semibold text-foreground">Incident Explainer</h2>
-          <Card className="bg-card border-card-border">
-            <CardContent className="pt-4 space-y-3">
-              <p className="text-xs text-muted-foreground">
-                Select an incident type to get an AI-powered explanation of probable causes and investigation steps.
-              </p>
-              <div className="flex items-center gap-3">
-                <Select onValueChange={setIncidentType} value={incidentType}>
-                  <SelectTrigger className="flex-1" data-testid="select-incident-type">
-                    <SelectValue placeholder="Select incident type…" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {INCIDENT_TYPES.map((t) => (
-                      <SelectItem key={t.value} value={t.value}
-                        data-testid={`option-incident-${t.value}`}>
-                        {t.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-                <Button
-                  onClick={() => incidentType && explainMutation.mutate(incidentType)}
-                  disabled={!incidentType || explainMutation.isPending}
-                  className="gap-2 shrink-0"
-                  data-testid="button-explain-incident">
-                  <BrainCircuit className="w-4 h-4" />
-                  {explainMutation.isPending ? "Analysing…" : "Explain"}
-                </Button>
+          ) : digest ? (
+            <div className="space-y-4">
+              <div className="text-xs text-muted-foreground" data-testid="text-digest-period">
+                Period: {digest.weekStart} → {digest.weekEnd}
               </div>
-
-              {explainMutation.data && (
-                <div className="pt-2 space-y-3 border-t border-border" data-testid="ops-ai-incident-result">
-                  <HealthBanner response={explainMutation.data} />
-                  <TopIssuesCard issues={explainMutation.data.top_issues ?? []} />
-                  <ActionsCard actions={explainMutation.data.recommended_actions ?? []} />
-                  <UnknownsCard unknowns={explainMutation.data.unknowns ?? []} />
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <div className="rounded-lg border p-3 text-center" data-testid="card-digest-health">
+                  <div className="text-xs text-muted-foreground mb-1">Platform</div>
+                  <div className="font-semibold text-sm capitalize">{digest.platformHealth?.systemStatus ?? "—"}</div>
+                </div>
+                <div className="rounded-lg border p-3 text-center" data-testid="card-digest-cost">
+                  <div className="text-xs text-muted-foreground mb-1">AI Cost</div>
+                  <div className="font-semibold text-sm">${(digest.aiCost?.totalSnapshotCostUsd ?? 0).toFixed(2)}</div>
+                </div>
+                <div className="rounded-lg border p-3 text-center" data-testid="card-digest-subs">
+                  <div className="text-xs text-muted-foreground mb-1">Active Subs</div>
+                  <div className="font-semibold text-sm">{digest.billing?.activeSubscriptions ?? 0}</div>
+                </div>
+                <div className="rounded-lg border p-3 text-center" data-testid="card-digest-security">
+                  <div className="text-xs text-muted-foreground mb-1">Security Events</div>
+                  <div className="font-semibold text-sm">{digest.security?.totalEvents ?? 0}</div>
+                </div>
+              </div>
+              {digest.riskSignals?.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Risk Signals</div>
+                  {digest.riskSignals.map((s, i) => (
+                    <div key={i} className="flex items-start gap-2 text-sm text-orange-700 dark:text-orange-400" data-testid={`text-risk-signal-${i}`}>
+                      <AlertTriangle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+                      {s}
+                    </div>
+                  ))}
                 </div>
               )}
-            </CardContent>
-          </Card>
-        </div>
+              {digest.highlights?.length > 0 && (
+                <div className="space-y-1">
+                  <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Highlights</div>
+                  {digest.highlights.map((h, i) => (
+                    <div key={i} className="flex items-start gap-2 text-sm" data-testid={`text-highlight-${i}`}>
+                      <Info className="h-3.5 w-3.5 mt-0.5 text-blue-500 shrink-0" />
+                      {h}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">No digest available.</p>
+          )}
+        </CardContent>
+      </Card>
 
-        {/* Section 3: Recent Runs */}
-        <div className="space-y-3" data-testid="ops-ai-history-section">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-foreground">Recent Assistant Runs</h2>
-            <Button variant="ghost" size="sm" className="gap-1.5 text-xs"
-              onClick={() => setShowHistory((v) => !v)}
-              data-testid="button-toggle-history">
-              <History className="w-3.5 h-3.5" />
-              {showHistory ? "Hide" : "Show"} History
+      {/* Intent Query Panel */}
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base font-semibold">Ops Intelligence Query</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-col sm:flex-row gap-3">
+            <Select
+              value={selectedIntent}
+              onValueChange={setSelectedIntent}
+            >
+              <SelectTrigger className="flex-1" data-testid="select-intent">
+                <SelectValue placeholder="Select intent" />
+              </SelectTrigger>
+              <SelectContent>
+                {Object.entries(INTENT_LABELS).map(([id, label]) => (
+                  <SelectItem key={id} value={id} data-testid={`option-intent-${id}`}>
+                    {label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            {needsTenant && (
+              <Input
+                placeholder="Tenant / Org ID (required)"
+                value={tenantId}
+                onChange={(e) => setTenantId(e.target.value)}
+                className="flex-1"
+                data-testid="input-tenant-id"
+              />
+            )}
+
+            <Button
+              onClick={() => queryMutation.mutate()}
+              disabled={queryMutation.isPending || (needsTenant && !tenantId)}
+              data-testid="button-run-query"
+            >
+              <Zap className="h-4 w-4 mr-1.5" />
+              {queryMutation.isPending ? "Analyzing…" : "Run"}
             </Button>
           </div>
 
-          {showHistory && (
-            <Card className="bg-card border-card-border">
-              <CardContent className="p-0">
-                {historyLoading ? (
-                  <div className="p-4 space-y-2">
-                    {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-10" />)}
-                  </div>
-                ) : history?.records?.length ? (
-                  <div data-testid="ops-ai-history-list">
-                    {history.records.map((r) => (
-                      <div key={r.id} className="flex items-center justify-between px-4 py-3 border-b border-border last:border-0 text-xs"
-                        data-testid={`ops-ai-history-row-${r.id}`}>
-                        <div>
-                          <span className="font-mono text-muted-foreground">{r.requestType}</span>
-                          {r.responseSummary && (
-                            <p className="text-muted-foreground truncate max-w-xs mt-0.5">{r.responseSummary.slice(0, 80)}…</p>
-                          )}
-                        </div>
-                        <div className="flex items-center gap-3 shrink-0 ml-3">
-                          {r.confidence && (
-                            <span className={confidenceColor(r.confidence)}>{r.confidence}</span>
-                          )}
-                          {r.modelUsed && (
-                            <span className="text-muted-foreground/50">{r.modelUsed}</span>
-                          )}
-                          <span className="text-muted-foreground/50">
-                            {new Date(r.createdAt).toLocaleDateString()}
-                          </span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="p-6 text-center">
-                    <p className="text-sm text-muted-foreground" data-testid="ops-ai-no-history-msg">
-                      No assistant runs recorded yet
-                    </p>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+          {needsTenant && (
+            <p className="text-xs text-muted-foreground">
+              This intent requires a Tenant / Organization ID.
+            </p>
           )}
-        </div>
-      </div>
+        </CardContent>
+      </Card>
+
+      {/* Query Error */}
+      {queryError && (
+        <Alert variant="destructive" data-testid="alert-query-error">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertDescription>{queryError}</AlertDescription>
+        </Alert>
+      )}
+
+      {/* Query Loading Skeleton */}
+      {queryMutation.isPending && (
+        <Card>
+          <CardContent className="pt-6 space-y-3">
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-4 w-5/6" />
+            <Skeleton className="h-4 w-4/5" />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Query Result */}
+      {queryResult && !queryMutation.isPending && (
+        <Card data-testid="card-query-result">
+          <CardHeader className="pb-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <CardTitle className="text-base font-semibold">
+                  {INTENT_LABELS[queryResult.intent] ?? queryResult.intent}
+                </CardTitle>
+                <div className="flex items-center gap-2 mt-1 text-xs text-muted-foreground">
+                  <span>Scope: <span className="font-medium capitalize">{queryResult.scope}</span></span>
+                  {queryResult.organizationId && (
+                    <span>· Org: <span className="font-medium">{queryResult.organizationId}</span></span>
+                  )}
+                  <span>· Freshness: {new Date(queryResult.dataFreshness).toLocaleTimeString()}</span>
+                </div>
+              </div>
+              {confidenceBadge(queryResult.confidence)}
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <p className="text-sm leading-relaxed" data-testid="text-summary">{queryResult.summary}</p>
+
+            {queryResult.findings?.length > 0 && (
+              <div>
+                <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Findings</div>
+                <div className="space-y-2">
+                  {queryResult.findings.map((f, i) => (
+                    <div key={i} className="flex items-start gap-2 rounded-md border p-3" data-testid={`card-finding-${i}`}>
+                      {severityIcon(f.severity)}
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-sm">{f.area}</div>
+                        <div className="text-sm text-muted-foreground">{f.observation}</div>
+                        {f.metric && f.value !== undefined && (
+                          <div className="text-xs text-muted-foreground mt-0.5">{f.metric}: {f.value}</div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {queryResult.risks?.length > 0 && (
+              <div>
+                <Separator className="mb-3" />
+                <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Risks</div>
+                <div className="space-y-2">
+                  {queryResult.risks.map((r, i) => (
+                    <div key={i} className="rounded-md border border-orange-200 dark:border-orange-900 p-3" data-testid={`card-risk-${i}`}>
+                      <div className="font-medium text-sm">{r.risk}</div>
+                      <div className="text-xs text-muted-foreground mt-0.5">
+                        Likelihood: {r.likelihood} · Impact: {r.impact}
+                      </div>
+                      {r.mitigation && <div className="text-xs text-muted-foreground mt-1">Mitigation: {r.mitigation}</div>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {queryResult.recommendedActions?.length > 0 && (
+              <div>
+                <Separator className="mb-3" />
+                <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-2">Recommended Actions</div>
+                <div className="space-y-2">
+                  {queryResult.recommendedActions.map((a, i) => (
+                    <div key={i} className="flex items-start gap-3 rounded-md border p-3" data-testid={`card-action-${i}`}>
+                      <div className="mt-0.5">{priorityBadge(a.priority)}</div>
+                      <div className="flex-1 min-w-0">
+                        <div className="font-medium text-sm">{a.action}</div>
+                        <div className="text-xs text-muted-foreground mt-0.5">{a.rationale}</div>
+                        {a.owner && <div className="text-xs text-muted-foreground">Owner: {a.owner}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="text-xs text-muted-foreground pt-1 border-t">
+              Sources: {queryResult.sourcesUsed?.join(", ") ?? "—"} · Generated: {new Date(queryResult.generatedAt).toLocaleString()}
+            </div>
+          </CardContent>
+        </Card>
+      )}
     </div>
   );
 }

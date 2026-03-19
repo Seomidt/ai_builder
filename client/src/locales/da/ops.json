@@ -1,0 +1,54 @@
+{
+  "title": "Driftskonsol",
+  "subtitle": "Platformdrift og administration",
+  "nav": {
+    "dashboard": "Oversigt",
+    "tenants": "Lejere",
+    "jobs": "Jobs",
+    "webhooks": "Webhooks",
+    "ai": "AI",
+    "billing": "Fakturering",
+    "recovery": "Gendannelse",
+    "security": "Sikkerhed",
+    "assistant": "Assistent",
+    "release": "Udgivelse",
+    "auth": "Auth-sikkerhed",
+    "storage": "Storage"
+  },
+  "sections": {
+    "overview": "Overblik",
+    "systemHealth": "Systemsundhed",
+    "recentActivity": "Seneste aktivitet",
+    "alerts": "Advarsler"
+  },
+  "tenants": {
+    "title": "Lejere",
+    "total": "Lejere i alt",
+    "active": "Aktive",
+    "suspended": "Suspenderede",
+    "noTenants": "Ingen lejere fundet"
+  },
+  "jobs": {
+    "title": "Jobs",
+    "running": "Kørende jobs",
+    "queued": "I kø",
+    "failed": "Fejlede",
+    "noJobs": "Ingen jobs i kø"
+  },
+  "security": {
+    "title": "Sikkerhed",
+    "recentEvents": "Seneste sikkerhedshændelser",
+    "noEvents": "Ingen seneste hændelser"
+  },
+  "storage": {
+    "title": "Storage",
+    "totalFiles": "Filer i alt",
+    "totalSize": "Samlet størrelse",
+    "consistency": "Konsistens"
+  },
+  "status": {
+    "healthy": "Sundt",
+    "degraded": "Forringet",
+    "outage": "Udfald"
+  }
+}

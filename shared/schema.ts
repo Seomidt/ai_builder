@@ -64,6 +64,7 @@ import {
   index,
   uniqueIndex,
   check,
+  date,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -6319,3 +6320,126 @@ export const dataDeletionJobs = pgTable(
 export const insertDataDeletionJobSchema = createInsertSchema(dataDeletionJobs).omit({ id: true, createdAt: true });
 export type InsertDataDeletionJob = z.infer<typeof insertDataDeletionJobSchema>;
 export type DataDeletionJob = typeof dataDeletionJobs.$inferSelect;
+
+// ─── Phase 46: tenant_files — canonical file metadata ─────────────────────────
+//
+// Source of truth for all tenant file uploads.
+// Object keys are server-generated, tenant-scoped, and never client-controlled.
+// R2 stores the objects; this table stores all metadata, audit state, and lifecycle.
+//
+// Access model: INTERNAL-SYSTEM — never queried directly by tenant users via Supabase client.
+// Application layer enforces tenant isolation by organization_id.
+
+export const tenantFiles = pgTable(
+  "tenant_files",
+  {
+    id:                  text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId:      text("organization_id").notNull(),
+    clientId:            text("client_id"),
+    ownerUserId:         text("owner_user_id"),
+    bucket:              text("bucket").notNull(),
+    objectKey:           text("object_key").notNull(),
+    originalFilename:    text("original_filename").notNull(),
+    mimeType:            text("mime_type").notNull(),
+    sizeBytes:           bigint("size_bytes", { mode: "number" }).notNull(),
+    checksumSha256:      text("checksum_sha256").notNull(),
+    category:            text("category").notNull(),
+    /** private | tenant_internal */
+    visibility:          text("visibility").notNull().default("private"),
+    /** pending | uploaded | failed | deleted */
+    uploadStatus:        text("upload_status").notNull().default("pending"),
+    /** not_scanned | pending_scan | clean | rejected */
+    scanStatus:          text("scan_status").notNull().default("not_scanned"),
+    createdAt:           timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    uploadedAt:          timestamp("uploaded_at", { withTimezone: true }),
+    deletedAt:           timestamp("deleted_at", { withTimezone: true }),
+    deleteScheduledAt:   timestamp("delete_scheduled_at", { withTimezone: true }),
+    metadata:            jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+  },
+  (t) => [
+    index("tf_org_idx").on(t.organizationId),
+    index("tf_org_created_idx").on(t.organizationId, t.createdAt),
+    index("tf_org_category_created_idx").on(t.organizationId, t.category, t.createdAt),
+    uniqueIndex("tf_object_key_uniq").on(t.objectKey),
+  ],
+);
+
+export const insertTenantFileSchema = createInsertSchema(tenantFiles).omit({
+  id:        true,
+  createdAt: true,
+});
+export type InsertTenantFile = z.infer<typeof insertTenantFileSchema>;
+export type TenantFile = typeof tenantFiles.$inferSelect;
+
+// ─── Phase 50: Analytics Foundation ──────────────────────────────────────────
+//
+// analytics_events       — raw behavioral / product event stream
+// analytics_daily_rollups — pre-aggregated daily summaries
+//
+// Access model: service_role_only
+//   - No raw tenant reads from client (PostgREST blocked by RLS)
+//   - Admin reads only via server-side aggregated endpoints
+//   - analytics != security_events (security/system) != audit logs (compliance)
+
+export const analyticsEvents = pgTable(
+  "analytics_events",
+  {
+    id:              text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId:  text("organization_id"),
+    actorUserId:     text("actor_user_id"),
+    clientId:        text("client_id"),
+    eventName:       text("event_name").notNull(),
+    eventFamily:     text("event_family").notNull(),
+    source:          text("source").notNull(),
+    domainRole:      text("domain_role"),
+    locale:          text("locale"),
+    occurredAt:      timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+    sessionId:       text("session_id"),
+    requestId:       text("request_id"),
+    idempotencyKey:  text("idempotency_key"),
+    properties:      jsonb("properties").notNull().default(sql`'{}'::jsonb`),
+  },
+  (t) => [
+    index("ae50_org_occurred_idx").on(t.organizationId, t.occurredAt),
+    index("ae50_family_occurred_idx").on(t.eventFamily, t.occurredAt),
+    index("ae50_name_occurred_idx").on(t.eventName, t.occurredAt),
+    index("ae50_org_name_occurred_idx").on(t.organizationId, t.eventName, t.occurredAt),
+    uniqueIndex("ae50_idempotency_key_uq").on(t.idempotencyKey),
+    check("ae50_source_check", sql`${t.source} IN ('client', 'server', 'system')`),
+    check("ae50_domain_role_check", sql`${t.domainRole} IS NULL OR ${t.domainRole} IN ('public', 'app', 'admin')`),
+    check("ae50_family_check", sql`${t.eventFamily} IN ('product', 'funnel', 'retention', 'billing', 'ai', 'ops')`),
+  ],
+);
+
+export const insertAnalyticsEventSchema = createInsertSchema(analyticsEvents).omit({
+  id:         true,
+  occurredAt: true,
+});
+export type InsertAnalyticsEvent = z.infer<typeof insertAnalyticsEventSchema>;
+export type AnalyticsEvent = typeof analyticsEvents.$inferSelect;
+
+export const analyticsDailyRollups = pgTable(
+  "analytics_daily_rollups",
+  {
+    id:                text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId:    text("organization_id"),
+    eventFamily:       text("event_family").notNull(),
+    eventName:         text("event_name").notNull(),
+    date:              date("date").notNull(),
+    eventCount:        bigint("event_count", { mode: "bigint" }).notNull().default(BigInt(0)),
+    uniqueUsers:       bigint("unique_users", { mode: "bigint" }).notNull().default(BigInt(0)),
+    propertiesSummary: jsonb("properties_summary").notNull().default(sql`'{}'::jsonb`),
+  },
+  (t) => [
+    index("adr50_date_family_name_idx").on(t.date, t.eventFamily, t.eventName),
+    index("adr50_org_date_name_idx").on(t.organizationId, t.date, t.eventName),
+    uniqueIndex("adr50_uq_date_family_name").on(t.date, t.eventFamily, t.eventName),
+    check("adr50_family_check", sql`${t.eventFamily} IN ('product', 'funnel', 'retention', 'billing', 'ai', 'ops')`),
+  ],
+);
+
+export const insertAnalyticsDailyRollupSchema = createInsertSchema(analyticsDailyRollups).omit({
+  id: true,
+});
+export type InsertAnalyticsDailyRollup = z.infer<typeof insertAnalyticsDailyRollupSchema>;
+export type AnalyticsDailyRollup = typeof analyticsDailyRollups.$inferSelect;

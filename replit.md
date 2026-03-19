@@ -311,7 +311,7 @@ npm run db:push   # Sync schema to DB
 - [x] Phase 31: API Security Hardening — 106/106 assertions pass
 - [x] Phase 30: Backup & Disaster Recovery — 151/151 assertions pass
 - [x] Phase 27: Platform Ops Console — 265/265 assertions pass
-- [x] Phase 16: AI Cost Governance — 156/156 assertions pass
+- [x] Phase 16: AI Cost Governance — 156/156 assertions pass *(færdiggjort for længst — commit 541110b, 16. marts 2026)*
 - [x] Phase 4A–4S: Full monetization engine — billing, wallet, subscriptions, invoices, Stripe, jobs, integrity, recovery
 
 ### Open branches (not yet merged to main)
@@ -1694,7 +1694,7 @@ Advisory-only AI assistant for platform operators. Reads live telemetry, synthes
 ### Validation results
 45 scenarios — 173 assertions — ALL PASS (branch: feature/ai-operations-assistant)
 
-## Phase 16 — AI Cost Governance Platform (branch: feature/ai-cost-governance)
+## Phase 16 — AI Cost Governance Platform (branch: feature/ai-cost-governance) — FÆRDIGGJORT 16. MARTS 2026
 
 ### Overview
 Per-tenant AI spend governance with budget enforcement, usage snapshotting, anomaly detection, alert generation and runaway-agent protection. Hard limits block execution (INV-GOV-2). Soft limits warn only (INV-GOV-3). All governance actions fail-open (INV-GOV-1). Full audit trail (INV-GOV-5).
@@ -1776,3 +1776,89 @@ Full argon2id password auth, TOTP MFA, session management, password reset, email
 
 ### Validation results
 233 assertions — ALL PASS (branch: feature/secure-auth-platform)
+
+## Phase 43 — Enterprise Output Safety (branch: feature/enterprise-output-safety-phase43)
+
+### Overview
+HTML sanitization boundary with parser-based server-side sanitizer and DOMPurify client-side. CSP hardened with report-uri.
+
+### New files
+- server/lib/security/output-sanitizer.ts — sanitize-html based, 14-tag allowlist, branded types
+- client/src/lib/security/render-safe-content.ts — DOMPurify client-side renderer
+- client/src/components/security/SafeHtml.tsx — React component wrapping DOMPurify
+- server/routes/security-report.ts — POST /api/security/csp-report
+
+### Invariants
+- INV-OUT-1: sanitizeHtmlForRender returns SanitizedHtml branded type only
+- INV-FE-1: dangerouslySetInnerHTML only allowed with SafeHtml
+
+### Validation results
+498 assertions — ALL PASS
+
+## Phase 44 — Final Enterprise Hardening (branch: feature/final-enterprise-hardening-phase44)
+
+### Overview
+Final production hardening: CSP duplicate removed, nonce infra, W3C Reporting API, AI abuse guard, 3 new security event types, route group extensions.
+
+### Files changed/added
+- chart.tsx: PHASE-44-AUDIT INTERNAL-SAFE comment
+- server/middleware/nonce.ts: CSP nonce infrastructure (SSR migration path documented)
+- server/middleware/security-headers.ts: reportingEndpointsMiddleware, CSP report-to group, cspMiddleware duplicate removed
+- server/index.ts: middleware order: nonce → securityHeaders → reportingEndpoints → globalRateLimit → routeGroupRateLimit → cspReport → auth
+- server/lib/security/security-events.ts: 3 new event types (csp_violation, ai_input_rejected, rate_limit_exceeded); convenience log functions
+- server/lib/security/ai-abuse-guard.ts: input cap (32k chars), burst control (20/min/tenant), hourly budget (500k/hr), injection detection
+- server/lib/security/api-rate-limits.ts: 2 new route groups (ai_expensive, security_report)
+- server/lib/security/migrate-phase44.ts: DB migration (se_event_type_check extended to 14 types, 3 partial indexes, ai_abuse_log table with RLS)
+- server/lib/security/validate-phase44.ts: 412-assertion validation suite (LAYER A-I)
+
+### DB changes (Phase 44 migration)
+- security_events.se_event_type_check extended: 11 → 14 types
+- 3 partial indexes on security_events (csp_violation, ai_input_rejected, rate_limit_exceeded)
+- ai_abuse_log table: rejection_reason CHECK, 3 indexes, RLS enabled
+
+### Validation results
+412 assertions — ALL PASS
+
+## Phase CF-Enterprise — Cloudflare Edge Hardening
+
+### Purpose
+Full Cloudflare edge security and performance setup — fully API-driven, reproducible, verifiable.
+
+### Files created
+- server/lib/cloudflare/client.ts: typed Cloudflare API client (cfFetch, retry, zone/ruleset helpers)
+- server/lib/cloudflare/setup-ssl.ts: SSL strict + always-HTTPS + HSTS + TLS 1.2 min
+- server/lib/cloudflare/verify-dns.ts: assert/enforce proxied=true on all A/CNAME records
+- server/lib/cloudflare/setup-waf.ts: managed WAF packages + 3 custom rules (auth/ai/geo)
+- server/lib/cloudflare/setup-rate-limits.ts: edge rate limits (10/20/100 req per 60s)
+- server/lib/cloudflare/setup-cache.ts: static asset cache (30d) + API bypass
+- server/lib/cloudflare/validate-cloudflare.ts: 7-check validation → structured report
+- server/lib/cloudflare/setup-all.ts: orchestrator (6 steps in order, fails on critical)
+- scripts/setup-cloudflare.ts: CLI entrypoint — npx tsx scripts/setup-cloudflare.ts
+- scripts/validate-cloudflare.ts: CI validation — exit 0 on all pass
+- docs/security/cloudflare-setup.md: full documentation
+
+### Env vars required
+- CF_API_TOKEN (already configured as Replit secret)
+- CLOUDFLARE_ZONE_ID (must be added — Zone ID from Cloudflare dashboard)
+
+### Custom WAF rules
+1. /api/auth → managed_challenge
+2. /api/ai → managed_challenge
+3. Non-DK/US/DE IPs → managed_challenge
+
+### Rate limits (edge)
+- /api/auth/*: 10 req/60s → block
+- /api/ai/*: 20 req/60s → block
+- /api/*: 100 req/60s → managed_challenge
+
+### Cache rules
+- Static assets (js/css/png/svg/…): 30-day edge TTL
+- /api/*: bypass cache entirely
+
+### CSP reports (Task 8)
+Already wired in Phase 44: POST /api/security/csp-report → security_events(csp_violation).
+Reporting-Endpoints header instructs browsers to POST to this endpoint.
+No additional Cloudflare config needed.
+
+### Branch
+feature/cloudflare-enterprise-setup
