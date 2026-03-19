@@ -115,6 +115,11 @@ export function lockdownGuard(
     return next();
   }
 
+  // Only enforce lockdown on /api/* routes — React SPA handles client-side protection
+  if (!req.path.startsWith("/api")) {
+    return next();
+  }
+
   // Internal tooling bypass (validation scripts, CI) — same check as authMiddleware
   const internalSecret = process.env.INTERNAL_API_SECRET;
   if (internalSecret && req.headers["x-internal-token"] === internalSecret) {

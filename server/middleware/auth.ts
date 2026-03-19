@@ -85,6 +85,12 @@ export async function authMiddleware(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
+  // Only enforce auth on /api/* — all other paths are served by the React SPA
+  // which handles client-side route protection via ProtectedRoute.
+  if (!req.path.startsWith("/api")) {
+    return next();
+  }
+
   // Phase 28: allow specific public paths without authentication
   if (PUBLIC_PATHS.includes(req.path)) {
     return next();
