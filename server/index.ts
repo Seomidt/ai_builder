@@ -61,6 +61,9 @@ app.use("/api/security", cspReportRouter);
 
 app.use(authMiddleware);
 
+// Phase 7: API rate limiting (INV-SEC5)
+app.use("/api", apiRateLimit);
+
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",
