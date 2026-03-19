@@ -4,6 +4,7 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/layout/AppShell";
+import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import { I18nProvider } from "@/components/providers/I18nProvider";
 import Dashboard from "@/pages/dashboard";
 import Projects from "@/pages/projects";
@@ -33,45 +34,71 @@ import AuthMfaChallenge from "@/pages/auth/mfa-challenge";
 import SecuritySettings from "@/pages/settings/security";
 import OpsStorage from "@/pages/ops/storage";
 
+/**
+ * Protected inner routes — only rendered when ProtectedRoute clears session.
+ * AppShell (sidebar + layout) is only shown to authenticated users.
+ */
+function ProtectedApp() {
+  return (
+    <ProtectedRoute>
+      <AppShell>
+        <Switch>
+          {/* Platform routes */}
+          <Route path="/" component={Dashboard} />
+          <Route path="/projects" component={Projects} />
+          <Route path="/architectures" component={Architectures} />
+          <Route path="/runs" component={Runs} />
+          <Route path="/runs/:id" component={RunDetail} />
+          <Route path="/integrations" component={Integrations} />
+          <Route path="/settings" component={Settings} />
+          <Route path="/settings/security" component={SecuritySettings} />
+
+          {/* Ops Console routes */}
+          <Route path="/ops" component={OpsDashboard} />
+          <Route path="/ops/tenants" component={OpsTenants} />
+          <Route path="/ops/jobs" component={OpsJobs} />
+          <Route path="/ops/webhooks" component={OpsWebhooks} />
+          <Route path="/ops/ai" component={OpsAi} />
+          <Route path="/ops/billing" component={OpsBilling} />
+          <Route path="/ops/recovery" component={OpsRecovery} />
+          <Route path="/ops/security" component={OpsSecurity} />
+          <Route path="/ops/assistant" component={OpsAssistant} />
+          <Route path="/ops/release" component={OpsRelease} />
+          <Route path="/ops/auth" component={OpsAuthSecurity} />
+          <Route path="/ops/storage" component={OpsStorage} />
+
+          <Route component={NotFound} />
+        </Switch>
+      </AppShell>
+    </ProtectedRoute>
+  );
+}
+
+/**
+ * Top-level router.
+ *
+ * Auth routes (/auth/*) are PUBLIC — no ProtectedRoute, no AppShell.
+ * Every other route falls into the catch-all which applies ProtectedRoute.
+ *
+ * This ensures:
+ * - Unauthenticated users see /auth/login (not a dashboard shell)
+ * - Lockdown-blocked users see the access-denied screen
+ * - The AppShell/sidebar is NEVER rendered for unauthenticated users
+ */
 function Router() {
   return (
-    <AppShell>
-      <Switch>
-        {/* Platform routes */}
-        <Route path="/" component={Dashboard} />
-        <Route path="/projects" component={Projects} />
-        <Route path="/architectures" component={Architectures} />
-        <Route path="/runs" component={Runs} />
-        <Route path="/runs/:id" component={RunDetail} />
-        <Route path="/integrations" component={Integrations} />
-        <Route path="/settings" component={Settings} />
+    <Switch>
+      {/* Public auth routes — no guard, no sidebar */}
+      <Route path="/auth/login" component={AuthLogin} />
+      <Route path="/auth/password-reset" component={AuthPasswordResetRequest} />
+      <Route path="/auth/password-reset-confirm" component={AuthPasswordResetConfirm} />
+      <Route path="/auth/email-verify" component={AuthEmailVerify} />
+      <Route path="/auth/invite-accept" component={AuthInviteAccept} />
+      <Route path="/auth/mfa-challenge" component={AuthMfaChallenge} />
 
-        {/* Auth routes */}
-        <Route path="/auth/login" component={AuthLogin} />
-        <Route path="/auth/password-reset" component={AuthPasswordResetRequest} />
-        <Route path="/auth/password-reset-confirm" component={AuthPasswordResetConfirm} />
-        <Route path="/auth/email-verify" component={AuthEmailVerify} />
-        <Route path="/auth/invite-accept" component={AuthInviteAccept} />
-        <Route path="/auth/mfa-challenge" component={AuthMfaChallenge} />
-        <Route path="/settings/security" component={SecuritySettings} />
-
-        {/* Ops Console routes */}
-        <Route path="/ops" component={OpsDashboard} />
-        <Route path="/ops/tenants" component={OpsTenants} />
-        <Route path="/ops/jobs" component={OpsJobs} />
-        <Route path="/ops/webhooks" component={OpsWebhooks} />
-        <Route path="/ops/ai" component={OpsAi} />
-        <Route path="/ops/billing" component={OpsBilling} />
-        <Route path="/ops/recovery" component={OpsRecovery} />
-        <Route path="/ops/security" component={OpsSecurity} />
-        <Route path="/ops/assistant" component={OpsAssistant} />
-        <Route path="/ops/release" component={OpsRelease} />
-        <Route path="/ops/auth" component={OpsAuthSecurity} />
-        <Route path="/ops/storage" component={OpsStorage} />
-
-        <Route component={NotFound} />
-      </Switch>
-    </AppShell>
+      {/* All other routes — protected (session required) */}
+      <Route component={ProtectedApp} />
+    </Switch>
   );
 }
 
