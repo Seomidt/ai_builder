@@ -19,6 +19,8 @@ import { wwwRedirectMiddleware } from "./middleware/www-redirect";
 import { hostAllowlistMiddleware } from "./middleware/host-allowlist";
 import { adminDomainGuard, adminNoindexHeader } from "./middleware/admin-domain";
 import { robotsRouter } from "./routes/robots";
+// Enterprise auth lockdown — AI & Admin guard chains
+import { adminGuardMiddleware } from "./middleware/ai-guards";
 
 const app = express();
 const httpServer = createServer(app);
@@ -78,6 +80,10 @@ app.use(authMiddleware);
 // Phase Next: admin domain isolation + noindex header — after auth, before routes
 app.use(adminDomainGuard);
 app.use(adminNoindexHeader);
+
+// Enterprise auth lockdown: all /api/admin/* routes require platform_admin
+// CI/CD health-check paths (ADMIN_PUBLIC_PATHS) bypass this guard automatically.
+app.use("/api/admin", adminGuardMiddleware);
 
 
 export function log(message: string, source = "express") {

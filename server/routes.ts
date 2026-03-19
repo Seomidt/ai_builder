@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { registerAdminRoutes } from "./routes/admin";
+import { aiRouteChain } from "./middleware/ai-guards";
 import {
   getSecurityHealth,
   getSecurityViolationCounts,
@@ -314,7 +315,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ─── Run execution pipeline ─────────────────────────────────────────────────
 
-  app.post("/api/runs/:id/execute", async (req, res) => {
+  app.post("/api/runs/:id/execute", ...aiRouteChain, async (req, res) => {
     try {
       const orgId = getOrgId(req);
       // Fire execution — async (does not block response)
@@ -433,7 +434,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // ─── AI Features ─────────────────────────────────────────────────────────────
 
-  app.post("/api/ai/summarize", async (req: Request, res: Response) => {
+  app.post("/api/ai/summarize", ...aiRouteChain, async (req: Request, res: Response) => {
     try {
       const text = (req.body as { text?: string }).text?.trim() ?? "";
       if (!text) {
