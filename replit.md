@@ -1,4 +1,4 @@
-# AI Builder Platform — V1 (Phase 37 complete)
+# AI Builder Platform — V1 (Phase X / R2 Hardening complete)
 
 Internal control plane for AI-driven software generation. Express + React + Drizzle ORM + Supabase.
 
