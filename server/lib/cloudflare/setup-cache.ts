@@ -10,6 +10,7 @@ const CACHE_RULES: Array<{
 }> = [
   {
     description: "STATIC ASSETS — cache everything for 1 month",
+    // Use 'in' operator with space-separated values (Cloudflare ruleset syntax)
     expression:
       '(http.request.uri.path.extension in {"js" "css" "png" "jpg" "jpeg" "svg" "webp" "ico" "woff" "woff2" "ttf" "gif"})',
     action: "set_cache_settings",
@@ -17,17 +18,18 @@ const CACHE_RULES: Array<{
       cache: true,
       edge_ttl: {
         mode: "override_origin",
-        default: 2592000, // 30 days
+        default: 2592000, // 30 days in seconds
       },
       browser_ttl: {
         mode: "override_origin",
-        default: 86400, // 1 day
+        default: 86400, // 1 day in seconds
       },
     },
   },
   {
     description: "API BYPASS — never cache /api/* responses",
-    expression: '(http.request.uri.path starts_with "/api/")',
+    // 'contains' works on all plans; 'matches' requires Business/WAF Advanced
+    expression: '(http.request.uri.path contains "/api/")',
     action: "set_cache_settings",
     action_parameters: {
       cache: false,
@@ -79,7 +81,9 @@ export async function setupCache(): Promise<CacheSetupResult> {
     console.log(`[CF:Cache] ${CACHE_RULES.length} cache rules applied ✔`);
     return { rulesApplied: CACHE_RULES.length, phaseAvailable: true };
   } catch (err) {
-    console.warn(`[CF:Cache] Cache phase unavailable: ${(err as Error).message}`);
+    const msg = (err as Error).message;
+    console.warn(`[CF:Cache] Cache rules unavailable on this plan: ${msg}`);
+    // Cache rules require Pro plan — log and continue gracefully
     return { rulesApplied: 0, phaseAvailable: false };
   }
 }

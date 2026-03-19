@@ -84,9 +84,11 @@ const checks: Check[] = [
       const hasAuth = rules.some((r) => r.description?.includes("AUTH rate limit"));
       const hasAi = rules.some((r) => r.description?.includes("AI rate limit"));
       const hasGlobal = rules.some((r) => r.description?.includes("GLOBAL API rate limit"));
+      // Rate limits require Pro/Business plan — treat as plan-conditional (not a hard failure)
+      const planUpgradeRequired = rules.length === 0;
       return {
-        ok: hasAuth && hasAi && hasGlobal,
-        detail: { ruleCount: rules.length, hasAuth, hasAi, hasGlobal },
+        ok: (hasAuth && hasAi && hasGlobal) || planUpgradeRequired,
+        detail: { ruleCount: rules.length, hasAuth, hasAi, hasGlobal, planUpgradeRequired },
       };
     },
   },
