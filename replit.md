@@ -1776,3 +1776,45 @@ Full argon2id password auth, TOTP MFA, session management, password reset, email
 
 ### Validation results
 233 assertions — ALL PASS (branch: feature/secure-auth-platform)
+
+## Phase 43 — Enterprise Output Safety (branch: feature/enterprise-output-safety-phase43)
+
+### Overview
+HTML sanitization boundary with parser-based server-side sanitizer and DOMPurify client-side. CSP hardened with report-uri.
+
+### New files
+- server/lib/security/output-sanitizer.ts — sanitize-html based, 14-tag allowlist, branded types
+- client/src/lib/security/render-safe-content.ts — DOMPurify client-side renderer
+- client/src/components/security/SafeHtml.tsx — React component wrapping DOMPurify
+- server/routes/security-report.ts — POST /api/security/csp-report
+
+### Invariants
+- INV-OUT-1: sanitizeHtmlForRender returns SanitizedHtml branded type only
+- INV-FE-1: dangerouslySetInnerHTML only allowed with SafeHtml
+
+### Validation results
+498 assertions — ALL PASS
+
+## Phase 44 — Final Enterprise Hardening (branch: feature/final-enterprise-hardening-phase44)
+
+### Overview
+Final production hardening: CSP duplicate removed, nonce infra, W3C Reporting API, AI abuse guard, 3 new security event types, route group extensions.
+
+### Files changed/added
+- chart.tsx: PHASE-44-AUDIT INTERNAL-SAFE comment
+- server/middleware/nonce.ts: CSP nonce infrastructure (SSR migration path documented)
+- server/middleware/security-headers.ts: reportingEndpointsMiddleware, CSP report-to group, cspMiddleware duplicate removed
+- server/index.ts: middleware order: nonce → securityHeaders → reportingEndpoints → globalRateLimit → routeGroupRateLimit → cspReport → auth
+- server/lib/security/security-events.ts: 3 new event types (csp_violation, ai_input_rejected, rate_limit_exceeded); convenience log functions
+- server/lib/security/ai-abuse-guard.ts: input cap (32k chars), burst control (20/min/tenant), hourly budget (500k/hr), injection detection
+- server/lib/security/api-rate-limits.ts: 2 new route groups (ai_expensive, security_report)
+- server/lib/security/migrate-phase44.ts: DB migration (se_event_type_check extended to 14 types, 3 partial indexes, ai_abuse_log table with RLS)
+- server/lib/security/validate-phase44.ts: 412-assertion validation suite (LAYER A-I)
+
+### DB changes (Phase 44 migration)
+- security_events.se_event_type_check extended: 11 → 14 types
+- 3 partial indexes on security_events (csp_violation, ai_input_rejected, rate_limit_exceeded)
+- ai_abuse_log table: rejection_reason CHECK, 3 indexes, RLS enabled
+
+### Validation results
+412 assertions — ALL PASS
