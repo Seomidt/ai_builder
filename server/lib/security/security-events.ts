@@ -1,11 +1,20 @@
 /**
- * Phase 13.2 — Security Events Service
+ * Phase 13.2 / Phase 44 — Security Events Service
  *
  * Logs and queries security events. Security events are operational/security-domain
  * signals — they are DISTINCT from audit events (which are canonical governance history).
  *
+ * Phase 44 additions:
+ *   - csp_violation: browser-reported CSP violation (via /api/security/csp-report)
+ *   - ai_input_rejected: AI input blocked by abuse guard (input cap, burst, pattern)
+ *   - rate_limit_exceeded: fine-grained per-group rate limit trigger (replaces rate_limit_trigger
+ *     which remains for backward compat; rate_limit_exceeded carries group-level metadata)
+ *
  * INV-SEC-H7: Security events must never log secrets.
  * INV-SEC-H9: Security event reads must remain tenant-safe / admin-safe.
+ * INV-SEC-P44-1: csp_violation metadata includes blockedUri, violatedDirective, documentUri (no PII).
+ * INV-SEC-P44-2: ai_input_rejected metadata includes rejectionReason, inputLengthBytes (no content).
+ * INV-SEC-P44-3: rate_limit_exceeded metadata includes group, maxRequests, windowSec, keyStrategy.
  */
 
 import { db } from "../../db";
@@ -16,7 +25,7 @@ import { redactSensitiveFields } from "./log-redaction";
 // ── Security event types ──────────────────────────────────────────────────────
 
 // Phase 13.2 operational security event types
-export const SECURITY_EVENT_TYPES = [
+export const SECURITY_EVENT_TYPES_PHASE13 = [
   "auth_failure",
   "rate_limit_trigger",
   "invalid_input",
@@ -24,6 +33,19 @@ export const SECURITY_EVENT_TYPES = [
   "api_abuse",
   "oversized_payload",
   "security_header_violation",
+] as const;
+
+// Phase 44: new security event types for CSP, AI abuse, and fine-grained rate limiting
+export const SECURITY_EVENT_TYPES_PHASE44 = [
+  "csp_violation",
+  "ai_input_rejected",
+  "rate_limit_exceeded",
+] as const;
+
+// Combined canonical set — all valid event types
+export const SECURITY_EVENT_TYPES = [
+  ...SECURITY_EVENT_TYPES_PHASE13,
+  ...SECURITY_EVENT_TYPES_PHASE44,
 ] as const;
 
 // Phase 7 legacy event types (backward compat — kept in allowed constraint)
@@ -74,6 +96,83 @@ export async function logSecurityEvent(payload: SecurityEventPayload): Promise<v
     // Observability-only — security event failure must not disrupt request flow
     console.error("[security-events] logSecurityEvent error:", (err as Error).message);
   }
+}
+
+// ── Phase 44 convenience log functions ───────────────────────────────────────
+
+/**
+ * Log a browser-reported CSP violation.
+ * INV-SEC-P44-1: no PII — only blockedUri, violatedDirective, documentUri logged.
+ */
+export async function logCspViolation(opts: {
+  blockedUri:          string;
+  violatedDirective:   string;
+  documentUri:         string;
+  ip?:                 string | null;
+  requestId?:          string | null;
+}): Promise<void> {
+  return logSecurityEvent({
+    eventType: "csp_violation",
+    ip: opts.ip ?? null,
+    requestId: opts.requestId ?? null,
+    metadata: {
+      blockedUri:        opts.blockedUri,
+      violatedDirective: opts.violatedDirective,
+      documentUri:       opts.documentUri,
+    },
+  });
+}
+
+/**
+ * Log an AI input rejection event.
+ * INV-SEC-P44-2: content is NEVER logged — only inputLengthBytes and rejectionReason.
+ */
+export async function logAiInputRejected(opts: {
+  tenantId:          string;
+  actorId?:          string | null;
+  inputLengthBytes:  number;
+  rejectionReason:   "input_too_long" | "burst_limit" | "pattern_match" | "token_cap";
+  ip?:               string | null;
+  requestId?:        string | null;
+}): Promise<void> {
+  return logSecurityEvent({
+    eventType: "ai_input_rejected",
+    tenantId:  opts.tenantId,
+    actorId:   opts.actorId ?? null,
+    ip:        opts.ip ?? null,
+    requestId: opts.requestId ?? null,
+    metadata: {
+      inputLengthBytes: opts.inputLengthBytes,
+      rejectionReason:  opts.rejectionReason,
+    },
+  });
+}
+
+/**
+ * Log a fine-grained route-group rate limit exceeded event.
+ * INV-SEC-P44-3: metadata includes group, maxRequests, windowSec, keyStrategy.
+ */
+export async function logRateLimitExceeded(opts: {
+  tenantId?:      string | null;
+  ip?:            string | null;
+  requestId?:     string | null;
+  group:          string;
+  maxRequests:    number;
+  windowSec:      number;
+  keyStrategy:    string;
+}): Promise<void> {
+  return logSecurityEvent({
+    eventType:  "rate_limit_exceeded",
+    tenantId:   opts.tenantId ?? null,
+    ip:         opts.ip ?? null,
+    requestId:  opts.requestId ?? null,
+    metadata: {
+      group:       opts.group,
+      maxRequests: opts.maxRequests,
+      windowSec:   opts.windowSec,
+      keyStrategy: opts.keyStrategy,
+    },
+  });
 }
 
 // ── listSecurityEventsByTenant ────────────────────────────────────────────────
@@ -134,13 +233,18 @@ export interface SecurityEventExplanation {
 }
 
 const EVENT_EXPLANATIONS: Record<SecurityEventType, Omit<SecurityEventExplanation, "eventType">> = {
-  auth_failure: { description: "Authentication attempt failed", severity: "medium", tenantImpact: true },
-  rate_limit_trigger: { description: "Request rate limit exceeded", severity: "low", tenantImpact: true },
-  invalid_input: { description: "Invalid or malformed input detected", severity: "medium", tenantImpact: true },
-  tenant_access_violation: { description: "Cross-tenant access attempt detected", severity: "high", tenantImpact: true },
-  api_abuse: { description: "API abuse pattern detected", severity: "high", tenantImpact: true },
-  oversized_payload: { description: "Request body exceeded size limit", severity: "low", tenantImpact: false },
-  security_header_violation: { description: "Security header policy violation detected", severity: "medium", tenantImpact: false },
+  // Phase 13.2
+  auth_failure:              { description: "Authentication attempt failed",                        severity: "medium",   tenantImpact: true  },
+  rate_limit_trigger:        { description: "Request rate limit exceeded (legacy)",                 severity: "low",      tenantImpact: true  },
+  invalid_input:             { description: "Invalid or malformed input detected",                  severity: "medium",   tenantImpact: true  },
+  tenant_access_violation:   { description: "Cross-tenant access attempt detected",                 severity: "high",     tenantImpact: true  },
+  api_abuse:                 { description: "API abuse pattern detected",                           severity: "high",     tenantImpact: true  },
+  oversized_payload:         { description: "Request body exceeded size limit",                     severity: "low",      tenantImpact: false },
+  security_header_violation: { description: "Security header policy violation detected",            severity: "medium",   tenantImpact: false },
+  // Phase 44
+  csp_violation:             { description: "Browser CSP violation reported",                       severity: "medium",   tenantImpact: false },
+  ai_input_rejected:         { description: "AI input rejected by abuse guard (cap/burst/pattern)", severity: "high",     tenantImpact: true  },
+  rate_limit_exceeded:       { description: "Fine-grained route-group rate limit exceeded",         severity: "low",      tenantImpact: true  },
 };
 
 export function explainSecurityEvent(eventType: SecurityEventType): SecurityEventExplanation {

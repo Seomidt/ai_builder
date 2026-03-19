@@ -30,7 +30,10 @@ export type RouteGroup =
   | "r2_signed_url"
   | "webhooks"
   | "tenant_api"
-  | "ai_general";
+  | "ai_general"
+  // Phase 44 additions
+  | "ai_expensive"      // Expensive AI ops (code gen, long context) — stricter limit
+  | "security_report";  // CSP / security report ingestion — generous, unauthenticated
 
 export interface RouteGroupPolicy {
   group:         RouteGroup;
@@ -88,6 +91,16 @@ export const ROUTE_GROUP_POLICIES: Record<RouteGroup, RouteGroupPolicy> = {
   ai_general: {
     group: "ai_general", maxRequests: 60, windowMs: 60_000,
     keyStrategy: "tenant", description: "AI API: 60 per tenant per minute",
+  },
+  // Phase 44: expensive AI operations (code generation, long-context completions)
+  ai_expensive: {
+    group: "ai_expensive", maxRequests: 10, windowMs: 60_000,
+    keyStrategy: "tenant", description: "Expensive AI ops: 10 per tenant per minute",
+  },
+  // Phase 44: security report ingestion — unauthenticated, so IP-keyed, generous
+  security_report: {
+    group: "security_report", maxRequests: 200, windowMs: 60_000,
+    keyStrategy: "ip", description: "Security reports: 200 per IP per minute",
   },
 };
 
@@ -170,8 +183,14 @@ export function routePathToGroup(path: string, method = "GET"): RouteGroup | nul
   if (path.startsWith("/api/r2/"))                 return "r2_general";
   if (path.startsWith("/api/webhooks/") ||
       path.startsWith("/api/webhook/"))            return "webhooks";
+  // Phase 44: expensive AI operations (code generation, long-context)
+  if (path.startsWith("/api/ai/generate") ||
+      path.startsWith("/api/ai/complete") ||
+      path.startsWith("/api/ai/code"))             return "ai_expensive";
   if (path.startsWith("/api/ai/"))                 return "ai_general";
   if (path.startsWith("/api/tenant/"))             return "tenant_api";
+  // Phase 44: CSP and security report ingestion
+  if (path.startsWith("/api/security/"))           return "security_report";
   return null;
 }
 

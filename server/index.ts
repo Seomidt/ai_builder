@@ -4,19 +4,27 @@ import { serveStatic } from "./static";
 import { createServer } from "http";
 import { authMiddleware } from "./middleware/auth";
 import { requestIdMiddleware, structuredLoggingMiddleware } from "./middleware/request-id";
-import { securityHeaders } from "./middleware/security-headers";
-import { cspMiddleware } from "./middleware/csp";
+import { securityHeaders, reportingEndpointsMiddleware } from "./middleware/security-headers";
+// Phase 44: cspMiddleware removed — it was a duplicate of helmet CSP in securityHeaders.
+// Both set Content-Security-Policy; browsers enforce the intersection (most restrictive).
+// securityHeaders (helmet) is the authoritative CSP source going forward.
+// csp.ts is retained for reference but no longer applied.
 import { responseSecurityMiddleware } from "./middleware/response-security";
 import { globalApiLimiter } from "./middleware/rate-limit";
+import { nonceMiddleware } from "./middleware/nonce";
 import { cspReportRouter } from "./routes/security-report";
+import { createRouteGroupRateLimiter } from "./lib/security/api-rate-limits";
 
 const app = express();
 const httpServer = createServer(app);
 
+// Phase 44: nonce middleware — generates per-request CSP nonce (infrastructure for future SSR)
+app.use(nonceMiddleware);
 // Phase 13.2: security headers — FIRST, before all routes and body parsing
+// Phase 44: cspMiddleware removed (was duplicate of helmet CSP). securityHeaders is authoritative.
 app.use(securityHeaders);
-// Phase 13.2: explicit CSP header
-app.use(cspMiddleware);
+// Phase 44: Report-To + Reporting-Endpoints headers (W3C Reporting API)
+app.use(reportingEndpointsMiddleware);
 // Phase 13.2: response header hardening (overrides specific helmet defaults)
 app.use(responseSecurityMiddleware);
 
@@ -44,6 +52,8 @@ app.use(structuredLoggingMiddleware);
 
 // Phase 13.2: global API rate limiter — 1000 req/15 min per actor/IP (replaces Phase 13.1 inline)
 app.use("/api", globalApiLimiter);
+// Phase 44: route-group rate limiter — per-group stricter limits (auth/AI/admin/security)
+app.use("/api", createRouteGroupRateLimiter());
 
 // Phase 43: CSP violation reporting — registered BEFORE authMiddleware.
 // Browsers send CSP reports without auth credentials — must be publicly accessible.

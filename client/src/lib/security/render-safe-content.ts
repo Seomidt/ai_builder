@@ -38,22 +38,24 @@ export function markUnsafe(s: string): UnsafeContent {
 
 // ── DOMPurify config ──────────────────────────────────────────────────────────
 
-/** Allowlist-based DOMPurify config for rich HTML rendering */
+/**
+ * Phase 44: STRICT MINIMUM — 14 tags only. Mirrors server/lib/security/output-sanitizer.ts.
+ * Changes from Phase 43: removed table/div/span/headings/dl/kbd/samp/q/cite/hr/etc.
+ * See output-sanitizer.ts for full exclusion justifications.
+ */
 const RENDER_HTML_CONFIG: DOMPurify.Config = {
   ALLOWED_TAGS: [
-    "b", "strong", "i", "em", "u", "s", "del", "ins",
-    "p", "br", "hr",
+    "b", "strong",
+    "i", "em",
+    "u",
+    "p", "br",
     "ul", "ol", "li",
-    "dl", "dt", "dd",
-    "code", "pre", "kbd", "samp",
-    "blockquote", "q", "cite",
-    "h1", "h2", "h3", "h4", "h5", "h6",
+    "code", "pre",
+    "blockquote",
     "a",
-    "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption",
-    "div", "span",
-    "abbr", "acronym", "address", "small", "sub", "sup",
   ],
-  ALLOWED_ATTR: ["href", "title", "target", "rel", "rowspan", "colspan", "scope", "summary", "cite"],
+  // Phase 44: only href/target/rel on <a> — matches server-side policy
+  ALLOWED_ATTR: ["href", "target", "rel"],
   FORCE_BODY: true,
   RETURN_DOM: false,
   RETURN_DOM_FRAGMENT: false,

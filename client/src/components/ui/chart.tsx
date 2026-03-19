@@ -76,6 +76,11 @@ const ChartStyle = ({ id, config }: { id: string; config: ChartConfig }) => {
     return null
   }
 
+  // PHASE-44-AUDIT: INTERNAL-SAFE — dangerouslySetInnerHTML below renders CSS custom
+  // properties (--color-* variables) from the internal THEMES constant and
+  // caller-supplied ChartConfig only. No user input reaches this path.
+  // Approved: does NOT violate INV-FE-1.
+  // Do NOT render untrusted HTML outside SafeHtml — see client/src/components/security/SafeHtml.tsx
   return (
     <style
       dangerouslySetInnerHTML={{

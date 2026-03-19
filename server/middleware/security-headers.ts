@@ -1,19 +1,24 @@
 /**
- * Phase 42 / Phase 43 — Security Headers Middleware
+ * Phase 42 / Phase 43 / Phase 44 — Security Headers Middleware
  *
  * Phase 42 fix: contentSecurityPolicy was set to `false` — scanner finding resolved.
  * Phase 43 hardening:
  *   - Added report-uri /api/security/csp-report for violation observability
- *   - Tightened connect-src (self + Supabase + Vite HMR WS in dev)
+ *   - Tightened connect-src (self + Vite HMR WS in dev only)
  *   - Explicit upgrade-insecure-requests in production
- *   - img-src tightened (removed broad data: fallback — only small data: URIs needed)
- *   - Script-src documented: nonce migration path tracked as Phase 44 follow-up
  *   - style-src 'unsafe-inline' retained — required by Tailwind + shadcn runtime styles
- *     (nonce-based approach would require React 18 streaming + framework rewrite)
- *
- * NOTE: cspMiddleware (server/middleware/csp.ts) also runs (index.ts line 18)
- * and sets the same policy. Both coexist safely — browsers enforce the intersection.
- * Removing cspMiddleware is tracked as Phase 44 follow-up cleanup.
+ * Phase 44 hardening:
+ *   - cspMiddleware (server/middleware/csp.ts) REMOVED from middleware chain
+ *     (was duplicate of this helmet CSP). securityHeaders is now the sole authoritative source.
+ *   - Added Reporting-Endpoints + Report-To headers (modern W3C Reporting API)
+ *   - Nonce infrastructure implemented (server/middleware/nonce.ts) — full nonce
+ *     rollout blocked pending Vite SSR migration. 'self' remains launch-safe baseline.
+ *   - img-src: data: retained for chart.tsx internal CSS custom properties (INTERNAL-SAFE)
+ *   - connect-src explicit allowlist verified — no wildcards in production
+ *   - font-src: 'self' only
+ *   - style-src 'unsafe-inline' required: Tailwind/shadcn generates runtime CSS classes.
+ *     CSS-based data exfiltration via attribute selectors is low-risk for authenticated
+ *     internal SaaS. Nonce-based style CSP tracked as post-launch follow-up.
  *
  * Dev mode adds 'unsafe-eval' for Vite HMR only — never in production.
  */
@@ -68,11 +73,45 @@ const helmetCspDirectives = {
   mediaSrc:       ["'self'"],
   workerSrc:      ["'self'", "blob:"],
 
-  // Phase 43: CSP violation reporting endpoint
+  // Phase 43: CSP violation reporting endpoint (legacy — Firefox/Safari)
   reportUri:      ["/api/security/csp-report"],
+  // Phase 44: modern Report-To group (Chrome 96+ / Reporting API)
+  // Group "csp-endpoint" is defined in the Report-To / Reporting-Endpoints headers
+  // added by reportingEndpointsMiddleware.
+  reportTo:       "csp-endpoint",
 
   // Phase 43: upgrade all mixed-content requests to HTTPS in production
   ...(isProd ? { upgradeInsecureRequests: [] } : {}),
+};
+
+// ── Report-To / Reporting-Endpoints (modern W3C Reporting API) ────────────────
+//
+// Phase 44: add report-to group for modern browsers alongside legacy report-uri.
+// report-to is the successor to report-uri (W3C Reporting API Level 1).
+// Both are set — report-uri serves Firefox/Safari; report-to serves Chrome.
+// Group name "csp-endpoint" is referenced in CSP report-to directive.
+//
+// NOTE: Reporting-Endpoints header format (Reporting API Level 1, Chrome 96+):
+//   Reporting-Endpoints: csp-endpoint="/api/security/csp-report"
+// Report-To (legacy group format):
+//   Report-To: {"group":"csp-endpoint","max_age":86400,"endpoints":[{"url":"/api/security/csp-report"}]}
+
+export const reportingEndpointsMiddleware: RequestHandler = (_req, res, next) => {
+  // W3C Reporting API Level 1 (Chrome 96+)
+  res.setHeader(
+    "Reporting-Endpoints",
+    'csp-endpoint="/api/security/csp-report"',
+  );
+  // Legacy Report-To format (Chrome < 96, Edge)
+  res.setHeader(
+    "Report-To",
+    JSON.stringify({
+      group: "csp-endpoint",
+      max_age: 86400,
+      endpoints: [{ url: "/api/security/csp-report" }],
+    }),
+  );
+  next();
 };
 
 export const securityHeaders: RequestHandler = helmet({

@@ -1,5 +1,5 @@
 /**
- * Phase 43 — Enterprise Output Sanitizer (LAYER B)
+ * Phase 43/44 — Enterprise Output Sanitizer (LAYER B)
  *
  * This is the BROWSER-BOUND / RENDER-BOUND sanitizer.
  * Use this for any content that will be:
@@ -22,11 +22,22 @@
  * RULE: untrusted content MUST pass through this module before entering any render surface.
  *
  * INV-OUT-1: sanitizeHtmlForRender returns SanitizedHtml branded type only
- * INV-OUT-2: allowlist is minimal — deny-by-default
+ * INV-OUT-2: allowlist is minimal — deny-by-default (Phase 44: reduced to 14 tags)
  * INV-OUT-3: no regex-only HTML cleaning in this layer
  * INV-OUT-4: javascript: URLs are never allowed
  * INV-OUT-5: event handlers are never allowed
  * INV-OUT-6: script, iframe, object, embed, form, svg, style are always forbidden
+ * INV-OUT-7: class, style, id, data-*, on* attributes are never allowed
+ *
+ * Phase 44 allowlist reduction:
+ *   Previous: 40+ tags (table, div, span, heading, dl, kbd, hr, etc.)
+ *   Current:  14 tags (strict minimum for AI/document output formatting)
+ *   Removed tags: all presentation/layout (div, span), tables, headings (h1-h6),
+ *     definition lists (dl/dt/dd), kbd/samp/q/cite/hr/s/del/ins/abbr/sub/sup etc.
+ *   Justification: no current feature requires table, div, span or heading rendering
+ *     in untrusted content surfaces. Headings/tables in AI output rendered as plain
+ *     paragraphs is acceptable and significantly reduces attack surface.
+ *   If future features require more tags, add them here with explicit justification.
  */
 
 import sanitizeHtml from "sanitize-html";
@@ -49,34 +60,47 @@ export function markUnsafe(s: string): UnsafeUserContent {
 
 // ── HTML allowlist policy ────────────────────────────────────────────────────
 //
-// Task 3: minimal safe allowlist — deny by default.
-// Forbidden always: script, iframe, object, embed, form, svg, style, link, meta
+// Phase 44: STRICT MINIMUM — 14 tags only. Deny by default.
+// Forbidden always: script, iframe, object, embed, form, svg, style, link, meta,
+//   table, div, span, headings, definition lists, and all presentation markup.
 // INV-OUT-6: forbidden tags — hard-coded, not configurable at runtime
+// INV-OUT-7: class, style, id, data-*, on* attributes are never allowed
+//
+// ALLOWED (14 tags):
+//   Inline emphasis:    b, strong, i, em, u
+//   Block structure:    p, br
+//   Lists:              ul, ol, li
+//   Code / preformat:   code, pre
+//   Quotation:          blockquote
+//   Links:              a
+//
+// EXPLICITLY EXCLUDED (with justification):
+//   table, thead, tbody, tr, td, th  — no untrusted table rendering surface exists
+//   div, span                         — layout tags are unsafe for untrusted content
+//   h1–h6                             — headings in AI output render as <p> (acceptable)
+//   dl, dt, dd                        — no definition list rendering surface
+//   kbd, samp, q, cite               — not needed for current AI/doc output surfaces
+//   hr, s, del, ins                   — not needed
+//   abbr, acronym, small, sub, sup   — not needed
+//   address, caption, figure         — not needed
+//
+// To add a tag: document the feature requirement and attack surface analysis here.
 
 const ALLOWED_TAGS: string[] = [
-  "b", "strong", "i", "em", "u", "s", "del", "ins",
-  "p", "br", "hr",
+  "b", "strong",
+  "i", "em",
+  "u",
+  "p", "br",
   "ul", "ol", "li",
-  "dl", "dt", "dd",
-  "code", "pre", "kbd", "samp",
-  "blockquote", "q", "cite",
-  "h1", "h2", "h3", "h4", "h5", "h6",
+  "code", "pre",
+  "blockquote",
   "a",
-  "table", "thead", "tbody", "tfoot", "tr", "th", "td", "caption",
-  "div", "span",
-  "abbr", "acronym", "address", "small", "sub", "sup",
 ];
 
+// Phase 44: only href/target/rel on <a> — no other attributes allowed on any tag
 const ALLOWED_ATTRIBUTES: sanitizeHtml.IOptions["allowedAttributes"] = {
-  "a": ["href", "title", "target", "rel"],
-  "abbr": ["title"],
-  "acronym": ["title"],
-  "td": ["rowspan", "colspan"],
-  "th": ["rowspan", "colspan", "scope"],
-  "table": ["summary"],
-  "blockquote": ["cite"],
-  "q": ["cite"],
-  // No class, style, id, data-*, on* — never allowed
+  "a": ["href", "target", "rel"],
+  // No class, style, id, data-*, on*, title, cite, rowspan, colspan — never allowed
 };
 
 /** Strict sanitize-html options for browser-rendered output */
