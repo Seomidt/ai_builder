@@ -79,6 +79,9 @@ app.use("/api/security", cspReportRouter);
 
 app.use(authMiddleware);
 
+// Phase 7: API rate limiting (INV-SEC5)
+app.use("/api", apiRateLimit);
+
 // Phase Next: admin domain isolation + noindex header — after auth, before routes
 app.use(adminDomainGuard);
 app.use(adminNoindexHeader);
@@ -91,7 +94,6 @@ app.use("/api/admin", adminGuardMiddleware);
 // only users in LOCKDOWN_ALLOWLIST (email-based) may access protected surfaces.
 // CI/CD health-check paths bypass automatically. Anonymous → 401. Others → 403.
 app.use(lockdownGuard);
-
 
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
