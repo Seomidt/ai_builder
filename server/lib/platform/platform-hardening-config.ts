@@ -24,6 +24,7 @@ export function isPreview(): boolean { return getRuntimeEnv() === "preview"; }
 
 export const PRODUCTION_ALLOWED_HOSTS: ReadonlySet<string> = new Set([
   "blissops.com",
+  "www.blissops.com",
   "app.blissops.com",
   "admin.blissops.com",
 ]);
