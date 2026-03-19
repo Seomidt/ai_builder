@@ -75,6 +75,16 @@ Cloudflare zone. Therefore:
 5. HSTS on `app.blissops.com` ensures browser caches the canonical domain
 6. Document the `.vercel.app` URL internally and treat it as internal-only
 
+**How bypass works technically:**  
+Traffic to `ai-builder-xxx.vercel.app` bypasses Cloudflare entirely — it resolves directly to  
+Vercel's Anycast infrastructure, never touching the blissops.com Cloudflare zone.  
+Cloudflare has zero visibility into, and zero control over, requests that go to `*.vercel.app`.
+
+**⚠️ TLS note — never set SSL to Flexible:**  
+Cloudflare SSL mode must be **Full (Strict)** — never Flexible.  
+Flexible SSL sends traffic from Cloudflare to the origin over plain HTTP, causing the origin  
+to see HTTP while clients see HTTPS. This breaks HSTS and creates a security downgrade.
+
 **Explicit acknowledgment:**  
 *This platform cannot guarantee that a user cannot directly access the Vercel origin  
 via `*.vercel.app`. The mitigation above ensures that such access is functionally  
