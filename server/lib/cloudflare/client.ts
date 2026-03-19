@@ -135,6 +135,15 @@ export interface RulesetRule {
   expression: string;
   action: string;
   action_parameters?: Record<string, unknown>;
+  // New rate limiting API: ratelimit config is a top-level field on the rule
+  ratelimit?: {
+    characteristics: string[];
+    period: number;
+    requests_per_period: number;
+    mitigation_timeout: number;
+    counting_expression?: string;
+    requests_to_origin?: boolean;
+  };
   enabled?: boolean;
 }
 
