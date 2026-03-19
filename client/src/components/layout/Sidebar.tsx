@@ -10,23 +10,26 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-const navItems = [
-  { href: "/", label: "Dashboard", icon: LayoutDashboard },
-  { href: "/projects", label: "Projects", icon: FolderKanban },
-  { href: "/architectures", label: "Architectures", icon: Cpu },
-  { href: "/runs", label: "Runs", icon: PlayCircle },
-  { href: "/integrations", label: "Integrations", icon: Plug },
-  { href: "/settings", label: "Settings", icon: Settings },
-];
-
-const opsItems = [
-  { href: "/ops", label: "Ops Console", icon: ShieldAlert },
-];
+import { useTranslations } from "@/hooks/use-translations";
+import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
 
 export function Sidebar() {
   const [location] = useLocation();
+  const { t } = useTranslations("common");
   const isOpsSection = location.startsWith("/ops");
+
+  const navItems = [
+    { href: "/",              label: t("nav.dashboard"),     icon: LayoutDashboard },
+    { href: "/projects",      label: t("nav.projects"),      icon: FolderKanban },
+    { href: "/architectures", label: t("nav.architectures"), icon: Cpu },
+    { href: "/runs",          label: t("nav.runs"),          icon: PlayCircle },
+    { href: "/integrations",  label: t("nav.integrations"),  icon: Plug },
+    { href: "/settings",      label: t("nav.settings"),      icon: Settings },
+  ];
+
+  const opsItems = [
+    { href: "/ops", label: t("nav.opsConsole"), icon: ShieldAlert },
+  ];
 
   return (
     <aside className="flex flex-col w-56 shrink-0 h-screen bg-sidebar border-r border-sidebar-border">
@@ -35,7 +38,9 @@ export function Sidebar() {
         <div className="flex items-center justify-center w-7 h-7 rounded-md bg-sidebar-primary">
           <Cpu className="w-4 h-4 text-sidebar-primary-foreground" />
         </div>
-        <span className="text-sm font-semibold text-sidebar-foreground tracking-wide">AI Builder</span>
+        <span className="text-sm font-semibold text-sidebar-foreground tracking-wide">
+          {t("brand.name")}
+        </span>
       </div>
 
       {/* Navigation */}
@@ -46,7 +51,7 @@ export function Sidebar() {
             <Link
               key={href}
               href={href}
-              data-testid={`nav-link-${label.toLowerCase().replace(/\s/g, "-")}`}
+              data-testid={`nav-link-${href.replace("/", "").replace("/", "-") || "dashboard"}`}
               className={cn(
                 "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
                 isActive
@@ -64,7 +69,7 @@ export function Sidebar() {
         {/* Ops Console section */}
         <div className="pt-3 pb-1">
           <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40 mb-0.5">
-            Platform Ops
+            {t("nav.platformOps")}
           </p>
         </div>
         {opsItems.map(({ href, label, icon: Icon }) => {
@@ -73,7 +78,7 @@ export function Sidebar() {
             <Link
               key={href}
               href={href}
-              data-testid={`nav-link-${label.toLowerCase().replace(/\s/g, "-")}`}
+              data-testid={`nav-link-ops`}
               className={cn(
                 "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
                 isActive
@@ -89,8 +94,8 @@ export function Sidebar() {
         })}
       </nav>
 
-      {/* Footer */}
-      <div className="px-4 py-3 border-t border-sidebar-border">
+      {/* Footer: org info + locale switcher */}
+      <div className="px-4 py-3 border-t border-sidebar-border space-y-2">
         <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 rounded-full bg-sidebar-primary/20 flex items-center justify-center">
             <span className="text-xs font-semibold text-sidebar-primary">DO</span>
@@ -100,6 +105,7 @@ export function Sidebar() {
             <p className="text-xs text-sidebar-foreground/40 truncate">demo-org</p>
           </div>
         </div>
+        <LocaleSwitcher />
       </div>
     </aside>
   );
