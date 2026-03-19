@@ -79,9 +79,6 @@ app.use("/api/security", cspReportRouter);
 
 app.use(authMiddleware);
 
-// Phase 7: API rate limiting (INV-SEC5)
-app.use("/api", apiRateLimit);
-
 // Phase Next: admin domain isolation + noindex header — after auth, before routes
 app.use(adminDomainGuard);
 app.use(adminNoindexHeader);
