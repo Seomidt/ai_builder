@@ -1818,3 +1818,47 @@ Final production hardening: CSP duplicate removed, nonce infra, W3C Reporting AP
 
 ### Validation results
 412 assertions — ALL PASS
+
+## Phase CF-Enterprise — Cloudflare Edge Hardening
+
+### Purpose
+Full Cloudflare edge security and performance setup — fully API-driven, reproducible, verifiable.
+
+### Files created
+- server/lib/cloudflare/client.ts: typed Cloudflare API client (cfFetch, retry, zone/ruleset helpers)
+- server/lib/cloudflare/setup-ssl.ts: SSL strict + always-HTTPS + HSTS + TLS 1.2 min
+- server/lib/cloudflare/verify-dns.ts: assert/enforce proxied=true on all A/CNAME records
+- server/lib/cloudflare/setup-waf.ts: managed WAF packages + 3 custom rules (auth/ai/geo)
+- server/lib/cloudflare/setup-rate-limits.ts: edge rate limits (10/20/100 req per 60s)
+- server/lib/cloudflare/setup-cache.ts: static asset cache (30d) + API bypass
+- server/lib/cloudflare/validate-cloudflare.ts: 7-check validation → structured report
+- server/lib/cloudflare/setup-all.ts: orchestrator (6 steps in order, fails on critical)
+- scripts/setup-cloudflare.ts: CLI entrypoint — npx tsx scripts/setup-cloudflare.ts
+- scripts/validate-cloudflare.ts: CI validation — exit 0 on all pass
+- docs/security/cloudflare-setup.md: full documentation
+
+### Env vars required
+- CF_API_TOKEN (already configured as Replit secret)
+- CLOUDFLARE_ZONE_ID (must be added — Zone ID from Cloudflare dashboard)
+
+### Custom WAF rules
+1. /api/auth → managed_challenge
+2. /api/ai → managed_challenge
+3. Non-DK/US/DE IPs → managed_challenge
+
+### Rate limits (edge)
+- /api/auth/*: 10 req/60s → block
+- /api/ai/*: 20 req/60s → block
+- /api/*: 100 req/60s → managed_challenge
+
+### Cache rules
+- Static assets (js/css/png/svg/…): 30-day edge TTL
+- /api/*: bypass cache entirely
+
+### CSP reports (Task 8)
+Already wired in Phase 44: POST /api/security/csp-report → security_events(csp_violation).
+Reporting-Endpoints header instructs browsers to POST to this endpoint.
+No additional Cloudflare config needed.
+
+### Branch
+feature/cloudflare-enterprise-setup
