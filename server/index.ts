@@ -61,6 +61,7 @@ app.use("/api/security", cspReportRouter);
 
 app.use(authMiddleware);
 
+
 export function log(message: string, source = "express") {
   const formattedTime = new Date().toLocaleTimeString("en-US", {
     hour: "numeric",

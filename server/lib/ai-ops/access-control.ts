@@ -177,9 +177,14 @@ export function resolveUserFromRequest(req: {
 
   const rawRole = req.user.role ?? "";
   let role: AiOpsRole = "none";
-  if (rawRole === "platform_admin" || rawRole === "admin" || rawRole === "ops") {
+
+  // Strict explicit mapping — deny by default, no implicit role elevation.
+  // Only literal "platform_admin" grants platform scope.
+  // Only literal "tenant_admin" grants tenant scope.
+  // "admin", "ops", "owner", "member" and all unknowns → role stays "none" (denied).
+  if (rawRole === "platform_admin") {
     role = "platform_admin";
-  } else if (rawRole === "tenant_admin" || rawRole === "owner" || rawRole === "member") {
+  } else if (rawRole === "tenant_admin") {
     role = "tenant_admin";
   }
 

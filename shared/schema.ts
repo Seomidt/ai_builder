@@ -2597,47 +2597,33 @@ export type AiAnomalyConfig = typeof aiAnomalyConfigs.$inferSelect;
 export const aiAnomalyEvents = pgTable(
   "ai_anomaly_events",
   {
-    id: varchar("id")
-      .primaryKey()
-      .default(sql`gen_random_uuid()`),
-    tenantId: text("tenant_id").notNull(),
-    /** HTTP request ID — ties this event back to its origin request (null for window events) */
-    requestId: text("request_id"),
-    /** Feature/agent key that triggered the call */
-    feature: text("feature"),
-    /** Logical route key used for the call */
-    routeKey: text("route_key"),
-    /** Resolved provider at time of event */
-    provider: text("provider"),
-    /** Resolved model at time of event */
-    model: text("model"),
-    /** Anomaly signal type — see table comment for allowed values */
-    eventType: text("event_type").notNull(),
-    /** Observed metric value that triggered the anomaly */
-    observedValue: numeric("observed_value", { precision: 14, scale: 8 }),
-    /** Configured threshold that was exceeded */
-    thresholdValue: numeric("threshold_value", { precision: 14, scale: 8 }),
-    /** Start of the window for window-based anomalies (null for per-request) */
-    periodStart: timestamp("period_start"),
-    /** End of the window for window-based anomalies (null for per-request) */
-    periodEnd: timestamp("period_end"),
-    /**
-     * Deduplication key used for cooldown suppression.
-     * Format: "<tenantId>:<eventType>[:<routeKey>][:<model>]"
-     */
-    cooldownKey: text("cooldown_key"),
-    createdAt: timestamp("created_at").notNull().defaultNow(),
+    id:              text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId:  text("organization_id").notNull(),
+    anomalyType:     text("anomaly_type").notNull(),
+    detectedAt:      timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    windowMinutes:   integer("window_minutes").notNull().default(60),
+    baselineValue:   numeric("baseline_value", { precision: 18, scale: 6 }).notNull(),
+    observedValue:   numeric("observed_value", { precision: 18, scale: 6 }).notNull(),
+    deviationPct:    numeric("deviation_pct", { precision: 10, scale: 2 }).notNull(),
+    severity:        text("severity").notNull().default("medium"),
+    isConfirmed:     boolean("is_confirmed").notNull().default(false),
+    linkedAlertId:   text("linked_alert_id"),
+    metadata:        jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
   },
   (t) => [
-    index("ai_anomaly_events_tenant_idx").on(t.tenantId),
-    index("ai_anomaly_events_event_type_idx").on(t.eventType),
-    index("ai_anomaly_events_created_at_idx").on(t.createdAt),
-    index("ai_anomaly_events_request_idx").on(t.requestId),
-    index("ai_anomaly_events_tenant_created_at_idx").on(t.tenantId, t.createdAt),
+    index("aae16_org_detected_idx").on(t.organizationId, t.detectedAt),
+    index("aae16_anomaly_type_idx").on(t.anomalyType, t.detectedAt),
+    index("aae16_org_type_idx").on(t.organizationId, t.anomalyType),
+    check("aae16_anomaly_type_check", sql`${t.anomalyType} IN ('cost_spike', 'token_spike', 'request_spike', 'model_drift', 'sudden_stop')`),
+    check("aae16_severity_check", sql`${t.severity} IN ('low', 'medium', 'high', 'critical')`),
+    check("aae16_deviation_check", sql`${t.deviationPct} >= 0`),
   ],
 );
 
-export const insertAiAnomalyEventSchema = createInsertSchema(aiAnomalyEvents).omit({ id: true, createdAt: true });
+export const insertAiAnomalyEventSchema = createInsertSchema(aiAnomalyEvents).omit({
+  id:         true,
+  detectedAt: true,
+});
 export type InsertAiAnomalyEvent = z.infer<typeof insertAiAnomalyEventSchema>;
 export type AiAnomalyEvent = typeof aiAnomalyEvents.$inferSelect;
 
@@ -5879,67 +5865,112 @@ export type ObsTenantUsageMetric = typeof obsTenantUsageMetrics.$inferSelect;
 // INV-GOV-3: Soft limit warns only — execution proceeds
 // INV-GOV-4: Tenant isolation — all governance data is strictly per-tenant
 // INV-GOV-5: All governance actions are recorded (full audit trail)
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Phase 16: AI Cost Governance ────────────────────────────────────────────
+//
+// tenant_ai_budgets          — per-tenant AI spend budget configuration
+// tenant_ai_usage_snapshots  — periodic usage snapshots
+// ai_usage_alerts            — budget / anomaly alerts
+// (ai_anomaly_events is defined above, replacing Phase 3H stub)
 
-// Per-tenant AI budget configuration.
 export const tenantAiBudgets = pgTable(
   "tenant_ai_budgets",
   {
-    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    tenantId: text("tenant_id").notNull().unique(),
-    monthlyBudgetUsd: numeric("monthly_budget_usd", { precision: 12, scale: 4 }),
-    dailyBudgetUsd: numeric("daily_budget_usd", { precision: 12, scale: 4 }),
-    softLimitPercent: numeric("soft_limit_percent", { precision: 5, scale: 2 }).default("80"),
-    hardLimitPercent: numeric("hard_limit_percent", { precision: 5, scale: 2 }).default("100"),
-    createdAt: timestamp("created_at").notNull().defaultNow(),
-    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+    id:                   text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId:       text("organization_id").notNull(),
+    periodType:           text("period_type").notNull().default("monthly"),
+    budgetUsdCents:       bigint("budget_usd_cents", { mode: "bigint" }).notNull(),
+    warningThresholdPct:  integer("warning_threshold_pct").notNull().default(80),
+    hardLimitPct:         integer("hard_limit_pct").notNull().default(100),
+    isActive:             boolean("is_active").notNull().default(true),
+    createdAt:            timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt:            timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    index("tab_tenant_idx").on(t.tenantId),
+    index("tab16_org_idx").on(t.organizationId),
+    uniqueIndex("tab16_org_period_uq").on(t.organizationId, t.periodType),
+    check("tab16_period_check", sql`${t.periodType} IN ('daily', 'weekly', 'monthly', 'annual')`),
+    check("tab16_threshold_check", sql`${t.warningThresholdPct} > 0 AND ${t.hardLimitPct} > 0 AND ${t.warningThresholdPct} < ${t.hardLimitPct}`),
+    check("tab16_budget_positive", sql`${t.budgetUsdCents} > 0`),
   ],
 );
-export const insertTenantAiBudgetSchema = createInsertSchema(tenantAiBudgets).omit({ id: true, createdAt: true, updatedAt: true });
+
+export const insertTenantAiBudgetSchema = createInsertSchema(tenantAiBudgets).omit({
+  id:        true,
+  createdAt: true,
+  updatedAt: true,
+});
 export type InsertTenantAiBudget = z.infer<typeof insertTenantAiBudgetSchema>;
 export type TenantAiBudget = typeof tenantAiBudgets.$inferSelect;
 
-// Per-tenant periodic usage snapshots — captures cumulative spend at a point in time.
 export const tenantAiUsageSnapshots = pgTable(
   "tenant_ai_usage_snapshots",
   {
-    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    tenantId: text("tenant_id").notNull(),
-    period: text("period").notNull(),
-    tokensIn: integer("tokens_in").default(0),
-    tokensOut: integer("tokens_out").default(0),
-    costUsd: numeric("cost_usd", { precision: 12, scale: 6 }).default("0"),
-    createdAt: timestamp("created_at").notNull().defaultNow(),
+    id:                  text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId:      text("organization_id").notNull(),
+    periodStart:         timestamp("period_start", { withTimezone: true }).notNull(),
+    periodEnd:           timestamp("period_end", { withTimezone: true }).notNull(),
+    periodType:          text("period_type").notNull(),
+    totalTokens:         bigint("total_tokens", { mode: "bigint" }).notNull().default(BigInt(0)),
+    promptTokens:        bigint("prompt_tokens", { mode: "bigint" }).notNull().default(BigInt(0)),
+    completionTokens:    bigint("completion_tokens", { mode: "bigint" }).notNull().default(BigInt(0)),
+    totalCostUsdCents:   bigint("total_cost_usd_cents", { mode: "bigint" }).notNull().default(BigInt(0)),
+    requestCount:        integer("request_count").notNull().default(0),
+    failedRequestCount:  integer("failed_request_count").notNull().default(0),
+    modelBreakdown:      jsonb("model_breakdown").notNull().default(sql`'{}'::jsonb`),
+    snapshotAt:          timestamp("snapshot_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    index("taus_tenant_period_idx").on(t.tenantId, t.period),
-    index("taus_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("taus16_org_period_idx").on(t.organizationId, t.periodStart),
+    index("taus16_type_start_idx").on(t.periodType, t.periodStart),
+    index("taus16_org_type_start_idx").on(t.organizationId, t.periodType, t.periodStart),
+    check("taus16_period_check", sql`${t.periodEnd} > ${t.periodStart}`),
+    check("taus16_period_type_check", sql`${t.periodType} IN ('hourly', 'daily', 'weekly', 'monthly')`),
+    check("taus16_tokens_check", sql`${t.totalTokens} >= 0 AND ${t.promptTokens} >= 0 AND ${t.completionTokens} >= 0`),
+    check("taus16_cost_check", sql`${t.totalCostUsdCents} >= 0`),
   ],
 );
-export const insertTenantAiUsageSnapshotSchema = createInsertSchema(tenantAiUsageSnapshots).omit({ id: true, createdAt: true });
+
+export const insertTenantAiUsageSnapshotSchema = createInsertSchema(tenantAiUsageSnapshots).omit({
+  id:         true,
+  snapshotAt: true,
+});
 export type InsertTenantAiUsageSnapshot = z.infer<typeof insertTenantAiUsageSnapshotSchema>;
 export type TenantAiUsageSnapshot = typeof tenantAiUsageSnapshots.$inferSelect;
 
-// AI usage alerts — triggered when tenant usage crosses soft or hard limits.
 export const aiUsageAlerts = pgTable(
   "ai_usage_alerts",
   {
-    id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    tenantId: text("tenant_id").notNull(),
-    alertType: text("alert_type").notNull(), // "soft_limit" | "hard_limit" | "daily_limit" | "daily_soft"
-    thresholdPercent: numeric("threshold_percent", { precision: 10, scale: 4 }).notNull(),
-    usagePercent: numeric("usage_percent", { precision: 10, scale: 4 }).notNull(),
-    triggeredAt: timestamp("triggered_at").notNull().defaultNow(),
+    id:                      text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId:          text("organization_id").notNull(),
+    alertType:               text("alert_type").notNull(),
+    severity:                text("severity").notNull().default("medium"),
+    status:                  text("status").notNull().default("open"),
+    title:                   text("title").notNull(),
+    message:                 text("message").notNull(),
+    thresholdPct:            integer("threshold_pct"),
+    currentUsageUsdCents:    bigint("current_usage_usd_cents", { mode: "bigint" }),
+    budgetUsdCents:          bigint("budget_usd_cents", { mode: "bigint" }),
+    linkedSnapshotId:        text("linked_snapshot_id"),
+    linkedAnomalyId:         text("linked_anomaly_id"),
+    metadata:                jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+    createdAt:               timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    acknowledgedAt:          timestamp("acknowledged_at", { withTimezone: true }),
+    resolvedAt:              timestamp("resolved_at", { withTimezone: true }),
   },
   (t) => [
-    index("aua_tenant_triggered_idx").on(t.tenantId, t.triggeredAt),
-    index("aua_tenant_type_idx").on(t.tenantId, t.alertType),
+    index("aua16_org_created_idx").on(t.organizationId, t.createdAt),
+    index("aua16_status_severity_idx").on(t.status, t.severity),
+    index("aua16_org_status_idx").on(t.organizationId, t.status),
+    check("aua16_alert_type_check", sql`${t.alertType} IN ('budget_warning', 'budget_exceeded', 'anomaly', 'runaway')`),
+    check("aua16_severity_check", sql`${t.severity} IN ('low', 'medium', 'high', 'critical')`),
+    check("aua16_status_check", sql`${t.status} IN ('open', 'acknowledged', 'resolved', 'suppressed')`),
   ],
 );
-export const insertAiUsageAlertSchema = createInsertSchema(aiUsageAlerts).omit({ id: true, triggeredAt: true });
+
+export const insertAiUsageAlertSchema = createInsertSchema(aiUsageAlerts).omit({
+  id:        true,
+  createdAt: true,
+});
 export type InsertAiUsageAlert = z.infer<typeof insertAiUsageAlertSchema>;
 export type AiUsageAlert = typeof aiUsageAlerts.$inferSelect;
 
