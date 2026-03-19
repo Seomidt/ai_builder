@@ -21,6 +21,8 @@ import { adminDomainGuard, adminNoindexHeader } from "./middleware/admin-domain"
 import { robotsRouter } from "./routes/robots";
 // Enterprise auth lockdown — AI & Admin guard chains
 import { adminGuardMiddleware } from "./middleware/ai-guards";
+// Emergency single-email production lockdown
+import { lockdownGuard } from "./middleware/lockdown";
 
 const app = express();
 const httpServer = createServer(app);
@@ -84,6 +86,11 @@ app.use(adminNoindexHeader);
 // Enterprise auth lockdown: all /api/admin/* routes require platform_admin
 // CI/CD health-check paths (ADMIN_PUBLIC_PATHS) bypass this guard automatically.
 app.use("/api/admin", adminGuardMiddleware);
+
+// Emergency single-email production lockdown — when LOCKDOWN_ENABLED=true,
+// only users in LOCKDOWN_ALLOWLIST (email-based) may access protected surfaces.
+// CI/CD health-check paths bypass automatically. Anonymous → 401. Others → 403.
+app.use(lockdownGuard);
 
 
 export function log(message: string, source = "express") {

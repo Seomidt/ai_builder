@@ -45,3 +45,5 @@ integrations = ["javascript_database:1.0.0"]
 
 [userenv.shared]
 DEMO_MODE = "true"
+LOCKDOWN_ENABLED = "true"
+LOCKDOWN_ALLOWLIST = "seomidt@gmail.com"
