@@ -1,16 +1,24 @@
 /**
- * Platform Hardening Config
- * Phase Next — Domain/Subdomain/Auth Architecture Hardening
+ * Platform Hardening Config — Single-Domain Production Mode
  *
  * Central, typed config for all production hardening assumptions.
  * Single source of truth for:
  *   - Host allowlist (production vs dev vs preview)
- *   - Admin isolation (admin.blissops.com)
+ *   - Admin access (path-based + role-based — NOT hostname-based)
  *   - www → apex redirect
  *   - Auth/cookie strategy
  *   - Tenant subdomain readiness
  *   - Analytics dedupe
+ *
+ * CURRENT LIVE PRODUCTION MODE: single
+ *   blissops.com = entire authenticated application
+ *   www.blissops.com = 301 redirect to blissops.com
+ *
+ * NOT ACTIVE (future only):
+ *   app.blissops.com, admin.blissops.com — documented in DOMAIN_CONFIG.plannedSubdomains
  */
+
+import { DOMAIN_CONFIG } from "./domain-config";
 
 // ─── Environment detection ────────────────────────────────────────────────────
 
@@ -33,30 +41,26 @@ export const ROOT_DOMAIN = "blissops.com";
 
 // ─── Canonical production hosts ───────────────────────────────────────────────
 //
-// DOMAIN MODEL:
+// CURRENT LIVE DOMAIN MODEL (single-domain mode):
 //
-//  blissops.com          Public marketing, SEO, landing. INDEXED.
-//  www.blissops.com      Alias — 301 redirect to blissops.com (apex).
-//  app.blissops.com      Authenticated SPA. Auth callbacks live here. NOINDEX.
-//  admin.blissops.com    Internal ops console (/ops/*). NOINDEX.
+//  blissops.com        Authenticated application (tenants, admin — path-based). NOINDEX.
+//  www.blissops.com    301 redirect to blissops.com. No app content served here.
 //
-// Auth decision: auth callbacks stay on app.blissops.com/auth/* (no dedicated
-//   auth host). Supabase allow-list already targets app.blissops.com.
-//   Cookie scope is app.blissops.com (not root domain) for security isolation.
+// NOT ACTIVE — future planned model (DOMAIN_CONFIG.mode = "multi"):
+//  app.blissops.com    Future: authenticated SPA moves here.
+//  admin.blissops.com  Future: isolated ops console.
 //
-// Tenant subdomains: NOT yet live. Prep documented in TENANT_SUBDOMAIN_CONFIG.
+// Auth callbacks: https://blissops.com/auth/*
+// Cookie scope: blissops.com (single-domain — no cross-subdomain handoff needed)
 
-export const PRODUCTION_ALLOWED_HOSTS: ReadonlySet<string> = new Set([
-  "blissops.com",
-  "www.blissops.com",
-  "app.blissops.com",
-  "admin.blissops.com",
-]);
+export const PRODUCTION_ALLOWED_HOSTS: ReadonlySet<string> = new Set(
+  DOMAIN_CONFIG.allowHosts,
+);
 
-export const PUBLIC_CANONICAL_HOST = ROOT_DOMAIN;
-export const APP_CANONICAL_HOST    = `app.${ROOT_DOMAIN}`;
-export const ADMIN_CANONICAL_HOST  = `admin.${ROOT_DOMAIN}`;
-export const WWW_HOST              = `www.${ROOT_DOMAIN}`;
+export const PUBLIC_CANONICAL_HOST  = ROOT_DOMAIN;
+export const APP_CANONICAL_HOST     = ROOT_DOMAIN;        // single-domain: same as root
+export const ADMIN_CANONICAL_HOST   = ROOT_DOMAIN;        // single-domain: path-based, not hostname-based
+export const WWW_HOST               = `www.${ROOT_DOMAIN}`;
 
 /** Hosts allowed in development mode */
 export const DEV_ALLOWED_HOST_PATTERNS: readonly string[] = [
@@ -77,60 +81,66 @@ export const PREVIEW_ALLOWED_HOST_PATTERNS: readonly string[] = [
 /** Hosts explicitly blocked regardless of environment */
 export const ALWAYS_BLOCKED_HOSTS: ReadonlySet<string> = new Set([]);
 
-// ─── Admin isolation config ───────────────────────────────────────────────────
+// ─── Admin access config ──────────────────────────────────────────────────────
 //
-// /ops/* and /api/admin/* are restricted to admin.blissops.com.
-// GET requests from wrong host → 302 redirect to admin.blissops.com.
-// API and mutating methods → 403 (never redirect).
+// Admin/ops access is PATH-BASED and ROLE-BASED — not hostname-based.
+// No hostname-based gating. The planned admin subdomain is not active in this mode.
+//
+// Enforcement chain for /ops/* and /api/admin/*:
+//   1. authMiddleware — valid session required
+//   2. lockdownGuard — lockdown allowlist check (if enabled)
+//   3. adminGuardMiddleware — platform_admin role required
+//
+// All three layers are in server/app.ts middleware stack.
 
 export const ADMIN_CONFIG = {
-  canonicalHost:      ADMIN_CANONICAL_HOST,
+  canonicalHost:      ROOT_DOMAIN,                  // single-domain: admin lives here
   adminPathPrefixes:  ["/ops", "/api/admin"],
   noindex:            true,
   robotsHeaderValue:  "noindex, nofollow",
   requiresRoleGuard:  true,
   sharedDeployment:   true,
+  hostBasedAccess:    false,                        // DISABLED — path+role only
 } as const;
 
 // ─── Auth strategy config ─────────────────────────────────────────────────────
 //
-// Auth callbacks stay on app.blissops.com/auth/*.
-// No dedicated auth.blissops.com subdomain justified at this stage:
-//   1. Supabase allow-list targets app.blissops.com — changing it is risky.
-//   2. Cookie scope is app.blissops.com — cross-domain token handoff not needed.
-//   3. Operational complexity outweighs the benefit before Phase 52 isolation.
+// Single-domain mode: all auth lives on blissops.com.
 //
-// Cookie scope: app.blissops.com (NOT .blissops.com root).
-// Rationale: public domain (blissops.com) must not receive privileged session
-//   cookies. Root-domain scope would send tokens on every public request → CSRF risk.
-// Only the locale preference cookie uses root-domain scope (benign, non-sensitive).
+// Auth URLs:
+//   Login:    https://blissops.com/auth/login
+//   Callback: https://blissops.com/auth/callback
+//   Logout:   https://blissops.com/auth/logout
 //
-// Logout redirect: https://app.blissops.com/auth/login (hard canonical, not relative).
-// Magic links / invites / password reset: all target app.blissops.com.
+// Cookie scope: blissops.com (exact host — no subdomain sharing needed)
+// SameSite: Lax  Secure: true (production)
+//
+// Future (multi-domain): move callbacks to app.blissops.com/auth/*,
+// update Supabase OAuth allow-list, update cookie domain to .blissops.com.
 
 export const AUTH_CONFIG = {
-  canonicalCallbackHost:  APP_CANONICAL_HOST,
+  canonicalCallbackHost:  ROOT_DOMAIN,
   callbackBasePath:       "/auth",
-  cookieScope:            APP_CANONICAL_HOST,       // privileged cookies
-  rootDomainCookieScope:  `.${ROOT_DOMAIN}`,        // locale pref only
-  logoutRedirect:         `https://${APP_CANONICAL_HOST}/auth/login`,
-  supabaseAllowListNote:  "Ensure Supabase allow-list targets app.blissops.com — do not add blissops.com",
+  cookieScope:            ROOT_DOMAIN,
+  rootDomainCookieScope:  ROOT_DOMAIN,
+  logoutRedirect:         `https://${ROOT_DOMAIN}/auth/login`,
+  loginUrl:               `https://${ROOT_DOMAIN}/auth/login`,
+  callbackUrl:            `https://${ROOT_DOMAIN}/auth/callback`,
+  supabaseAllowListNote:  "Supabase allow-list must target https://blissops.com/auth/callback",
 } as const;
 
 // ─── Cookie / session policy ──────────────────────────────────────────────────
 //
-// DECISION: App-scoped cookies (app.blissops.com), NOT root-domain (.blissops.com).
-// This is the conservative, secure choice. Migration to root-domain scope only if:
-//   a) Admin gets isolated deployment (Phase 52+) AND needs SSO with app
-//   b) A public-to-app handoff token is required
-//   c) Team explicitly re-evaluates the CSRF surface
+// Single-domain: cookies scoped to blissops.com exactly.
+// Secure=true, SameSite=Lax in production.
+// No subdomain cookie sharing needed until multi-domain migration.
 
 export const COOKIE_POLICY = {
-  privilegedScope:      APP_CANONICAL_HOST,
-  localeScope:          `.${ROOT_DOMAIN}`,
+  privilegedScope:      ROOT_DOMAIN,
+  localeScope:          ROOT_DOMAIN,
   sameSite:             "Lax" as const,
   secure:               true,
-  migrateToRootNote:    "Re-evaluate in Phase 52 if admin isolation requires cross-subdomain SSO.",
+  migrateToRootNote:    "If multi-domain mode activated, re-scope to .blissops.com for subdomain SSO.",
 } as const;
 
 // ─── Analytics dedupe config ──────────────────────────────────────────────────
@@ -154,64 +164,18 @@ export const ANALYTICS_DEDUPE_CONFIG = {
 // ─── Tenant subdomain readiness ───────────────────────────────────────────────
 //
 // CURRENT STATE: NOT live. Prep only.
+// Tenant routing is currently path-based: blissops.com/tenant/:slug
 //
-// Future model: coachname.blissops.com → routes to tenant-specific app.
-// OR: app.blissops.com/tenant/:slug (simpler, no DNS per-tenant needed).
-//
-// RESERVED SUBDOMAINS — must never be allocated to tenants:
+// Future: tenant.blissops.com subdomains (requires wildcard DNS + Vercel config)
 
 export const RESERVED_SUBDOMAINS: ReadonlySet<string> = new Set([
-  "www",
-  "app",
-  "admin",
-  "api",
-  "auth",
-  "mail",
-  "smtp",
-  "imap",
-  "pop",
-  "ftp",
-  "sftp",
-  "cdn",
-  "static",
-  "assets",
-  "media",
-  "status",
-  "health",
-  "ping",
-  "blog",
-  "docs",
-  "help",
-  "support",
-  "careers",
-  "legal",
-  "privacy",
-  "terms",
-  "security",
-  "billing",
-  "dashboard",
-  "manage",
-  "portal",
-  "dev",
-  "staging",
-  "preview",
-  "beta",
-  "sandbox",
-  "test",
-  "internal",
-  "ops",
-  "infra",
-  "metrics",
-  "monitoring",
-  "grafana",
-  "prometheus",
-  "sentry",
-  "feedback",
-  "changelog",
-  "release",
-  "git",
-  "github",
-  "ci",
+  "www", "app", "admin", "api", "auth", "mail", "smtp", "imap", "pop",
+  "ftp", "sftp", "cdn", "static", "assets", "media", "status", "health",
+  "ping", "blog", "docs", "help", "support", "careers", "legal", "privacy",
+  "terms", "security", "billing", "dashboard", "manage", "portal", "dev",
+  "staging", "preview", "beta", "sandbox", "test", "internal", "ops",
+  "infra", "metrics", "monitoring", "grafana", "prometheus", "sentry",
+  "feedback", "changelog", "release", "git", "github", "ci",
 ]);
 
 export const TENANT_SUBDOMAIN_CONFIG = {
@@ -226,14 +190,7 @@ export const TENANT_SUBDOMAIN_CONFIG = {
   ].join(" "),
   cookieNote: [
     "Tenant subdomains will need root-domain cookie scope (.blissops.com)",
-    "if tenants share sessions with app.blissops.com.",
-    "Otherwise use host-only cookies per tenant subdomain.",
-    "Re-evaluate in Phase 52+.",
-  ].join(" "),
-  migrationNote: [
-    "If migrating from app.blissops.com/... to tenant.blissops.com/:...,",
-    "use 301 redirects from old paths, update Supabase OAuth allow-list,",
-    "update cookie domain, and handle wildcard TLS cert via Cloudflare.",
+    "Re-evaluate when enabling multi-domain mode.",
   ].join(" "),
 } as const;
 
@@ -254,53 +211,32 @@ export const WWW_REDIRECT_CONFIG = {
   from:       WWW_HOST,
   to:         PUBLIC_CANONICAL_HOST,
   statusCode: 301 as const,
-  note:       "www is not canonical. All www traffic 301-redirects to apex.",
+  note:       "www.blissops.com 301-redirects to blissops.com (apex).",
 } as const;
 
 // ─── SEO / indexing config ────────────────────────────────────────────────────
+//
+// blissops.com is currently the authenticated app — NOT a public marketing site.
+// All hosts must be noindex until a separate public landing site exists.
 
 export const SEO_CONFIG = {
-  indexedHosts:     new Set([PUBLIC_CANONICAL_HOST]) as ReadonlySet<string>,
-  noindexHosts:     new Set([APP_CANONICAL_HOST, ADMIN_CANONICAL_HOST, WWW_HOST]) as ReadonlySet<string>,
+  indexedHosts:     new Set<string>() as ReadonlySet<string>,  // NONE — app is not public
+  noindexHosts:     PRODUCTION_ALLOWED_HOSTS,
   previewHostNote:  "All *.vercel.app and *.replit.dev hosts must carry noindex — never canonical.",
-  canonicalNote:    "Canonical tags must only point to blissops.com, never to preview or app host.",
+  appOnRootNote:    "blissops.com is the authenticated app. Disallow: / until a public marketing site exists.",
 } as const;
-
-// ─── Cloudflare / Vercel operator execution plan ──────────────────────────────
-//
-// Required Cloudflare DNS records:
-//
-//   A     @              76.76.21.21                        (Vercel anycast — proxy OFF during validation)
-//   CNAME www            5882b65e4b130c85.vercel-dns.com    (Vercel — proxy OFF during validation)
-//   CNAME app            cname.vercel-dns.com               (Future — when app.blissops.com is Vercel-connected)
-//   CNAME admin          cname.vercel-dns.com               (Future — when admin.blissops.com is Vercel-connected)
-//
-// Required Vercel domains (attached to Production — main branch):
-//
-//   blissops.com         Primary production domain
-//   www.blissops.com     Redirect to blissops.com
-//   app.blissops.com     Future — when app SPA moves to subdomain
-//   admin.blissops.com   Future — when admin is isolated
-//
-// SSL/TLS (Cloudflare):
-//   - Full (Strict) after Vercel SSL cert is issued
-//   - Proxy ON (orange cloud) after Vercel validation
-//
-// Wildcard DNS (future tenant subdomains):
-//   CNAME *   cname.vercel-dns.com   (add when TENANT_SUBDOMAIN_CONFIG.enabled = true)
-
-export const OPERATOR_PLAN_NOTE = "See comments in TENANT_SUBDOMAIN_CONFIG and above for Cloudflare/Vercel steps.";
 
 // ─── Full platform hardening summary ─────────────────────────────────────────
 
 export const PLATFORM_HARDENING = {
   hostAllowlist:      HOST_ALLOWLIST_CONFIG,
-  adminIsolation:     ADMIN_CONFIG,
+  adminAccess:        ADMIN_CONFIG,
   authStrategy:       AUTH_CONFIG,
   cookiePolicy:       COOKIE_POLICY,
   wwwRedirect:        WWW_REDIRECT_CONFIG,
   seo:                SEO_CONFIG,
   tenantReadiness:    TENANT_SUBDOMAIN_CONFIG,
   analyticsDedupe:    ANALYTICS_DEDUPE_CONFIG,
+  domainMode:         DOMAIN_CONFIG.mode,
   launchReady:        true,
 } as const;
