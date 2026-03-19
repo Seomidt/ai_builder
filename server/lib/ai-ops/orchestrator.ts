@@ -8,6 +8,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import OpenAI from "openai";
+import { env } from "../env";
 import { assertValidIntent, getIntentDefinition, OPS_INTENT, type OpsIntentId } from "./intents";
 import { assertAiOpsAccess, resolveAiOpsScope, type AiOpsAccessContext, type AiOpsScope } from "./access-control";
 import {
@@ -25,7 +26,7 @@ import { assertAiOpsSafeContext, assertAiOpsOutputSafe, assertNoForbiddenIntent,
 import { logAiOpsAudit } from "./audit";
 import type { AiOpsSourceId } from "./data-sources";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
 
 export interface OrchestratorInput {
   intent: string;

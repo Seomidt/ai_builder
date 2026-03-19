@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import { DEFAULT_MODEL } from "./agents/model-config";
+import { env } from "./env";
 
 /**
  * OpenAI client factory.
@@ -7,13 +8,11 @@ import { DEFAULT_MODEL } from "./agents/model-config";
  * Do NOT cache the client at module level — call getOpenAIClient() per request.
  */
 export function getOpenAIClient(): OpenAI {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY is not set");
-  return new OpenAI({ apiKey });
+  return new OpenAI({ apiKey: env.OPENAI_API_KEY });
 }
 
 export function isOpenAIAvailable(): boolean {
-  return !!process.env.OPENAI_API_KEY;
+  return !!env.OPENAI_API_KEY;
 }
 
 /**

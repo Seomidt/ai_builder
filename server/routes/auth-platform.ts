@@ -1,4 +1,5 @@
 import type { Express, Request, Response } from "express";
+import { env } from "../lib/env";
 
 export function registerAuthPlatformRoutes(app: Express): void {
 
@@ -6,8 +7,8 @@ export function registerAuthPlatformRoutes(app: Express): void {
   // SUPABASE_ANON_KEY is intentionally public (safe to expose to browser).
   app.get("/api/auth/config", (_req: Request, res: Response) => {
     res.json({
-      supabaseUrl:     process.env.SUPABASE_URL     ?? "",
-      supabaseAnonKey: process.env.SUPABASE_ANON_KEY ?? "",
+      supabaseUrl:     env.SUPABASE_URL,
+      supabaseAnonKey: env.SUPABASE_ANON_KEY,
     });
   });
 
