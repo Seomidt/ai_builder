@@ -128,7 +128,7 @@ export function registerAdminRoutes(app: Express): void {
     res.json({ intents: SUPPORTED_INTENTS });
   });
 
-  app.get("/api/admin/ai-ops/audit", (_req: Request, res: Response) => {
+  app.get("/api/admin/ai-ops/audit", (req: Request, res: Response) => {
     const limit = parseInt(String(req.query.limit ?? "50"), 10);
     res.json({
       entries: getRecentAuditLog(Math.min(limit, 100)),
