@@ -25,10 +25,27 @@ function getClient(): pg.Client {
   return new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
 }
 
+// ─── Resource exhaustion limits (CodeQL remediation) ─────────────────────────
+export const MAX_CONTEXT_CHUNKS = 8;
+export const MAX_CONTEXT_CHARS = 20_000;
+export const MAX_QUERY_LENGTH = 2_000;
+export const MAX_PROMPT_TOKENS_ESTIMATE = 12_000;
+export const MAX_PIPELINE_TIME_MS = 10_000;
+
 // ─── Rate limiting (per-tenant in-memory token bucket) ─────────────────────
 const rateLimitMap = new Map<string, { tokens: number; lastRefill: number }>();
 const RATE_LIMIT = 20;
 const WINDOW_MS = 60_000;
+
+// ─── Structured limit-violation logger ───────────────────────────────────────
+function logLimitViolation(params: { tenantId: string; requestId: string; limitType: string; inputSize: number }): void {
+  console.warn(JSON.stringify({ level: "SECURITY", event: "limit_exceeded", ...params, timestamp: new Date().toISOString() }));
+}
+
+// ─── Rough token estimator (4 chars ≈ 1 token) ───────────────────────────────
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
 
 function checkRateLimit(tenantId: string): void {
   const now = Date.now();
@@ -132,6 +149,12 @@ export async function runAiQuery(params: {
 
   const queryText = sanitizeQuery(params.queryText);
 
+  // Resource guard: MAX_QUERY_LENGTH (CodeQL: resource exhaustion protection)
+  if (queryText.length > MAX_QUERY_LENGTH) {
+    logLimitViolation({ tenantId, requestId, limitType: "query_length", inputSize: queryText.length });
+    return errorResult(requestId, tenantId, queryText, `Query exceeds maximum length of ${MAX_QUERY_LENGTH} characters (got ${queryText.length}).`, startTime);
+  }
+
   // Security: Rate limiting
   try { checkRateLimit(tenantId); } catch (e) {
     return errorResult(requestId, tenantId, queryText, String((e as Error).message), startTime);
@@ -143,8 +166,13 @@ export async function runAiQuery(params: {
     return { ...errorResult(requestId, tenantId, queryText, `Guardrail [${guard.reason}]: ${guard.detail}`, startTime), guardrailPassed: false };
   }
 
+  // Timeout: MAX_PIPELINE_TIME_MS (CodeQL: resource exhaustion protection)
+  const effectiveTimeout = Math.min(timeoutMs, MAX_PIPELINE_TIME_MS);
   const timeoutPromise = new Promise<never>((_, reject) =>
-    setTimeout(() => reject(new Error(`AI orchestration timeout after ${timeoutMs}ms`)), timeoutMs),
+    setTimeout(() => {
+      logLimitViolation({ tenantId, requestId, limitType: "pipeline_timeout", inputSize: effectiveTimeout });
+      reject(new Error(`AI orchestration timeout after ${effectiveTimeout}ms (MAX_PIPELINE_TIME_MS)`));
+    }, effectiveTimeout),
   );
 
   return Promise.race([executeOrchestration({ ...params, queryText, requestId, startTime }), timeoutPromise]).catch((e) =>
@@ -182,6 +210,18 @@ async function executeOrchestration(params: {
 
     const context = buildContext({ results: retrieval.results, contextWindow: model.contextWindow, reserveTokensForPromptAndResponse: model.maxTokens });
 
+    // Resource guard: MAX_CONTEXT_CHUNKS (CodeQL: bounded array, prevent large chunk concat)
+    if (context.totalChunks > MAX_CONTEXT_CHUNKS) {
+      logLimitViolation({ tenantId, requestId, limitType: "context_chunks", inputSize: context.totalChunks });
+      throw new Error(`Context exceeds MAX_CONTEXT_CHUNKS (${context.totalChunks} > ${MAX_CONTEXT_CHUNKS})`);
+    }
+
+    // Resource guard: MAX_CONTEXT_CHARS (CodeQL: memory safety)
+    if (context.contextText.length > MAX_CONTEXT_CHARS) {
+      logLimitViolation({ tenantId, requestId, limitType: "context_chars", inputSize: context.contextText.length });
+      throw new Error(`Context exceeds MAX_CONTEXT_CHARS (${context.contextText.length} > ${MAX_CONTEXT_CHARS})`);
+    }
+
     // Step 3: Get or create prompt version (INV-AI5: tenant-scoped)
     let pv = null;
     if (promptVersionId) {
@@ -196,6 +236,13 @@ async function executeOrchestration(params: {
 
     // Step 4: Build prompt (INV-AI2: system prompt sealed)
     const built = buildPrompt({ promptVersion: fakePv, contextText: context.contextText, queryText });
+
+    // Resource guard: MAX_PROMPT_TOKENS_ESTIMATE (CodeQL: prevent token budget exhaustion)
+    const promptTokenEstimate = estimateTokens(built.systemPrompt + built.userMessage);
+    if (promptTokenEstimate > MAX_PROMPT_TOKENS_ESTIMATE) {
+      logLimitViolation({ tenantId, requestId, limitType: "prompt_tokens_estimate", inputSize: promptTokenEstimate });
+      throw new Error(`Prompt token estimate exceeds MAX_PROMPT_TOKENS_ESTIMATE (${promptTokenEstimate} > ${MAX_PROMPT_TOKENS_ESTIMATE})`);
+    }
 
     // Step 5: Store request record
     const dbRequestId = await storeAiRequest({ tenantId, queryText, promptVersionId: pv?.id ?? null, retrievalQueryId, modelId: model.id, client });
