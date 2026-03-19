@@ -2,13 +2,13 @@
   "buildCommand": "npm run build",
   "outputDirectory": "dist/public",
   "functions": {
-    "api/index.mjs": {
+    "api/index.js": {
       "memory": 1024,
       "maxDuration": 30
     }
   },
   "rewrites": [
-    { "source": "/api/:path*", "destination": "/api/index.mjs" },
+    { "source": "/api/:path*", "destination": "/api/index.js" },
     { "source": "/(.*)",       "destination": "/index.html" }
   ],
   "headers": [

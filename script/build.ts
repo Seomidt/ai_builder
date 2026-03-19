@@ -65,14 +65,17 @@ async function buildAll() {
     entryPoints: ["server/vercel-handler.ts"],
     platform: "node",
     bundle: true,
-    format: "esm",
-    outfile: "api/index.mjs",
+    format: "cjs",
+    outfile: "api/index.js",
     define: {
       "process.env.NODE_ENV": '"production"',
     },
     minify: true,
     external: externals,
     logLevel: "info",
+    banner: {
+      js: "/* Vercel serverless — pre-bundled by esbuild */",
+    },
   });
 }
 
