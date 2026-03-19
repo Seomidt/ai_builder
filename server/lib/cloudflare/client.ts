@@ -1,9 +1,12 @@
 const CF_BASE = "https://api.cloudflare.com/client/v4";
 
 function getCredentials(): { token: string; zoneId: string } {
-  const token = process.env.CF_API_TOKEN ?? process.env.CLOUDFLARE_API_TOKEN;
+  const token =
+    process.env.CLOUDFLARE_ZONE_API_TOKEN ??
+    process.env.CF_API_TOKEN ??
+    process.env.CLOUDFLARE_API_TOKEN;
   const zoneId = process.env.CLOUDFLARE_ZONE_ID;
-  if (!token) throw new Error("CF_API_TOKEN / CLOUDFLARE_API_TOKEN is not set");
+  if (!token) throw new Error("CLOUDFLARE_ZONE_API_TOKEN / CF_API_TOKEN is not set");
   if (!zoneId) throw new Error("CLOUDFLARE_ZONE_ID is not set");
   return { token, zoneId };
 }
