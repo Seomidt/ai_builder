@@ -73,9 +73,36 @@ analyticsRouter.post("/track", async (req: Request, res: Response): Promise<void
 
 // ─── Admin analytics routes ───────────────────────────────────────────────────
 
+
+// ─── Platform admin authorization guard ─────────────────────────────────────
+
+/**
+ * Asserts that the request comes from a platform admin.
+ * Returns true if authorized, false + sends 401/403 if not.
+ * Must be called at the top of every /api/admin/analytics/* handler.
+ */
+function requirePlatformAdmin(req: Request, res: Response): boolean {
+  const user: any = (req as any).user ?? null;
+  if (!user || !user.id) {
+    res.status(401).json({
+      error_code: "UNAUTHENTICATED",
+      message: "Authentication required to access admin analytics.",
+    });
+    return false;
+  }
+  if (user.role !== "platform_admin") {
+    res.status(403).json({
+      error_code: "FORBIDDEN",
+      message: "Platform admin role required. Tenant users cannot access platform-wide analytics.",
+    });
+    return false;
+  }
+  return true;
+}
 export const adminAnalyticsRouter = Router();
 
-adminAnalyticsRouter.get("/summary", async (_req: Request, res: Response): Promise<void> => {
+adminAnalyticsRouter.get("/summary", async (req: Request, res: Response): Promise<void> => {
+  if (!requirePlatformAdmin(req, res)) return;
   try {
     const rows = await db
       .select({
@@ -94,7 +121,8 @@ adminAnalyticsRouter.get("/summary", async (_req: Request, res: Response): Promi
   }
 });
 
-adminAnalyticsRouter.get("/funnels", async (_req: Request, res: Response): Promise<void> => {
+adminAnalyticsRouter.get("/funnels", async (req: Request, res: Response): Promise<void> => {
+  if (!requirePlatformAdmin(req, res)) return;
   try {
     const rows = await db
       .select({
@@ -114,7 +142,8 @@ adminAnalyticsRouter.get("/funnels", async (_req: Request, res: Response): Promi
   }
 });
 
-adminAnalyticsRouter.get("/retention", async (_req: Request, res: Response): Promise<void> => {
+adminAnalyticsRouter.get("/retention", async (req: Request, res: Response): Promise<void> => {
+  if (!requirePlatformAdmin(req, res)) return;
   try {
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
