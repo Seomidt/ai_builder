@@ -16,6 +16,7 @@ function getCredentials(): Credentials {
 
   const email = process.env.CLOUDFLARE_EMAIL ?? process.env.CF_EMAIL;
   const apiKey =
+    process.env.CLOUDFLARE_GLOBAL_API_KEY ??
     process.env.CLOUDFLARE_ZONE_API_TOKEN ??
     process.env.CF_API_KEY ??
     process.env.CLOUDFLARE_API_KEY;
