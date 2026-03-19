@@ -1,187 +1,206 @@
 # i18n Architecture and Domain Routing Strategy
 
 **Platform**: blissops.com — AI Builder Platform  
-**Phase**: 48 — Internationalization Foundation  
+**Phase**: 49 — Domain/Subdomain Architecture (supersedes Phase 48)  
 **Last updated**: 2026-03-19  
 **Status**: ACTIVE
 
 ---
 
-## 1. Chosen Locale Routing Strategy
+## 1. Hybrid i18n Architecture
 
-### Strategy: Cookie-based locale (no URL prefix)
+The platform uses a **hybrid locale strategy** because different surfaces have fundamentally different SEO and UX requirements.
 
-The platform uses **cookie-based locale persistence** without locale-prefixed URLs.
+| Surface | Domain | Locale Strategy | Reason |
+|---|---|---|---|
+| Public marketing | `blissops.com` | URL-prefixed (`/en/`, `/da/`) | SEO-critical; crawlers need locale-explicit URLs |
+| Authenticated app | `app.blissops.com` | Cookie-based (`blissops_locale`) | SPA; no SSR; locale is per-user preference |
+| Admin/ops | `admin.blissops.com` | Default locale only | Internal tool; no locale switching needed now |
+| Auth callbacks | `app.blissops.com/auth/*` | Locale-neutral | Supabase callbacks must have stable, prefix-free paths |
+
+---
+
+## 2. Public Domain — Locale-Prefixed URLs
 
 ```
-Current: /dashboard       (locale determined by cookie, not URL)
-NOT:     /da/dashboard    (locale-prefixed — not currently active)
+blissops.com/en/         → English homepage
+blissops.com/da/         → Danish homepage
+blissops.com/en/pricing  → English pricing page
+blissops.com/da/pricing  → Danish pricing page
 ```
 
-### Why this strategy was chosen
+### Canonical tags
+Every public page must declare a canonical URL with the locale prefix:
+```html
+<link rel="canonical" href="https://blissops.com/en/pricing" />
+```
+
+### hreflang tags
+Every public page must include hreflang for all supported locales:
+```html
+<link rel="alternate" hreflang="en"        href="https://blissops.com/en/pricing" />
+<link rel="alternate" hreflang="da"        href="https://blissops.com/da/pricing" />
+<link rel="alternate" hreflang="x-default" href="https://blissops.com/en/pricing" />
+```
+
+### Default locale redirect (public)
+```
+blissops.com/  →  302  →  blissops.com/en/
+```
+302 (not 301) until public site ships — easier to change redirect target.
+
+### www redirect
+```
+www.blissops.com/*  →  301  →  blissops.com/*
+```
+
+---
+
+## 3. App Domain — Cookie-Based Locale
+
+The authenticated SPA (`app.blissops.com`) resolves locale via a priority chain:
+
+```
+1. Explicit selection (user clicked locale switcher)
+2. User preference  (stored in user profile)
+3. Tenant preference (org-level default locale)
+4. Cookie          (blissops_locale — persisted from previous selection)
+5. Browser header  (navigator.languages)
+6. Default         (en)
+```
+
+### Why cookie-based for app?
 
 | Factor | Decision |
 |---|---|
 | Stack | Vite + React + Wouter (SPA, no SSR) |
-| Auth | Supabase callbacks use fixed paths (`/auth/...`) — prefixing breaks them |
-| API routes | Express REST API paths (`/api/...`) must not be locale-prefixed |
-| User base | B2B SaaS — locale set per user/tenant, not per URL share |
-| SEO | Internal app (authenticated) — SEO locale variants not required now |
-| Simplicity | Cookie is simpler, avoids router complexity in Wouter |
+| Auth | Supabase callbacks use fixed `/auth/*` paths — prefixing breaks them |
+| API routes | Express REST (`/api/*`) must not be locale-prefixed |
+| User base | B2B SaaS — locale is per-user preference, not per-shared URL |
+| SEO | Authenticated app is noindex — SEO locale variants not needed |
 
-### Future upgrade path (Phase 50+)
-When public marketing pages are added, locale-prefixed URLs can be introduced:
-- Public: `/en/`, `/da/` with proper hreflang
-- App: remains cookie-based OR migrates to `/[locale]/...` with a layout wrapper
-- All helpers in `locale-path.ts` are built to support this upgrade transparently
+### Cookie config
+```
+Name:      blissops_locale
+Domain:    .blissops.com  (benign cross-subdomain — public also gets locale pref)
+Expires:   1 year
+SameSite:  Lax
+Secure:    true (production)
+```
 
 ---
 
-## 2. Supported Locales
+## 4. Admin Domain — Default Locale
 
-| Code | Language | Native | Default |
-|---|---|---|---|
-| `en` | English | English | ✅ Yes |
-| `da` | Danish | Dansk | No |
+`admin.blissops.com` uses the default locale (`en`) only.
+
+- No locale switcher in ops console
+- No locale cookie written from admin surface
+- Future expansion: add `localeStrategy: "cookie"` to `DOMAIN_CONFIGS[DOMAIN_ROLE.ADMIN]` and expose LocaleSwitcher
+
+---
+
+## 5. Auth / Callback Flows — Locale-Neutral
+
+Auth callback paths are **locale-neutral** by design:
+
+```
+app.blissops.com/auth/login
+app.blissops.com/auth/callback
+app.blissops.com/auth/invite-accept
+app.blissops.com/auth/email-verify
+app.blissops.com/auth/password-reset-confirm
+app.blissops.com/auth/mfa-challenge
+```
+
+**Rules:**
+- NEVER prefix with `/en/` or `/da/`
+- NEVER move to `admin.blissops.com` or `blissops.com`
+- ALWAYS remain on `app.blissops.com`
+- Post-callback redirect lands on app route (e.g. `/` or `/settings`)
+
+---
+
+## 6. Supported Locales
+
+| Code | Language | Native Name |
+|---|---|---|
+| `en` | English | English |
+| `da` | Danish | Dansk |
 
 **Default locale**: `en`  
-Adding a new locale requires:
-1. Add to `SUPPORTED_LOCALES` in `config.ts`
-2. Add metadata to `LOCALE_METADATA`
-3. Create locale directory: `client/src/locales/[locale]/`
-4. Create all namespace JSON files
-5. Update translations
+**Cookie name**: `blissops_locale`
+
+### Adding a new locale (checklist)
+1. Add to `SUPPORTED_LOCALES` in `client/src/lib/i18n/config.ts`
+2. Create `client/src/locales/[locale]/` with all 5 namespace files
+3. Verify key parity with `en` (validation script enforces this)
+4. Add to sitemap generator (Phase 50+)
+5. Add hreflang entries to public pages (Phase 50+)
 
 ---
 
-## 3. Locale Resolution Priority
+## 7. Translation Namespaces
 
-```
-1. Explicit override (programmatic, e.g. force English for system routes)
-2. User preference (from auth profile — future-ready hook)
-3. Tenant default locale (future-ready hook in resolveTenantLocale())
-4. Cookie: blissops_locale (set on language switch, 1-year expiry)
-5. Browser Accept-Language header (navigator.languages)
-6. Platform default: "en"
-```
+5 namespaces, loaded lazily per namespace:
 
-This is implemented in `client/src/lib/i18n/resolve-locale.ts`.
-
----
-
-## 4. Translation Dictionary Structure
-
-```
-client/src/locales/
-  en/
-    common.json      ← shared: nav, actions, status, errors, time
-    auth.json        ← login, logout, mfa, password reset
-    dashboard.json   ← stats, sections, empty states
-    settings.json    ← profile, security, language preferences
-    ops.json         ← ops console, tenants, jobs, security, storage
-  da/
-    common.json
-    auth.json
-    dashboard.json
-    settings.json
-    ops.json
-```
-
-**Namespace loading**: lazy-loaded per namespace via Vite glob imports.  
-**Cache**: in-process Map, cleared on locale switch.  
-**Fallback**: missing key → fallback locale (en) → key name itself (dev warning).
-
----
-
-## 5. Architecture Files
-
-| File | Purpose |
+| Namespace | Coverage |
 |---|---|
-| `client/src/lib/i18n/config.ts` | Types, supported locales, helpers |
-| `client/src/lib/i18n/resolve-locale.ts` | Resolution priority chain + cookie utils |
-| `client/src/lib/i18n/load-dictionary.ts` | Async namespace loader with caching |
-| `client/src/lib/i18n/translator.ts` | `createTranslator`, interpolation, pluralization |
-| `client/src/lib/i18n/locale-path.ts` | Path helpers: withLocale, stripLocale, replaceLocale |
-| `client/src/components/providers/I18nProvider.tsx` | React context + hooks |
-| `client/src/hooks/use-translations.ts` | `useTranslations(ns)` hook |
-| `client/src/components/i18n/LocaleSwitcher.tsx` | Accessible locale switcher |
+| `common` | Navigation, actions, status, errors, brand |
+| `auth` | Login, logout, MFA, password reset, invite |
+| `dashboard` | Stats, project/run summaries |
+| `settings` | Profile, security, language preferences |
+| `ops` | Admin console, tenants, jobs, AI governance |
 
 ---
 
-## 6. Core Shell Migration
+## 8. URL Builders
 
-The following areas were migrated in Phase 48:
+All cross-domain URLs must be generated via:
 
-| Component | Namespace | Keys migrated |
-|---|---|---|
-| `Sidebar.tsx` | `common` | nav.*, brand.name |
-| `App.tsx` | — | Wrapped with I18nProvider |
-
-Future migrations (Phase 49+):
-- `pages/dashboard.tsx` → dashboard namespace
-- `pages/settings.tsx` → settings namespace
-- `pages/ops/*.tsx` → ops namespace
-- Auth pages → auth namespace
-
----
-
-## 7. Domain Structure (Future Phase 50+)
-
-Recommended future domains:
-
-```
-blissops.com          → Public marketing site (Next.js or Astro, locale-prefixed)
-app.blissops.com      → Authenticated app (current, cookie-based locale)
-admin.blissops.com    → Internal ops console (admin-only, en-only initially)
-auth.blissops.com     → Supabase auth callbacks (no locale prefix, system routes)
+```typescript
+import {
+  buildPublicUrl,
+  buildLocalePublicUrl,
+  buildAppUrl,
+  buildAdminUrl,
+  buildAuthUrl,
+  buildInviteUrl,
+  buildResetPasswordUrl,
+  buildMagicLinkReturnUrl,
+} from "@/lib/domain/url-builders";
 ```
 
-### Locale interactions with subdomains
-
-| Domain | Locale strategy | Cookie scope |
-|---|---|---|
-| `blissops.com` | URL prefix (`/en/`, `/da/`) | `.blissops.com` |
-| `app.blissops.com` | Cookie | `.blissops.com` (shared) |
-| `admin.blissops.com` | Cookie or fixed `en` | Separate |
-| `auth.blissops.com` | None (system routes) | None |
-
-### Cookie cross-subdomain note
-Set `Domain=.blissops.com` (leading dot) to share locale cookie across subdomains.
-Currently set to current domain only (Phase 48 scope).
+No hardcoded hostnames should appear elsewhere in the codebase after Phase 49.
 
 ---
 
-## 8. Email / System Message i18n (Future Phase 51+)
+## 9. Domain Model Files
 
-Planned approach:
-- Server-side: `loadDictionary(tenantLocale, "emails")` using the same loader
-- Template: Handlebars or similar with `{{t "greeting" name=recipientName}}`
-- Locale source: `tenant.default_locale` → `user.locale_preference` → `"en"`
-- Namespace: `client/src/locales/[locale]/emails.json` (add when needed)
+Full domain architecture is defined in:
+- `client/src/lib/domain/config.ts` — roles, hostnames, predicates
+- `client/src/lib/domain/canonical.ts` — canonical URL helpers
+- `client/src/lib/domain/session-scope.ts` — cookie/session strategy
+- `client/src/lib/domain/seo-rules.ts` — robots/indexing rules
+- `client/src/lib/domain/url-builders.ts` — typed URL builders
 
----
-
-## 9. Pluralization
-
-Currently implemented as a placeholder in `translator.ts`:
-- `t.plural(key, { count: n })` → uses `key_one` / `key_other` suffixes
-- Full CLDR plural rules (Czech, Polish etc.) can be added via `Intl.PluralRules`
+Route ownership: `docs/architecture/domain-route-ownership.md`  
+Phase 52 prep: `docs/architecture/domain-origin-prep.md`
 
 ---
 
-## 10. Validation
+## 10. Future Migration Path
 
-Phase 48 validation: `scripts/validate-phase48.ts`  
-60 scenarios, 250+ assertions covering:
-- Config correctness
-- Dictionary integrity
-- Translator logic
-- Path helpers
-- Cookie utilities
-- Component existence
-- Core shell migration
+When public marketing pages are added (Phase 50+):
 
----
+1. Public site is a separate Vercel deployment (or static export)
+2. Public site uses locale-prefixed routing from the start
+3. App SPA remains on cookie-based locale — no migration needed
+4. `blissops.com` and `app.blissops.com` are isolated deployments behind Cloudflare
+5. All helpers in `locale-path.ts` and `url-builders.ts` already support this
 
-*blissops.com AI Builder Platform — i18n Architecture*  
-*Classification: INTERNAL*
+When admin isolation ships (Phase 52):
+1. Cloudflare Worker routes `admin.blissops.com/*` to `/ops/*` on app deployment
+2. Worker sets `X-Domain-Role: admin` header
+3. App checks header and enforces superadmin gating
+4. Cookie scope remains `app.blissops.com` until admin gets own deployment
