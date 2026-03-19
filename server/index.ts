@@ -14,9 +14,20 @@ import { globalApiLimiter } from "./middleware/rate-limit";
 import { nonceMiddleware } from "./middleware/nonce";
 import { cspReportRouter } from "./routes/security-report";
 import { createRouteGroupRateLimiter } from "./lib/security/api-rate-limits";
+// Phase Next: domain/subdomain architecture hardening
+import { wwwRedirectMiddleware } from "./middleware/www-redirect";
+import { hostAllowlistMiddleware } from "./middleware/host-allowlist";
+import { adminDomainGuard, adminNoindexHeader } from "./middleware/admin-domain";
+import { robotsRouter } from "./routes/robots";
 
 const app = express();
 const httpServer = createServer(app);
+
+// Phase Next: www → apex redirect — FIRST so no other middleware runs on www requests
+app.use(wwwRedirectMiddleware);
+
+// Phase Next: host allowlist — rejects non-canonical hosts in production
+app.use(hostAllowlistMiddleware);
 
 // Phase 44: nonce middleware — generates per-request CSP nonce (infrastructure for future SSR)
 app.use(nonceMiddleware);
@@ -55,11 +66,18 @@ app.use("/api", globalApiLimiter);
 // Phase 44: route-group rate limiter — per-group stricter limits (auth/AI/admin/security)
 app.use("/api", createRouteGroupRateLimiter());
 
+// Phase Next: robots.txt — registered before auth so crawlers can always fetch it
+app.use(robotsRouter);
+
 // Phase 43: CSP violation reporting — registered BEFORE authMiddleware.
 // Browsers send CSP reports without auth credentials — must be publicly accessible.
 app.use("/api/security", cspReportRouter);
 
 app.use(authMiddleware);
+
+// Phase Next: admin domain isolation + noindex header — after auth, before routes
+app.use(adminDomainGuard);
+app.use(adminNoindexHeader);
 
 
 export function log(message: string, source = "express") {
