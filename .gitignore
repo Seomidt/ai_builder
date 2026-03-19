@@ -6,3 +6,4 @@ vite.config.ts.*
 *.tar.gz
 attached_assets/
 api/index.js
+.vercel/output
