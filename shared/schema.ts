@@ -6319,3 +6319,53 @@ export const dataDeletionJobs = pgTable(
 export const insertDataDeletionJobSchema = createInsertSchema(dataDeletionJobs).omit({ id: true, createdAt: true });
 export type InsertDataDeletionJob = z.infer<typeof insertDataDeletionJobSchema>;
 export type DataDeletionJob = typeof dataDeletionJobs.$inferSelect;
+
+// ─── Phase 46: tenant_files — canonical file metadata ─────────────────────────
+//
+// Source of truth for all tenant file uploads.
+// Object keys are server-generated, tenant-scoped, and never client-controlled.
+// R2 stores the objects; this table stores all metadata, audit state, and lifecycle.
+//
+// Access model: INTERNAL-SYSTEM — never queried directly by tenant users via Supabase client.
+// Application layer enforces tenant isolation by organization_id.
+
+export const tenantFiles = pgTable(
+  "tenant_files",
+  {
+    id:                  text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId:      text("organization_id").notNull(),
+    clientId:            text("client_id"),
+    ownerUserId:         text("owner_user_id"),
+    bucket:              text("bucket").notNull(),
+    objectKey:           text("object_key").notNull(),
+    originalFilename:    text("original_filename").notNull(),
+    mimeType:            text("mime_type").notNull(),
+    sizeBytes:           bigint("size_bytes", { mode: "number" }).notNull(),
+    checksumSha256:      text("checksum_sha256").notNull(),
+    category:            text("category").notNull(),
+    /** private | tenant_internal */
+    visibility:          text("visibility").notNull().default("private"),
+    /** pending | uploaded | failed | deleted */
+    uploadStatus:        text("upload_status").notNull().default("pending"),
+    /** not_scanned | pending_scan | clean | rejected */
+    scanStatus:          text("scan_status").notNull().default("not_scanned"),
+    createdAt:           timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    uploadedAt:          timestamp("uploaded_at", { withTimezone: true }),
+    deletedAt:           timestamp("deleted_at", { withTimezone: true }),
+    deleteScheduledAt:   timestamp("delete_scheduled_at", { withTimezone: true }),
+    metadata:            jsonb("metadata").notNull().default(sql`'{}'::jsonb`),
+  },
+  (t) => [
+    index("tf_org_idx").on(t.organizationId),
+    index("tf_org_created_idx").on(t.organizationId, t.createdAt),
+    index("tf_org_category_created_idx").on(t.organizationId, t.category, t.createdAt),
+    uniqueIndex("tf_object_key_uniq").on(t.objectKey),
+  ],
+);
+
+export const insertTenantFileSchema = createInsertSchema(tenantFiles).omit({
+  id:        true,
+  createdAt: true,
+});
+export type InsertTenantFile = z.infer<typeof insertTenantFileSchema>;
+export type TenantFile = typeof tenantFiles.$inferSelect;

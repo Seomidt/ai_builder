@@ -722,6 +722,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   const { registerR2Routes } = await import("./routes/r2");
   registerR2Routes(app);
 
+  // Phase 46 — Tenant Storage routes (DB-first, signed URLs, tenant isolation)
+  const storageRouter = await import("./routes/storage");
+  app.use("/api/storage", storageRouter.default);
+
   return httpServer;
 }
 
