@@ -7,6 +7,7 @@ import { db } from "../../db";
 import { webhookEndpoints, webhookSubscriptions } from "@shared/schema";
 import { sql as drizzleSql } from "drizzle-orm";
 import { generateWebhookSecret } from "./webhook-signature";
+import { clampTimeoutMs } from "../ai/timeout-sanitizer";
 
 // ── Supported platform event types ────────────────────────────────────────────
 
@@ -65,7 +66,8 @@ export async function registerWebhookEndpoint(params: {
     description: params.description ?? null,
     active: true,
     maxRetries: Math.max(0, Math.min(params.maxRetries ?? 3, 10)),
-    timeoutMs: Math.max(1000, Math.min(params.timeoutMs ?? 10000, 60000)),
+    // Phase 42: use formal sanitizer instead of inline clamp — enforces platform SLA bounds
+    timeoutMs: clampTimeoutMs(params.timeoutMs ?? 10000, 1000, 60000),
   }).returning({ id: webhookEndpoints.id });
 
   return { id: rows[0].id, secret, tenantId: params.tenantId };
@@ -120,7 +122,7 @@ export async function updateWebhookEndpoint(endpointId: string, params: {
       description = ${params.description ?? (existing.description as string | null)},
       active = ${params.active ?? (existing.active as boolean)},
       max_retries = ${params.maxRetries ?? (existing.max_retries as number)},
-      timeout_ms = ${params.timeoutMs ?? (existing.timeout_ms as number)},
+      timeout_ms = ${clampTimeoutMs(params.timeoutMs ?? (existing.timeout_ms as number), 1000, 60000)},
       updated_at = NOW()
     WHERE id = ${endpointId}
   `);
