@@ -12,12 +12,13 @@ export const env = {
   SUPABASE_URL:              required("SUPABASE_URL"),
   SUPABASE_ANON_KEY:         required("SUPABASE_ANON_KEY"),
   SUPABASE_SERVICE_ROLE_KEY: required("SUPABASE_SERVICE_ROLE_KEY"),
-  OPENAI_API_KEY:            required("OPENAI_API_KEY"),
+  // Optional at boot — validated when first used in openai-client.ts
+  OPENAI_API_KEY:            optional("OPENAI_API_KEY", ""),
   APP_ENV:                   optional("APP_ENV", "development"),
 };
 
 function assertProductionSafe() {
-  if (env.APP_ENV === "production") {
+  if (env.APP_ENV === "production" && env.OPENAI_API_KEY) {
     if (!env.OPENAI_API_KEY.startsWith("sk-")) {
       throw new Error("Invalid OPENAI_API_KEY format");
     }

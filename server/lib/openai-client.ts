@@ -8,6 +8,7 @@ import { env } from "./env";
  * Do NOT cache the client at module level — call getOpenAIClient() per request.
  */
 export function getOpenAIClient(): OpenAI {
+  if (!env.OPENAI_API_KEY) throw new Error("Missing env: OPENAI_API_KEY");
   return new OpenAI({ apiKey: env.OPENAI_API_KEY });
 }
 
