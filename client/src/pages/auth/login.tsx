@@ -12,8 +12,7 @@ import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
 
-import { supabase }    from "@/lib/supabase";
-import { queryClient } from "@/lib/queryClient";
+import { supabase } from "@/lib/supabase";
 
 const schema = z.object({
   email:    z.string().email("Ugyldig e-mailadresse"),
@@ -49,8 +48,10 @@ export default function AuthLogin() {
         return;
       }
 
-      await queryClient.invalidateQueries({ queryKey: ["/api/auth/session"] });
-      setLocation("/");
+      // Hard redirect — undgår React-state race conditions efter login.
+      // Supabase har gemt sessionen i localStorage; siden genindlæses
+      // fra bunden og ProtectedRoute henter sessionen med Bearer token.
+      window.location.replace("/");
     } catch {
       setAuthError("Der opstod en fejl. Prøv igen.");
     }
