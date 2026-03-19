@@ -8,6 +8,7 @@ import { securityHeaders } from "./middleware/security-headers";
 import { cspMiddleware } from "./middleware/csp";
 import { responseSecurityMiddleware } from "./middleware/response-security";
 import { globalApiLimiter } from "./middleware/rate-limit";
+import { cspReportRouter } from "./routes/security-report";
 
 const app = express();
 const httpServer = createServer(app);
@@ -43,6 +44,10 @@ app.use(structuredLoggingMiddleware);
 
 // Phase 13.2: global API rate limiter — 1000 req/15 min per actor/IP (replaces Phase 13.1 inline)
 app.use("/api", globalApiLimiter);
+
+// Phase 43: CSP violation reporting — registered BEFORE authMiddleware.
+// Browsers send CSP reports without auth credentials — must be publicly accessible.
+app.use("/api/security", cspReportRouter);
 
 app.use(authMiddleware);
 

@@ -1,5 +1,22 @@
 /**
- * Phase 42 — Content Sanitizer
+ * Phase 42 — Content Sanitizer (LAYER A — AI Ingestion / Text Extraction)
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │  LAYER A — AI INGESTION ONLY                                            │
+ * │                                                                         │
+ * │  Functions in this file are for:                                        │
+ * │    - AI model prompt construction                                       │
+ * │    - Search preprocessing / normalization                               │
+ * │    - Document content extraction (text-only)                            │
+ * │    - Import pipeline preprocessing                                      │
+ * │                                                                         │
+ * │  ✗ NOT safe for HTML rendering. Use output-sanitizer.ts instead.        │
+ * │  ✗ Never pass return values to dangerouslySetInnerHTML.                 │
+ * │  ✗ Never use for content stored for later browser display.              │
+ * │                                                                         │
+ * │  For browser-rendered output: server/lib/security/output-sanitizer.ts  │
+ * │  For frontend rendering:      client/src/lib/security/render-safe-content.ts │
+ * └─────────────────────────────────────────────────────────────────────────┘
  *
  * Shared sanitization helpers for HTML, script, and plain text normalization.
  * Fixes scanner findings for:
@@ -110,6 +127,13 @@ function fullyNormalize(input: string): string {
  *   4. Remove event handler attributes
  *   5. Remove all remaining tags
  *   6. Collapse whitespace
+ */
+/**
+ * LAYER A — AI INGESTION ONLY.
+ * ✗ Not safe for HTML rendering. Use output-sanitizer.ts → sanitizeHtmlForRender() instead.
+ * ✗ Never pass the return value to dangerouslySetInnerHTML.
+ *
+ * Alias: normalizePlainTextForAiInput (preferred name — see below)
  */
 export function sanitizePlainTextInput(input: string): string {
   if (!input || typeof input !== "string") return "";
@@ -254,6 +278,24 @@ export function sanitizeWithReport(input: string): SanitizationResult {
     bytesDelta:      input.length - sanitized.length,
   };
 }
+
+/**
+ * Phase 43 — Preferred alias for sanitizePlainTextInput().
+ *
+ * Use this name in new code to make the scope crystal-clear.
+ *
+ * LAYER A — AI INGESTION ONLY.
+ * ✗ Not safe for HTML rendering. Use output-sanitizer.ts → sanitizeHtmlForRender() instead.
+ * ✗ Never pass the return value to dangerouslySetInnerHTML.
+ * ✗ Never use to sanitize content destined for browser display.
+ *
+ * Safe for:
+ *   ✓ AI model prompt construction
+ *   ✓ Search preprocessing / embedding normalization
+ *   ✓ Document text extraction (plain-text pipeline)
+ *   ✓ Import pipeline preprocessing
+ */
+export const normalizePlainTextForAiInput = sanitizePlainTextInput;
 
 /**
  * Check if a string contains potentially dangerous content (without sanitizing).
