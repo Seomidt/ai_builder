@@ -1,6 +1,6 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile } from "fs/promises";
+import { rm, readFile, unlink } from "fs/promises";
 
 const allowlist = [
   "@google/generative-ai",
@@ -60,27 +60,9 @@ async function buildAll() {
     logLevel: "info",
   });
 
-  console.log("building Vercel serverless function...");
-  await esbuild({
-    entryPoints: ["server/vercel-handler.ts"],
-    platform: "node",
-    bundle: true,
-    format: "cjs",
-    outfile: "api/index.js",
-    define: {
-      "process.env.NODE_ENV": '"production"',
-    },
-    minifyWhitespace: true,
-    minifySyntax: true,
-    external: externals,
-    logLevel: "info",
-    banner: {
-      js: "/* Vercel serverless — pre-bundled by esbuild */",
-    },
-    footer: {
-      js: "if(module.exports&&module.exports.__esModule&&typeof module.exports.default===\"function\"){module.exports=module.exports.default;}",
-    },
-  });
+  // Vercel function is api/index.ts — compiled natively by Vercel, no esbuild needed.
+  // Remove any stale pre-built api/index.js so Vercel only sees the TypeScript source.
+  await unlink("api/index.js").catch(() => { /* already absent — that's fine */ });
 }
 
 buildAll().catch((err) => {
