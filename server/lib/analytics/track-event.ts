@@ -1,14 +1,16 @@
 /**
- * Phase 50 — Analytics Foundation
- * Server-side Analytics Event Tracking
+ * Phase 50 — Analytics Foundation (updated: Final Hardening Closeout)
+ * Server-side Analytics Event Tracking with Idempotency
  *
  * Never blocks the request path on failure.
  * Validates against canonical taxonomy.
  * Sanitizes payload per privacy rules.
+ * Dedupes via idempotency_key (WHERE idempotency_key IS NOT NULL).
  */
 
 import { db } from "../../db";
 import { analyticsEvents } from "../../../shared/schema";
+import { eq }              from "drizzle-orm";
 import {
   isValidEventName,
   getFamilyForEvent,
@@ -25,16 +27,17 @@ import { sanitizeAnalyticsPayload } from "./privacy-rules";
 // ─── Core input type ──────────────────────────────────────────────────────────
 
 export interface TrackEventInput {
-  eventName:      AnalyticsEventName;
-  source:         AnalyticsSource;
-  organizationId?: string | null;
-  actorUserId?:   string | null;
-  clientId?:      string | null;
-  domainRole?:    AnalyticsDomainRole | null;
-  locale?:        SupportedLocale | null;
-  sessionId?:     string | null;
-  requestId?:     string | null;
-  properties?:    Record<string, unknown>;
+  eventName:       AnalyticsEventName;
+  source:          AnalyticsSource;
+  organizationId?:  string | null;
+  actorUserId?:    string | null;
+  clientId?:       string | null;
+  domainRole?:     AnalyticsDomainRole | null;
+  locale?:         SupportedLocale | null;
+  sessionId?:      string | null;
+  requestId?:      string | null;
+  idempotencyKey?: string | null;
+  properties?:     Record<string, unknown>;
 }
 
 // ─── Core tracking function ───────────────────────────────────────────────────
@@ -61,17 +64,31 @@ export async function trackAnalyticsEvent(input: TrackEventInput): Promise<void>
     const family     = getFamilyForEvent(input.eventName);
     const properties = sanitizeAnalyticsPayload(input.properties ?? {});
 
+    if (input.idempotencyKey) {
+      const existing = await db
+        .select({ id: analyticsEvents.id })
+        .from(analyticsEvents)
+        .where(eq(analyticsEvents.idempotencyKey, input.idempotencyKey))
+        .limit(1);
+
+      if (existing.length > 0) {
+        console.debug(`[analytics] Duplicate idempotency_key="${input.idempotencyKey}" — skipped`);
+        return;
+      }
+    }
+
     await db.insert(analyticsEvents).values({
-      organizationId: input.organizationId ?? null,
-      actorUserId:    input.actorUserId    ?? null,
-      clientId:       input.clientId       ?? null,
-      eventName:      input.eventName,
-      eventFamily:    family,
-      source:         input.source,
-      domainRole:     input.domainRole     ?? null,
-      locale:         input.locale         ?? null,
-      sessionId:      input.sessionId      ?? null,
-      requestId:      input.requestId      ?? null,
+      organizationId:  input.organizationId  ?? null,
+      actorUserId:     input.actorUserId     ?? null,
+      clientId:        input.clientId        ?? null,
+      eventName:       input.eventName,
+      eventFamily:     family,
+      source:          input.source,
+      domainRole:      input.domainRole      ?? null,
+      locale:          input.locale          ?? null,
+      sessionId:       input.sessionId       ?? null,
+      requestId:       input.requestId       ?? null,
+      idempotencyKey:  input.idempotencyKey  ?? null,
       properties,
     });
   } catch (err) {
