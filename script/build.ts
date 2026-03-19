@@ -74,7 +74,7 @@ async function buildAll() {
     minifySyntax: true,
     minifyWhitespace: true,
     minifyIdentifiers: false,
-    external: externals,
+    external: ["pg-native"],
     logLevel: "info",
     banner: {
       js: '// @vercel-bundled — esbuild pre-compiled, DO NOT edit manually\n',
