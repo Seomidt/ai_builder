@@ -9,13 +9,16 @@
  */
 
 import { getOpenAIClient } from "../openai-client";
-import { AI_MODELS, AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS, type AiModelKey } from "./config";
+import { AI_MODELS, AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS } from "./config";
+
+/** Legacy model keys supported by this module — see AI_MODEL_ROUTES in config.ts for the full routing table */
+type LegacyModelKey = keyof typeof AI_MODELS;
 
 export interface GenerateTextInput {
   systemPrompt: string;
   userInput: string;
   /** Model key from AI_MODELS — defaults to "default" */
-  model?: AiModelKey;
+  model?: LegacyModelKey;
 }
 
 export interface GenerateTextUsage {
