@@ -1,0 +1,151 @@
+# Phase 29 — Automatic Database Backup
+# Schedule: daily at 02:00 UTC
+#
+# NOTE: This file is named backup.yml.github-workflow instead of
+# .github/workflows/backup.yml because the GitHub PAT in use lacks
+# the `workflow` scope required to push workflow files.
+# To activate: copy this file to .github/workflows/backup.yml
+# and push with a PAT that has the `workflow` scope.
+#
+# To activate this workflow:
+#   cp backup.yml.github-workflow .github/workflows/backup.yml
+#   git add .github/workflows/backup.yml
+#   git commit -m "chore: activate backup workflow"
+#   git push  # requires PAT with workflow scope
+
+name: Automated Database Backup
+
+on:
+  schedule:
+    - cron: '0 2 * * *'   # 02:00 UTC daily
+  workflow_dispatch:       # allow manual trigger
+    inputs:
+      backup_type:
+        description: 'Backup type'
+        required: false
+        default: 'daily'
+        type: choice
+        options: [daily, weekly, monthly]
+      dry_run:
+        description: 'Dry run (skip actual upload)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  NODE_VERSION: '20'
+
+jobs:
+  backup:
+    name: Database Backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate R2 configuration
+        run: |
+          npx tsx -e "
+          import('./server/lib/backup/r2-backup.js').then(m => {
+            const v = m.validateR2Config();
+            if (!v.valid) {
+              console.error('R2 not configured — missing:', v.missing.join(', '));
+              process.exit(1);
+            }
+            console.log('R2 config valid');
+          });
+          "
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+
+      - name: Run database export
+        id: db_export
+        run: |
+          DATE=$(date +%Y-%m-%d)
+          echo "export_date=$DATE" >> $GITHUB_OUTPUT
+          npx tsx scripts/db-export.ts --date=$DATE
+        env:
+          SUPABASE_DB_POOL_URL: ${{ secrets.SUPABASE_DB_POOL_URL }}
+
+      - name: Upload backup to Cloudflare R2
+        id: r2_upload
+        run: |
+          DATE=${{ steps.db_export.outputs.export_date }}
+          TYPE=${{ github.event.inputs.backup_type || 'daily' }}
+          npx tsx -e "
+          import('./server/lib/backup/r2-backup.js').then(async m => {
+            const file = '.backups/db/${DATE}.sql.gz';
+            const result = await m.uploadBackup(file, '${TYPE}');
+            console.log(JSON.stringify(result, null, 2));
+            if (!result.success) { process.exit(1); }
+            console.log('Upload key:', result.key);
+          });
+          "
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+
+      - name: Verify upload success
+        run: |
+          DATE=${{ steps.db_export.outputs.export_date }}
+          TYPE=${{ github.event.inputs.backup_type || 'daily' }}
+          npx tsx -e "
+          import('./server/lib/backup/r2-backup.js').then(async m => {
+            const key = m.buildBackupKey('${TYPE}', '${DATE}.sql.gz');
+            const result = await m.verifyUpload(key);
+            console.log(JSON.stringify(result, null, 2));
+            if (!result.exists) {
+              console.error('Verification failed — backup not found at key:', key);
+              process.exit(1);
+            }
+            console.log('Verification passed:', key);
+          });
+          "
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+
+      - name: Rotate old backups
+        run: |
+          TYPE=${{ github.event.inputs.backup_type || 'daily' }}
+          KEEP=14
+          if [ "$TYPE" = "weekly" ]; then KEEP=8; fi
+          if [ "$TYPE" = "monthly" ]; then KEEP=12; fi
+          npx tsx -e "
+          import('./server/lib/backup/r2-backup.js').then(async m => {
+            const result = await m.rotateBackups('${TYPE}', ${KEEP});
+            console.log('Rotated:', result.deletedCount, 'old backups deleted');
+            console.log(JSON.stringify(result, null, 2));
+          });
+          "
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+
+      - name: Report backup status
+        if: always()
+        run: |
+          echo "=== Backup Summary ==="
+          echo "Date: ${{ steps.db_export.outputs.export_date }}"
+          echo "Type: ${{ github.event.inputs.backup_type || 'daily' }}"
+          echo "Job status: ${{ job.status }}"
