@@ -3,8 +3,20 @@
  * Phase 49 — Domain/Subdomain Architecture
  *
  * Platform: blissops.com — AI Builder Platform
- * Model: Hybrid i18n (locale-prefixed public + cookie-based app)
- * Updated: 2026-03-19
+ * Model: single-domain — entire app on blissops.com
+ * Updated: 2026-03-19 — migrated from multi-subdomain to single-domain
+ *
+ * CURRENT MODE: single-domain
+ *   - blissops.com → authenticated application (all routes)
+ *   - www.blissops.com → 301 redirect to blissops.com
+ *   - app.blissops.com → NOT LIVE (planned future subdomain)
+ *   - admin.blissops.com → NOT LIVE (planned future subdomain)
+ *
+ * When migrating to multi-domain:
+ *   - Change APP + AUTH + ADMIN back to their respective subdomains
+ *   - Update Supabase allow-list
+ *   - Update Vercel project domains
+ *   - Update DOMAIN_CONFIG.mode in server/lib/platform/domain-config.ts
  */
 
 // ─── Domain Role Enum ────────────────────────────────────────────────────────
@@ -20,11 +32,17 @@ export type DomainRole = (typeof DOMAIN_ROLE)[keyof typeof DOMAIN_ROLE];
 
 // ─── Canonical Hostnames ─────────────────────────────────────────────────────
 
+/**
+ * Single-domain mode: everything lives on blissops.com.
+ *
+ * All roles map to the same host. Auth callbacks, app routes,
+ * and admin/ops routes all live under blissops.com.
+ */
 export const CANONICAL_HOSTS: Record<DomainRole, string> = {
   [DOMAIN_ROLE.PUBLIC]: "blissops.com",
-  [DOMAIN_ROLE.APP]:    "app.blissops.com",
-  [DOMAIN_ROLE.ADMIN]:  "admin.blissops.com",
-  [DOMAIN_ROLE.AUTH]:   "app.blissops.com", // auth callbacks live on app domain
+  [DOMAIN_ROLE.APP]:    "blissops.com",   // single-domain: was app.blissops.com
+  [DOMAIN_ROLE.ADMIN]:  "blissops.com",   // single-domain: was admin.blissops.com
+  [DOMAIN_ROLE.AUTH]:   "blissops.com",   // single-domain: auth callbacks on blissops.com
 };
 
 /** www always redirects to apex public domain */
@@ -58,54 +76,46 @@ export const DOMAIN_CONFIGS: Record<DomainRole, DomainConfig> = {
   [DOMAIN_ROLE.PUBLIC]: {
     role:             DOMAIN_ROLE.PUBLIC,
     host:             "blissops.com",
-    purpose:          "Marketing site, homepage, pricing, legal, SEO-optimised public pages",
-    audience:         "Prospects, public, SEO crawlers",
-    indexed:          true,
-    localeStrategy:   "prefix",
-    authRequired:     false,
+    purpose:          "Authenticated application — all routes (single-domain mode)",
+    audience:         "Authenticated users only",
+    indexed:          false,
+    localeStrategy:   "cookie",
+    authRequired:     true,
     sharedDeployment: null,
-    notes:            "Locale-prefixed URLs (/en/..., /da/...). Canonical + hreflang tags required.",
+    notes:            "Single-domain mode. Not a public marketing site. All routes require auth.",
   },
   [DOMAIN_ROLE.APP]: {
     role:             DOMAIN_ROLE.APP,
-    host:             "app.blissops.com",
-    purpose:          "Authenticated coach/client SPA — projects, runs, settings, integrations",
+    host:             "blissops.com",
+    purpose:          "Authenticated app SPA — projects, runs, settings, integrations",
     audience:         "Authenticated users (coaches, clients, org members)",
     indexed:          false,
     localeStrategy:   "cookie",
     authRequired:     true,
     sharedDeployment: null,
-    notes:            "Cookie-based locale (blissops_locale). Auth callbacks live here. No locale URL prefix.",
+    notes:            "Single-domain mode: app routes on blissops.com. Auth callbacks live here.",
   },
   [DOMAIN_ROLE.ADMIN]: {
     role:             DOMAIN_ROLE.ADMIN,
-    host:             "admin.blissops.com",
+    host:             "blissops.com",
     purpose:          "Internal ops console — tenant management, jobs, AI governance, security",
-    audience:         "Platform staff only (superadmin role required)",
+    audience:         "Platform staff only (platform_admin role required)",
     indexed:          false,
     localeStrategy:   "default-only",
     authRequired:     true,
     sharedDeployment: DOMAIN_ROLE.APP,
-    notes:            "Currently served from same SPA under /ops/* routes. Isolated later via Cloudflare routing.",
+    notes:            "Single-domain mode: ops routes on blissops.com/ops/*. Role-based, not host-based.",
   },
   [DOMAIN_ROLE.AUTH]: {
     role:             DOMAIN_ROLE.AUTH,
-    host:             "app.blissops.com",
+    host:             "blissops.com",
     purpose:          "Auth/callback flows — Supabase OAuth, magic link, invite, password reset",
     audience:         "All users (unauthenticated callbacks)",
     indexed:          false,
     localeStrategy:   "default-only",
     authRequired:     false,
     sharedDeployment: DOMAIN_ROLE.APP,
-    notes: [
-      "Auth callbacks deliberately remain on app.blissops.com/auth/*.",
-      "A dedicated auth.blissops.com is NOT justified at this stage because:",
-      "1) Supabase allow-list already targets app.blissops.com",
-      "2) Cookie scope for session token is app.blissops.com",
-      "3) Post-callback redirect targets are app.blissops.com routes",
-      "4) Operational complexity of cross-domain token handoff outweighs benefit",
-      "Re-evaluate if SSR public auth pages become required.",
-    ].join(" "),
+    notes:            "Single-domain mode: auth callbacks on blissops.com/auth/*. Registered in Supabase allow-list.",
   },
 };
 
@@ -127,11 +137,10 @@ export function isKnownHost(hostname: string): boolean {
 /** Resolve domain role from hostname */
 export function getDomainRoleFromHost(hostname: string): DomainRole | null {
   const h = hostname.toLowerCase().replace(/:\d+$/, ""); // strip port
-  if (h === CANONICAL_HOSTS[DOMAIN_ROLE.ADMIN]) return DOMAIN_ROLE.ADMIN;
-  if (h === CANONICAL_HOSTS[DOMAIN_ROLE.APP])   return DOMAIN_ROLE.APP;
-  if (h === CANONICAL_HOSTS[DOMAIN_ROLE.PUBLIC] || h === `www.${ROOT_DOMAIN}`) return DOMAIN_ROLE.PUBLIC;
+  // Single-domain: blissops.com is everything
+  if (h === "blissops.com" || h === `www.${ROOT_DOMAIN}`) return DOMAIN_ROLE.PUBLIC;
   // localhost / dev
-  if (h === "localhost" || h === "127.0.0.1")   return DOMAIN_ROLE.APP;
+  if (h === "localhost" || h === "127.0.0.1") return DOMAIN_ROLE.APP;
   return null;
 }
 

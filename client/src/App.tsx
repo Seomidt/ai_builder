@@ -31,6 +31,7 @@ import AuthPasswordResetConfirm from "@/pages/auth/password-reset-confirm";
 import AuthEmailVerify from "@/pages/auth/email-verify";
 import AuthInviteAccept from "@/pages/auth/invite-accept";
 import AuthMfaChallenge from "@/pages/auth/mfa-challenge";
+import AuthCallback from "@/pages/auth/callback";
 import SecuritySettings from "@/pages/settings/security";
 import OpsStorage from "@/pages/ops/storage";
 
@@ -94,6 +95,7 @@ function Router() {
       <Route path="/auth/password-reset-confirm" component={AuthPasswordResetConfirm} />
       <Route path="/auth/email-verify" component={AuthEmailVerify} />
       <Route path="/auth/invite-accept" component={AuthInviteAccept} />
+      <Route path="/auth/callback" component={AuthCallback} />
       <Route path="/auth/mfa-challenge" component={AuthMfaChallenge} />
 
       {/* All other routes — protected (session required) */}
