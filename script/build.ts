@@ -70,11 +70,15 @@ async function buildAll() {
     define: {
       "process.env.NODE_ENV": '"production"',
     },
-    minify: true,
+    minifyWhitespace: true,
+    minifySyntax: true,
     external: externals,
     logLevel: "info",
     banner: {
       js: "/* Vercel serverless — pre-bundled by esbuild */",
+    },
+    footer: {
+      js: "if(module.exports&&module.exports.__esModule&&typeof module.exports.default===\"function\"){module.exports=module.exports.default;}",
     },
   });
 }
