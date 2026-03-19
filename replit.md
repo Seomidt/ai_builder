@@ -311,7 +311,7 @@ npm run db:push   # Sync schema to DB
 - [x] Phase 31: API Security Hardening — 106/106 assertions pass
 - [x] Phase 30: Backup & Disaster Recovery — 151/151 assertions pass
 - [x] Phase 27: Platform Ops Console — 265/265 assertions pass
-- [x] Phase 16: AI Cost Governance — 156/156 assertions pass
+- [x] Phase 16: AI Cost Governance — 156/156 assertions pass *(færdiggjort for længst — commit 541110b, 16. marts 2026)*
 - [x] Phase 4A–4S: Full monetization engine — billing, wallet, subscriptions, invoices, Stripe, jobs, integrity, recovery
 
 ### Open branches (not yet merged to main)
@@ -1694,7 +1694,7 @@ Advisory-only AI assistant for platform operators. Reads live telemetry, synthes
 ### Validation results
 45 scenarios — 173 assertions — ALL PASS (branch: feature/ai-operations-assistant)
 
-## Phase 16 — AI Cost Governance Platform (branch: feature/ai-cost-governance)
+## Phase 16 — AI Cost Governance Platform (branch: feature/ai-cost-governance) — FÆRDIGGJORT 16. MARTS 2026
 
 ### Overview
 Per-tenant AI spend governance with budget enforcement, usage snapshotting, anomaly detection, alert generation and runaway-agent protection. Hard limits block execution (INV-GOV-2). Soft limits warn only (INV-GOV-3). All governance actions fail-open (INV-GOV-1). Full audit trail (INV-GOV-5).
