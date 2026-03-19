@@ -23,12 +23,13 @@ interface SessionResult {
 async function fetchSession(): Promise<SessionResult> {
   try {
     const token = await getSessionToken();
-    const headers: Record<string, string> = { "Cache-Control": "no-store" };
+    const headers: Record<string, string> = {};
     if (token) headers["Authorization"] = `Bearer ${token}`;
 
     const res = await fetch("/api/auth/session", {
       headers,
       credentials: "include",
+      cache: "no-store",
     });
 
     if (res.status === 401) return { status: 401, user: null };
@@ -44,10 +45,10 @@ async function fetchSession(): Promise<SessionResult> {
 
 export function useAuth() {
   const { data, isLoading } = useQuery<SessionResult>({
-    queryKey: ["/api/auth/session"],
-    queryFn: fetchSession,
-    retry: false,
-    staleTime: 30_000,
+    queryKey:            ["/api/auth/session"],
+    queryFn:             fetchSession,
+    retry:               false,
+    staleTime:           30_000,
     refetchOnWindowFocus: true,
   });
 

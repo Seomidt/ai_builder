@@ -11,8 +11,10 @@
  * This guard provides the correct UX for unauthenticated/blocked users.
  */
 
-import { Redirect } from "wouter";
+import { Redirect, Link } from "wouter";
 import { useAuth } from "@/hooks/use-auth";
+import { signOut } from "@/lib/supabase";
+import { queryClient } from "@/lib/queryClient";
 
 interface ProtectedRouteProps {
   children: React.ReactNode;

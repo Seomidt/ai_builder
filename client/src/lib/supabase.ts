@@ -1,32 +1,19 @@
-import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { createClient } from "@supabase/supabase-js";
 
-let _client: SupabaseClient | null = null;
-let _configPromise: Promise<{ supabaseUrl: string; supabaseAnonKey: string }> | null = null;
+const supabaseUrl     = import.meta.env.VITE_SUPABASE_URL     as string;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
 
-async function loadConfig(): Promise<{ supabaseUrl: string; supabaseAnonKey: string }> {
-  if (!_configPromise) {
-    _configPromise = fetch("/api/auth/config").then((r) => r.json());
-  }
-  return _configPromise;
-}
-
-export async function getSupabase(): Promise<SupabaseClient> {
-  if (_client) return _client;
-  const { supabaseUrl, supabaseAnonKey } = await loadConfig();
-  _client = createClient(supabaseUrl, supabaseAnonKey, {
-    auth: {
-      persistSession:   true,
-      autoRefreshToken: true,
-      storageKey:       "blissops_auth",
-    },
-  });
-  return _client;
-}
+export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+  auth: {
+    persistSession:   true,
+    autoRefreshToken: true,
+    storageKey:       "blissops_auth",
+  },
+});
 
 export async function getSessionToken(): Promise<string | null> {
   try {
-    const client = await getSupabase();
-    const { data } = await client.auth.getSession();
+    const { data } = await supabase.auth.getSession();
     return data.session?.access_token ?? null;
   } catch {
     return null;
@@ -34,6 +21,5 @@ export async function getSessionToken(): Promise<string | null> {
 }
 
 export async function signOut(): Promise<void> {
-  const client = await getSupabase();
-  await client.auth.signOut();
+  await supabase.auth.signOut();
 }

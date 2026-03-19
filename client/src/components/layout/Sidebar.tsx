@@ -8,15 +8,32 @@ import {
   Settings,
   ChevronRight,
   ShieldAlert,
+  LogOut,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTranslations } from "@/hooks/use-translations";
 import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
+import { useAuth } from "@/hooks/use-auth";
+import { signOut } from "@/lib/supabase";
+import { queryClient } from "@/lib/queryClient";
 
 export function Sidebar() {
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
   const { t } = useTranslations("common");
+  const { user } = useAuth();
   const isOpsSection = location.startsWith("/ops");
+
+  async function handleLogout() {
+    await signOut();
+    queryClient.clear();
+    setLocation("/auth/login");
+  }
+
+  const initials = user?.email
+    ? user.email.slice(0, 2).toUpperCase()
+    : "??";
+  const displayEmail = user?.email ?? "—";
+  const displayOrg   = user?.organizationId ?? "—";
 
   const navItems = [
     { href: "/",              label: t("nav.dashboard"),     icon: LayoutDashboard },
@@ -94,16 +111,28 @@ export function Sidebar() {
         })}
       </nav>
 
-      {/* Footer: org info + locale switcher */}
+      {/* Footer: user info + logout */}
       <div className="px-4 py-3 border-t border-sidebar-border space-y-2">
         <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-full bg-sidebar-primary/20 flex items-center justify-center">
-            <span className="text-xs font-semibold text-sidebar-primary">DO</span>
+          <div className="w-7 h-7 rounded-full bg-sidebar-primary/20 flex items-center justify-center shrink-0">
+            <span className="text-xs font-semibold text-sidebar-primary">{initials}</span>
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-xs font-medium text-sidebar-foreground truncate">Demo Org</p>
-            <p className="text-xs text-sidebar-foreground/40 truncate">demo-org</p>
+            <p className="text-xs font-medium text-sidebar-foreground truncate" data-testid="text-sidebar-email">
+              {displayEmail}
+            </p>
+            <p className="text-xs text-sidebar-foreground/40 truncate" data-testid="text-sidebar-org">
+              {displayOrg}
+            </p>
           </div>
+          <button
+            onClick={handleLogout}
+            title="Log ud"
+            data-testid="button-logout"
+            className="shrink-0 p-1 rounded text-sidebar-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-colors"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+          </button>
         </div>
         <LocaleSwitcher />
       </div>

@@ -8,7 +8,9 @@ async function throwIfResNotOk(res: Response) {
   }
 }
 
-async function authHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
+async function bearerHeaders(
+  extra?: Record<string, string>,
+): Promise<Record<string, string>> {
   const token = await getSessionToken();
   const headers: Record<string, string> = { ...extra };
   if (token) headers["Authorization"] = `Bearer ${token}`;
@@ -20,7 +22,9 @@ export async function apiRequest(
   url: string,
   data?: unknown,
 ): Promise<Response> {
-  const headers = await authHeaders(data ? { "Content-Type": "application/json" } : {});
+  const headers = await bearerHeaders(
+    data ? { "Content-Type": "application/json" } : undefined,
+  );
   const res = await fetch(url, {
     method,
     headers,
@@ -37,7 +41,7 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const headers = await authHeaders();
+    const headers = await bearerHeaders();
     const res = await fetch(queryKey.join("/") as string, {
       headers,
       credentials: "include",

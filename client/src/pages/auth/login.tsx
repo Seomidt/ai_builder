@@ -12,7 +12,7 @@ import {
   Card, CardContent, CardDescription, CardHeader, CardTitle,
 } from "@/components/ui/card";
 
-import { getSupabase } from "@/lib/supabase";
+import { supabase }    from "@/lib/supabase";
 import { queryClient } from "@/lib/queryClient";
 
 const schema = z.object({
@@ -35,8 +35,7 @@ export default function AuthLogin() {
   async function onSubmit(values: FormValues) {
     setAuthError(null);
     try {
-      const client = await getSupabase();
-      const { error } = await client.auth.signInWithPassword({
+      const { error } = await supabase.auth.signInWithPassword({
         email:    values.email,
         password: values.password,
       });
