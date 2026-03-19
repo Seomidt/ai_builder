@@ -26,6 +26,7 @@ import type { Request, Response, NextFunction } from "express";
 // Must stay in sync with authMiddleware PUBLIC_PATHS + robots.txt endpoint.
 
 const LOCKDOWN_BYPASS_PATHS: readonly string[] = [
+  "/api/auth/config",
   "/api/admin/platform/deploy-health",
   "/api/admin/recovery/backup-status",
   "/api/admin/recovery/trigger-backup",

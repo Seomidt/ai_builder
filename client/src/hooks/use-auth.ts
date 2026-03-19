@@ -1,18 +1,12 @@
 /**
  * useAuth — Session state hook
  *
- * Fetches /api/auth/session and exposes the result as a typed hook.
- * Handles 401 (unauthenticated) and 403 (lockdown/forbidden) gracefully.
- *
- * Returns:
- *   isLoading  — session check in progress (show spinner, not blocked screen)
- *   user       — authenticated user object, or null
- *   status     — HTTP status of the session check (200 | 401 | 403 | null)
- *   isAuthed   — true only when status === 200 and user is present
- *   isLockdown — true when status === 403 (lockdown blocked)
+ * Fetches /api/auth/session with a Supabase Bearer token (if present).
+ * Handles 401 (unauthenticated) and 403 (lockdown) gracefully.
  */
 
 import { useQuery } from "@tanstack/react-query";
+import { getSessionToken } from "@/lib/supabase";
 
 export interface SessionUser {
   id: string;
@@ -28,14 +22,18 @@ interface SessionResult {
 
 async function fetchSession(): Promise<SessionResult> {
   try {
+    const token = await getSessionToken();
+    const headers: Record<string, string> = { "Cache-Control": "no-store" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+
     const res = await fetch("/api/auth/session", {
+      headers,
       credentials: "include",
-      cache: "no-store",
     });
 
     if (res.status === 401) return { status: 401, user: null };
     if (res.status === 403) return { status: 403, user: null };
-    if (!res.ok) return { status: res.status, user: null };
+    if (!res.ok)            return { status: res.status, user: null };
 
     const data = await res.json() as { user: SessionUser };
     return { status: 200, user: data.user ?? null };
@@ -54,13 +52,13 @@ export function useAuth() {
   });
 
   const status = data?.status ?? null;
-  const user = data?.user ?? null;
+  const user   = data?.user   ?? null;
 
   return {
     isLoading,
     user,
     status,
-    isAuthed: status === 200 && user !== null,
+    isAuthed:   status === 200 && user !== null,
     isLockdown: status === 403,
   };
 }

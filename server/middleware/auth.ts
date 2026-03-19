@@ -55,6 +55,7 @@ function getDemoUser(): AuthUser {
 // These are CI/CD and health-check endpoints that must be accessible without auth.
 
 const PUBLIC_PATHS = [
+  "/api/auth/config",
   "/api/admin/platform/deploy-health",
   // Phase 29: Recovery & backup admin endpoints (internal tooling — CI/CD, runbooks, monitoring)
   "/api/admin/recovery/backup-status",
