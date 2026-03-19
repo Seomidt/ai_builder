@@ -229,8 +229,9 @@ export function adminGuardMiddleware(
   res: Response,
   next: NextFunction,
 ): void {
-  if ((ADMIN_PUBLIC_PATHS as readonly string[]).includes(req.path)) {
-    return next(); // Health-check / CI bypass — no auth required
+  const fullPath = req.originalUrl?.split("?")[0] ?? req.path;
+  if ((ADMIN_PUBLIC_PATHS as readonly string[]).includes(fullPath)) {
+    return next();
   }
   requirePlatformAdmin(req, res, next);
 }

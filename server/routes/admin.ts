@@ -31,6 +31,70 @@ export function registerAdminRoutes(app: Express): void {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
+  app.get("/api/admin/platform/deploy-health", async (_req: Request, res: Response) => {
+    const checks: Record<string, { ok: boolean; detail?: string }> = {};
+
+    checks.SUPABASE_URL = {
+      ok: !!process.env.SUPABASE_URL,
+      detail: process.env.SUPABASE_URL ? process.env.SUPABASE_URL.replace(/\/\/(.{4}).*@/, "//$1***@") : "MISSING",
+    };
+    checks.SUPABASE_SERVICE_ROLE_KEY = {
+      ok: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+      detail: process.env.SUPABASE_SERVICE_ROLE_KEY ? "set (hidden)" : "MISSING",
+    };
+    checks.SUPABASE_ANON_KEY = {
+      ok: !!process.env.SUPABASE_ANON_KEY,
+      detail: process.env.SUPABASE_ANON_KEY ? "set (hidden)" : "MISSING",
+    };
+    checks.DB_CONNECTION = {
+      ok: !!(process.env.SUPABASE_DB_POOL_URL || process.env.DATABASE_URL),
+      detail: process.env.SUPABASE_DB_POOL_URL ? "SUPABASE_DB_POOL_URL" : process.env.DATABASE_URL ? "DATABASE_URL" : "MISSING",
+    };
+    checks.LOCKDOWN_ENABLED = {
+      ok: true,
+      detail: process.env.LOCKDOWN_ENABLED ?? "not set (lockdown off)",
+    };
+    checks.LOCKDOWN_ALLOWLIST = {
+      ok: true,
+      detail: process.env.LOCKDOWN_ALLOWLIST ?? "not set",
+    };
+    checks.DEMO_MODE = {
+      ok: true,
+      detail: process.env.DEMO_MODE ?? "not set",
+    };
+    checks.VERCEL = {
+      ok: true,
+      detail: process.env.VERCEL ? "true" : "false (not on Vercel)",
+    };
+    checks.NODE_ENV = {
+      ok: true,
+      detail: process.env.NODE_ENV ?? "not set",
+    };
+
+    try {
+      const { pool } = await import("../db");
+      const result = await pool.query("SELECT 1 AS ping");
+      checks.DB_PING = { ok: result.rows[0]?.ping === 1, detail: "connected" };
+    } catch (e: unknown) {
+      checks.DB_PING = { ok: false, detail: e instanceof Error ? e.message : "unknown error" };
+    }
+
+    try {
+      const { supabaseAdmin } = await import("../lib/supabase");
+      const { data, error } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 1 });
+      checks.SUPABASE_AUTH = { ok: !error, detail: error ? error.message : `connected (${data?.users?.length ?? 0} user(s) sampled)` };
+    } catch (e: unknown) {
+      checks.SUPABASE_AUTH = { ok: false, detail: e instanceof Error ? e.message : "unknown error" };
+    }
+
+    const allOk = Object.values(checks).every((c) => c.ok);
+    res.status(allOk ? 200 : 503).json({
+      status: allOk ? "healthy" : "degraded",
+      timestamp: new Date().toISOString(),
+      checks,
+    });
+  });
+
   app.get("/api/admin/tenants", (_req: Request, res: Response) => {
     res.json({ tenants: [], total: 0 });
   });
