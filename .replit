@@ -44,6 +44,7 @@ integrations = ["javascript_database:1.0.0"]
 [userenv]
 
 [userenv.shared]
-DEMO_MODE = "true"
+DEMO_MODE = "false"
 LOCKDOWN_ENABLED = "true"
 LOCKDOWN_ALLOWLIST = "seomidt@gmail.com"
+INTERNAL_API_SECRET = "ph16-validation-internal-2026"

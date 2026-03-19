@@ -70,6 +70,15 @@ const PUBLIC_PATHS = [
   "/api/admin/recovery/brownout-history",
 ];
 
+// ── Internal API secret bypass (validation scripts + CI tooling) ─────────────
+// Only active when INTERNAL_API_SECRET is set. Never exposed to clients.
+
+function checkInternalToken(req: Request): boolean {
+  const secret = process.env.INTERNAL_API_SECRET;
+  if (!secret) return false;
+  return req.headers["x-internal-token"] === secret;
+}
+
 export async function authMiddleware(
   req: Request,
   res: Response,
@@ -77,6 +86,17 @@ export async function authMiddleware(
 ): Promise<void> {
   // Phase 28: allow specific public paths without authentication
   if (PUBLIC_PATHS.includes(req.path)) {
+    return next();
+  }
+
+  // Internal tooling bypass (validation scripts, CI)
+  if (checkInternalToken(req)) {
+    req.user = {
+      id: "internal-script",
+      email: "internal@blissops.com",
+      organizationId: "platform",
+      role: "platform_admin",
+    };
     return next();
   }
 

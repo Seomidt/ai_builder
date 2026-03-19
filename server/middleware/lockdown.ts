@@ -114,6 +114,12 @@ export function lockdownGuard(
     return next();
   }
 
+  // Internal tooling bypass (validation scripts, CI) — same check as authMiddleware
+  const internalSecret = process.env.INTERNAL_API_SECRET;
+  if (internalSecret && req.headers["x-internal-token"] === internalSecret) {
+    return next();
+  }
+
   // Bypass CI/CD health-check and public paths
   if ((LOCKDOWN_BYPASS_PATHS as readonly string[]).includes(req.path)) {
     return next();

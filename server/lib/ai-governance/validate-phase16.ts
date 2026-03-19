@@ -448,11 +448,13 @@ async function run(): Promise<void> {
     section("S21: Admin API endpoints");
 
     const BASE = "http://localhost:5000";
+    const INTERNAL_TOKEN = process.env.INTERNAL_API_SECRET ?? "";
+    const internalHeaders = { "X-Internal-Token": INTERNAL_TOKEN };
 
-    const govHealth = await fetch(`${BASE}/api/admin/health`).then(r => r.json() as Promise<{ status: string }>);
+    const govHealth = await fetch(`${BASE}/api/admin/health`, { headers: internalHeaders }).then(r => r.json() as Promise<{ status: string }>);
     assert(govHealth.status === "ok",                             "API: /admin/health → ok");   // 126
 
-    const periodResp = await fetch(`${BASE}/api/admin/governance/period-bounds?periodType=monthly`);
+    const periodResp = await fetch(`${BASE}/api/admin/governance/period-bounds?periodType=monthly`, { headers: internalHeaders });
     assert(periodResp.status === 200,                             "API: period-bounds 200");    // 127
     const periodData = await periodResp.json() as { data: { periodType: string; periodStart: string; periodEnd: string } };
     assert(periodData.data?.periodType === "monthly",             "API: period-bounds type");   // 128
@@ -460,7 +462,7 @@ async function run(): Promise<void> {
 
     const classifyResp = await fetch(`${BASE}/api/admin/governance/classify-budget`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...internalHeaders },
       body: JSON.stringify({ currentUsageUsdCents: 8500, budgetUsdCents: 10000, warningThresholdPct: 80, hardLimitPct: 100 }),
     });
     assert(classifyResp.status === 200,                           "API: classify-budget 200");  // 130
@@ -468,23 +470,23 @@ async function run(): Promise<void> {
     assert(classifyData.data?.status === "warning",               "API: classify-budget → warning"); // 131
     assert(typeof classifyData.data?.utilizationPct === "number", "API: classify-budget utilPct");   // 132
 
-    const alertsResp = await fetch(`${BASE}/api/admin/governance/alerts`);
+    const alertsResp = await fetch(`${BASE}/api/admin/governance/alerts`, { headers: internalHeaders });
     assert(alertsResp.status === 200,                             "API: GET alerts 200");       // 133
     const alertsData = await alertsResp.json() as { data: unknown[] };
     assert(Array.isArray(alertsData.data),                        "API: alerts returns array"); // 134
 
-    const budgetsResp = await fetch(`${BASE}/api/admin/governance/budgets`);
+    const budgetsResp = await fetch(`${BASE}/api/admin/governance/budgets`, { headers: internalHeaders });
     assert(budgetsResp.status === 200,                            "API: GET budgets 200");      // 135
     const budgetsData = await budgetsResp.json() as { data: unknown[]; errors: unknown[] };
     assert(Array.isArray(budgetsData.data),                       "API: budgets returns array");// 136
     assert(Array.isArray(budgetsData.errors),                     "API: budgets errors array"); // 137
 
-    const periodsResp = await fetch(`${BASE}/api/admin/governance/period-bounds?periodType=invalid`);
+    const periodsResp = await fetch(`${BASE}/api/admin/governance/period-bounds?periodType=invalid`, { headers: internalHeaders });
     assert(periodsResp.status === 400,                            "API: invalid periodType → 400"); // 138
 
     const classifyBadResp = await fetch(`${BASE}/api/admin/governance/classify-budget`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...internalHeaders },
       body: JSON.stringify({ budgetUsdCents: 0 }),
     });
     assert(classifyBadResp.status === 400,                        "API: classify invalid body → 400"); // 139
@@ -492,7 +494,7 @@ async function run(): Promise<void> {
     // Snapshot for a test org (no-op if no billing data)
     const snapResp = await fetch(`${BASE}/api/admin/governance/snapshots/${testOrgId}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...internalHeaders },
       body: JSON.stringify({ periodType: "monthly" }),
     });
     assert(snapResp.status === 200,                               "API: POST snapshot 200");    // 140
