@@ -49,12 +49,30 @@ export interface WeeklyDigestData {
 
 let cachedDigest: WeeklyDigestData | null = null;
 let cachedAt: Date | null = null;
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+/** Hard maximum cache lifetime — stale data beyond this is never served */
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour (hard limit)
+
+/** Returns true if the cache is populated and within the hard TTL limit */
+function isCacheValid(): boolean {
+  if (!cachedDigest || !cachedAt) return false;
+  return Date.now() - cachedAt.getTime() < CACHE_TTL_MS;
+}
+
+/** Clears the cache unconditionally */
+export function invalidateDigestCache(): void {
+  cachedDigest = null;
+  cachedAt = null;
+}
 
 export async function generateWeeklyDigest(forceRefresh = false): Promise<WeeklyDigestData> {
-  if (!forceRefresh && cachedDigest && cachedAt && Date.now() - cachedAt.getTime() < CACHE_TTL_MS) {
-    return cachedDigest;
+  // Hard TTL enforcement: never serve data older than CACHE_TTL_MS
+  if (!forceRefresh && isCacheValid()) {
+    return cachedDigest!;
   }
+
+  // Cache expired or forced — invalidate before rebuild
+  invalidateDigestCache();
 
   const now = new Date();
   const weekEnd = now.toISOString().split("T")[0];
