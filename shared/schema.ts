@@ -64,6 +64,7 @@ import {
   index,
   uniqueIndex,
   check,
+  date,
 } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -6369,3 +6370,74 @@ export const insertTenantFileSchema = createInsertSchema(tenantFiles).omit({
 });
 export type InsertTenantFile = z.infer<typeof insertTenantFileSchema>;
 export type TenantFile = typeof tenantFiles.$inferSelect;
+
+// ─── Phase 50: Analytics Foundation ──────────────────────────────────────────
+//
+// analytics_events       — raw behavioral / product event stream
+// analytics_daily_rollups — pre-aggregated daily summaries
+//
+// Access model: service_role_only
+//   - No raw tenant reads from client (PostgREST blocked by RLS)
+//   - Admin reads only via server-side aggregated endpoints
+//   - analytics != security_events (security/system) != audit logs (compliance)
+
+export const analyticsEvents = pgTable(
+  "analytics_events",
+  {
+    id:             text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId: text("organization_id"),
+    actorUserId:    text("actor_user_id"),
+    clientId:       text("client_id"),
+    eventName:      text("event_name").notNull(),
+    eventFamily:    text("event_family").notNull(),
+    source:         text("source").notNull(),
+    domainRole:     text("domain_role"),
+    locale:         text("locale"),
+    occurredAt:     timestamp("occurred_at", { withTimezone: true }).notNull().defaultNow(),
+    sessionId:      text("session_id"),
+    requestId:      text("request_id"),
+    properties:     jsonb("properties").notNull().default(sql`'{}'::jsonb`),
+  },
+  (t) => [
+    index("ae50_org_occurred_idx").on(t.organizationId, t.occurredAt),
+    index("ae50_family_occurred_idx").on(t.eventFamily, t.occurredAt),
+    index("ae50_name_occurred_idx").on(t.eventName, t.occurredAt),
+    index("ae50_org_name_occurred_idx").on(t.organizationId, t.eventName, t.occurredAt),
+    check("ae50_source_check", sql`${t.source} IN ('client', 'server', 'system')`),
+    check("ae50_domain_role_check", sql`${t.domainRole} IS NULL OR ${t.domainRole} IN ('public', 'app', 'admin')`),
+    check("ae50_family_check", sql`${t.eventFamily} IN ('product', 'funnel', 'retention', 'billing', 'ai', 'ops')`),
+  ],
+);
+
+export const insertAnalyticsEventSchema = createInsertSchema(analyticsEvents).omit({
+  id:         true,
+  occurredAt: true,
+});
+export type InsertAnalyticsEvent = z.infer<typeof insertAnalyticsEventSchema>;
+export type AnalyticsEvent = typeof analyticsEvents.$inferSelect;
+
+export const analyticsDailyRollups = pgTable(
+  "analytics_daily_rollups",
+  {
+    id:                text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId:    text("organization_id"),
+    eventFamily:       text("event_family").notNull(),
+    eventName:         text("event_name").notNull(),
+    date:              date("date").notNull(),
+    eventCount:        bigint("event_count", { mode: "bigint" }).notNull().default(BigInt(0)),
+    uniqueUsers:       bigint("unique_users", { mode: "bigint" }).notNull().default(BigInt(0)),
+    propertiesSummary: jsonb("properties_summary").notNull().default(sql`'{}'::jsonb`),
+  },
+  (t) => [
+    index("adr50_date_family_name_idx").on(t.date, t.eventFamily, t.eventName),
+    index("adr50_org_date_name_idx").on(t.organizationId, t.date, t.eventName),
+    uniqueIndex("adr50_uq_date_family_name").on(t.date, t.eventFamily, t.eventName),
+    check("adr50_family_check", sql`${t.eventFamily} IN ('product', 'funnel', 'retention', 'billing', 'ai', 'ops')`),
+  ],
+);
+
+export const insertAnalyticsDailyRollupSchema = createInsertSchema(analyticsDailyRollups).omit({
+  id: true,
+});
+export type InsertAnalyticsDailyRollup = z.infer<typeof insertAnalyticsDailyRollupSchema>;
+export type AnalyticsDailyRollup = typeof analyticsDailyRollups.$inferSelect;

@@ -726,6 +726,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   const storageRouter = await import("./routes/storage");
   app.use("/api/storage", storageRouter.default);
 
+  // Phase 50 — Analytics Foundation routes
+  const { analyticsRouter, adminAnalyticsRouter } = await import("./routes/analytics");
+  app.use("/api/analytics", analyticsRouter);
+  app.use("/api/admin/analytics", adminAnalyticsRouter);
+
   return httpServer;
 }
 
