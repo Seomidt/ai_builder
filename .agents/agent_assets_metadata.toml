@@ -1,0 +1,8 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "CwthtQp5Xb98SpySgvdgN"
+uri = "file://.local/PROJEKT_OVERSIGT.md"
+type = "text"
+title = "BlissOps — Komplet Byggeliste"
