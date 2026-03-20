@@ -4,6 +4,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Loader2, LogIn, AlertCircle } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +25,7 @@ type FormValues = z.infer<typeof schema>;
 export default function AuthLogin() {
   const [authError, setAuthError] = useState<string | null>(null);
   const { isAuthed, isLoading } = useAuth();
+  const queryClient = useQueryClient();
 
   const form = useForm<FormValues>({
     resolver: zodResolver(schema),
@@ -32,6 +34,7 @@ export default function AuthLogin() {
 
   const { isSubmitting } = form.formState;
 
+  // Safety fallback: already authenticated users bounce immediately
   if (isAuthed) {
     return <Redirect to="/" />;
   }
@@ -52,6 +55,16 @@ export default function AuthLogin() {
         );
         return;
       }
+
+      // Session is now in localStorage. Prefetch bootstrap immediately — starts
+      // the network request BEFORE the auth state change propagates through React.
+      // Uses same queryKey + default queryFn as dashboard's own useQuery.
+      // No await — fire-and-forget. Navigation happens via the auth state
+      // change: onAuthStateChange → setHasLocalSession(true) → isAuthed=true
+      // → <Redirect to="/" /> above. By then the prefetch is already in-flight
+      // or complete, so dashboard mounts with cache warm.
+      queryClient.prefetchQuery({ queryKey: ["/api/dashboard/bootstrap"] });
+
     } catch {
       setAuthError("Der opstod en fejl. Prøv igen.");
     }
