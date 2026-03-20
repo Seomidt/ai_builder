@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { PlayCircle, Filter, Plus, Loader2 } from "lucide-react";
@@ -9,30 +9,49 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { AiRun, ArchitectureProfile } from "@shared/schema";
+import { supabase } from "@/lib/supabase";
+
+type RunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
+
+interface RunRow {
+  id: string;
+  runNumber: number | null;
+  status: RunStatus;
+  title: string | null;
+  goal: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  completedAt: string | null;
+}
+
+interface ArchRow {
+  id: string;
+  currentVersionId: string | null;
+}
 
 const STATUS_OPTIONS = ["all", "pending", "running", "completed", "failed", "cancelled"] as const;
 
-function statusStyle(status: AiRun["status"]) {
-  const map: Record<AiRun["status"], string> = {
+function statusStyle(status: RunStatus) {
+  const map: Record<RunStatus, string> = {
     pending:   "text-secondary border-secondary/30 bg-secondary/10",
     running:   "text-primary border-primary/30 bg-primary/10",
     completed: "text-green-400 border-green-500/30 bg-green-500/10",
     failed:    "text-destructive border-destructive/30 bg-destructive/10",
     cancelled: "text-muted-foreground border-border bg-muted/30",
   };
-  return map[status];
+  return map[status] ?? "";
 }
 
-function statusDot(status: AiRun["status"]) {
-  const map: Record<AiRun["status"], string> = {
+function statusDot(status: RunStatus) {
+  const map: Record<RunStatus, string> = {
     pending:   "bg-secondary",
     running:   "bg-primary animate-pulse",
     completed: "bg-green-400",
     failed:    "bg-destructive",
     cancelled: "bg-muted-foreground",
   };
-  return map[status];
+  return map[status] ?? "";
 }
 
 export default function Runs() {
@@ -40,36 +59,52 @@ export default function Runs() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
 
-  const queryParams = statusFilter !== "all" ? `?status=${statusFilter}` : "";
-  const { data: runs, isLoading } = useQuery<AiRun[]>({
-    queryKey: ["/api/runs", statusFilter],
-    queryFn: () => fetch(`/api/runs${queryParams}`, { credentials: "include" }).then((r) => r.json()),
+  const { data: allRuns, isLoading } = useQuery<RunRow[]>({
+    queryKey: ["runs"],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("get_runs_page");
+      if (error) throw new Error(error.message);
+      return (data as RunRow[]) ?? [];
+    },
     refetchInterval: 5000,
+    staleTime: 4000,
+    retry: false,
   });
 
-  const { data: architectures } = useQuery<ArchitectureProfile[]>({
-    queryKey: ["/api/architectures"],
+  const { data: archData } = useQuery<ArchRow[]>({
+    queryKey: ["architectures"],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("get_architectures_page");
+      if (error) throw new Error(error.message);
+      return (data as ArchRow[]) ?? [];
+    },
+    staleTime: 60_000,
+    retry: false,
   });
+
+  const runs = useMemo(() => {
+    if (!allRuns) return allRuns;
+    if (statusFilter === "all") return allRuns;
+    return allRuns.filter((r) => r.status === statusFilter);
+  }, [allRuns, statusFilter]);
 
   const createRunMutation = useMutation({
     mutationFn: async () => {
-      const arch = architectures?.[0];
+      const arch = archData?.[0];
       if (!arch) throw new Error("No architecture available — create one first");
-      const versions = (arch as ArchitectureProfile & { versions?: { id: string }[] }).versions;
-      const versionId = versions?.[0]?.id;
-      if (!versionId) throw new Error("No architecture version found — create a version first");
+      if (!arch.currentVersionId) throw new Error("No published architecture version — publish a version first");
       return apiRequest("POST", "/api/runs", {
         projectId: "default",
         architectureProfileId: arch.id,
-        architectureVersionId: versionId,
-        title: `New Run`,
+        architectureVersionId: arch.currentVersionId,
+        title: "New Run",
         goal: "Define a goal for this run",
         tags: [],
       });
     },
     onSuccess: async (res) => {
       const run = await res.json();
-      queryClient.invalidateQueries({ queryKey: ["/api/runs"] });
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
       navigate(`/runs/${run.id}`);
     },
@@ -101,7 +136,7 @@ export default function Runs() {
             size="sm"
             className="h-8 text-xs"
             onClick={() => createRunMutation.mutate()}
-            disabled={createRunMutation.isPending || !architectures?.length}
+            disabled={createRunMutation.isPending || !archData?.length}
             data-testid="button-create-run"
           >
             {createRunMutation.isPending ? (
@@ -125,14 +160,13 @@ export default function Runs() {
               <PlayCircle className="w-10 h-10 text-muted-foreground/30 mb-3" />
               <p className="text-sm font-medium text-muted-foreground">No runs found</p>
               <p className="text-xs text-muted-foreground/60 mt-1">
-                {architectures?.length
+                {archData?.length
                   ? "Click New Run to create your first pipeline run"
                   : "Create an architecture first, then start a run"}
               </p>
             </div>
           ) : (
             <div className="divide-y divide-border">
-              {/* Header */}
               <div className="grid grid-cols-12 px-4 py-2.5 text-xs font-medium text-muted-foreground">
                 <div className="col-span-1">#</div>
                 <div className="col-span-4">Title</div>
@@ -178,9 +212,7 @@ export default function Runs() {
                       ? new Date(run.completedAt).toLocaleString()
                       : "—"}
                   </div>
-                  <div className="col-span-1 text-xs text-muted-foreground font-mono">
-                    —
-                  </div>
+                  <div className="col-span-1 text-xs text-muted-foreground font-mono">—</div>
                 </div>
               ))}
             </div>

@@ -15,7 +15,18 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import type { ArchitectureProfile } from "@shared/schema";
+import { supabase } from "@/lib/supabase";
+
+interface ArchRow {
+  id: string;
+  name: string;
+  slug: string;
+  status: string;
+  description: string | null;
+  category: string | null;
+  currentVersionId: string | null;
+  createdAt: string;
+}
 
 const createSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -26,7 +37,7 @@ const createSchema = z.object({
 
 type CreateValues = z.infer<typeof createSchema>;
 
-function ArchCard({ arch, onArchive }: { arch: ArchitectureProfile; onArchive: (id: string) => void }) {
+function ArchCard({ arch, onArchive }: { arch: ArchRow; onArchive: (id: string) => void }) {
   return (
     <Card data-testid={`arch-card-${arch.id}`} className="bg-card border-card-border hover:border-primary/30 transition-colors">
       <CardContent className="pt-4 pb-4">
@@ -94,7 +105,16 @@ export default function Architectures() {
   const [open, setOpen] = useState(false);
   const { toast } = useToast();
 
-  const { data: architectures, isLoading } = useQuery<ArchitectureProfile[]>({ queryKey: ["/api/architectures"] });
+  const { data: architectures, isLoading } = useQuery<ArchRow[]>({
+    queryKey: ["architectures"],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("get_architectures_page");
+      if (error) throw new Error(error.message);
+      return (data as ArchRow[]) ?? [];
+    },
+    staleTime: 30_000,
+    retry: false,
+  });
 
   const form = useForm<CreateValues>({
     resolver: zodResolver(createSchema),
@@ -106,7 +126,7 @@ export default function Architectures() {
       await apiRequest("POST", "/api/architectures", values);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/architectures"] });
+      queryClient.invalidateQueries({ queryKey: ["architectures"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
       setOpen(false);
       form.reset();
@@ -120,7 +140,7 @@ export default function Architectures() {
       await apiRequest("POST", `/api/architectures/${id}/archive`);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/architectures"] });
+      queryClient.invalidateQueries({ queryKey: ["architectures"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
       toast({ title: "Architecture archived" });
     },

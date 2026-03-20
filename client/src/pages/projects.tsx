@@ -15,7 +15,16 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import type { Project } from "@shared/schema";
+import { supabase } from "@/lib/supabase";
+
+interface ProjectRow {
+  id: string;
+  name: string;
+  slug: string;
+  status: string;
+  description: string | null;
+  createdAt: string;
+}
 
 const createProjectSchema = z.object({
   name: z.string().min(1, "Name is required"),
@@ -25,7 +34,7 @@ const createProjectSchema = z.object({
 
 type CreateProjectValues = z.infer<typeof createProjectSchema>;
 
-function ProjectCard({ project, onArchive }: { project: Project; onArchive: (id: string) => void }) {
+function ProjectCard({ project, onArchive }: { project: ProjectRow; onArchive: (id: string) => void }) {
   return (
     <Card data-testid={`project-card-${project.id}`} className="bg-card border-card-border hover:border-primary/30 transition-colors">
       <CardContent className="pt-4 pb-4">
@@ -74,7 +83,16 @@ export default function Projects() {
   const [open, setOpen] = useState(false);
   const { toast } = useToast();
 
-  const { data: projects, isLoading } = useQuery<Project[]>({ queryKey: ["/api/projects"] });
+  const { data: projects, isLoading } = useQuery<ProjectRow[]>({
+    queryKey: ["projects"],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("get_projects_page");
+      if (error) throw new Error(error.message);
+      return (data as ProjectRow[]) ?? [];
+    },
+    staleTime: 30_000,
+    retry: false,
+  });
 
   const form = useForm<CreateProjectValues>({
     resolver: zodResolver(createProjectSchema),
@@ -86,7 +104,7 @@ export default function Projects() {
       await apiRequest("POST", "/api/projects", values);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/projects"] });
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
       setOpen(false);
       form.reset();
@@ -100,15 +118,12 @@ export default function Projects() {
       await apiRequest("POST", `/api/projects/${id}/archive`);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/projects"] });
+      queryClient.invalidateQueries({ queryKey: ["projects"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
       toast({ title: "Project archived" });
     },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
   });
-
-  const watchName = form.watch("name");
-  const autoSlug = watchName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 
   return (
     <div className="p-6 space-y-5 max-w-6xl">

@@ -9,9 +9,17 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { useState } from "react";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { supabase } from "@/lib/supabase";
 import type { Integration } from "@shared/schema";
 
 type Provider = Integration["provider"];
+
+interface IntegrationRow {
+  id: string;
+  provider: Provider;
+  status: string;
+  createdAt: string;
+}
 
 interface ConfigStatus {
   supabase: { url: string | null; connected: boolean };
@@ -74,14 +82,14 @@ function IntegrationCard({
   configStatus,
   onConfigure,
 }: {
-  integration: Integration;
+  integration: IntegrationRow;
   configStatus?: ConfigStatus;
   onConfigure: (provider: Provider) => void;
 }) {
   const meta = PROVIDER_META[integration.provider];
+  if (!meta) return null;
   const Icon = meta.icon;
 
-  // Determine real status from server env for V1 providers
   let isActive = integration.status === "active";
   let envStatus: string | null = null;
 
@@ -158,11 +166,20 @@ export default function Integrations() {
   const [configProvider, setConfigProvider] = useState<Provider | null>(null);
   const { toast } = useToast();
 
-  const { data: integrations, isLoading } = useQuery<Integration[]>({
-    queryKey: ["/api/integrations"],
+  const { data: integrations, isLoading } = useQuery<IntegrationRow[]>({
+    queryKey: ["integrations"],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("get_integrations_page");
+      if (error) throw new Error(error.message);
+      return (data as IntegrationRow[]) ?? [];
+    },
+    staleTime: 30_000,
+    retry: false,
   });
+
   const { data: configStatus } = useQuery<ConfigStatus>({
     queryKey: ["/api/config/status"],
+    staleTime: 60_000,
   });
 
   const enableMutation = useMutation({
@@ -170,7 +187,7 @@ export default function Integrations() {
       await apiRequest("POST", "/api/integrations", { provider, status: "active" });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/integrations"] });
+      queryClient.invalidateQueries({ queryKey: ["integrations"] });
       queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
       setConfigProvider(null);
       toast({ title: "Integration marked as configured" });
