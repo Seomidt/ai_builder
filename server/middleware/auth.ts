@@ -9,7 +9,7 @@
  *   - Authenticated users keep full role from DB (unchanged behavior).
  */
 
-import { randomUUID } from "crypto";
+import { randomUUID, createHmac, timingSafeEqual } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 import { supabaseAdmin } from "../lib/supabase";
 import { db } from "../db";
@@ -32,6 +32,151 @@ declare global {
       resolvedActor?: ResolvedActor;
     }
   }
+}
+
+// ── Token verification cache ──────────────────────────────────────────────────
+// ROOT CAUSE FIX: supabaseAdmin.auth.getUser(token) is a remote network call
+// to Supabase Auth API (~200-500ms locally, 3-8 s on mobile/slow networks).
+// Without this cache, EVERY API request makes that round-trip. After login,
+// /api/auth/session + /api/dashboard/bootstrap fire simultaneously → 2 calls
+// in parallel → on mobile: 2 × 7-8 s = 15-16 s perceived login latency.
+//
+// Fix: verify once per 30 s window per token. Cache the {userId, email} result.
+// Request coalescing (tokenInflight) ensures simultaneous requests with the
+// same token share a single in-flight Promise instead of each making their
+// own network call. The result is written once and served from memory for
+// all subsequent requests within the TTL.
+//
+// Security: tokens are only in server process memory (never persisted).
+// Expiry is enforced by TTL (30 s) — well within Supabase's 1-hour JWT window.
+// Revoked tokens are caught on the next cache miss (worst-case: 30 s delay,
+// same as the existing memberCache TTL — acceptable for this threat model).
+
+// ── Local JWT verification (fast path) ───────────────────────────────────────
+// When SUPABASE_JWT_SECRET is set, verifies Supabase HS256 JWTs locally using
+// Node.js crypto (< 1ms). No network call to Supabase Auth API required.
+//
+// How to get the secret:
+//   Supabase dashboard → Project Settings → API → JWT Secret
+//   Set it as SUPABASE_JWT_SECRET in your environment/secrets.
+//
+// Falls back to getUser() network call (with cache+coalescing) if not set.
+
+function base64UrlToBuffer(str: string): Buffer {
+  return Buffer.from(str.replace(/-/g, "+").replace(/_/g, "/"), "base64");
+}
+
+function verifyLocalJwt(
+  token: string,
+  secret: string,
+): { id: string; email?: string } | null {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const [headerB64, payloadB64, sigB64] = parts;
+    const signingInput = `${headerB64}.${payloadB64}`;
+
+    // Verify HMAC-SHA256 signature — timing-safe comparison
+    const expected = createHmac("sha256", secret)
+      .update(signingInput)
+      .digest("base64url");
+    const expectedBuf = Buffer.from(expected, "utf8");
+    const actualBuf   = Buffer.from(sigB64, "utf8");
+    if (
+      expectedBuf.length !== actualBuf.length ||
+      !timingSafeEqual(expectedBuf, actualBuf)
+    ) {
+      return null;
+    }
+
+    // Parse payload
+    const payload = JSON.parse(
+      base64UrlToBuffer(payloadB64).toString("utf8"),
+    ) as Record<string, unknown>;
+
+    // Check expiry
+    if (typeof payload.exp === "number" && payload.exp < Math.floor(Date.now() / 1000)) {
+      return null; // expired
+    }
+
+    if (typeof payload.sub !== "string") return null;
+
+    return {
+      id: payload.sub,
+      email: typeof payload.email === "string" ? payload.email : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Resolved once on first use — avoids repeated env lookup in hot path
+const SUPABASE_JWT_SECRET = process.env.SUPABASE_JWT_SECRET ?? null;
+
+if (SUPABASE_JWT_SECRET) {
+  console.log("[auth] local JWT verification ENABLED (SUPABASE_JWT_SECRET set) — getUser() bypassed");
+} else {
+  console.log("[auth] local JWT verification DISABLED — using getUser() with cache+coalescing");
+  console.log("[auth] PERF TIP: set SUPABASE_JWT_SECRET to eliminate Supabase Auth API round-trips on every login");
+}
+
+interface TokenRecord { userId: string; email?: string; exp: number }
+const tokenCache = new Map<string, TokenRecord>();
+const tokenInflight = new Map<string, Promise<{ id: string; email?: string } | null>>();
+const TOKEN_CACHE_TTL_MS = 30_000;
+
+async function getVerifiedUser(
+  token: string,
+): Promise<{ id: string; email?: string } | null> {
+  // FAST PATH: local JWT verification — ~0ms, no network
+  if (SUPABASE_JWT_SECRET) {
+    const local = verifyLocalJwt(token, SUPABASE_JWT_SECRET);
+    if (local === null) return null; // signature invalid or expired
+    return local; // no caching needed — verification is already instant
+  }
+
+  // SLOW PATH (cache + coalescing): Supabase getUser() network call
+  // 1. Cache hit — skip network call entirely
+  const cached = tokenCache.get(token);
+  if (cached) {
+    if (cached.exp > Date.now()) {
+      return { id: cached.userId, email: cached.email };
+    }
+    tokenCache.delete(token);
+  }
+
+  // 2. Coalesce: if another request with the same token is already in-flight,
+  //    wait for that Promise instead of making a duplicate network call.
+  const inflight = tokenInflight.get(token);
+  if (inflight) {
+    return inflight;
+  }
+
+  // 3. No cache, no in-flight — start the Supabase getUser() network call.
+  const t0 = Date.now();
+  const promise = supabaseAdmin.auth
+    .getUser(token)
+    .then(({ data, error }) => {
+      const ms = Date.now() - t0;
+      if (error || !data.user) {
+        console.log(`[auth] getUser() FAILED (${ms}ms)`);
+        return null;
+      }
+      console.log(`[auth] getUser() OK (${ms}ms) — cached for ${TOKEN_CACHE_TTL_MS / 1000}s`);
+      const user = { id: data.user.id, email: data.user.email };
+      tokenCache.set(token, {
+        userId: user.id,
+        email: user.email,
+        exp: Date.now() + TOKEN_CACHE_TTL_MS,
+      });
+      return user;
+    })
+    .finally(() => {
+      tokenInflight.delete(token);
+    });
+
+  tokenInflight.set(token, promise);
+  return promise;
 }
 
 // ── Membership cache ─────────────────────────────────────────────────────────
@@ -146,20 +291,19 @@ export async function authMiddleware(
 
   const token = authHeader.slice(7);
 
-  // ── Step 1: verify JWT with Supabase ─────────────────────────────────────
+  // ── Step 1: verify JWT (cached — avoids remote Supabase call per request) ──
   let supabaseUser: { id: string; email?: string } | null = null;
   try {
-    const { data, error } = await supabaseAdmin.auth.getUser(token);
-    if (error || !data.user) {
+    supabaseUser = await getVerifiedUser(token);
+    if (!supabaseUser) {
       res.status(401).json({
         error_code: "UNAUTHORIZED",
         message: "Invalid or expired authentication token.",
       });
       return;
     }
-    supabaseUser = { id: data.user.id, email: data.user.email };
   } catch (err) {
-    console.error("[auth] supabaseAdmin.auth.getUser failed:", err);
+    console.error("[auth] token verification failed:", err);
     res.status(401).json({
       error_code: "UNAUTHORIZED",
       message: "Authentication check failed. Please try again.",
