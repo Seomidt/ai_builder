@@ -171,7 +171,7 @@ export default function Integrations() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/integrations"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/bootstrap"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
       setConfigProvider(null);
       toast({ title: "Integration marked as configured" });
     },

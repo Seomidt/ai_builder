@@ -18,20 +18,7 @@ import { architecturesService, type CreateProfileInput, type UpdateProfileInput,
 import { runsService, type CreateRunInput, type UpdateRunStatusInput, type AppendStepInput, type AppendArtifactInput, type AppendToolCallInput, type AppendApprovalInput, type ResolveApprovalInput } from "./services/runs.service";
 import { runsRepository } from "./repositories/runs.repository";
 import { integrationsService, type UpsertIntegrationInput } from "./services/integrations.service";
-import { db } from "./db";
-import { count, eq, and, desc } from "drizzle-orm";
-import { projects, aiRuns, architectureProfiles, integrations as integrationsTable, organizations } from "@shared/schema";
 import { SupabaseStorage } from "./lib/supabase-runtime-storage";
-
-export interface DashboardSummary {
-  orgName: string;
-  projectCount: number;
-  activeRunCount: number;
-  architectureCount: number;
-  configuredIntegrationCount: number;
-  recentRuns: Array<{ id: string; status: string; createdAt: Date }>;
-  recentProjects: Array<{ id: string; name: string; status: string; updatedAt: Date }>;
-}
 
 export interface IStorage {
   // Projects
@@ -70,8 +57,6 @@ export interface IStorage {
   listIntegrations(organizationId: string): Promise<Integration[]>;
   upsertIntegration(input: UpsertIntegrationInput): Promise<Integration>;
 
-  // Dashboard summary (single optimized endpoint)
-  getDashboardSummary(organizationId: string): Promise<DashboardSummary>;
 }
 
 // ── Runtime factory (use this in all HTTP route handlers) ─────────────────────
@@ -129,33 +114,6 @@ export class DatabaseStorage implements IStorage {
   listIntegrations(organizationId: string) { return integrationsService.list(organizationId); }
   upsertIntegration(input: UpsertIntegrationInput) { return integrationsService.upsert(input); }
 
-  // Dashboard summary — LEGACY: uses pg.Pool via Drizzle.
-  // Kept only for DatabaseStorage backwards compat. Runtime handlers must use
-  // createStorageForRequest(req).getDashboardSummary() which calls Supabase RPC.
-  async getDashboardSummary(organizationId: string): Promise<DashboardSummary> {
-    const [
-      orgResult, projectCountResult, activeRunCountResult,
-      architectureCountResult, configuredIntCountResult,
-      recentRunsResult, recentProjectsResult,
-    ] = await Promise.all([
-      db.select({ name: organizations.name }).from(organizations).where(eq(organizations.id, organizationId)).limit(1),
-      db.select({ value: count() }).from(projects).where(eq(projects.organizationId, organizationId)),
-      db.select({ value: count() }).from(aiRuns).where(and(eq(aiRuns.organizationId, organizationId), eq(aiRuns.status, "running"))),
-      db.select({ value: count() }).from(architectureProfiles).where(eq(architectureProfiles.organizationId, organizationId)),
-      db.select({ value: count() }).from(integrationsTable).where(and(eq(integrationsTable.organizationId, organizationId), eq(integrationsTable.status, "active"))),
-      db.select({ id: aiRuns.id, status: aiRuns.status, createdAt: aiRuns.createdAt }).from(aiRuns).where(eq(aiRuns.organizationId, organizationId)).orderBy(desc(aiRuns.createdAt)).limit(5),
-      db.select({ id: projects.id, name: projects.name, status: projects.status, updatedAt: projects.updatedAt }).from(projects).where(eq(projects.organizationId, organizationId)).orderBy(desc(projects.updatedAt)).limit(5),
-    ]);
-    return {
-      orgName: orgResult[0]?.name ?? organizationId,
-      projectCount: Number(projectCountResult[0]?.value ?? 0),
-      activeRunCount: Number(activeRunCountResult[0]?.value ?? 0),
-      architectureCount: Number(architectureCountResult[0]?.value ?? 0),
-      configuredIntegrationCount: Number(configuredIntCountResult[0]?.value ?? 0),
-      recentRuns: recentRunsResult,
-      recentProjects: recentProjectsResult,
-    };
-  }
 }
 
 // Background-job storage singleton (Drizzle/pg — for run-executor only).

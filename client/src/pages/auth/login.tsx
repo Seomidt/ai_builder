@@ -56,14 +56,18 @@ export default function AuthLogin() {
         return;
       }
 
-      // Session is now in localStorage. Prefetch bootstrap immediately — starts
-      // the network request BEFORE the auth state change propagates through React.
-      // Uses same queryKey + default queryFn as dashboard's own useQuery.
-      // No await — fire-and-forget. Navigation happens via the auth state
-      // change: onAuthStateChange → setHasLocalSession(true) → isAuthed=true
-      // → <Redirect to="/" /> above. By then the prefetch is already in-flight
-      // or complete, so dashboard mounts with cache warm.
-      queryClient.prefetchQuery({ queryKey: ["/api/dashboard/bootstrap"] });
+      // Prefetch dashboard summary immediately after login — fire-and-forget.
+      // Calls Supabase RPC directly (no server hop). The session JWT is now
+      // in localStorage so supabase.rpc() will include it automatically.
+      // By the time auth state change navigates to "/", the cache is warm.
+      queryClient.prefetchQuery({
+        queryKey: ["dashboard-summary"],
+        queryFn: async () => {
+          const { data, error } = await supabase.rpc("get_dashboard_summary");
+          if (error) throw new Error(error.message);
+          return data;
+        },
+      });
 
     } catch {
       setAuthError("Der opstod en fejl. Prøv igen.");

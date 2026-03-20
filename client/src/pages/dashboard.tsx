@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { supabase } from "@/lib/supabase";
 import { FolderKanban, PlayCircle, Cpu, Plug, Plus, ArrowRight, Building2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -72,13 +73,20 @@ function SkeletonRows({ count = 3 }: { count?: number }) {
 }
 
 // ─── Dashboard ────────────────────────────────────────────────────────────────
-// Critical path: ONE bootstrap query → 7 parallel DB queries → 30s server cache.
+// Critical path: ONE direct Supabase RPC — no server hop → ~50-120ms.
+// Client calls supabase.rpc("get_dashboard_summary") with user JWT.
+// RLS + SECURITY INVOKER derives org from auth.uid() — no tenant_id from client.
 // Quick Actions section renders immediately with zero query dependency.
 // Governance / analytics / heavy data is NOT loaded here — deferred to own pages.
 
 export default function Dashboard() {
   const { data, isLoading } = useQuery<BootstrapData>({
-    queryKey: ["/api/dashboard/bootstrap"],
+    queryKey: ["dashboard-summary"],
+    queryFn: async () => {
+      const { data, error } = await supabase.rpc("get_dashboard_summary");
+      if (error) throw new Error(error.message);
+      return data as BootstrapData;
+    },
   });
 
   return (

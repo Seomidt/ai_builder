@@ -70,7 +70,7 @@ export default function Runs() {
     onSuccess: async (res) => {
       const run = await res.json();
       queryClient.invalidateQueries({ queryKey: ["/api/runs"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/bootstrap"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
       navigate(`/runs/${run.id}`);
     },
     onError: (err: Error) => {

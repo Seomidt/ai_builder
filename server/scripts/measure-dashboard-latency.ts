@@ -55,11 +55,12 @@ async function main(): Promise<void> {
   console.log(`  Org: ${orgName} (${orgId})\n`);
 
   // ── Step 2: RPC cold call (x3 for warm average) ──────────────────────────
-  console.log("▶ STEP 2: RPC get_dashboard_summary (3 calls)");
+  console.log("▶ STEP 2: RPC get_dashboard_summary (3 calls) — zero-param, JWT-derived org");
+  console.log("  NOTE: admin client call returns zeros (no JWT auth.uid()). Client JWT call measures real latency.");
   let rpcPayloadBytes = 0;
   for (let i = 0; i < 3; i++) {
     const { data, error } = await time(`call ${i + 1}`, () =>
-      admin.rpc("get_dashboard_summary", { p_org_id: orgId }),
+      admin.rpc("get_dashboard_summary"),
     );
     if (error) console.error("    ERROR:", error.message);
     else {

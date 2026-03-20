@@ -21,7 +21,7 @@ import type {
   Project, AiRun, AiStep, AiArtifact, AiToolCall, AiApproval,
   ArchitectureProfile, ArchitectureVersion, Integration, ArtifactDependency,
 } from "@shared/schema";
-import type { IStorage, DashboardSummary } from "../storage";
+import type { IStorage } from "../storage";
 import type {
   CreateProjectInput, UpdateProjectInput,
 } from "../services/projects.service";
@@ -87,25 +87,6 @@ export class SupabaseStorage implements IStorage {
   constructor(accessToken: string) {
     this.rls  = createServerSupabaseClient(accessToken);
     this.admin = getSupabaseAdmin();
-  }
-
-  // ── Dashboard ─────────────────────────────────────────────────────────────
-
-  async getDashboardSummary(organizationId: string): Promise<DashboardSummary> {
-    const { data, error } = await this.rls.rpc("get_dashboard_summary", {
-      p_org_id: organizationId,
-    });
-    assertNoError(error, "getDashboardSummary");
-    const d = data as Record<string, unknown>;
-    return {
-      orgName:                    String(d.orgName ?? organizationId),
-      projectCount:               Number(d.projectCount ?? 0),
-      activeRunCount:             Number(d.activeRunCount ?? 0),
-      architectureCount:          Number(d.architectureCount ?? 0),
-      configuredIntegrationCount: Number(d.configuredIntegrationCount ?? 0),
-      recentRuns:    (d.recentRuns as Array<{ id: string; status: string; createdAt: Date }>) ?? [],
-      recentProjects:(d.recentProjects as Array<{ id: string; name: string; status: string; updatedAt: Date }>) ?? [],
-    };
   }
 
   // ── Projects ──────────────────────────────────────────────────────────────
