@@ -64,6 +64,23 @@ async function buildAll() {
   // Pre-bundled with esbuild to avoid @vercel/node's ncc re-compilation.
   // api/index.js is committed to git so Vercel never needs to compile TypeScript.
   // @shared/* path aliases are resolved at build time by esbuild (not at Vercel deploy).
+  // Plugin: stub pg-native so it returns null instead of throwing
+  // pg uses optional native bindings (pg-native) — when not installed, it falls
+  // back to pure-JS. Without this stub, the bundle throws "Cannot find module".
+  const stubPgNative = {
+    name: "stub-pg-native",
+    setup(build: import("esbuild").PluginBuild) {
+      build.onResolve({ filter: /^pg-native$/ }, () => ({
+        path: "pg-native",
+        namespace: "pg-native-stub",
+      }));
+      build.onLoad({ filter: /.*/, namespace: "pg-native-stub" }, () => ({
+        contents: "module.exports = null;",
+        loader: "js" as const,
+      }));
+    },
+  };
+
   console.log("building Vercel serverless function (api/index.js)...");
   await esbuild({
     entryPoints: ["server/vercel-entry.ts"],
@@ -78,7 +95,7 @@ async function buildAll() {
     minifySyntax: true,
     minifyWhitespace: true,
     minifyIdentifiers: false,
-    external: ["pg-native"],
+    plugins: [stubPgNative],
     logLevel: "info",
     banner: {
       js: "// @vercel-bundled — esbuild pre-compiled, do not edit\n",
