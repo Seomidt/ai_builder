@@ -9,6 +9,11 @@ import {
   ChevronRight,
   ShieldAlert,
   LogOut,
+  DollarSign,
+  BarChart3,
+  Bell,
+  Zap,
+  Shield,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTranslations } from "@/hooks/use-translations";
@@ -20,19 +25,13 @@ export function Sidebar() {
   const [location] = useLocation();
   const { t } = useTranslations("common");
   const { user } = useAuth();
-  const isOpsSection = location.startsWith("/ops");
-  const isAdminSection = isOpsSection
-    || location.startsWith("/integrations")
-    || location.startsWith("/settings");
 
   async function handleLogout() {
     await signOut();
     window.location.href = "/auth/login";
   }
 
-  const initials = user?.email
-    ? user.email.slice(0, 2).toUpperCase()
-    : "??";
+  const initials    = user?.email ? user.email.slice(0, 2).toUpperCase() : "??";
   const displayEmail = user?.email ?? "—";
   const displayOrg   = user?.organizationId ?? "—";
 
@@ -44,12 +43,42 @@ export function Sidebar() {
     { href: "/runs",          label: t("nav.runs"),          icon: PlayCircle },
   ];
 
-  // Admin — platform_admin only (backend-verified role)
+  // Admin top-level items
   const adminItems = [
-    { href: "/ops",           label: t("nav.opsConsole"),    icon: ShieldAlert },
-    { href: "/integrations",  label: t("nav.integrations"),  icon: Plug },
-    { href: "/settings",      label: t("nav.settings"),      icon: Settings },
+    { href: "/ops",          label: t("nav.opsConsole"),   icon: ShieldAlert },
+    { href: "/integrations", label: t("nav.integrations"), icon: Plug },
+    { href: "/settings",     label: t("nav.settings"),     icon: Settings },
   ];
+
+  // Governance sub-section (admin only)
+  const governanceItems = [
+    { href: "/ops/governance/budgets",   label: "Budgets",   icon: DollarSign },
+    { href: "/ops/governance/usage",     label: "Usage",     icon: BarChart3 },
+    { href: "/ops/governance/alerts",    label: "Alerts",    icon: Bell },
+    { href: "/ops/governance/anomalies", label: "Anomalies", icon: Zap },
+    { href: "/ops/governance/runaway",   label: "Runaway",   icon: Shield },
+  ];
+
+  const isAdminPath =
+    location.startsWith("/ops") ||
+    location.startsWith("/integrations") ||
+    location.startsWith("/settings");
+
+  function isActive(href: string): boolean {
+    if (href === "/") return location === "/" && !isAdminPath;
+    if (isAdminPath && (href === "/" || href === "/projects" || href === "/architectures" || href === "/runs")) return false;
+    return location.startsWith(href);
+  }
+
+  function navClass(active: boolean, isAdmin = false) {
+    if (active && isAdmin) {
+      return "bg-destructive/15 text-destructive border border-destructive/25";
+    }
+    if (active) {
+      return "bg-sidebar-primary/15 text-sidebar-primary border border-sidebar-primary/25";
+    }
+    return "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent";
+  }
 
   return (
     <aside className="flex flex-col w-56 shrink-0 h-screen bg-sidebar border-r border-sidebar-border">
@@ -65,12 +94,9 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
-        {/* Tenant core items */}
+        {/* Tenant core */}
         {navItems.map(({ href, label, icon: Icon }) => {
-          const isActive =
-            href === "/"
-              ? location === "/"
-              : location.startsWith(href) && !isAdminSection;
+          const active = isActive(href);
           return (
             <Link
               key={href}
@@ -78,43 +104,66 @@ export function Sidebar() {
               data-testid={`nav-link-${href.replace("/", "").replace("/", "-") || "dashboard"}`}
               className={cn(
                 "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
-                isActive
-                  ? "bg-sidebar-primary/15 text-sidebar-primary border border-sidebar-primary/25"
-                  : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent",
+                navClass(active),
               )}
             >
               <Icon className="w-4 h-4 shrink-0" />
               <span className="flex-1">{label}</span>
-              {isActive && <ChevronRight className="w-3 h-3 opacity-60" />}
+              {active && <ChevronRight className="w-3 h-3 opacity-60" />}
             </Link>
           );
         })}
 
-        {/* Admin section — only for platform_admin (backend-verified role from /api/auth/session) */}
+        {/* Admin section — backend-verified platform_admin only */}
         {user?.role === "platform_admin" && (
           <>
             <div className="pt-3 pb-1">
-              <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40 mb-0.5">
+              <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
                 {t("nav.platformOps")}
               </p>
             </div>
+
             {adminItems.map(({ href, label, icon: Icon }) => {
-              const isActive = location.startsWith(href);
+              const active = location.startsWith(href) && !location.startsWith("/ops/governance");
               return (
                 <Link
                   key={href}
                   href={href}
-                  data-testid={`nav-link-admin-${href.replace("/", "")}`}
+                  data-testid={`nav-link-admin-${href.replace(/\//g, "-").replace(/^-/, "")}`}
                   className={cn(
                     "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
-                    isActive
-                      ? "bg-destructive/15 text-destructive border border-destructive/25"
-                      : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent",
+                    navClass(active, true),
                   )}
                 >
                   <Icon className="w-4 h-4 shrink-0" />
                   <span className="flex-1">{label}</span>
-                  {isActive && <ChevronRight className="w-3 h-3 opacity-60" />}
+                  {active && <ChevronRight className="w-3 h-3 opacity-60" />}
+                </Link>
+              );
+            })}
+
+            {/* Governance sub-section */}
+            <div className="pt-3 pb-1">
+              <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
+                Governance
+              </p>
+            </div>
+
+            {governanceItems.map(({ href, label, icon: Icon }) => {
+              const active = location.startsWith(href);
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  data-testid={`nav-link-gov-${label.toLowerCase()}`}
+                  className={cn(
+                    "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
+                    navClass(active, true),
+                  )}
+                >
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span className="flex-1">{label}</span>
+                  {active && <ChevronRight className="w-3 h-3 opacity-60" />}
                 </Link>
               );
             })}
@@ -122,7 +171,7 @@ export function Sidebar() {
         )}
       </nav>
 
-      {/* Footer: user info + logout */}
+      {/* Footer */}
       <div className="px-4 py-3 border-t border-sidebar-border space-y-2">
         <div className="flex items-center gap-2.5">
           <div className="w-7 h-7 rounded-full bg-sidebar-primary/20 flex items-center justify-center shrink-0">

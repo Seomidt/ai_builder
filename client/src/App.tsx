@@ -9,14 +9,14 @@ import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import { AdminRoute } from "@/components/auth/AdminRoute";
 import { I18nProvider } from "@/components/providers/I18nProvider";
 
-// ── Eagerly loaded: core tenant pages (most frequently visited) ───────────────
+// ── Eagerly loaded: core tenant pages ─────────────────────────────────────────
 import Dashboard from "@/pages/dashboard";
 import Projects from "@/pages/projects";
 import Architectures from "@/pages/architectures";
 import Runs from "@/pages/runs";
 import NotFound from "@/pages/not-found";
 
-// ── Eagerly loaded: auth pages (needed immediately on login) ──────────────────
+// ── Eagerly loaded: auth pages ────────────────────────────────────────────────
 import AuthLogin from "@/pages/auth/login";
 import AuthPasswordResetRequest from "@/pages/auth/password-reset-request";
 import AuthPasswordResetConfirm from "@/pages/auth/password-reset-confirm";
@@ -25,16 +25,15 @@ import AuthInviteAccept from "@/pages/auth/invite-accept";
 import AuthMfaChallenge from "@/pages/auth/mfa-challenge";
 import AuthCallback from "@/pages/auth/callback";
 
-// ── Lazy loaded: tenant detail pages ─────────────────────────────────────────
+// ── Lazy: tenant detail ───────────────────────────────────────────────────────
 const RunDetail = lazy(() => import("@/pages/run-detail"));
 
-// ── Lazy loaded: admin-only pages — never downloaded by tenant users ──────────
-// Split into separate JS chunks: tenant bundle stays lean.
-const Integrations    = lazy(() => import("@/pages/integrations"));
-const Settings        = lazy(() => import("@/pages/settings"));
+// ── Lazy: admin platform — not in tenant bundle ───────────────────────────────
+const Integrations     = lazy(() => import("@/pages/integrations"));
+const Settings         = lazy(() => import("@/pages/settings"));
 const SecuritySettings = lazy(() => import("@/pages/settings/security"));
 
-// Ops console — admin-only surface, completely isolated from tenant bundle
+// ── Lazy: Ops console ─────────────────────────────────────────────────────────
 const OpsDashboard    = lazy(() => import("@/pages/ops/dashboard"));
 const OpsTenants      = lazy(() => import("@/pages/ops/tenants"));
 const OpsJobs         = lazy(() => import("@/pages/ops/jobs"));
@@ -48,7 +47,14 @@ const OpsRelease      = lazy(() => import("@/pages/ops/release"));
 const OpsAuthSecurity = lazy(() => import("@/pages/ops/auth"));
 const OpsStorage      = lazy(() => import("@/pages/ops/storage"));
 
-// ── Page-level loading fallback ───────────────────────────────────────────────
+// ── Lazy: Governance (admin-only) — own chunk ─────────────────────────────────
+const GovBudgets   = lazy(() => import("@/pages/ops/governance/budgets"));
+const GovUsage     = lazy(() => import("@/pages/ops/governance/usage"));
+const GovAlerts    = lazy(() => import("@/pages/ops/governance/alerts"));
+const GovAnomalies = lazy(() => import("@/pages/ops/governance/anomalies"));
+const GovRunaway   = lazy(() => import("@/pages/ops/governance/runaway"));
+
+// ── Loading fallback ──────────────────────────────────────────────────────────
 function PageLoader() {
   return (
     <div className="flex items-center justify-center flex-1 h-full">
@@ -57,33 +63,25 @@ function PageLoader() {
   );
 }
 
-/**
- * Protected inner routes — only rendered when ProtectedRoute clears session.
- * AppShell (sidebar + layout) is only shown to authenticated users.
- * Lazy pages are wrapped in Suspense so the app shell renders immediately
- * while the route chunk downloads in the background.
- */
 function ProtectedApp() {
   return (
     <ProtectedRoute>
       <AppShell>
         <Suspense fallback={<PageLoader />}>
           <Switch>
-            {/* Core tenant routes — eagerly loaded, no admin guard */}
-            <Route path="/" component={Dashboard} />
-            <Route path="/projects" component={Projects} />
+            {/* Tenant core */}
+            <Route path="/"              component={Dashboard} />
+            <Route path="/projects"      component={Projects} />
             <Route path="/architectures" component={Architectures} />
-            <Route path="/runs" component={Runs} />
+            <Route path="/runs"          component={Runs} />
+            <Route path="/runs/:id"      component={RunDetail} />
 
-            {/* Lazy tenant route */}
-            <Route path="/runs/:id" component={RunDetail} />
+            {/* Admin platform */}
+            <Route path="/integrations"      component={() => <AdminRoute><Integrations /></AdminRoute>} />
+            <Route path="/settings"          component={() => <AdminRoute><Settings /></AdminRoute>} />
+            <Route path="/settings/security" component={() => <AdminRoute><SecuritySettings /></AdminRoute>} />
 
-            {/* Admin-only routes — lazy, wrapped with AdminRoute */}
-            <Route path="/integrations"       component={() => <AdminRoute><Integrations /></AdminRoute>} />
-            <Route path="/settings"           component={() => <AdminRoute><Settings /></AdminRoute>} />
-            <Route path="/settings/security"  component={() => <AdminRoute><SecuritySettings /></AdminRoute>} />
-
-            {/* Ops Console routes — lazy, platform_admin only */}
+            {/* Ops console */}
             <Route path="/ops"           component={() => <AdminRoute><OpsDashboard /></AdminRoute>} />
             <Route path="/ops/tenants"   component={() => <AdminRoute><OpsTenants /></AdminRoute>} />
             <Route path="/ops/jobs"      component={() => <AdminRoute><OpsJobs /></AdminRoute>} />
@@ -97,6 +95,13 @@ function ProtectedApp() {
             <Route path="/ops/auth"      component={() => <AdminRoute><OpsAuthSecurity /></AdminRoute>} />
             <Route path="/ops/storage"   component={() => <AdminRoute><OpsStorage /></AdminRoute>} />
 
+            {/* Governance (admin-only) */}
+            <Route path="/ops/governance/budgets"   component={() => <AdminRoute><GovBudgets /></AdminRoute>} />
+            <Route path="/ops/governance/usage"     component={() => <AdminRoute><GovUsage /></AdminRoute>} />
+            <Route path="/ops/governance/alerts"    component={() => <AdminRoute><GovAlerts /></AdminRoute>} />
+            <Route path="/ops/governance/anomalies" component={() => <AdminRoute><GovAnomalies /></AdminRoute>} />
+            <Route path="/ops/governance/runaway"   component={() => <AdminRoute><GovRunaway /></AdminRoute>} />
+
             <Route component={NotFound} />
           </Switch>
         </Suspense>
@@ -105,25 +110,16 @@ function ProtectedApp() {
   );
 }
 
-/**
- * Top-level router.
- *
- * Auth routes (/auth/*) are PUBLIC — no ProtectedRoute, no AppShell.
- * Every other route falls into the catch-all which applies ProtectedRoute.
- */
 function Router() {
   return (
     <Switch>
-      {/* Public auth routes — no guard, no sidebar */}
-      <Route path="/auth/login" component={AuthLogin} />
-      <Route path="/auth/password-reset" component={AuthPasswordResetRequest} />
-      <Route path="/auth/password-reset-confirm" component={AuthPasswordResetConfirm} />
-      <Route path="/auth/email-verify" component={AuthEmailVerify} />
-      <Route path="/auth/invite-accept" component={AuthInviteAccept} />
-      <Route path="/auth/callback" component={AuthCallback} />
-      <Route path="/auth/mfa-challenge" component={AuthMfaChallenge} />
-
-      {/* All other routes — protected (session required) */}
+      <Route path="/auth/login"                   component={AuthLogin} />
+      <Route path="/auth/password-reset"          component={AuthPasswordResetRequest} />
+      <Route path="/auth/password-reset-confirm"  component={AuthPasswordResetConfirm} />
+      <Route path="/auth/email-verify"            component={AuthEmailVerify} />
+      <Route path="/auth/invite-accept"           component={AuthInviteAccept} />
+      <Route path="/auth/callback"                component={AuthCallback} />
+      <Route path="/auth/mfa-challenge"           component={AuthMfaChallenge} />
       <Route component={ProtectedApp} />
     </Switch>
   );
