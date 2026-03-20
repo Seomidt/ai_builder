@@ -10,6 +10,7 @@
     "runs": "Kørsler",
     "integrations": "Integrationer",
     "settings": "Indstillinger",
+    "workspace": "Workspace",
     "opsConsole": "Driftskonsol",
     "platformOps": "Platform Drift",
     "viewAll": "Se alle"

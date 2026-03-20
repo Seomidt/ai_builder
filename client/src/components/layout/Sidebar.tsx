@@ -14,6 +14,17 @@ import {
   Bell,
   Zap,
   Shield,
+  Building2,
+  BrainCircuit,
+  CreditCard,
+  Lock,
+  DatabaseBackup,
+  Rocket,
+  UserCheck,
+  HardDrive,
+  Bot,
+  Webhook,
+  Clock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTranslations } from "@/hooks/use-translations";
@@ -41,22 +52,38 @@ export function Sidebar() {
     { href: "/projects",      label: t("nav.projects"),      icon: FolderKanban },
     { href: "/architectures", label: t("nav.architectures"), icon: Cpu },
     { href: "/runs",          label: t("nav.runs"),          icon: PlayCircle },
+    { href: "/tenant",        label: t("nav.workspace") ?? "Workspace", icon: Building2 },
   ];
 
-  // Admin top-level items
+  // Ops console items (admin-only)
+  const opsItems = [
+    { href: "/ops",            label: "Ops Console",  icon: ShieldAlert    },
+    { href: "/ops/tenants",    label: "Tenants",      icon: Building2      },
+    { href: "/ops/ai",         label: "AI Operations", icon: BrainCircuit  },
+    { href: "/ops/billing",    label: "Billing Ops",  icon: CreditCard     },
+    { href: "/ops/security",   label: "Security",     icon: Shield         },
+    { href: "/ops/recovery",   label: "Recovery",     icon: DatabaseBackup },
+    { href: "/ops/release",    label: "Release",      icon: Rocket         },
+    { href: "/ops/auth",       label: "Auth",         icon: UserCheck      },
+    { href: "/ops/storage",    label: "Storage",      icon: HardDrive      },
+    { href: "/ops/assistant",  label: "Assistant",    icon: Bot            },
+    { href: "/ops/jobs",       label: "Jobs",         icon: Clock          },
+    { href: "/ops/webhooks",   label: "Webhooks",     icon: Webhook        },
+  ];
+
+  // Admin settings items (admin-only)
   const adminItems = [
-    { href: "/ops",          label: t("nav.opsConsole"),   icon: ShieldAlert },
-    { href: "/integrations", label: t("nav.integrations"), icon: Plug },
+    { href: "/integrations", label: t("nav.integrations"), icon: Plug     },
     { href: "/settings",     label: t("nav.settings"),     icon: Settings },
   ];
 
   // Governance sub-section (admin only)
   const governanceItems = [
     { href: "/ops/governance/budgets",   label: "Budgets",   icon: DollarSign },
-    { href: "/ops/governance/usage",     label: "Usage",     icon: BarChart3 },
-    { href: "/ops/governance/alerts",    label: "Alerts",    icon: Bell },
-    { href: "/ops/governance/anomalies", label: "Anomalies", icon: Zap },
-    { href: "/ops/governance/runaway",   label: "Runaway",   icon: Shield },
+    { href: "/ops/governance/usage",     label: "Usage",     icon: BarChart3  },
+    { href: "/ops/governance/alerts",    label: "Alerts",    icon: Bell       },
+    { href: "/ops/governance/anomalies", label: "Anomalies", icon: Zap        },
+    { href: "/ops/governance/runaway",   label: "Runaway",   icon: Lock       },
   ];
 
   const isAdminPath =
@@ -64,9 +91,14 @@ export function Sidebar() {
     location.startsWith("/integrations") ||
     location.startsWith("/settings");
 
+  const isTenantPath = location.startsWith("/tenant");
+
   function isActive(href: string): boolean {
-    if (href === "/") return location === "/" && !isAdminPath;
-    if (isAdminPath && (href === "/" || href === "/projects" || href === "/architectures" || href === "/runs")) return false;
+    if (href === "/") return location === "/" && !isAdminPath && !isTenantPath;
+    if ((isAdminPath || isTenantPath) && (href === "/" || href === "/projects" || href === "/architectures" || href === "/runs")) return false;
+    if (isAdminPath && href === "/tenant") return false;
+    // Exact match for /ops so it doesn't activate for /ops/tenants etc.
+    if (href === "/ops") return location === "/ops";
     return location.startsWith(href);
   }
 
@@ -78,6 +110,36 @@ export function Sidebar() {
       return "bg-sidebar-primary/15 text-sidebar-primary border border-sidebar-primary/25";
     }
     return "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent";
+  }
+
+  function SectionLabel({ label }: { label: string }) {
+    return (
+      <div className="pt-3 pb-1">
+        <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
+          {label}
+        </p>
+      </div>
+    );
+  }
+
+  function NavLink({
+    href, label, icon: Icon, isAdmin = false, testId,
+  }: { href: string; label: string; icon: React.ElementType; isAdmin?: boolean; testId: string }) {
+    const active = isActive(href);
+    return (
+      <Link
+        href={href}
+        data-testid={testId}
+        className={cn(
+          "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
+          navClass(active, isAdmin),
+        )}
+      >
+        <Icon className="w-4 h-4 shrink-0" />
+        <span className="flex-1">{label}</span>
+        {active && <ChevronRight className="w-3 h-3 opacity-60" />}
+      </Link>
+    );
   }
 
   return (
@@ -95,78 +157,57 @@ export function Sidebar() {
       {/* Navigation */}
       <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
         {/* Tenant core */}
-        {navItems.map(({ href, label, icon: Icon }) => {
-          const active = isActive(href);
-          return (
-            <Link
-              key={href}
-              href={href}
-              data-testid={`nav-link-${href.replace("/", "").replace("/", "-") || "dashboard"}`}
-              className={cn(
-                "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
-                navClass(active),
-              )}
-            >
-              <Icon className="w-4 h-4 shrink-0" />
-              <span className="flex-1">{label}</span>
-              {active && <ChevronRight className="w-3 h-3 opacity-60" />}
-            </Link>
-          );
-        })}
+        {navItems.map(({ href, label, icon: Icon }) => (
+          <NavLink
+            key={href}
+            href={href}
+            label={label}
+            icon={Icon}
+            testId={`nav-link-${href.replace(/\//g, "-").replace(/^-/, "") || "dashboard"}`}
+          />
+        ))}
 
         {/* Admin section — backend-verified platform_admin only */}
         {user?.role === "platform_admin" && (
           <>
-            <div className="pt-3 pb-1">
-              <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
-                {t("nav.platformOps")}
-              </p>
-            </div>
+            {/* Ops Console */}
+            <SectionLabel label={t("nav.platformOps")} />
+            {opsItems.map(({ href, label, icon: Icon }) => (
+              <NavLink
+                key={href}
+                href={href}
+                label={label}
+                icon={Icon}
+                isAdmin
+                testId={`nav-link-admin-${href.replace(/\//g, "-").replace(/^-/, "")}`}
+              />
+            ))}
 
-            {adminItems.map(({ href, label, icon: Icon }) => {
-              const active = location.startsWith(href) && !location.startsWith("/ops/governance");
-              return (
-                <Link
-                  key={href}
-                  href={href}
-                  data-testid={`nav-link-admin-${href.replace(/\//g, "-").replace(/^-/, "")}`}
-                  className={cn(
-                    "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
-                    navClass(active, true),
-                  )}
-                >
-                  <Icon className="w-4 h-4 shrink-0" />
-                  <span className="flex-1">{label}</span>
-                  {active && <ChevronRight className="w-3 h-3 opacity-60" />}
-                </Link>
-              );
-            })}
+            {/* Admin Settings */}
+            <SectionLabel label="Admin" />
+            {adminItems.map(({ href, label, icon: Icon }) => (
+              <NavLink
+                key={href}
+                href={href}
+                label={label}
+                icon={Icon}
+                isAdmin
+                testId={`nav-link-admin-${href.replace(/\//g, "-").replace(/^-/, "")}`}
+              />
+            ))}
 
-            {/* Governance sub-section */}
-            <div className="pt-3 pb-1">
-              <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
-                Governance
-              </p>
-            </div>
-
-            {governanceItems.map(({ href, label, icon: Icon }) => {
-              const active = location.startsWith(href);
-              return (
-                <Link
-                  key={href}
-                  href={href}
-                  data-testid={`nav-link-gov-${label.toLowerCase()}`}
-                  className={cn(
-                    "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
-                    navClass(active, true),
-                  )}
-                >
-                  <Icon className="w-4 h-4 shrink-0" />
-                  <span className="flex-1">{label}</span>
-                  {active && <ChevronRight className="w-3 h-3 opacity-60" />}
-                </Link>
-              );
-            })}
+            {/* Governance */}
+            <SectionLabel label="Governance" />
+            {governanceItems.map(({ href, label, icon: Icon }) => (
+              <NavLink
+                key={href}
+                href={href}
+                label={label}
+                icon={Icon}
+                isAdmin
+                testId={`nav-link-gov-${label.toLowerCase()}`}
+              />
+            ))}
           </>
         )}
       </nav>

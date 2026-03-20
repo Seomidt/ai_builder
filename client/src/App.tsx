@@ -28,6 +28,17 @@ import AuthCallback from "@/pages/auth/callback";
 // ── Lazy: tenant detail ───────────────────────────────────────────────────────
 const RunDetail = lazy(() => import("@/pages/run-detail"));
 
+// ── Lazy: tenant surface (workspace) — own chunk ──────────────────────────────
+const TenantDashboard    = lazy(() => import("@/pages/tenant/dashboard"));
+const TenantData         = lazy(() => import("@/pages/tenant/data"));
+const TenantAI           = lazy(() => import("@/pages/tenant/ai"));
+const TenantUsage        = lazy(() => import("@/pages/tenant/usage"));
+const TenantBilling      = lazy(() => import("@/pages/tenant/billing"));
+const TenantIntegrations = lazy(() => import("@/pages/tenant/integrations"));
+const TenantTeam         = lazy(() => import("@/pages/tenant/team"));
+const TenantSettings     = lazy(() => import("@/pages/tenant/settings"));
+const TenantAudit        = lazy(() => import("@/pages/tenant/audit"));
+
 // ── Lazy: admin platform — not in tenant bundle ───────────────────────────────
 const Integrations     = lazy(() => import("@/pages/integrations"));
 const Settings         = lazy(() => import("@/pages/settings"));
@@ -75,6 +86,17 @@ function ProtectedApp() {
             <Route path="/architectures" component={Architectures} />
             <Route path="/runs"          component={Runs} />
             <Route path="/runs/:id"      component={RunDetail} />
+
+            {/* Tenant workspace surface — /tenant/* */}
+            <Route path="/tenant"              component={TenantDashboard} />
+            <Route path="/tenant/data"         component={TenantData} />
+            <Route path="/tenant/ai"           component={TenantAI} />
+            <Route path="/tenant/usage"        component={TenantUsage} />
+            <Route path="/tenant/billing"      component={TenantBilling} />
+            <Route path="/tenant/integrations" component={TenantIntegrations} />
+            <Route path="/tenant/team"         component={TenantTeam} />
+            <Route path="/tenant/settings"     component={TenantSettings} />
+            <Route path="/tenant/audit"        component={TenantAudit} />
 
             {/* Admin platform */}
             <Route path="/integrations"      component={() => <AdminRoute><Integrations /></AdminRoute>} />

@@ -10,6 +10,7 @@
     "runs": "Runs",
     "integrations": "Integrations",
     "settings": "Settings",
+    "workspace": "Workspace",
     "opsConsole": "Ops Console",
     "platformOps": "Platform Ops",
     "viewAll": "View all"
