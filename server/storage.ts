@@ -1,9 +1,21 @@
 import type { Project, AiRun, AiStep, AiArtifact, AiToolCall, AiApproval, ArchitectureProfile, ArchitectureVersion, Integration, ArtifactDependency } from "@shared/schema";
+import { projects, aiRuns, architectureProfiles, integrations as integrationsTable } from "@shared/schema";
 import { projectsService, type CreateProjectInput, type UpdateProjectInput } from "./services/projects.service";
 import { architecturesService, type CreateProfileInput, type UpdateProfileInput, type CreateVersionInput, type UpsertAgentConfigInput, type UpsertCapabilityConfigInput } from "./services/architectures.service";
 import { runsService, type CreateRunInput, type UpdateRunStatusInput, type AppendStepInput, type AppendArtifactInput, type AppendToolCallInput, type AppendApprovalInput, type ResolveApprovalInput } from "./services/runs.service";
 import { runsRepository } from "./repositories/runs.repository";
 import { integrationsService, type UpsertIntegrationInput } from "./services/integrations.service";
+import { db } from "./db";
+import { count, eq, and, desc } from "drizzle-orm";
+
+export interface DashboardSummary {
+  projectCount: number;
+  activeRunCount: number;
+  architectureCount: number;
+  configuredIntegrationCount: number;
+  recentRuns: Array<{ id: string; status: string; createdAt: Date }>;
+  recentProjects: Array<{ id: string; name: string; status: string; updatedAt: Date }>;
+}
 
 export interface IStorage {
   // Projects
@@ -41,6 +53,9 @@ export interface IStorage {
   // Integrations
   listIntegrations(organizationId: string): Promise<Integration[]>;
   upsertIntegration(input: UpsertIntegrationInput): Promise<Integration>;
+
+  // Dashboard summary (single optimized endpoint)
+  getDashboardSummary(organizationId: string): Promise<DashboardSummary>;
 }
 
 export class DatabaseStorage implements IStorage {
@@ -79,6 +94,52 @@ export class DatabaseStorage implements IStorage {
   // Integrations
   listIntegrations(organizationId: string) { return integrationsService.list(organizationId); }
   upsertIntegration(input: UpsertIntegrationInput) { return integrationsService.upsert(input); }
+
+  // Dashboard summary — runs all 4 counts + 2 recent lists in parallel.
+  // Uses column-specific SELECT to avoid fetching full records.
+  async getDashboardSummary(organizationId: string): Promise<DashboardSummary> {
+    const [
+      projectCountResult,
+      activeRunCountResult,
+      architectureCountResult,
+      configuredIntCountResult,
+      recentRunsResult,
+      recentProjectsResult,
+    ] = await Promise.all([
+      db.select({ value: count() }).from(projects)
+        .where(eq(projects.organizationId, organizationId)),
+
+      db.select({ value: count() }).from(aiRuns)
+        .where(and(eq(aiRuns.organizationId, organizationId), eq(aiRuns.status, "running"))),
+
+      db.select({ value: count() }).from(architectureProfiles)
+        .where(eq(architectureProfiles.organizationId, organizationId)),
+
+      db.select({ value: count() }).from(integrationsTable)
+        .where(and(eq(integrationsTable.organizationId, organizationId), eq(integrationsTable.status, "active"))),
+
+      db.select({ id: aiRuns.id, status: aiRuns.status, createdAt: aiRuns.createdAt })
+        .from(aiRuns)
+        .where(eq(aiRuns.organizationId, organizationId))
+        .orderBy(desc(aiRuns.createdAt))
+        .limit(5),
+
+      db.select({ id: projects.id, name: projects.name, status: projects.status, updatedAt: projects.updatedAt })
+        .from(projects)
+        .where(eq(projects.organizationId, organizationId))
+        .orderBy(desc(projects.updatedAt))
+        .limit(5),
+    ]);
+
+    return {
+      projectCount:               Number(projectCountResult[0]?.value ?? 0),
+      activeRunCount:             Number(activeRunCountResult[0]?.value ?? 0),
+      architectureCount:          Number(architectureCountResult[0]?.value ?? 0),
+      configuredIntegrationCount: Number(configuredIntCountResult[0]?.value ?? 0),
+      recentRuns:                 recentRunsResult,
+      recentProjects:             recentProjectsResult,
+    };
+  }
 }
 
 export const storage = new DatabaseStorage();
