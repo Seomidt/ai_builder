@@ -87,6 +87,7 @@ export default function Projects() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/projects"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/bootstrap"] });
       setOpen(false);
       form.reset();
       toast({ title: "Project created" });
@@ -100,6 +101,7 @@ export default function Projects() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/projects"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/bootstrap"] });
       toast({ title: "Project archived" });
     },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),

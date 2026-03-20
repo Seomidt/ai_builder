@@ -77,9 +77,25 @@ export function useAuth() {
   useEffect(() => {
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
+    } = supabase.auth.onAuthStateChange((event, session) => {
       setHasLocalSession(session !== null);
-      queryClient.invalidateQueries({ queryKey: ["/api/auth/session"] });
+
+      if (event === "SIGNED_OUT") {
+        // Hard clear: remove all cached tenant/user data so the next user
+        // cannot see a previous user's dashboard, projects, runs etc.
+        queryClient.clear();
+      } else if (event === "SIGNED_IN") {
+        // A new sign-in (NOT initial page-load session detection which uses
+        // INITIAL_SESSION). Clear any stale data that may belong to a previous
+        // user context. This fires synchronously *before* signInWithPassword()
+        // resolves in login.tsx — so the prefetchQuery that follows lands into
+        // the now-empty cache, giving a clean cache hit on dashboard mount.
+        queryClient.clear();
+      } else {
+        // TOKEN_REFRESHED, USER_UPDATED, INITIAL_SESSION, PASSWORD_RECOVERY:
+        // only re-validate the session query; don't disturb other cached data.
+        queryClient.invalidateQueries({ queryKey: ["/api/auth/session"] });
+      }
     });
 
     return () => subscription.unsubscribe();

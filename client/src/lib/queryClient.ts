@@ -61,7 +61,12 @@ export const queryClient = new QueryClient({
       queryFn: getQueryFn({ on401: "throw" }),
       refetchInterval: false,
       refetchOnWindowFocus: false,
-      staleTime: Infinity,
+      // 60s staleTime: data is reused within a session (fast UX) but
+      // re-fetches after 60s to surface updates. Prefetch data is always
+      // < 60s old on login, so cache hit is guaranteed there.
+      // NOT Infinity — prevents cross-user stale data if cache is not
+      // explicitly cleared (defence-in-depth alongside queryClient.clear()).
+      staleTime: 60_000,
       retry: false,
     },
     mutations: {

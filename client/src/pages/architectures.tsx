@@ -107,6 +107,7 @@ export default function Architectures() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/architectures"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/bootstrap"] });
       setOpen(false);
       form.reset();
       toast({ title: "Architecture created" });
@@ -120,6 +121,7 @@ export default function Architectures() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/architectures"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/dashboard/bootstrap"] });
       toast({ title: "Architecture archived" });
     },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
