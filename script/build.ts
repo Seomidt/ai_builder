@@ -87,7 +87,7 @@ async function buildAll() {
     platform: "node",
     bundle: true,
     format: "cjs",
-    outfile: "api/index.cjs",
+    outfile: "api/index.js",
     tsconfig: "tsconfig.json",
     define: {
       "process.env.NODE_ENV": '"production"',
