@@ -16,8 +16,7 @@ import {
 } from "./lib/security/security-events";
 import { sanitizeInput, sanitizeObject, explainSanitization } from "./lib/security/sanitize";
 import { getRateLimitConfig } from "./middleware/rate-limit";
-import { storage } from "./storage";
-import { dbProvider } from "./db";
+import { createStorageForRequest } from "./storage";
 import { previewCommit } from "./lib/github-commit-format";
 import { runExecutorService } from "./services/run-executor.service";
 import { summarize } from "./features/ai-summarize/summarize.service";
@@ -36,7 +35,7 @@ import {
   getInvoiceStripeLifecycle,
   explainStripeWebhookOutcome,
 } from "./lib/ai/stripe-webhook-summary";
-import type { DashboardSummary } from "./storage";
+import type { DashboardSummary, IStorage } from "./storage";
 
 // ─── Dashboard bootstrap cache ────────────────────────────────────────────────
 // Short-lived per-org cache (30 s) so rapid refresh / re-login doesn't
@@ -134,7 +133,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         res.setHeader("X-Cache", "HIT");
         return res.json(cached.data);
       }
-      const data = await storage.getDashboardSummary(orgId);
+      const data = await createStorageForRequest(req).getDashboardSummary(orgId);
       bootstrapCache.set(orgId, { data, expiresAt: Date.now() + BOOTSTRAP_CACHE_TTL_MS });
       res.setHeader("X-Cache", "MISS");
       res.json(data);
@@ -145,14 +144,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/projects", async (req, res) => {
     try {
-      const projects = await storage.listProjects(getOrgId(req));
+      const projects = await createStorageForRequest(req).listProjects(getOrgId(req));
       res.json(projects);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/projects", async (req, res) => {
     try {
-      const project = await storage.createProject({
+      const project = await createStorageForRequest(req).createProject({
         ...req.body,
         organizationId: getOrgId(req),
         createdBy: getUserId(req),
@@ -163,21 +162,21 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/projects/:id", async (req, res) => {
     try {
-      const project = await storage.getProject(req.params.id, getOrgId(req));
+      const project = await createStorageForRequest(req).getProject(req.params.id, getOrgId(req));
       res.json(project);
     } catch (err) { handleError(res, err); }
   });
 
   app.patch("/api/projects/:id", async (req, res) => {
     try {
-      const project = await storage.updateProject(req.params.id, getOrgId(req), req.body);
+      const project = await createStorageForRequest(req).updateProject(req.params.id, getOrgId(req), req.body);
       res.json(project);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/projects/:id/archive", async (req, res) => {
     try {
-      const project = await storage.archiveProject(req.params.id, getOrgId(req));
+      const project = await createStorageForRequest(req).archiveProject(req.params.id, getOrgId(req));
       res.json(project);
     } catch (err) { handleError(res, err); }
   });
@@ -186,14 +185,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/architectures", async (req, res) => {
     try {
-      const profiles = await storage.listArchitectureProfiles(getOrgId(req));
+      const profiles = await createStorageForRequest(req).listArchitectureProfiles(getOrgId(req));
       res.json(profiles);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/architectures", async (req, res) => {
     try {
-      const profile = await storage.createArchitectureProfile({
+      const profile = await createStorageForRequest(req).createArchitectureProfile({
         ...req.body,
         organizationId: getOrgId(req),
       });
@@ -203,28 +202,28 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/architectures/:id", async (req, res) => {
     try {
-      const profile = await storage.getArchitectureProfile(req.params.id, getOrgId(req));
+      const profile = await createStorageForRequest(req).getArchitectureProfile(req.params.id, getOrgId(req));
       res.json(profile);
     } catch (err) { handleError(res, err); }
   });
 
   app.patch("/api/architectures/:id", async (req, res) => {
     try {
-      const profile = await storage.updateArchitectureProfile(req.params.id, getOrgId(req), req.body);
+      const profile = await createStorageForRequest(req).updateArchitectureProfile(req.params.id, getOrgId(req), req.body);
       res.json(profile);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/architectures/:id/archive", async (req, res) => {
     try {
-      const profile = await storage.archiveArchitectureProfile(req.params.id, getOrgId(req));
+      const profile = await createStorageForRequest(req).archiveArchitectureProfile(req.params.id, getOrgId(req));
       res.json(profile);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/architectures/:id/versions", async (req, res) => {
     try {
-      const version = await storage.createArchitectureVersion({
+      const version = await createStorageForRequest(req).createArchitectureVersion({
         ...req.body,
         architectureProfileId: req.params.id,
       });
@@ -234,7 +233,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/architectures/:id/versions/:versionId/publish", async (req, res) => {
     try {
-      const version = await storage.publishArchitectureVersion(
+      const version = await createStorageForRequest(req).publishArchitectureVersion(
         req.params.versionId,
         req.params.id,
         getOrgId(req),
@@ -247,7 +246,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const configs = await Promise.all(
         (req.body as unknown[]).map((c: unknown) =>
-          storage.upsertAgentConfig({ ...(c as object), versionId: req.params.versionId }),
+          createStorageForRequest(req).upsertAgentConfig({ ...(c as object), versionId: req.params.versionId }),
         ),
       );
       res.json(configs);
@@ -258,7 +257,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     try {
       const configs = await Promise.all(
         (req.body as unknown[]).map((c: unknown) =>
-          storage.upsertCapabilityConfig({ ...(c as object), versionId: req.params.versionId }),
+          createStorageForRequest(req).upsertCapabilityConfig({ ...(c as object), versionId: req.params.versionId }),
         ),
       );
       res.json(configs);
@@ -273,14 +272,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         status: req.query.status as AiRunStatus | undefined,
         projectId: req.query.projectId as string | undefined,
       };
-      const runs = await storage.listRuns(getOrgId(req), filters);
+      const runs = await createStorageForRequest(req).listRuns(getOrgId(req), filters);
       res.json(runs);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/runs", async (req, res) => {
     try {
-      const run = await storage.createRun({
+      const run = await createStorageForRequest(req).createRun({
         ...req.body,
         organizationId: getOrgId(req),
         createdBy: getUserId(req),
@@ -291,42 +290,42 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/runs/:id", async (req, res) => {
     try {
-      const run = await storage.getRun(req.params.id, getOrgId(req));
+      const run = await createStorageForRequest(req).getRun(req.params.id, getOrgId(req));
       res.json(run);
     } catch (err) { handleError(res, err); }
   });
 
   app.patch("/api/runs/:id/status", async (req, res) => {
     try {
-      const run = await storage.updateRunStatus(req.params.id, getOrgId(req), req.body);
+      const run = await createStorageForRequest(req).updateRunStatus(req.params.id, getOrgId(req), req.body);
       res.json(run);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/runs/:id/steps", async (req, res) => {
     try {
-      const step = await storage.appendStep({ ...req.body, runId: req.params.id });
+      const step = await createStorageForRequest(req).appendStep({ ...req.body, runId: req.params.id });
       res.status(201).json(step);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/runs/:id/artifacts", async (req, res) => {
     try {
-      const artifact = await storage.appendArtifact({ ...req.body, runId: req.params.id });
+      const artifact = await createStorageForRequest(req).appendArtifact({ ...req.body, runId: req.params.id });
       res.status(201).json(artifact);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/runs/:id/tool-calls", async (req, res) => {
     try {
-      const toolCall = await storage.appendToolCall({ ...req.body, runId: req.params.id });
+      const toolCall = await createStorageForRequest(req).appendToolCall({ ...req.body, runId: req.params.id });
       res.status(201).json(toolCall);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/runs/:id/approvals", async (req, res) => {
     try {
-      const approval = await storage.appendApproval({
+      const approval = await createStorageForRequest(req).appendApproval({
         ...req.body,
         runId: req.params.id,
         requestedBy: req.body.requestedBy ?? "system",
@@ -337,7 +336,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.patch("/api/runs/:id/approvals/:approvalId", async (req, res) => {
     try {
-      const approval = await storage.resolveApproval(req.params.approvalId, req.body);
+      const approval = await createStorageForRequest(req).resolveApproval(req.params.approvalId, req.body);
       res.json(approval);
     } catch (err) { handleError(res, err); }
   });
@@ -352,14 +351,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         console.error(`[run-executor] run=${req.params.id} fatal:`, err);
       });
       // Return the run immediately (status will move to "running" within the executor)
-      const run = await storage.getRun(req.params.id, orgId);
+      const run = await createStorageForRequest(req).getRun(req.params.id, orgId);
       res.status(202).json({ ...run, executing: true });
     } catch (err) { handleError(res, err); }
   });
 
   app.get("/api/runs/:id/artifact-dependencies", async (req, res) => {
     try {
-      const deps = await storage.listArtifactDependencies(req.params.id);
+      const deps = await createStorageForRequest(req).listArtifactDependencies(req.params.id);
       res.json(deps);
     } catch (err) { handleError(res, err); }
   });
@@ -368,14 +367,14 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/integrations", async (req, res) => {
     try {
-      const integrations = await storage.listIntegrations(getOrgId(req));
+      const integrations = await createStorageForRequest(req).listIntegrations(getOrgId(req));
       res.json(integrations);
     } catch (err) { handleError(res, err); }
   });
 
   app.post("/api/integrations", async (req, res) => {
     try {
-      const integration = await storage.upsertIntegration({
+      const integration = await createStorageForRequest(req).upsertIntegration({
         ...req.body,
         organizationId: getOrgId(req),
       });
@@ -385,7 +384,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/integrations/:provider", async (req, res) => {
     try {
-      const integrations = await storage.listIntegrations(getOrgId(req));
+      const integrations = await createStorageForRequest(req).listIntegrations(getOrgId(req));
       const integration = integrations.find((i) => i.provider === req.params.provider);
       if (!integration) return res.status(404).json({ error: "Integration not found" });
       res.json(integration);
@@ -396,11 +395,11 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/runs/:id/commit-preview", async (req, res) => {
     try {
-      const run = await storage.getRun(req.params.id, getOrgId(req));
+      const run = await createStorageForRequest(req).getRun(req.params.id, getOrgId(req));
       const [profile, version] = await Promise.all([
-        storage.getArchitectureProfile(run.architectureProfileId, getOrgId(req)),
+        createStorageForRequest(req).getArchitectureProfile(run.architectureProfileId, getOrgId(req)),
         (async () => {
-          const p = await storage.getArchitectureProfile(run.architectureProfileId, getOrgId(req));
+          const p = await createStorageForRequest(req).getArchitectureProfile(run.architectureProfileId, getOrgId(req));
           return p.versions.find((v) => v.id === run.architectureVersionId) ?? p.versions[0];
         })(),
       ]);
@@ -451,7 +450,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       requireOwnerRole(req.user?.role);
       // Return only boolean connection flags — never expose env values or identifiers
       res.json({
-        database: !!dbProvider,
+        database: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
         supabase: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
         github: !!process.env.GITHUB_TOKEN,
         openai: !!process.env.OPENAI_API_KEY,

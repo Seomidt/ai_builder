@@ -1,3 +1,32 @@
+/**
+ * ── DB Module — NON-RUNTIME (auth middleware + background jobs only) ──────────
+ *
+ * This module exports a Drizzle ORM client backed by pg.Pool.
+ *
+ * RUNTIME ACCESS RULE (Phase DB-Hardening):
+ *   DO NOT import `db` or `pool` in runtime request handlers or storage layers.
+ *   Runtime data access must use createStorageForRequest(req) from storage.ts,
+ *   which uses Supabase PostgREST (HTTP) — connectionless, serverless-safe.
+ *
+ * Permitted callers:
+ *   • server/middleware/auth.ts — membership lookup (30s cache, NOT hot path)
+ *   • server/lib/ai-governance/* — admin governance services (admin-only endpoints)
+ *   • server/lib/ai-governance/migrate-phase16.ts — migration script (D: script)
+ *   • server/lib/ai-governance/validate-phase16.ts — validation script (D: script)
+ *   • server/services/run-executor.service.ts — async background job (C: internal)
+ *   • server/repositories/* — used by run-executor and legacy DatabaseStorage only
+ *   • server/scripts/* — one-time maintenance/migration scripts
+ *
+ * Forbidden callers:
+ *   • Any runtime HTTP route handler
+ *   • server/storage.ts (SupabaseStorage path)
+ *   • Any new feature — use createStorageForRequest() instead
+ *
+ * No warmupPool(), no pool tuning hacks, no startup SELECT 1.
+ * The auth middleware's membership lookup uses a 30-second in-memory cache
+ * (memberCache) so the pg.Pool is only hit on first request per user per 30s.
+ */
+
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "@shared/schema";
@@ -24,35 +53,8 @@ function initPool(): pg.Pool {
   _pool = new Pool({
     connectionString,
     ...(isSupabase ? { ssl: { rejectUnauthorized: false } } : {}),
-    // ── Connection pool tuning ──────────────────────────────────────────────
-    // max: 5 — Supabase PgBouncer transaction mode works best with few clients.
-    //           Default 10 can exhaust the pooler's server_pool_size.
-    max: 5,
-    // connectionTimeoutMillis: 10s — fail fast instead of hanging indefinitely
-    // (default is 0 = no timeout, which causes 30s+ hangs on cold DB connections).
-    connectionTimeoutMillis: 10_000,
-    // idleTimeoutMillis: 60s — keep connections alive longer to survive brief
-    // idle periods (default 10s closes them too aggressively for Supabase).
-    idleTimeoutMillis: 60_000,
   });
   return _pool;
-}
-
-// Pre-warm the DB connection pool immediately at module import time.
-// This fires a lightweight SELECT 1 as soon as the pool is created.
-// Goal: have at least one live connection ready before the first user request arrives.
-// Does NOT block the server from starting — warmup runs in background.
-// On Vercel cold starts: warms up during Lambda initialisation so the first
-// user request finds a live connection instead of waiting for TCP+SSL+auth.
-export async function warmupPool(): Promise<void> {
-  const t0 = Date.now();
-  try {
-    await initPool().query("SELECT 1");
-    console.log(`[db] pool warmed up in ${Date.now() - t0}ms`);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[db] pool warmup failed (${Date.now() - t0}ms): ${msg}`);
-  }
 }
 
 export const pool: pg.Pool = new Proxy({} as pg.Pool, {
@@ -69,5 +71,3 @@ export const db = new Proxy({} as ReturnType<typeof drizzle>, {
     return (_db as any)[prop];
   },
 });
-
-export const dbProvider = process.env.SUPABASE_DB_POOL_URL ? "supabase" : "replit";

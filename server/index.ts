@@ -1,5 +1,4 @@
 import "./lib/env";
-import { warmupPool } from "./db";
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
@@ -133,10 +132,6 @@ app.use((req, res, next) => {
 
 (async () => {
   await registerRoutes(httpServer, app);
-
-  // Fire DB warmup immediately — gives Supabase connection time to establish
-  // before the first user request arrives. Does not block server startup.
-  warmupPool();
 
   // Phase 13.1 hardened global error handler — structured response, no stack traces
   app.use((err: any, req: Request, res: Response, _next: NextFunction) => {

@@ -72,9 +72,9 @@ export function registerAdminRoutes(app: Express): void {
     };
 
     try {
-      const { pool } = await import("../db");
-      const result = await pool.query("SELECT 1 AS ping");
-      checks.DB_PING = { ok: result.rows[0]?.ping === 1, detail: "connected" };
+      const { getSupabaseAdmin } = await import("../lib/supabase");
+      const { error } = await getSupabaseAdmin().from("organizations").select("id").limit(1);
+      checks.DB_PING = { ok: !error, detail: error ? error.message : "supabase connected" };
     } catch (e: unknown) {
       checks.DB_PING = { ok: false, detail: e instanceof Error ? e.message : "unknown error" };
     }

@@ -1,5 +1,18 @@
+/**
+ * Storage layer — facade over the Supabase-native runtime storage.
+ *
+ * Runtime rule (Phase DB-Hardening):
+ *   - ALL data access in runtime request handlers must go through
+ *     createStorageForRequest(req) which creates a SupabaseStorage bound
+ *     to the caller's JWT. No pg.Pool in the request path.
+ *   - The `storage` singleton below is DEPRECATED for runtime use.
+ *     It remains only to support internal background services (run-executor)
+ *     that are classified as non-tenant-facing internal jobs and run
+ *     asynchronously after the HTTP response has already been sent.
+ */
+
+import type { Request } from "express";
 import type { Project, AiRun, AiStep, AiArtifact, AiToolCall, AiApproval, ArchitectureProfile, ArchitectureVersion, Integration, ArtifactDependency } from "@shared/schema";
-import { projects, aiRuns, architectureProfiles, integrations as integrationsTable, organizations } from "@shared/schema";
 import { projectsService, type CreateProjectInput, type UpdateProjectInput } from "./services/projects.service";
 import { architecturesService, type CreateProfileInput, type UpdateProfileInput, type CreateVersionInput, type UpsertAgentConfigInput, type UpsertCapabilityConfigInput } from "./services/architectures.service";
 import { runsService, type CreateRunInput, type UpdateRunStatusInput, type AppendStepInput, type AppendArtifactInput, type AppendToolCallInput, type AppendApprovalInput, type ResolveApprovalInput } from "./services/runs.service";
@@ -7,6 +20,8 @@ import { runsRepository } from "./repositories/runs.repository";
 import { integrationsService, type UpsertIntegrationInput } from "./services/integrations.service";
 import { db } from "./db";
 import { count, eq, and, desc } from "drizzle-orm";
+import { projects, aiRuns, architectureProfiles, integrations as integrationsTable, organizations } from "@shared/schema";
+import { SupabaseStorage } from "./lib/supabase-runtime-storage";
 
 export interface DashboardSummary {
   orgName: string;
@@ -59,6 +74,24 @@ export interface IStorage {
   getDashboardSummary(organizationId: string): Promise<DashboardSummary>;
 }
 
+// ── Runtime factory (use this in all HTTP route handlers) ─────────────────────
+// Extracts the user's Bearer token from the request and creates a Supabase
+// client scoped to that JWT. RLS on Postgres enforces tenant isolation.
+// Zero pg.Pool usage — HTTP only — safe for serverless cold starts.
+
+export function createStorageForRequest(req: Request): IStorage {
+  const token = req.headers.authorization?.startsWith("Bearer ")
+    ? req.headers.authorization.slice(7)
+    : "";
+  return new SupabaseStorage(token);
+}
+
+// ── Legacy Drizzle/pg storage (background jobs only) ─────────────────────────
+// NOT for use in runtime request handlers. Only kept for:
+//   • run-executor.service (async background job, not request-path)
+//   • Any other internal service that runs after HTTP response is sent
+// DO NOT add new callers. Migrate any new feature to createStorageForRequest.
+
 export class DatabaseStorage implements IStorage {
   // Projects
   listProjects(organizationId: string) { return projectsService.list(organizationId); }
@@ -96,58 +129,34 @@ export class DatabaseStorage implements IStorage {
   listIntegrations(organizationId: string) { return integrationsService.list(organizationId); }
   upsertIntegration(input: UpsertIntegrationInput) { return integrationsService.upsert(input); }
 
-  // Dashboard summary — runs all 4 counts + 2 recent lists in parallel.
-  // Uses column-specific SELECT to avoid fetching full records.
+  // Dashboard summary — LEGACY: uses pg.Pool via Drizzle.
+  // Kept only for DatabaseStorage backwards compat. Runtime handlers must use
+  // createStorageForRequest(req).getDashboardSummary() which calls Supabase RPC.
   async getDashboardSummary(organizationId: string): Promise<DashboardSummary> {
     const [
-      orgResult,
-      projectCountResult,
-      activeRunCountResult,
-      architectureCountResult,
-      configuredIntCountResult,
-      recentRunsResult,
-      recentProjectsResult,
+      orgResult, projectCountResult, activeRunCountResult,
+      architectureCountResult, configuredIntCountResult,
+      recentRunsResult, recentProjectsResult,
     ] = await Promise.all([
-      db.select({ name: organizations.name })
-        .from(organizations)
-        .where(eq(organizations.id, organizationId))
-        .limit(1),
-
-      db.select({ value: count() }).from(projects)
-        .where(eq(projects.organizationId, organizationId)),
-
-      db.select({ value: count() }).from(aiRuns)
-        .where(and(eq(aiRuns.organizationId, organizationId), eq(aiRuns.status, "running"))),
-
-      db.select({ value: count() }).from(architectureProfiles)
-        .where(eq(architectureProfiles.organizationId, organizationId)),
-
-      db.select({ value: count() }).from(integrationsTable)
-        .where(and(eq(integrationsTable.organizationId, organizationId), eq(integrationsTable.status, "active"))),
-
-      db.select({ id: aiRuns.id, status: aiRuns.status, createdAt: aiRuns.createdAt })
-        .from(aiRuns)
-        .where(eq(aiRuns.organizationId, organizationId))
-        .orderBy(desc(aiRuns.createdAt))
-        .limit(5),
-
-      db.select({ id: projects.id, name: projects.name, status: projects.status, updatedAt: projects.updatedAt })
-        .from(projects)
-        .where(eq(projects.organizationId, organizationId))
-        .orderBy(desc(projects.updatedAt))
-        .limit(5),
+      db.select({ name: organizations.name }).from(organizations).where(eq(organizations.id, organizationId)).limit(1),
+      db.select({ value: count() }).from(projects).where(eq(projects.organizationId, organizationId)),
+      db.select({ value: count() }).from(aiRuns).where(and(eq(aiRuns.organizationId, organizationId), eq(aiRuns.status, "running"))),
+      db.select({ value: count() }).from(architectureProfiles).where(eq(architectureProfiles.organizationId, organizationId)),
+      db.select({ value: count() }).from(integrationsTable).where(and(eq(integrationsTable.organizationId, organizationId), eq(integrationsTable.status, "active"))),
+      db.select({ id: aiRuns.id, status: aiRuns.status, createdAt: aiRuns.createdAt }).from(aiRuns).where(eq(aiRuns.organizationId, organizationId)).orderBy(desc(aiRuns.createdAt)).limit(5),
+      db.select({ id: projects.id, name: projects.name, status: projects.status, updatedAt: projects.updatedAt }).from(projects).where(eq(projects.organizationId, organizationId)).orderBy(desc(projects.updatedAt)).limit(5),
     ]);
-
     return {
-      orgName:                    orgResult[0]?.name ?? organizationId,
-      projectCount:               Number(projectCountResult[0]?.value ?? 0),
-      activeRunCount:             Number(activeRunCountResult[0]?.value ?? 0),
-      architectureCount:          Number(architectureCountResult[0]?.value ?? 0),
+      orgName: orgResult[0]?.name ?? organizationId,
+      projectCount: Number(projectCountResult[0]?.value ?? 0),
+      activeRunCount: Number(activeRunCountResult[0]?.value ?? 0),
+      architectureCount: Number(architectureCountResult[0]?.value ?? 0),
       configuredIntegrationCount: Number(configuredIntCountResult[0]?.value ?? 0),
-      recentRuns:                 recentRunsResult,
-      recentProjects:             recentProjectsResult,
+      recentRuns: recentRunsResult,
+      recentProjects: recentProjectsResult,
     };
   }
 }
 
+// Background-job storage singleton (Drizzle/pg — for run-executor only).
 export const storage = new DatabaseStorage();
