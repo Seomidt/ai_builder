@@ -24,8 +24,35 @@ function initPool(): pg.Pool {
   _pool = new Pool({
     connectionString,
     ...(isSupabase ? { ssl: { rejectUnauthorized: false } } : {}),
+    // ── Connection pool tuning ──────────────────────────────────────────────
+    // max: 5 — Supabase PgBouncer transaction mode works best with few clients.
+    //           Default 10 can exhaust the pooler's server_pool_size.
+    max: 5,
+    // connectionTimeoutMillis: 10s — fail fast instead of hanging indefinitely
+    // (default is 0 = no timeout, which causes 30s+ hangs on cold DB connections).
+    connectionTimeoutMillis: 10_000,
+    // idleTimeoutMillis: 60s — keep connections alive longer to survive brief
+    // idle periods (default 10s closes them too aggressively for Supabase).
+    idleTimeoutMillis: 60_000,
   });
   return _pool;
+}
+
+// Pre-warm the DB connection pool immediately at module import time.
+// This fires a lightweight SELECT 1 as soon as the pool is created.
+// Goal: have at least one live connection ready before the first user request arrives.
+// Does NOT block the server from starting — warmup runs in background.
+// On Vercel cold starts: warms up during Lambda initialisation so the first
+// user request finds a live connection instead of waiting for TCP+SSL+auth.
+export async function warmupPool(): Promise<void> {
+  const t0 = Date.now();
+  try {
+    await initPool().query("SELECT 1");
+    console.log(`[db] pool warmed up in ${Date.now() - t0}ms`);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[db] pool warmup failed (${Date.now() - t0}ms): ${msg}`);
+  }
 }
 
 export const pool: pg.Pool = new Proxy({} as pg.Pool, {
