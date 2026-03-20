@@ -8,7 +8,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { queryClient } from "@/lib/queryClient";
-import { QUERY_POLICY } from "@/lib/query-policy";
+import { useAuth } from "@/hooks/use-auth";
 
 interface OpsSummary {
   healthStatus: "healthy" | "degraded" | "critical" | "unknown";
@@ -65,9 +65,19 @@ function SummaryCard({
 }
 
 export default function OpsDashboard() {
+  const { user } = useAuth();
+  const isPlatformAdmin = user?.role === "platform_admin";
+
+  // Never fire if not platform_admin — AdminRoute already guards the render path,
+  // but the enabled guard is an extra safeguard against query leakage.
+  // No semiLive polling: retry:false + refetchInterval:false prevents 403 loops.
   const { data: raw, isLoading, error, isFetching } = useQuery<{ data: OpsSummary }>({
     queryKey: OPS_SUMMARY_KEY,
-    ...QUERY_POLICY.semiLive,
+    staleTime: 30_000,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
+    retry: false,
+    enabled: isPlatformAdmin,
   });
 
   const ops = raw?.data;

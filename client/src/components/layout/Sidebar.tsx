@@ -84,32 +84,36 @@ export function Sidebar() {
           );
         })}
 
-        {/* Ops Console section */}
-        <div className="pt-3 pb-1">
-          <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40 mb-0.5">
-            {t("nav.platformOps")}
-          </p>
-        </div>
-        {opsItems.map(({ href, label, icon: Icon }) => {
-          const isActive = location.startsWith(href);
-          return (
-            <Link
-              key={href}
-              href={href}
-              data-testid={`nav-link-ops`}
-              className={cn(
-                "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
-                isActive
-                  ? "bg-destructive/15 text-destructive border border-destructive/25"
-                  : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent",
-              )}
-            >
-              <Icon className="w-4 h-4 shrink-0" />
-              <span className="flex-1">{label}</span>
-              {isActive && <ChevronRight className="w-3 h-3 opacity-60" />}
-            </Link>
-          );
-        })}
+        {/* Ops Console section — only for platform_admin (backend-verified role) */}
+        {user?.role === "platform_admin" && (
+          <>
+            <div className="pt-3 pb-1">
+              <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40 mb-0.5">
+                {t("nav.platformOps")}
+              </p>
+            </div>
+            {opsItems.map(({ href, label, icon: Icon }) => {
+              const isActive = location.startsWith(href);
+              return (
+                <Link
+                  key={href}
+                  href={href}
+                  data-testid="nav-link-ops"
+                  className={cn(
+                    "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
+                    isActive
+                      ? "bg-destructive/15 text-destructive border border-destructive/25"
+                      : "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent",
+                  )}
+                >
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span className="flex-1">{label}</span>
+                  {isActive && <ChevronRight className="w-3 h-3 opacity-60" />}
+                </Link>
+              );
+            })}
+          </>
+        )}
       </nav>
 
       {/* Footer: user info + logout */}

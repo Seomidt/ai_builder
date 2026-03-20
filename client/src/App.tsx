@@ -6,6 +6,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/layout/AppShell";
 import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
+import { AdminRoute } from "@/components/auth/AdminRoute";
 import { I18nProvider } from "@/components/providers/I18nProvider";
 
 // ── Eagerly loaded: core tenant pages (most frequently visited) ───────────────
@@ -79,19 +80,19 @@ function ProtectedApp() {
             <Route path="/runs/:id" component={RunDetail} />
             <Route path="/settings/security" component={SecuritySettings} />
 
-            {/* Ops Console routes — lazy, admin-only */}
-            <Route path="/ops" component={OpsDashboard} />
-            <Route path="/ops/tenants" component={OpsTenants} />
-            <Route path="/ops/jobs" component={OpsJobs} />
-            <Route path="/ops/webhooks" component={OpsWebhooks} />
-            <Route path="/ops/ai" component={OpsAi} />
-            <Route path="/ops/billing" component={OpsBilling} />
-            <Route path="/ops/recovery" component={OpsRecovery} />
-            <Route path="/ops/security" component={OpsSecurity} />
-            <Route path="/ops/assistant" component={OpsAssistant} />
-            <Route path="/ops/release" component={OpsRelease} />
-            <Route path="/ops/auth" component={OpsAuthSecurity} />
-            <Route path="/ops/storage" component={OpsStorage} />
+            {/* Ops Console routes — lazy, platform_admin only */}
+            <Route path="/ops"           component={() => <AdminRoute><OpsDashboard /></AdminRoute>} />
+            <Route path="/ops/tenants"   component={() => <AdminRoute><OpsTenants /></AdminRoute>} />
+            <Route path="/ops/jobs"      component={() => <AdminRoute><OpsJobs /></AdminRoute>} />
+            <Route path="/ops/webhooks"  component={() => <AdminRoute><OpsWebhooks /></AdminRoute>} />
+            <Route path="/ops/ai"        component={() => <AdminRoute><OpsAi /></AdminRoute>} />
+            <Route path="/ops/billing"   component={() => <AdminRoute><OpsBilling /></AdminRoute>} />
+            <Route path="/ops/recovery"  component={() => <AdminRoute><OpsRecovery /></AdminRoute>} />
+            <Route path="/ops/security"  component={() => <AdminRoute><OpsSecurity /></AdminRoute>} />
+            <Route path="/ops/assistant" component={() => <AdminRoute><OpsAssistant /></AdminRoute>} />
+            <Route path="/ops/release"   component={() => <AdminRoute><OpsRelease /></AdminRoute>} />
+            <Route path="/ops/auth"      component={() => <AdminRoute><OpsAuthSecurity /></AdminRoute>} />
+            <Route path="/ops/storage"   component={() => <AdminRoute><OpsStorage /></AdminRoute>} />
 
             <Route component={NotFound} />
           </Switch>
