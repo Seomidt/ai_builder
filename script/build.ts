@@ -1,7 +1,6 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile, writeFile, mkdir, cp } from "fs/promises";
-import { join } from "path";
+import { rm, readFile } from "fs/promises";
 
 const allowlist = [
   "@google/generative-ai",
@@ -35,7 +34,6 @@ const allowlist = [
 
 async function buildAll() {
   await rm("dist", { recursive: true, force: true });
-  await rm(".vercel/output", { recursive: true, force: true });
 
   console.log("building client...");
   await viteBuild();
@@ -62,23 +60,17 @@ async function buildAll() {
     logLevel: "info",
   });
 
-  // ─── Vercel Build Output API v3 ──────────────────────────────────────────────
-  // Outputs to .vercel/output/ so Vercel uses our pre-built function directly,
-  // WITHOUT re-bundling through @vercel/node's ncc.
-
-  const funcDir = ".vercel/output/functions/api/index.func";
-  const staticDir = ".vercel/output/static";
-
-  await mkdir(funcDir, { recursive: true });
-  await mkdir(staticDir, { recursive: true });
-
-  console.log("building Vercel serverless function...");
+  // ── Vercel serverless function ────────────────────────────────────────────────
+  // Pre-bundled with esbuild to avoid @vercel/node's ncc re-compilation.
+  // api/index.js is committed to git so Vercel never needs to compile TypeScript.
+  // @shared/* path aliases are resolved at build time by esbuild (not at Vercel deploy).
+  console.log("building Vercel serverless function (api/index.js)...");
   await esbuild({
     entryPoints: ["server/vercel-entry.ts"],
     platform: "node",
     bundle: true,
-    format: "esm",
-    outfile: join(funcDir, "index.mjs"),
+    format: "cjs",
+    outfile: "api/index.js",
     tsconfig: "tsconfig.json",
     define: {
       "process.env.NODE_ENV": '"production"',
@@ -88,57 +80,12 @@ async function buildAll() {
     minifyIdentifiers: false,
     external: ["pg-native"],
     logLevel: "info",
+    banner: {
+      js: "// @vercel-bundled — esbuild pre-compiled, do not edit\n",
+    },
   });
 
-  // Function config — tells Vercel runtime + memory + maxDuration
-  await writeFile(
-    join(funcDir, ".vc-config.json"),
-    JSON.stringify({
-      runtime: "nodejs20.x",
-      handler: "index.mjs",
-      memory: 1024,
-      maxDuration: 30,
-      launcherType: "Nodejs",
-    }),
-  );
-
-  // Copy static frontend assets from dist/public/ to .vercel/output/static/
-  console.log("copying static assets to Vercel output...");
-  await cp("dist/public", staticDir, { recursive: true });
-
-  // Build Output API config — routes and headers
-  const outputConfig = {
-    version: 3,
-    routes: [
-      // API routes → serverless function
-      { src: "/api/(.*)", dest: "/api/index" },
-      // Static assets with long cache
-      {
-        src: "/assets/(.*)",
-        headers: { "Cache-Control": "public, max-age=31536000, immutable" },
-      },
-      // Security headers on all routes
-      {
-        src: "/(.*)",
-        headers: {
-          "X-Content-Type-Options": "nosniff",
-          "X-Frame-Options": "DENY",
-          "Referrer-Policy": "strict-origin-when-cross-origin",
-        },
-        continue: true,
-      },
-      // SPA fallback — all non-file paths serve index.html
-      { handle: "filesystem" },
-      { src: "/(.*)", dest: "/index.html" },
-    ],
-  };
-
-  await writeFile(
-    ".vercel/output/config.json",
-    JSON.stringify(outputConfig, null, 2),
-  );
-
-  console.log("Vercel Build Output API v3 ready at .vercel/output/");
+  console.log("build complete.");
 }
 
 buildAll().catch((err) => {
