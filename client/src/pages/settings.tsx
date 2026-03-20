@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Building2, Shield, Database, GitBranch, CheckCircle, Circle } from "lucide-react";
+import { useAuth } from "@/hooks/use-auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
@@ -82,8 +83,15 @@ function StatusBadge({ connected, label }: { connected: boolean; label: string }
 }
 
 export default function Settings() {
+  const { user } = useAuth();
+  const isPlatformAdmin = user?.role === "platform_admin";
+
   const { data: configStatus, isLoading } = useQuery<ConfigStatus>({
     queryKey: ["/api/config/status"],
+    enabled: isPlatformAdmin,
+    retry: false,
+    refetchInterval: false,
+    refetchOnWindowFocus: false,
   });
 
   return (

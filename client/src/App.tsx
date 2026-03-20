@@ -14,8 +14,6 @@ import Dashboard from "@/pages/dashboard";
 import Projects from "@/pages/projects";
 import Architectures from "@/pages/architectures";
 import Runs from "@/pages/runs";
-import Integrations from "@/pages/integrations";
-import Settings from "@/pages/settings";
 import NotFound from "@/pages/not-found";
 
 // ── Eagerly loaded: auth pages (needed immediately on login) ──────────────────
@@ -27,10 +25,13 @@ import AuthInviteAccept from "@/pages/auth/invite-accept";
 import AuthMfaChallenge from "@/pages/auth/mfa-challenge";
 import AuthCallback from "@/pages/auth/callback";
 
-// ── Lazy loaded: heavy or rarely-visited pages ────────────────────────────────
-// These are split into separate JS chunks and only downloaded on first visit.
-// Tenant users never pay the download cost for ops/admin code.
-const RunDetail        = lazy(() => import("@/pages/run-detail"));
+// ── Lazy loaded: tenant detail pages ─────────────────────────────────────────
+const RunDetail = lazy(() => import("@/pages/run-detail"));
+
+// ── Lazy loaded: admin-only pages — never downloaded by tenant users ──────────
+// Split into separate JS chunks: tenant bundle stays lean.
+const Integrations    = lazy(() => import("@/pages/integrations"));
+const Settings        = lazy(() => import("@/pages/settings"));
 const SecuritySettings = lazy(() => import("@/pages/settings/security"));
 
 // Ops console — admin-only surface, completely isolated from tenant bundle
@@ -68,17 +69,19 @@ function ProtectedApp() {
       <AppShell>
         <Suspense fallback={<PageLoader />}>
           <Switch>
-            {/* Core tenant routes — eagerly loaded */}
+            {/* Core tenant routes — eagerly loaded, no admin guard */}
             <Route path="/" component={Dashboard} />
             <Route path="/projects" component={Projects} />
             <Route path="/architectures" component={Architectures} />
             <Route path="/runs" component={Runs} />
-            <Route path="/integrations" component={Integrations} />
-            <Route path="/settings" component={Settings} />
 
-            {/* Lazy tenant routes */}
+            {/* Lazy tenant route */}
             <Route path="/runs/:id" component={RunDetail} />
-            <Route path="/settings/security" component={SecuritySettings} />
+
+            {/* Admin-only routes — lazy, wrapped with AdminRoute */}
+            <Route path="/integrations"       component={() => <AdminRoute><Integrations /></AdminRoute>} />
+            <Route path="/settings"           component={() => <AdminRoute><Settings /></AdminRoute>} />
+            <Route path="/settings/security"  component={() => <AdminRoute><SecuritySettings /></AdminRoute>} />
 
             {/* Ops Console routes — lazy, platform_admin only */}
             <Route path="/ops"           component={() => <AdminRoute><OpsDashboard /></AdminRoute>} />

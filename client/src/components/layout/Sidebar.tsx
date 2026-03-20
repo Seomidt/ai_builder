@@ -21,12 +21,12 @@ export function Sidebar() {
   const { t } = useTranslations("common");
   const { user } = useAuth();
   const isOpsSection = location.startsWith("/ops");
+  const isAdminSection = isOpsSection
+    || location.startsWith("/integrations")
+    || location.startsWith("/settings");
 
   async function handleLogout() {
     await signOut();
-    // Full page reload after logout — resets all React state, React Query
-    // cache, and Supabase in-memory session in one shot, preventing redirect
-    // loops caused by stale cached session state.
     window.location.href = "/auth/login";
   }
 
@@ -36,17 +36,19 @@ export function Sidebar() {
   const displayEmail = user?.email ?? "—";
   const displayOrg   = user?.organizationId ?? "—";
 
+  // Tenant core — work surface only
   const navItems = [
     { href: "/",              label: t("nav.dashboard"),     icon: LayoutDashboard },
     { href: "/projects",      label: t("nav.projects"),      icon: FolderKanban },
     { href: "/architectures", label: t("nav.architectures"), icon: Cpu },
     { href: "/runs",          label: t("nav.runs"),          icon: PlayCircle },
-    { href: "/integrations",  label: t("nav.integrations"),  icon: Plug },
-    { href: "/settings",      label: t("nav.settings"),      icon: Settings },
   ];
 
-  const opsItems = [
-    { href: "/ops", label: t("nav.opsConsole"), icon: ShieldAlert },
+  // Admin — platform_admin only (backend-verified role)
+  const adminItems = [
+    { href: "/ops",           label: t("nav.opsConsole"),    icon: ShieldAlert },
+    { href: "/integrations",  label: t("nav.integrations"),  icon: Plug },
+    { href: "/settings",      label: t("nav.settings"),      icon: Settings },
   ];
 
   return (
@@ -63,8 +65,12 @@ export function Sidebar() {
 
       {/* Navigation */}
       <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
+        {/* Tenant core items */}
         {navItems.map(({ href, label, icon: Icon }) => {
-          const isActive = href === "/" ? location === "/" : location.startsWith(href) && !isOpsSection;
+          const isActive =
+            href === "/"
+              ? location === "/"
+              : location.startsWith(href) && !isAdminSection;
           return (
             <Link
               key={href}
@@ -84,7 +90,7 @@ export function Sidebar() {
           );
         })}
 
-        {/* Ops Console section — only for platform_admin (backend-verified role) */}
+        {/* Admin section — only for platform_admin (backend-verified role from /api/auth/session) */}
         {user?.role === "platform_admin" && (
           <>
             <div className="pt-3 pb-1">
@@ -92,13 +98,13 @@ export function Sidebar() {
                 {t("nav.platformOps")}
               </p>
             </div>
-            {opsItems.map(({ href, label, icon: Icon }) => {
+            {adminItems.map(({ href, label, icon: Icon }) => {
               const isActive = location.startsWith(href);
               return (
                 <Link
                   key={href}
                   href={href}
-                  data-testid="nav-link-ops"
+                  data-testid={`nav-link-admin-${href.replace("/", "")}`}
                   className={cn(
                     "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
                     isActive

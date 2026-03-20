@@ -13,6 +13,7 @@ import { supabase } from "@/lib/supabase";
 import { QUERY_POLICY, PAGE_LIMIT } from "@/lib/query-policy";
 import { invalidate } from "@/lib/invalidations";
 import { usePagePerf } from "@/lib/perf";
+import { useAuth } from "@/hooks/use-auth";
 import type { Integration } from "@shared/schema";
 
 type Provider = Integration["provider"];
@@ -174,6 +175,8 @@ export default function Integrations() {
   const [configProvider, setConfigProvider] = useState<Provider | null>(null);
   const { toast } = useToast();
   const perf = usePagePerf("integrations");
+  const { user } = useAuth();
+  const isPlatformAdmin = user?.role === "platform_admin";
 
   const {
     data,
@@ -191,6 +194,7 @@ export default function Integrations() {
     initialPageParam: null as string | null,
     getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
     ...QUERY_POLICY.staticList,
+    enabled: isPlatformAdmin,
   });
 
   const integrations = data?.pages.flatMap((p) => p.items) ?? [];
@@ -203,6 +207,7 @@ export default function Integrations() {
   const { data: configStatus } = useQuery<ConfigStatus>({
     queryKey: ["/api/config/status"],
     ...QUERY_POLICY.staticList,
+    enabled: isPlatformAdmin,
   });
 
   const enableMutation = useMutation({
