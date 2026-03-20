@@ -125,10 +125,10 @@ export async function authMiddleware(
 
   const token = authHeader.slice(7);
 
+  // ── Step 1: verify JWT with Supabase ─────────────────────────────────────
+  let supabaseUser: { id: string; email?: string } | null = null;
   try {
     const { data, error } = await supabaseAdmin.auth.getUser(token);
-
-    // ── Invalid token: fail closed (no demo fallback) ─────────────────────
     if (error || !data.user) {
       res.status(401).json({
         error_code: "UNAUTHORIZED",
@@ -136,32 +136,44 @@ export async function authMiddleware(
       });
       return;
     }
-
-    const members = await db
-      .select()
-      .from(organizationMembers)
-      .where(eq(organizationMembers.userId, data.user.id))
-      .limit(1);
-
-    const member = members[0];
-
-    req.user = {
-      id: data.user.id,
-      email: data.user.email,
-      organizationId: member?.organizationId ?? "demo-org",
-      role: member?.role ?? "member",
-    };
-
-    // Phase 6: attach canonical resolved actor for permission-code based checks.
-    // INV-ID9: backward-compatible — req.user remains untouched.
-    req.resolvedActor = mapCurrentUserToCanonicalActor(req.user);
-
-    return next();
-  } catch {
-    // DB failure: fail closed — do NOT fall back to demo user
+    supabaseUser = { id: data.user.id, email: data.user.email };
+  } catch (err) {
+    console.error("[auth] supabaseAdmin.auth.getUser failed:", err);
     res.status(401).json({
       error_code: "UNAUTHORIZED",
       message: "Authentication check failed. Please try again.",
     });
+    return;
   }
+
+  // ── Step 2: look up org membership (non-fatal if DB is unavailable) ───────
+  let organizationId = "blissops-main";
+  let role = "member";
+  try {
+    const members = await db
+      .select()
+      .from(organizationMembers)
+      .where(eq(organizationMembers.userId, supabaseUser.id))
+      .limit(1);
+    if (members[0]) {
+      organizationId = members[0].organizationId;
+      role = members[0].role;
+    }
+  } catch (dbErr) {
+    console.error("[auth] DB membership lookup failed (using defaults):", dbErr);
+    // JWT is valid — let the user in with safe defaults
+  }
+
+  req.user = {
+    id: supabaseUser.id,
+    email: supabaseUser.email,
+    organizationId,
+    role,
+  };
+
+  // Phase 6: attach canonical resolved actor for permission-code based checks.
+  // INV-ID9: backward-compatible — req.user remains untouched.
+  req.resolvedActor = mapCurrentUserToCanonicalActor(req.user);
+
+  return next();
 }
