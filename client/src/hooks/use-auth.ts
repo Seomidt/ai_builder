@@ -1,17 +1,18 @@
 /**
- * useAuth — Session state hook (reactive via Supabase onAuthStateChange)
+ * useAuth — Optimistic session hook
  *
- * Flow:
- *   1. Supabase loads session from localStorage (async on page load)
- *   2. onAuthStateChange fires INITIAL_SESSION → supabaseReady = true
- *   3. Only THEN do we call /api/auth/session with the Bearer token
- *   4. Backend validates JWT → returns user info (org, role)
+ * FLOW (non-blocking):
+ *   1. Read session from supabase.auth.getSession() — localStorage read, ~1ms
+ *   2. If local session exists → isAuthed = true IMMEDIATELY (no network wait)
+ *   3. /api/auth/session runs in background to confirm + fetch org/role
+ *   4. If backend returns 401 → force redirect (token expired / revoked)
  *
- * This eliminates the race condition where getSession() was called
- * before Supabase finished initializing from localStorage.
+ * This makes refresh instant: the shell renders using the local session
+ * while backend validation runs async. Security is preserved — any invalid
+ * token is caught and redirected once backend responds.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase, getSessionToken } from "@/lib/supabase";
 
@@ -48,43 +49,79 @@ async function fetchSession(): Promise<SessionResult> {
     const data = (await res.json()) as { user: SessionUser };
     return { status: 200, user: data.user ?? null };
   } catch {
+    // Network error: don't invalidate — let stale data hold
     return { status: 0, user: null };
   }
 }
 
 export function useAuth() {
-  const [supabaseReady, setSupabaseReady] = useState(false);
   const queryClient = useQueryClient();
 
+  // Optimistic: read local session immediately (localStorage, ~1ms)
+  // null  = not checked yet
+  // false = checked, no session
+  // true  = checked, session exists
+  const [hasLocalSession, setHasLocalSession] = useState<boolean | null>(null);
+  const bootstrapped = useRef(false);
+
+  useEffect(() => {
+    if (bootstrapped.current) return;
+    bootstrapped.current = true;
+
+    supabase.auth.getSession().then(({ data }) => {
+      setHasLocalSession(data.session !== null);
+    });
+  }, []);
+
+  // Subscribe to auth state changes (sign-in, sign-out, token refresh)
   useEffect(() => {
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event) => {
-      setSupabaseReady(true);
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setHasLocalSession(session !== null);
       queryClient.invalidateQueries({ queryKey: ["/api/auth/session"] });
     });
 
     return () => subscription.unsubscribe();
   }, [queryClient]);
 
+  // Background backend validation — starts as soon as we know we have a token.
+  // Does NOT block render. Returns org + role for the full user object.
   const { data, isLoading: queryLoading } = useQuery<SessionResult>({
     queryKey: ["/api/auth/session"],
     queryFn: fetchSession,
     retry: false,
     staleTime: 30_000,
     refetchOnWindowFocus: true,
-    enabled: supabaseReady,
+    // Start immediately if local session detected; also runs if no local session
+    // so we can confirm 401 quickly.
+    enabled: hasLocalSession !== null,
   });
 
-  const isLoading = !supabaseReady || queryLoading;
-  const status = data?.status ?? null;
+  const backendStatus = data?.status ?? null;
+
+  // Loading = haven't read localStorage yet (< 5ms in practice)
+  const isLoading = hasLocalSession === null;
+
+  // Optimistic auth: trust local session until backend says otherwise
+  // - hasLocalSession = true AND backend hasn't returned 401/403 yet → authed
+  // - hasLocalSession = false → not authed (localStorage is definitive for this)
+  // - backend returns 401 → override optimistic (token expired)
+  const isAuthed =
+    hasLocalSession === true &&
+    backendStatus !== 401 &&
+    backendStatus !== 403;
+
+  const isLockdown = backendStatus === 403;
+
+  // Prefer backend-verified user object; fall back to null while loading
   const user = data?.user ?? null;
 
   return {
     isLoading,
     user,
-    status,
-    isAuthed: status === 200 && user !== null,
-    isLockdown: status === 403,
+    status: backendStatus,
+    isAuthed,
+    isLockdown,
   };
 }

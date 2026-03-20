@@ -1,35 +1,31 @@
 /**
- * ProtectedRoute — Client-side auth guard
+ * ProtectedRoute — Client-side auth guard (optimistic)
  *
- * Wraps protected app surfaces. Behavior:
- *   Loading   → shows spinner (prevents flash of unauth content)
- *   401       → redirects to /auth/login
- *   403       → shows lockdown / access-denied screen (no redirect)
- *   200       → renders children
+ * Behavior:
+ *   isLoading (< 5ms localStorage read) → minimal spinner
+ *   hasLocalSession = true              → render children immediately (optimistic)
+ *   backend returns 401/403             → redirect / lockdown (after async check)
+ *   no local session                    → redirect to /auth/login instantly
  *
  * Backend enforcement remains the primary security layer.
- * This guard provides the correct UX for unauthenticated/blocked users.
+ * Frontend renders optimistically using local Supabase session to eliminate
+ * the "checking session" delay on refresh.
  */
 
-import { Redirect, Link } from "wouter";
+import { Redirect } from "wouter";
 import { useAuth } from "@/hooks/use-auth";
-import { signOut } from "@/lib/supabase";
-import { queryClient } from "@/lib/queryClient";
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
 }
 
-function LoadingScreen() {
+function BootSpinner() {
   return (
     <div
       className="flex items-center justify-center h-screen bg-background"
       data-testid="auth-loading-screen"
     >
-      <div className="flex flex-col items-center gap-3">
-        <div className="h-8 w-8 rounded-full border-4 border-primary border-t-transparent animate-spin" />
-        <p className="text-sm text-muted-foreground">Checking session…</p>
-      </div>
+      <div className="h-6 w-6 rounded-full border-2 border-primary border-t-transparent animate-spin" />
     </div>
   );
 }
@@ -57,17 +53,23 @@ function LockdownScreen() {
 export function ProtectedRoute({ children }: ProtectedRouteProps) {
   const { isLoading, isAuthed, isLockdown } = useAuth();
 
+  // Only shown for < 5ms while getSession() reads from localStorage
   if (isLoading) {
-    return <LoadingScreen />;
+    return <BootSpinner />;
   }
 
   if (isLockdown) {
     return <LockdownScreen />;
   }
 
+  // No local session — redirect immediately without waiting for backend
   if (!isAuthed) {
     return <Redirect to="/auth/login" />;
   }
 
+  // Local session confirmed — render immediately.
+  // Backend validation runs in background via useAuth's useQuery.
+  // If backend returns 401 (expired token), isAuthed transitions to false
+  // and this component re-renders with the redirect.
   return <>{children}</>;
 }

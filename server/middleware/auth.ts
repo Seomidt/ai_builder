@@ -34,6 +34,27 @@ declare global {
   }
 }
 
+// ── Membership cache ─────────────────────────────────────────────────────────
+// Caches org + role per userId to avoid a DB round-trip on every request.
+// TTL is short enough that role changes propagate within 30 s.
+
+interface MemberRecord { organizationId: string; role: string; exp: number }
+const memberCache = new Map<string, MemberRecord>();
+const MEMBER_CACHE_TTL_MS = 30_000;
+
+function getCachedMember(userId: string): { organizationId: string; role: string } | null {
+  const entry = memberCache.get(userId);
+  if (!entry || entry.exp < Date.now()) {
+    memberCache.delete(userId);
+    return null;
+  }
+  return { organizationId: entry.organizationId, role: entry.role };
+}
+
+function setCachedMember(userId: string, organizationId: string, role: string): void {
+  memberCache.set(userId, { organizationId, role, exp: Date.now() + MEMBER_CACHE_TTL_MS });
+}
+
 // ── Demo mode guard ───────────────────────────────────────────────────────────
 
 function isDemoModeEnabled(): boolean {
@@ -146,22 +167,29 @@ export async function authMiddleware(
     return;
   }
 
-  // ── Step 2: look up org membership (non-fatal if DB is unavailable) ───────
+  // ── Step 2: look up org membership (cached, non-fatal if DB unavailable) ──
   let organizationId = "blissops-main";
   let role = "member";
-  try {
-    const members = await db
-      .select()
-      .from(organizationMembers)
-      .where(eq(organizationMembers.userId, supabaseUser.id))
-      .limit(1);
-    if (members[0]) {
-      organizationId = members[0].organizationId;
-      role = members[0].role;
+  const cached = getCachedMember(supabaseUser.id);
+  if (cached) {
+    organizationId = cached.organizationId;
+    role = cached.role;
+  } else {
+    try {
+      const members = await db
+        .select()
+        .from(organizationMembers)
+        .where(eq(organizationMembers.userId, supabaseUser.id))
+        .limit(1);
+      if (members[0]) {
+        organizationId = members[0].organizationId;
+        role = members[0].role;
+      }
+      setCachedMember(supabaseUser.id, organizationId, role);
+    } catch (dbErr) {
+      console.error("[auth] DB membership lookup failed (using defaults):", dbErr);
+      // JWT is valid — let the user in with safe defaults; don't cache failures
     }
-  } catch (dbErr) {
-    console.error("[auth] DB membership lookup failed (using defaults):", dbErr);
-    // JWT is valid — let the user in with safe defaults
   }
 
   req.user = {
