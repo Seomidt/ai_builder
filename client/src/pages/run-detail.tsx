@@ -11,9 +11,11 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest } from "@/lib/queryClient";
 import { useState } from "react";
 import type { AiRun, AiStep, AiArtifact } from "@shared/schema";
+import { QUERY_POLICY } from "@/lib/query-policy";
+import { invalidate } from "@/lib/invalidations";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -169,25 +171,30 @@ export default function RunDetail() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
 
+  // Primary query — detail policy + dynamic refetchInterval when active
   const { data: run, isLoading } = useQuery<RunDetail>({
     queryKey: ["/api/runs", id],
     queryFn: () => fetch(`/api/runs/${id}`, { credentials: "include" }).then((r) => r.json()),
+    ...QUERY_POLICY.detailLive,
     refetchInterval: (query) => {
       const data = query.state.data as RunDetail | undefined;
       return data?.status === "running" || data?.status === "pending" ? 2000 : false;
     },
   });
 
+  // Non-critical deferred query — only fires when run is complete/running
+  // Does not block shell or primary tab content
   const { data: commitPreview } = useQuery<CommitPreview>({
     queryKey: ["/api/runs", id, "commit-preview"],
     queryFn: () => fetch(`/api/runs/${id}/commit-preview`, { credentials: "include" }).then((r) => r.json()),
     enabled: !!run && (run.status === "completed" || run.status === "running"),
+    ...QUERY_POLICY.detail,
   });
 
   const executeMutation = useMutation({
     mutationFn: () => apiRequest("POST", `/api/runs/${id}/execute`),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/runs", id] });
+      invalidate.afterRunStatusChange(id!);
       toast({ title: "Pipeline started", description: "Agents are running…" });
     },
     onError: (err: Error) => {
@@ -200,11 +207,17 @@ export default function RunDetail() {
     toast({ title: "Copied", description: `${label} copied to clipboard` });
   }
 
+  // Shell renders immediately; skeleton only for primary card area
   if (isLoading) {
     return (
       <div className="p-6 space-y-4 max-w-5xl">
-        <Skeleton className="h-8 w-64" />
-        <Skeleton className="h-32 w-full" />
+        <div className="flex items-center gap-3">
+          <Button variant="ghost" size="icon" className="text-muted-foreground" onClick={() => navigate("/runs")}>
+            <ArrowLeft className="w-4 h-4" />
+          </Button>
+          <Skeleton className="h-7 w-56" />
+        </div>
+        <Skeleton className="h-24 w-full" />
         <Skeleton className="h-64 w-full" />
       </div>
     );
@@ -271,10 +284,10 @@ export default function RunDetail() {
       {/* Meta strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {[
-          { label: "Steps", value: run.steps.length.toString() },
+          { label: "Steps",     value: run.steps.length.toString() },
           { label: "Artifacts", value: run.artifacts.length.toString() },
-          { label: "Started", value: run.startedAt ? new Date(run.startedAt).toLocaleString() : "—" },
-          { label: "Duration", value: elapsed(run.startedAt, run.finishedAt ?? run.completedAt) },
+          { label: "Started",   value: run.startedAt ? new Date(run.startedAt).toLocaleString() : "—" },
+          { label: "Duration",  value: elapsed(run.startedAt, run.finishedAt ?? run.completedAt) },
         ].map(({ label, value }) => (
           <Card key={label} className="bg-card border-card-border">
             <CardContent className="p-3">
@@ -394,13 +407,11 @@ export default function RunDetail() {
             </div>
           ) : (
             <div className="space-y-3">
-              {/* Note banner */}
               <div className="flex items-start gap-2 p-3 rounded-md bg-secondary/10 border border-secondary/20 text-xs text-secondary">
                 <FileText className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
                 {commitPreview.note}
               </div>
 
-              {/* Branch */}
               <Card className="bg-card border-card-border">
                 <CardContent className="p-4">
                   <div className="flex items-center justify-between gap-3">
@@ -426,7 +437,6 @@ export default function RunDetail() {
                 </CardContent>
               </Card>
 
-              {/* Commit message */}
               <Card className="bg-card border-card-border">
                 <CardHeader className="pb-2 pt-4 px-4">
                   <div className="flex items-center justify-between">
@@ -452,7 +462,6 @@ export default function RunDetail() {
                 </CardContent>
               </Card>
 
-              {/* Tags */}
               {commitPreview.tags && commitPreview.tags.length > 0 && (
                 <Card className="bg-card border-card-border">
                   <CardContent className="p-4">
@@ -475,7 +484,6 @@ export default function RunDetail() {
                 </Card>
               )}
 
-              {/* Future artifacts section */}
               {run.artifacts.length > 0 && (
                 <Card className="bg-card border-card-border">
                   <CardContent className="p-4">

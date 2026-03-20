@@ -1,4 +1,4 @@
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import { CheckCircle, Circle, Settings, AlertCircle } from "lucide-react";
 import { SiGithub, SiOpenai, SiVercel, SiSupabase, SiCloudflare } from "react-icons/si";
 import { Card, CardContent } from "@/components/ui/card";
@@ -6,10 +6,13 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
-import { useState } from "react";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { useState, useEffect } from "react";
+import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/lib/supabase";
+import { QUERY_POLICY, PAGE_LIMIT } from "@/lib/query-policy";
+import { invalidate } from "@/lib/invalidations";
+import { usePagePerf } from "@/lib/perf";
 import type { Integration } from "@shared/schema";
 
 type Provider = Integration["provider"];
@@ -19,6 +22,11 @@ interface IntegrationRow {
   provider: Provider;
   status: string;
   createdAt: string;
+}
+
+interface IntegrationPage {
+  items: IntegrationRow[];
+  nextCursor: string | null;
 }
 
 interface ConfigStatus {
@@ -165,21 +173,36 @@ function IntegrationCard({
 export default function Integrations() {
   const [configProvider, setConfigProvider] = useState<Provider | null>(null);
   const { toast } = useToast();
+  const perf = usePagePerf("integrations");
 
-  const { data: integrations, isLoading } = useQuery<IntegrationRow[]>({
+  const {
+    data,
+    isLoading,
+  } = useInfiniteQuery<IntegrationPage>({
     queryKey: ["integrations"],
-    queryFn: async () => {
-      const { data, error } = await supabase.rpc("get_integrations_page");
+    queryFn: async ({ pageParam }) => {
+      const { data, error } = await supabase.rpc("get_integrations_page", {
+        p_limit: PAGE_LIMIT.integrations,
+        p_cursor: (pageParam as string | null) ?? null,
+      });
       if (error) throw new Error(error.message);
-      return (data as IntegrationRow[]) ?? [];
+      return (data as unknown as IntegrationPage);
     },
-    staleTime: 30_000,
-    retry: false,
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    ...QUERY_POLICY.staticList,
   });
+
+  const integrations = data?.pages.flatMap((p) => p.items) ?? [];
+
+  useEffect(() => {
+    if (integrations.length > 0 || !isLoading) perf.record(integrations.length);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [integrations.length, isLoading]);
 
   const { data: configStatus } = useQuery<ConfigStatus>({
     queryKey: ["/api/config/status"],
-    staleTime: 60_000,
+    ...QUERY_POLICY.staticList,
   });
 
   const enableMutation = useMutation({
@@ -187,8 +210,7 @@ export default function Integrations() {
       await apiRequest("POST", "/api/integrations", { provider, status: "active" });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["integrations"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
+      invalidate.afterIntegrationMutation();
       setConfigProvider(null);
       toast({ title: "Integration marked as configured" });
     },
@@ -221,7 +243,7 @@ export default function Integrations() {
         </div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {integrations?.map((integration) => (
+          {integrations.map((integration) => (
             <IntegrationCard
               key={integration.provider}
               integration={integration}

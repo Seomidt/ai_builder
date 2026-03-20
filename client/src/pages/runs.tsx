@@ -1,5 +1,5 @@
-import { useState, useMemo } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { PlayCircle, Filter, Plus, Loader2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -8,8 +8,12 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest } from "@/lib/queryClient";
 import { supabase } from "@/lib/supabase";
+import { QUERY_POLICY, PAGE_LIMIT } from "@/lib/query-policy";
+import { invalidate } from "@/lib/invalidations";
+import { usePagePerf } from "@/lib/perf";
+import { useQueryState } from "@/lib/use-query-state";
 
 type RunStatus = "pending" | "running" | "completed" | "failed" | "cancelled";
 
@@ -28,6 +32,16 @@ interface RunRow {
 interface ArchRow {
   id: string;
   currentVersionId: string | null;
+}
+
+interface ArchPage {
+  items: ArchRow[];
+  nextCursor: string | null;
+}
+
+interface RunPage {
+  items: RunRow[];
+  nextCursor: string | null;
 }
 
 const STATUS_OPTIONS = ["all", "pending", "running", "completed", "failed", "cancelled"] as const;
@@ -55,48 +69,65 @@ function statusDot(status: RunStatus) {
 }
 
 export default function Runs() {
-  const [statusFilter, setStatusFilter] = useState<string>("all");
+  const [statusFilter, setStatusFilter] = useQueryState("status", "all");
   const [, navigate] = useLocation();
   const { toast } = useToast();
+  const perf = usePagePerf("runs");
 
-  const { data: allRuns, isLoading } = useQuery<RunRow[]>({
-    queryKey: ["runs"],
-    queryFn: async () => {
-      const { data, error } = await supabase.rpc("get_runs_page");
+  const {
+    data,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<RunPage>({
+    queryKey: ["runs", statusFilter],
+    queryFn: async ({ pageParam }) => {
+      const { data, error } = await supabase.rpc("get_runs_page", {
+        p_limit: PAGE_LIMIT.runs,
+        p_cursor: (pageParam as string | null) ?? null,
+        p_status: statusFilter === "all" ? null : statusFilter,
+      });
       if (error) throw new Error(error.message);
-      return (data as RunRow[]) ?? [];
+      return (data as unknown as RunPage);
     },
-    refetchInterval: 5000,
-    staleTime: 4000,
-    retry: false,
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    maxPages: 3,
+    ...QUERY_POLICY.semiLive,
   });
 
-  const { data: archData } = useQuery<ArchRow[]>({
+  const runs = data?.pages.flatMap((p) => p.items) ?? [];
+
+  useEffect(() => {
+    if (runs.length > 0 || !isLoading) perf.record(runs.length);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runs.length, isLoading]);
+
+  // Shared architectures cache — reuses key from architectures page if visited
+  const { data: archData } = useQuery<ArchPage>({
     queryKey: ["architectures"],
     queryFn: async () => {
-      const { data, error } = await supabase.rpc("get_architectures_page");
+      const { data, error } = await supabase.rpc("get_architectures_page", {
+        p_limit: 1,
+        p_cursor: null,
+      });
       if (error) throw new Error(error.message);
-      return (data as ArchRow[]) ?? [];
+      return (data as unknown as ArchPage);
     },
-    staleTime: 60_000,
-    retry: false,
+    ...QUERY_POLICY.staticList,
   });
 
-  const runs = useMemo(() => {
-    if (!allRuns) return allRuns;
-    if (statusFilter === "all") return allRuns;
-    return allRuns.filter((r) => r.status === statusFilter);
-  }, [allRuns, statusFilter]);
+  const firstArch = archData?.items?.[0];
 
   const createRunMutation = useMutation({
     mutationFn: async () => {
-      const arch = archData?.[0];
-      if (!arch) throw new Error("No architecture available — create one first");
-      if (!arch.currentVersionId) throw new Error("No published architecture version — publish a version first");
+      if (!firstArch) throw new Error("No architecture available — create one first");
+      if (!firstArch.currentVersionId) throw new Error("No published version — publish an architecture version first");
       return apiRequest("POST", "/api/runs", {
         projectId: "default",
-        architectureProfileId: arch.id,
-        architectureVersionId: arch.currentVersionId,
+        architectureProfileId: firstArch.id,
+        architectureVersionId: firstArch.currentVersionId,
         title: "New Run",
         goal: "Define a goal for this run",
         tags: [],
@@ -104,8 +135,7 @@ export default function Runs() {
     },
     onSuccess: async (res) => {
       const run = await res.json();
-      queryClient.invalidateQueries({ queryKey: ["runs"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
+      await invalidate.afterRunCreate(run.id);
       navigate(`/runs/${run.id}`);
     },
     onError: (err: Error) => {
@@ -118,7 +148,7 @@ export default function Runs() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-foreground">Runs</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">{runs?.length ?? 0} runs</p>
+          <p className="text-sm text-muted-foreground mt-0.5">{runs.length} run{runs.length !== 1 ? "s" : ""}</p>
         </div>
         <div className="flex items-center gap-2">
           <Filter className="w-4 h-4 text-muted-foreground" />
@@ -136,7 +166,7 @@ export default function Runs() {
             size="sm"
             className="h-8 text-xs"
             onClick={() => createRunMutation.mutate()}
-            disabled={createRunMutation.isPending || !archData?.length}
+            disabled={createRunMutation.isPending || !firstArch}
             data-testid="button-create-run"
           >
             {createRunMutation.isPending ? (
@@ -155,12 +185,12 @@ export default function Runs() {
             <div className="p-4 space-y-3">
               {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-12" />)}
             </div>
-          ) : runs?.length === 0 ? (
+          ) : runs.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <PlayCircle className="w-10 h-10 text-muted-foreground/30 mb-3" />
               <p className="text-sm font-medium text-muted-foreground">No runs found</p>
               <p className="text-xs text-muted-foreground/60 mt-1">
-                {archData?.length
+                {firstArch
                   ? "Click New Run to create your first pipeline run"
                   : "Create an architecture first, then start a run"}
               </p>
@@ -175,7 +205,7 @@ export default function Runs() {
                 <div className="col-span-2">Finished</div>
                 <div className="col-span-1">Steps</div>
               </div>
-              {runs?.map((run) => (
+              {runs.map((run) => (
                 <div
                   key={run.id}
                   data-testid={`run-row-${run.id}`}
@@ -215,6 +245,19 @@ export default function Runs() {
                   <div className="col-span-1 text-xs text-muted-foreground font-mono">—</div>
                 </div>
               ))}
+              {hasNextPage && (
+                <div className="flex justify-center p-4">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => fetchNextPage()}
+                    disabled={isFetchingNextPage}
+                    data-testid="btn-load-more-runs"
+                  >
+                    {isFetchingNextPage ? "Loading…" : "Load more"}
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </CardContent>

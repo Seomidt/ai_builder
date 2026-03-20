@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useState, useEffect } from "react";
+import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
 import { Plus, Cpu, MoreHorizontal, Tag } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,9 +13,12 @@ import { Textarea } from "@/components/ui/textarea";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { apiRequest, queryClient } from "@/lib/queryClient";
+import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { supabase } from "@/lib/supabase";
+import { QUERY_POLICY, PAGE_LIMIT } from "@/lib/query-policy";
+import { invalidate } from "@/lib/invalidations";
+import { usePagePerf } from "@/lib/perf";
 
 interface ArchRow {
   id: string;
@@ -26,6 +29,11 @@ interface ArchRow {
   category: string | null;
   currentVersionId: string | null;
   createdAt: string;
+}
+
+interface ArchPage {
+  items: ArchRow[];
+  nextCursor: string | null;
 }
 
 const createSchema = z.object({
@@ -104,17 +112,35 @@ function ArchCard({ arch, onArchive }: { arch: ArchRow; onArchive: (id: string) 
 export default function Architectures() {
   const [open, setOpen] = useState(false);
   const { toast } = useToast();
+  const perf = usePagePerf("architectures");
 
-  const { data: architectures, isLoading } = useQuery<ArchRow[]>({
+  const {
+    data,
+    isLoading,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInfiniteQuery<ArchPage>({
     queryKey: ["architectures"],
-    queryFn: async () => {
-      const { data, error } = await supabase.rpc("get_architectures_page");
+    queryFn: async ({ pageParam }) => {
+      const { data, error } = await supabase.rpc("get_architectures_page", {
+        p_limit: PAGE_LIMIT.staticList,
+        p_cursor: (pageParam as string | null) ?? null,
+      });
       if (error) throw new Error(error.message);
-      return (data as ArchRow[]) ?? [];
+      return (data as unknown as ArchPage);
     },
-    staleTime: 30_000,
-    retry: false,
+    initialPageParam: null as string | null,
+    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    ...QUERY_POLICY.staticList,
   });
+
+  const architectures = data?.pages.flatMap((p) => p.items) ?? [];
+
+  useEffect(() => {
+    if (architectures.length > 0 || !isLoading) perf.record(architectures.length);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [architectures.length, isLoading]);
 
   const form = useForm<CreateValues>({
     resolver: zodResolver(createSchema),
@@ -126,8 +152,7 @@ export default function Architectures() {
       await apiRequest("POST", "/api/architectures", values);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["architectures"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
+      invalidate.afterArchMutation();
       setOpen(false);
       form.reset();
       toast({ title: "Architecture created" });
@@ -140,8 +165,7 @@ export default function Architectures() {
       await apiRequest("POST", `/api/architectures/${id}/archive`);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["architectures"] });
-      queryClient.invalidateQueries({ queryKey: ["dashboard-summary"] });
+      invalidate.afterArchMutation();
       toast({ title: "Architecture archived" });
     },
     onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
@@ -152,7 +176,7 @@ export default function Architectures() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-foreground">Architectures</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">{architectures?.length ?? 0} architecture profiles</p>
+          <p className="text-sm text-muted-foreground mt-0.5">{architectures.length} architecture profile{architectures.length !== 1 ? "s" : ""}</p>
         </div>
         <Button size="sm" onClick={() => setOpen(true)} data-testid="btn-new-architecture">
           <Plus className="w-3.5 h-3.5 mr-1.5" /> New Architecture
@@ -163,7 +187,7 @@ export default function Architectures() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-32" />)}
         </div>
-      ) : architectures?.length === 0 ? (
+      ) : architectures.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-20 text-center">
           <Cpu className="w-10 h-10 text-muted-foreground/30 mb-3" />
           <p className="text-sm font-medium text-muted-foreground">No architectures yet</p>
@@ -173,11 +197,26 @@ export default function Architectures() {
           </Button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {architectures?.map((a) => (
-            <ArchCard key={a.id} arch={a} onArchive={(id) => archiveMutation.mutate(id)} />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {architectures.map((a) => (
+              <ArchCard key={a.id} arch={a} onArchive={(id) => archiveMutation.mutate(id)} />
+            ))}
+          </div>
+          {hasNextPage && (
+            <div className="flex justify-center pt-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => fetchNextPage()}
+                disabled={isFetchingNextPage}
+                data-testid="btn-load-more-architectures"
+              >
+                {isFetchingNextPage ? "Loading…" : "Load more"}
+              </Button>
+            </div>
+          )}
+        </>
       )}
 
       <Dialog open={open} onOpenChange={setOpen}>
