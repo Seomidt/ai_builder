@@ -1,34 +1,52 @@
 import { useQuery } from "@tanstack/react-query";
 import {
-  Activity, AlertTriangle, CheckCircle, Users,
-  TrendingUp, DollarSign, RefreshCw, Cpu,
+  Activity, AlertTriangle, CheckCircle,
+  TrendingUp, DollarSign, RefreshCw, ShieldAlert,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import { queryClient } from "@/lib/queryClient";
+import { QUERY_POLICY } from "@/lib/query-policy";
 
-interface HealthSummary {
-  overall?: string;
-  checks?: Record<string, { ok: boolean; detail?: string }>;
-  timestamp?: string;
+interface OpsSummary {
+  healthStatus: "healthy" | "degraded" | "critical" | "unknown";
+  checks: Record<string, { ok: boolean; detail?: string }>;
+  activeAlerts: number;
+  recentAnomalies: number;
+  totalEventsLast7d: number;
+  aiCostUsd: number;
+  weekStart: string;
+  weekEnd: string;
+  highlights: string[];
+  riskSignals: string[];
+  generatedAt: string;
+  cachedAt: string | null;
+  fromCache: boolean;
 }
 
-interface WeeklyDigest {
-  period?: string;
-  tenantCount?: number;
-  totalRequests?: number;
-  totalCostUsd?: number;
-  topTenants?: { id: string; requests: number; costUsd: number }[];
-  highlights?: string[];
-}
+const OPS_SUMMARY_KEY = ["/api/admin/ops-summary"] as const;
 
 function StatusDot({ ok }: { ok: boolean }) {
-  return <span className={`inline-block w-2 h-2 rounded-full ${ok ? "bg-green-400" : "bg-destructive"}`} />;
+  return (
+    <span
+      className={`inline-block w-2 h-2 rounded-full flex-shrink-0 ${ok ? "bg-green-400" : "bg-destructive"}`}
+    />
+  );
 }
 
-function SummaryCard({ label, value, icon: Icon, color, testId }: {
-  label: string; value: string | number; icon: React.ElementType; color: string; testId: string;
+function SummaryCard({
+  label, value, icon: Icon, color, testId, loading,
+}: {
+  label: string;
+  value: string | number;
+  icon: React.ElementType;
+  color: string;
+  testId: string;
+  loading?: boolean;
 }) {
+  if (loading) return <Skeleton className="h-20" data-testid={`ops-skeleton-${testId}`} />;
   return (
     <Card className="bg-card border-card-border" data-testid={`ops-summary-${testId}`}>
       <CardContent className="flex items-center gap-4 pt-5">
@@ -36,7 +54,9 @@ function SummaryCard({ label, value, icon: Icon, color, testId }: {
           <Icon className="w-5 h-5" />
         </div>
         <div>
-          <p className="text-xl font-bold text-foreground" data-testid={`ops-value-${testId}`}>{value}</p>
+          <p className="text-xl font-bold text-foreground" data-testid={`ops-value-${testId}`}>
+            {value}
+          </p>
           <p className="text-xs text-muted-foreground">{label}</p>
         </div>
       </CardContent>
@@ -45,122 +65,264 @@ function SummaryCard({ label, value, icon: Icon, color, testId }: {
 }
 
 export default function OpsDashboard() {
-  const { data: health, isLoading: healthLoading } = useQuery<HealthSummary>({
-    queryKey: ["/api/admin/ai-ops/health-summary"],
-  });
-  const { data: digest, isLoading: digestLoading } = useQuery<WeeklyDigest>({
-    queryKey: ["/api/admin/ai-ops/weekly-digest"],
+  const { data: raw, isLoading, error, isFetching } = useQuery<{ data: OpsSummary }>({
+    queryKey: OPS_SUMMARY_KEY,
+    ...QUERY_POLICY.semiLive,
   });
 
-  const checks = Object.entries(health?.checks ?? {});
+  const ops = raw?.data;
+  const checks = Object.entries(ops?.checks ?? {});
   const failedChecks = checks.filter(([, v]) => !v.ok);
+  const healthIcon = ops?.healthStatus === "healthy" ? CheckCircle : AlertTriangle;
+  const healthValue =
+    ops?.healthStatus === "healthy" ? "Healthy"
+    : ops?.healthStatus === "critical" ? "Critical"
+    : ops?.healthStatus === "degraded" ? "Degraded"
+    : "Unknown";
+  const healthColor =
+    ops?.healthStatus === "healthy"
+      ? "bg-green-500/15 text-green-400"
+      : "bg-destructive/15 text-destructive";
+
+  function handleRefresh() {
+    queryClient.invalidateQueries({ queryKey: OPS_SUMMARY_KEY });
+  }
 
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-6xl" data-testid="ops-dashboard-page">
-      <div>
-        <h1 className="text-xl font-semibold text-foreground flex items-center gap-2" data-testid="text-ops-dashboard-title">
-          <Activity className="w-5 h-5 text-primary" /> Platform Operations
-        </h1>
-        <p className="text-sm text-muted-foreground mt-0.5">Real-time platform health, AI usage digest, and operational status</p>
+      {/* Header */}
+      <div className="flex items-start justify-between">
+        <div>
+          <h1
+            className="text-xl font-semibold text-foreground flex items-center gap-2"
+            data-testid="text-ops-dashboard-title"
+          >
+            <Activity className="w-5 h-5 text-primary" /> Platform Operations
+          </h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Real-time platform health, AI usage, and operational status
+          </p>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleRefresh}
+          disabled={isFetching}
+          data-testid="button-ops-refresh"
+          className="text-muted-foreground"
+        >
+          <RefreshCw className={`w-4 h-4 mr-1.5 ${isFetching ? "animate-spin" : ""}`} />
+          Refresh
+        </Button>
       </div>
 
+      {/* Error state */}
+      {error && !isLoading && (
+        <Card className="bg-destructive/10 border-destructive/30" data-testid="ops-error-card">
+          <CardContent className="pt-4 flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-destructive" />
+            <p className="text-sm text-destructive">
+              Ops summary unavailable — {error instanceof Error ? error.message : "unknown error"}
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Summary cards — one query, no waterfall */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {healthLoading || digestLoading ? (
-          Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-20" />)
-        ) : (
-          <>
-            <SummaryCard
-              label="Platform Health" icon={failedChecks.length === 0 ? CheckCircle : AlertTriangle} testId="health"
-              value={failedChecks.length === 0 ? "Healthy" : `${failedChecks.length} issues`}
-              color={failedChecks.length === 0 ? "bg-green-500/15 text-green-400" : "bg-destructive/15 text-destructive"}
-            />
-            <SummaryCard label="Active Tenants" value={digest?.tenantCount ?? "—"} icon={Users} color="bg-primary/15 text-primary" testId="tenants" />
-            <SummaryCard label="Weekly Requests" value={digest?.totalRequests?.toLocaleString() ?? "—"} icon={TrendingUp} color="bg-secondary/15 text-secondary" testId="requests" />
-            <SummaryCard
-              label="Weekly Cost (USD)" icon={DollarSign} color="bg-green-500/15 text-green-400" testId="cost"
-              value={digest?.totalCostUsd != null ? `$${digest.totalCostUsd.toFixed(2)}` : "—"}
-            />
-          </>
-        )}
+        <SummaryCard
+          label="Platform Health"
+          icon={healthIcon}
+          value={isLoading ? "…" : healthValue}
+          color={healthColor}
+          testId="health"
+          loading={isLoading}
+        />
+        <SummaryCard
+          label="Open Alerts"
+          icon={ShieldAlert}
+          value={isLoading ? "…" : (ops?.activeAlerts ?? 0)}
+          color={
+            (ops?.activeAlerts ?? 0) > 0
+              ? "bg-destructive/15 text-destructive"
+              : "bg-primary/15 text-primary"
+          }
+          testId="alerts"
+          loading={isLoading}
+        />
+        <SummaryCard
+          label="Weekly Events"
+          icon={TrendingUp}
+          value={isLoading ? "…" : (ops?.totalEventsLast7d.toLocaleString() ?? "—")}
+          color="bg-secondary/15 text-secondary"
+          testId="events"
+          loading={isLoading}
+        />
+        <SummaryCard
+          label="AI Cost (7d)"
+          icon={DollarSign}
+          value={isLoading ? "…" : (ops ? `$${ops.aiCostUsd.toFixed(2)}` : "—")}
+          color="bg-green-500/15 text-green-400"
+          testId="cost"
+          loading={isLoading}
+        />
       </div>
 
+      {/* Main content grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Service Checks */}
         <Card className="bg-card border-card-border" data-testid="ops-health-checks-card">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-medium flex items-center gap-2">
               <CheckCircle className="w-4 h-4 text-primary" /> Service Checks
+              {ops && (
+                <Badge
+                  variant="outline"
+                  className={`ml-auto text-xs ${
+                    failedChecks.length === 0
+                      ? "border-green-500/40 text-green-400"
+                      : "border-destructive/40 text-destructive"
+                  }`}
+                  data-testid="badge-service-status"
+                >
+                  {failedChecks.length === 0 ? "All passing" : `${failedChecks.length} failing`}
+                </Badge>
+              )}
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {healthLoading ? (
-              <div className="space-y-2">{Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-7" />)}</div>
+            {isLoading ? (
+              <div className="space-y-2">
+                {Array.from({ length: 5 }).map((_, i) => (
+                  <Skeleton key={i} className="h-7" />
+                ))}
+              </div>
             ) : checks.length ? (
               <div className="space-y-2" data-testid="health-checks-list">
                 {checks.map(([name, check]) => (
-                  <div key={name} className="flex items-center justify-between py-1" data-testid={`health-check-${name}`}>
+                  <div
+                    key={name}
+                    className="flex items-center justify-between py-1"
+                    data-testid={`health-check-${name}`}
+                  >
                     <div className="flex items-center gap-2">
                       <StatusDot ok={check.ok} />
                       <span className="text-xs font-mono text-foreground">{name}</span>
                     </div>
-                    <span className="text-xs text-muted-foreground max-w-[180px] truncate text-right">{check.detail ?? (check.ok ? "ok" : "failed")}</span>
+                    <span className="text-xs text-muted-foreground max-w-[180px] truncate text-right">
+                      {check.detail ?? (check.ok ? "ok" : "failed")}
+                    </span>
                   </div>
                 ))}
               </div>
             ) : (
-              <p className="text-xs text-muted-foreground" data-testid="no-health-msg">No health data available</p>
+              <p className="text-xs text-muted-foreground" data-testid="no-health-msg">
+                No health data available
+              </p>
             )}
           </CardContent>
         </Card>
 
-        <Card className="bg-card border-card-border" data-testid="ops-digest-card">
+        {/* Weekly Highlights */}
+        <Card className="bg-card border-card-border" data-testid="ops-highlights-card">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm font-medium flex items-center gap-2">
-              <RefreshCw className="w-4 h-4 text-primary" /> Weekly Digest
-              {digest?.period && <span className="text-xs font-normal text-muted-foreground ml-auto">{digest.period}</span>}
+              <RefreshCw className="w-4 h-4 text-primary" /> Weekly Summary
+              {ops && (
+                <span className="text-xs font-normal text-muted-foreground ml-auto">
+                  {ops.weekStart} → {ops.weekEnd}
+                </span>
+              )}
             </CardTitle>
           </CardHeader>
           <CardContent>
-            {digestLoading ? (
-              <div className="space-y-2">{Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-7" />)}</div>
-            ) : digest?.topTenants?.length ? (
-              <div className="space-y-2" data-testid="top-tenants-list">
-                <p className="text-xs text-muted-foreground mb-2">Top tenants by volume</p>
-                {digest.topTenants.slice(0, 5).map((t, i) => (
-                  <div key={t.id} className="flex items-center justify-between py-1" data-testid={`top-tenant-row-${i}`}>
-                    <span className="text-xs font-mono text-muted-foreground truncate max-w-[120px]">{t.id.slice(0, 10)}…</span>
-                    <div className="flex items-center gap-3">
-                      <span className="flex items-center gap-1 text-xs"><Cpu className="w-3 h-3 text-muted-foreground" />{t.requests}</span>
-                      <span className="flex items-center gap-1 text-xs"><DollarSign className="w-3 h-3 text-muted-foreground" />${t.costUsd?.toFixed(2)}</span>
-                    </div>
-                  </div>
+            {isLoading ? (
+              <div className="space-y-2">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <Skeleton key={i} className="h-7" />
                 ))}
               </div>
+            ) : (ops?.highlights.length ?? 0) > 0 ? (
+              <ul className="space-y-2" data-testid="ops-highlights-list">
+                {ops!.highlights.map((h, i) => (
+                  <li
+                    key={i}
+                    className="text-xs text-foreground flex items-start gap-2 py-0.5"
+                    data-testid={`highlight-row-${i}`}
+                  >
+                    <span className="mt-0.5 w-1.5 h-1.5 rounded-full bg-primary flex-shrink-0" />
+                    {h}
+                  </li>
+                ))}
+              </ul>
             ) : (
-              <div className="py-6 text-center" data-testid="no-digest-msg">
+              <div className="py-6 text-center" data-testid="no-highlights-msg">
                 <RefreshCw className="w-7 h-7 text-muted-foreground/40 mx-auto mb-2" />
-                <p className="text-xs text-muted-foreground">No digest available yet</p>
+                <p className="text-xs text-muted-foreground">No highlights yet for this period</p>
               </div>
             )}
           </CardContent>
         </Card>
       </div>
 
-      {!healthLoading && failedChecks.length > 0 && (
+      {/* Risk signals — deferred section, only shown when data present */}
+      {!isLoading && (ops?.riskSignals.length ?? 0) > 0 && (
+        <Card className="bg-destructive/10 border-destructive/30" data-testid="ops-risk-signals-card">
+          <CardContent className="pt-4">
+            <div className="flex items-center gap-2 mb-3">
+              <AlertTriangle className="w-4 h-4 text-destructive" />
+              <p className="text-sm font-medium text-destructive">
+                {ops!.riskSignals.length} risk signal{ops!.riskSignals.length !== 1 ? "s" : ""} detected
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {ops!.riskSignals.map((signal, i) => (
+                <Badge
+                  key={i}
+                  variant="outline"
+                  className="text-xs bg-destructive/10 text-destructive border-destructive/30"
+                  data-testid={`risk-signal-${i}`}
+                >
+                  {signal}
+                </Badge>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Failed checks detail — deferred section */}
+      {!isLoading && failedChecks.length > 0 && (
         <Card className="bg-destructive/10 border-destructive/30" data-testid="ops-failed-checks-alert">
           <CardContent className="pt-4">
             <div className="flex items-center gap-2 mb-3">
               <AlertTriangle className="w-4 h-4 text-destructive" />
-              <p className="text-sm font-medium text-destructive">{failedChecks.length} check(s) failing</p>
+              <p className="text-sm font-medium text-destructive">
+                {failedChecks.length} check{failedChecks.length !== 1 ? "s" : ""} failing
+              </p>
             </div>
             <div className="flex flex-wrap gap-2">
               {failedChecks.map(([name, check]) => (
-                <Badge key={name} variant="outline" className="text-xs bg-destructive/10 text-destructive border-destructive/30" data-testid={`failed-check-${name}`}>
+                <Badge
+                  key={name}
+                  variant="outline"
+                  className="text-xs bg-destructive/10 text-destructive border-destructive/30"
+                  data-testid={`failed-check-${name}`}
+                >
                   {name}: {check.detail}
                 </Badge>
               ))}
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* Cache indicator — dev only hint */}
+      {ops && (
+        <p className="text-[11px] text-muted-foreground/50 text-right" data-testid="ops-generated-at">
+          Generated {new Date(ops.generatedAt).toLocaleTimeString()}
+          {ops.fromCache ? " (cached)" : " (fresh)"}
+        </p>
       )}
     </div>
   );

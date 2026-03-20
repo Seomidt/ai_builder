@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { runAiOpsQuery } from "../lib/ai-ops/orchestrator";
 import { generateWeeklyDigest } from "../lib/ai-ops/digest";
+import { getOpsSummary, invalidateOpsSummaryCache } from "../lib/ai-ops/ops-summary";
 import { getRecentAuditLog, getAuditStats } from "../lib/ai-ops/audit";
 import { SUPPORTED_INTENTS, isValidIntent } from "../lib/ai-ops/intents";
 import { resolveUserFromRequest } from "../lib/ai-ops/access-control";
@@ -29,6 +30,23 @@ export function registerAdminRoutes(app: Express): void {
 
   app.get("/api/admin/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  // ── Ops Summary — consolidated critical-path read model (no AI call) ───────
+  app.get("/api/admin/ops-summary", async (req: Request, res: Response) => {
+    const forceRefresh = req.query.refresh === "true";
+    try {
+      const summary = await getOpsSummary(forceRefresh);
+      res.json({ data: summary });
+    } catch (err: unknown) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Ops summary failed" });
+    }
+  });
+
+  // Invalidate ops summary cache (POST, e.g. after governance cycle)
+  app.post("/api/admin/ops-summary/invalidate", (_req: Request, res: Response) => {
+    invalidateOpsSummaryCache();
+    res.json({ ok: true });
   });
 
   app.get("/api/admin/platform/deploy-health", async (_req: Request, res: Response) => {
