@@ -15,18 +15,19 @@ import { useTranslations } from "@/hooks/use-translations";
 import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
 import { useAuth } from "@/hooks/use-auth";
 import { signOut } from "@/lib/supabase";
-import { queryClient } from "@/lib/queryClient";
 
 export function Sidebar() {
-  const [location, setLocation] = useLocation();
+  const [location] = useLocation();
   const { t } = useTranslations("common");
   const { user } = useAuth();
   const isOpsSection = location.startsWith("/ops");
 
   async function handleLogout() {
     await signOut();
-    queryClient.clear();
-    setLocation("/auth/login");
+    // Full page reload after logout — resets all React state, React Query
+    // cache, and Supabase in-memory session in one shot, preventing redirect
+    // loops caused by stale cached session state.
+    window.location.href = "/auth/login";
   }
 
   const initials = user?.email
