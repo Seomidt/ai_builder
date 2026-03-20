@@ -1,5 +1,5 @@
 import type { Project, AiRun, AiStep, AiArtifact, AiToolCall, AiApproval, ArchitectureProfile, ArchitectureVersion, Integration, ArtifactDependency } from "@shared/schema";
-import { projects, aiRuns, architectureProfiles, integrations as integrationsTable } from "@shared/schema";
+import { projects, aiRuns, architectureProfiles, integrations as integrationsTable, organizations } from "@shared/schema";
 import { projectsService, type CreateProjectInput, type UpdateProjectInput } from "./services/projects.service";
 import { architecturesService, type CreateProfileInput, type UpdateProfileInput, type CreateVersionInput, type UpsertAgentConfigInput, type UpsertCapabilityConfigInput } from "./services/architectures.service";
 import { runsService, type CreateRunInput, type UpdateRunStatusInput, type AppendStepInput, type AppendArtifactInput, type AppendToolCallInput, type AppendApprovalInput, type ResolveApprovalInput } from "./services/runs.service";
@@ -9,6 +9,7 @@ import { db } from "./db";
 import { count, eq, and, desc } from "drizzle-orm";
 
 export interface DashboardSummary {
+  orgName: string;
   projectCount: number;
   activeRunCount: number;
   architectureCount: number;
@@ -99,6 +100,7 @@ export class DatabaseStorage implements IStorage {
   // Uses column-specific SELECT to avoid fetching full records.
   async getDashboardSummary(organizationId: string): Promise<DashboardSummary> {
     const [
+      orgResult,
       projectCountResult,
       activeRunCountResult,
       architectureCountResult,
@@ -106,6 +108,11 @@ export class DatabaseStorage implements IStorage {
       recentRunsResult,
       recentProjectsResult,
     ] = await Promise.all([
+      db.select({ name: organizations.name })
+        .from(organizations)
+        .where(eq(organizations.id, organizationId))
+        .limit(1),
+
       db.select({ value: count() }).from(projects)
         .where(eq(projects.organizationId, organizationId)),
 
@@ -132,6 +139,7 @@ export class DatabaseStorage implements IStorage {
     ]);
 
     return {
+      orgName:                    orgResult[0]?.name ?? organizationId,
       projectCount:               Number(projectCountResult[0]?.value ?? 0),
       activeRunCount:             Number(activeRunCountResult[0]?.value ?? 0),
       architectureCount:          Number(architectureCountResult[0]?.value ?? 0),

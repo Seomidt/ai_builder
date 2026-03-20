@@ -36,6 +36,14 @@ import {
   getInvoiceStripeLifecycle,
   explainStripeWebhookOutcome,
 } from "./lib/ai/stripe-webhook-summary";
+import type { DashboardSummary } from "./storage";
+
+// ─── Dashboard bootstrap cache ────────────────────────────────────────────────
+// Short-lived per-org cache (30 s) so rapid refresh / re-login doesn't
+// hammer the DB with 7 parallel queries every time.
+const BOOTSTRAP_CACHE_TTL_MS = 30_000;
+interface BootstrapCacheEntry { data: DashboardSummary; expiresAt: number }
+const bootstrapCache = new Map<string, BootstrapCacheEntry>();
 
 /**
  * Central error → HTTP response mapper.
@@ -111,6 +119,27 @@ function getUserId(req: Request): string {
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+
+  // ─── Dashboard bootstrap ────────────────────────────────────────────────────
+  // Returns only what the first dashboard paint needs: 4 counts + 2×5 recent
+  // items + org name. Runs 7 DB queries in parallel, result cached 30s per org.
+  // Governance / analytics / ops data is NOT included — load deferred widgets
+  // from their own endpoints after first paint.
+
+  app.get("/api/dashboard/bootstrap", async (req, res) => {
+    try {
+      const orgId = getOrgId(req);
+      const cached = bootstrapCache.get(orgId);
+      if (cached && cached.expiresAt > Date.now()) {
+        res.setHeader("X-Cache", "HIT");
+        return res.json(cached.data);
+      }
+      const data = await storage.getDashboardSummary(orgId);
+      bootstrapCache.set(orgId, { data, expiresAt: Date.now() + BOOTSTRAP_CACHE_TTL_MS });
+      res.setHeader("X-Cache", "MISS");
+      res.json(data);
+    } catch (err) { handleError(res, err); }
+  });
 
   // ─── Projects ───────────────────────────────────────────────────────────────
 
