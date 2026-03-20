@@ -851,3 +851,9 @@ serve-static/index.js:
    * MIT Licensed
    *)
 */
+
+// Vercel CJS compatibility: expose handler directly on module.exports
+// @vercel/node invokes module.exports as a function, not module.exports.default
+if (module.exports && module.exports.__esModule && typeof module.exports.default === 'function') {
+  module.exports = module.exports.default;
+}

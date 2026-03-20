@@ -87,7 +87,7 @@ async function buildAll() {
     platform: "node",
     bundle: true,
     format: "cjs",
-    outfile: "api/index.js",
+    outfile: "api/index.cjs",
     tsconfig: "tsconfig.json",
     define: {
       "process.env.NODE_ENV": '"production"',
@@ -99,6 +99,16 @@ async function buildAll() {
     logLevel: "info",
     banner: {
       js: "// @vercel-bundled — esbuild pre-compiled, do not edit\n",
+    },
+    footer: {
+      js: [
+        "",
+        "// Vercel CJS compatibility: expose handler directly on module.exports",
+        "// @vercel/node invokes module.exports as a function, not module.exports.default",
+        "if (module.exports && module.exports.__esModule && typeof module.exports.default === 'function') {",
+        "  module.exports = module.exports.default;",
+        "}",
+      ].join("\n"),
     },
   });
 

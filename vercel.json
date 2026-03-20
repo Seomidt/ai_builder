@@ -3,7 +3,7 @@
   "installCommand": "npm install",
   "outputDirectory": "dist/public",
   "functions": {
-    "api/index.js": {
+    "api/index.cjs": {
       "memory": 1024,
       "maxDuration": 30
     }
