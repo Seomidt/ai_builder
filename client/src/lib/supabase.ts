@@ -1,5 +1,16 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
+// Public Supabase project values — same as returned by /api/auth/config.
+// Hardcoded so the client is ready immediately at module load (no boot-blocking
+// fetch needed). VITE_ build-time vars take precedence when set.
+const SUPABASE_URL =
+  (import.meta.env.VITE_SUPABASE_URL as string | undefined) ||
+  "https://jneoimqidmkhikvusxak.supabase.co";
+
+const SUPABASE_ANON_KEY =
+  (import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined) ||
+  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpuZW9pbXFpZG1raGlrdnVzeGFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxMzcxNTgsImV4cCI6MjA4ODcxMzE1OH0.CPdFKA1jfs7OAfHCm49J7_gl3GrA2b7WLmbKWzhoY8M";
+
 const AUTH_OPTIONS = {
   auth: {
     persistSession: true,
@@ -9,53 +20,20 @@ const AUTH_OPTIONS = {
   },
 } as const;
 
-// Mutable holder — replaced by initSupabaseFromConfig() before React renders
-let _instance: SupabaseClient = createClient(
-  import.meta.env.VITE_SUPABASE_URL ?? "https://placeholder.supabase.co",
-  import.meta.env.VITE_SUPABASE_ANON_KEY ?? "placeholder-key",
+export const supabase: SupabaseClient = createClient(
+  SUPABASE_URL,
+  SUPABASE_ANON_KEY,
   AUTH_OPTIONS,
 );
 
-// Proxy that always forwards to the current _instance.
-// Safe because initSupabaseFromConfig() runs before React renders (see main.tsx).
-export const supabase = new Proxy({} as SupabaseClient, {
-  get(_target, prop) {
-    return (_instance as any)[prop];
-  },
-});
-
 /**
- * Fetches Supabase URL + anon key from /api/auth/config and reinitialises
- * the client. Called once in main.tsx with top-level await BEFORE React renders,
- * so the real client is always in place when any component first uses `supabase`.
- *
- * If VITE_ build-time vars are already set (local dev or correctly configured
- * Vercel project), this is a no-op and returns immediately.
+ * No-op kept for import compatibility.
+ * Previously fetched /api/auth/config to initialise the client at boot time,
+ * which blocked React render. Client is now initialised synchronously above
+ * using baked-in public values (safe — anon key is already public).
  */
 export async function initSupabaseFromConfig(): Promise<void> {
-  const buildUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-  const buildKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
-
-  if (buildUrl && buildKey) {
-    return;
-  }
-
-  try {
-    const res = await fetch("/api/auth/config");
-    if (!res.ok) throw new Error(`/api/auth/config returned ${res.status}`);
-    const { supabaseUrl, supabaseAnonKey } = (await res.json()) as {
-      supabaseUrl: string;
-      supabaseAnonKey: string;
-    };
-    if (supabaseUrl && supabaseAnonKey && !supabaseUrl.includes("placeholder")) {
-      _instance = createClient(supabaseUrl, supabaseAnonKey, AUTH_OPTIONS);
-      console.info("[supabase] Client initialised from /api/auth/config");
-    } else {
-      console.error("[supabase] /api/auth/config returned empty or placeholder values");
-    }
-  } catch (err) {
-    console.error("[supabase] Failed to fetch config — auth will not work:", err);
-  }
+  // intentional no-op
 }
 
 export async function getSessionToken(): Promise<string | null> {

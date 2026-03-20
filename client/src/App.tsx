@@ -1,3 +1,4 @@
+import { lazy, Suspense } from "react";
 import { Switch, Route } from "wouter";
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -6,25 +7,17 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/layout/AppShell";
 import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import { I18nProvider } from "@/components/providers/I18nProvider";
+
+// ── Eagerly loaded: core tenant pages (most frequently visited) ───────────────
 import Dashboard from "@/pages/dashboard";
 import Projects from "@/pages/projects";
 import Architectures from "@/pages/architectures";
 import Runs from "@/pages/runs";
-import RunDetail from "@/pages/run-detail";
 import Integrations from "@/pages/integrations";
 import Settings from "@/pages/settings";
 import NotFound from "@/pages/not-found";
-import OpsDashboard from "@/pages/ops/dashboard";
-import OpsTenants from "@/pages/ops/tenants";
-import OpsJobs from "@/pages/ops/jobs";
-import OpsWebhooks from "@/pages/ops/webhooks";
-import OpsAi from "@/pages/ops/ai";
-import OpsBilling from "@/pages/ops/billing";
-import OpsRecovery from "@/pages/ops/recovery";
-import OpsSecurity from "@/pages/ops/security";
-import OpsAssistant from "@/pages/ops/assistant";
-import OpsRelease from "@/pages/ops/release";
-import OpsAuthSecurity from "@/pages/ops/auth";
+
+// ── Eagerly loaded: auth pages (needed immediately on login) ──────────────────
 import AuthLogin from "@/pages/auth/login";
 import AuthPasswordResetRequest from "@/pages/auth/password-reset-request";
 import AuthPasswordResetConfirm from "@/pages/auth/password-reset-confirm";
@@ -32,44 +25,77 @@ import AuthEmailVerify from "@/pages/auth/email-verify";
 import AuthInviteAccept from "@/pages/auth/invite-accept";
 import AuthMfaChallenge from "@/pages/auth/mfa-challenge";
 import AuthCallback from "@/pages/auth/callback";
-import SecuritySettings from "@/pages/settings/security";
-import OpsStorage from "@/pages/ops/storage";
+
+// ── Lazy loaded: heavy or rarely-visited pages ────────────────────────────────
+// These are split into separate JS chunks and only downloaded on first visit.
+// Tenant users never pay the download cost for ops/admin code.
+const RunDetail        = lazy(() => import("@/pages/run-detail"));
+const SecuritySettings = lazy(() => import("@/pages/settings/security"));
+
+// Ops console — admin-only surface, completely isolated from tenant bundle
+const OpsDashboard    = lazy(() => import("@/pages/ops/dashboard"));
+const OpsTenants      = lazy(() => import("@/pages/ops/tenants"));
+const OpsJobs         = lazy(() => import("@/pages/ops/jobs"));
+const OpsWebhooks     = lazy(() => import("@/pages/ops/webhooks"));
+const OpsAi           = lazy(() => import("@/pages/ops/ai"));
+const OpsBilling      = lazy(() => import("@/pages/ops/billing"));
+const OpsRecovery     = lazy(() => import("@/pages/ops/recovery"));
+const OpsSecurity     = lazy(() => import("@/pages/ops/security"));
+const OpsAssistant    = lazy(() => import("@/pages/ops/assistant"));
+const OpsRelease      = lazy(() => import("@/pages/ops/release"));
+const OpsAuthSecurity = lazy(() => import("@/pages/ops/auth"));
+const OpsStorage      = lazy(() => import("@/pages/ops/storage"));
+
+// ── Page-level loading fallback ───────────────────────────────────────────────
+function PageLoader() {
+  return (
+    <div className="flex items-center justify-center flex-1 h-full">
+      <div className="h-6 w-6 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+    </div>
+  );
+}
 
 /**
  * Protected inner routes — only rendered when ProtectedRoute clears session.
  * AppShell (sidebar + layout) is only shown to authenticated users.
+ * Lazy pages are wrapped in Suspense so the app shell renders immediately
+ * while the route chunk downloads in the background.
  */
 function ProtectedApp() {
   return (
     <ProtectedRoute>
       <AppShell>
-        <Switch>
-          {/* Platform routes */}
-          <Route path="/" component={Dashboard} />
-          <Route path="/projects" component={Projects} />
-          <Route path="/architectures" component={Architectures} />
-          <Route path="/runs" component={Runs} />
-          <Route path="/runs/:id" component={RunDetail} />
-          <Route path="/integrations" component={Integrations} />
-          <Route path="/settings" component={Settings} />
-          <Route path="/settings/security" component={SecuritySettings} />
+        <Suspense fallback={<PageLoader />}>
+          <Switch>
+            {/* Core tenant routes — eagerly loaded */}
+            <Route path="/" component={Dashboard} />
+            <Route path="/projects" component={Projects} />
+            <Route path="/architectures" component={Architectures} />
+            <Route path="/runs" component={Runs} />
+            <Route path="/integrations" component={Integrations} />
+            <Route path="/settings" component={Settings} />
 
-          {/* Ops Console routes */}
-          <Route path="/ops" component={OpsDashboard} />
-          <Route path="/ops/tenants" component={OpsTenants} />
-          <Route path="/ops/jobs" component={OpsJobs} />
-          <Route path="/ops/webhooks" component={OpsWebhooks} />
-          <Route path="/ops/ai" component={OpsAi} />
-          <Route path="/ops/billing" component={OpsBilling} />
-          <Route path="/ops/recovery" component={OpsRecovery} />
-          <Route path="/ops/security" component={OpsSecurity} />
-          <Route path="/ops/assistant" component={OpsAssistant} />
-          <Route path="/ops/release" component={OpsRelease} />
-          <Route path="/ops/auth" component={OpsAuthSecurity} />
-          <Route path="/ops/storage" component={OpsStorage} />
+            {/* Lazy tenant routes */}
+            <Route path="/runs/:id" component={RunDetail} />
+            <Route path="/settings/security" component={SecuritySettings} />
 
-          <Route component={NotFound} />
-        </Switch>
+            {/* Ops Console routes — lazy, admin-only */}
+            <Route path="/ops" component={OpsDashboard} />
+            <Route path="/ops/tenants" component={OpsTenants} />
+            <Route path="/ops/jobs" component={OpsJobs} />
+            <Route path="/ops/webhooks" component={OpsWebhooks} />
+            <Route path="/ops/ai" component={OpsAi} />
+            <Route path="/ops/billing" component={OpsBilling} />
+            <Route path="/ops/recovery" component={OpsRecovery} />
+            <Route path="/ops/security" component={OpsSecurity} />
+            <Route path="/ops/assistant" component={OpsAssistant} />
+            <Route path="/ops/release" component={OpsRelease} />
+            <Route path="/ops/auth" component={OpsAuthSecurity} />
+            <Route path="/ops/storage" component={OpsStorage} />
+
+            <Route component={NotFound} />
+          </Switch>
+        </Suspense>
       </AppShell>
     </ProtectedRoute>
   );
@@ -80,11 +106,6 @@ function ProtectedApp() {
  *
  * Auth routes (/auth/*) are PUBLIC — no ProtectedRoute, no AppShell.
  * Every other route falls into the catch-all which applies ProtectedRoute.
- *
- * This ensures:
- * - Unauthenticated users see /auth/login (not a dashboard shell)
- * - Lockdown-blocked users see the access-denied screen
- * - The AppShell/sidebar is NEVER rendered for unauthenticated users
  */
 function Router() {
   return (
