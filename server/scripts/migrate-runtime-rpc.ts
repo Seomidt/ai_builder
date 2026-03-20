@@ -3,14 +3,14 @@
  *
  * Run once:  npx tsx server/scripts/migrate-runtime-rpc.ts
  *
- * Creates:
+ * Creates / replaces:
  *   1. get_dashboard_summary(p_org_id text) — single HTTP round-trip for dashboard
- *      bootstrap, replacing 7 parallel pg.Pool queries. SECURITY INVOKER so
- *      existing RLS SELECT policies on all tables apply automatically.
+ *      bootstrap. SECURITY INVOKER so existing RLS SELECT policies apply.
  *
  *   2. create_ai_run(p_org_id, p_project_id, ...) — atomic sequential run_number
- *      assignment per org. SECURITY DEFINER + manual membership check because
- *      the INSERT needs elevated privileges to lock the max(run_number) row.
+ *      assignment per org. SECURITY DEFINER + manual membership check.
+ *
+ * Also creates composite indexes for dashboard queries (idempotent — IF NOT EXISTS).
  *
  * Classification: D (migration/script only). NOT imported by any runtime file.
  */
@@ -33,9 +33,12 @@ async function run(): Promise<void> {
   console.log("[migrate-runtime-rpc] Connected to Postgres");
 
   // ── 1. get_dashboard_summary ──────────────────────────────────────────────
-  // SECURITY INVOKER: runs as the calling Supabase user → existing RLS SELECT
-  // policies on organizations, projects, ai_runs, architecture_profiles, and
-  // integrations apply automatically. No manual membership check needed.
+  // SECURITY INVOKER: runs as the calling Supabase user → RLS SELECT policies apply.
+  //
+  // BUG FIX (v2): removed ORDER BY inside jsonb_agg() — the column alias `r` /
+  // `p` is a jsonb value, NOT a row type, so r."createdAt" is invalid SQL.
+  // The subquery ORDER BY created_at DESC + LIMIT 5 already guarantees order;
+  // jsonb_agg() aggregates rows in the order they arrive from the subquery.
 
   await client.query(`
     CREATE OR REPLACE FUNCTION get_dashboard_summary(p_org_id text)
@@ -68,11 +71,14 @@ async function run(): Promise<void> {
       SELECT COUNT(*) INTO v_int_count
         FROM integrations WHERE organization_id = p_org_id AND status = 'active';
 
-      SELECT COALESCE(jsonb_agg(r ORDER BY r."createdAt" DESC), '[]'::jsonb) INTO v_recent_runs
+      -- FIX v2: jsonb_agg(r) without ORDER BY clause.
+      -- "r" is a jsonb value alias, not a row type. r."createdAt" is invalid SQL.
+      -- Order is guaranteed by the inner ORDER BY created_at DESC LIMIT 5.
+      SELECT COALESCE(jsonb_agg(r), '[]'::jsonb) INTO v_recent_runs
         FROM (
           SELECT jsonb_build_object(
-            'id', id,
-            'status', status,
+            'id',        id,
+            'status',    status,
             'createdAt', created_at
           ) AS r
           FROM ai_runs
@@ -81,12 +87,12 @@ async function run(): Promise<void> {
           LIMIT 5
         ) sub;
 
-      SELECT COALESCE(jsonb_agg(p ORDER BY p."updatedAt" DESC), '[]'::jsonb) INTO v_recent_projects
+      SELECT COALESCE(jsonb_agg(p), '[]'::jsonb) INTO v_recent_projects
         FROM (
           SELECT jsonb_build_object(
-            'id', id,
-            'name', name,
-            'status', status,
+            'id',        id,
+            'name',      name,
+            'status',    status,
             'updatedAt', updated_at
           ) AS p
           FROM projects
@@ -107,13 +113,10 @@ async function run(): Promise<void> {
     END;
     $$;
   `);
-  console.log("[migrate-runtime-rpc] ✓ Created get_dashboard_summary");
+  console.log("[migrate-runtime-rpc] ✓ get_dashboard_summary (v2 — bug fixed)");
 
   // ── 2. create_ai_run ──────────────────────────────────────────────────────
-  // SECURITY DEFINER: needs elevated privileges to atomically read MAX(run_number)
-  // and insert the new row in a single execution context (no separate transaction
-  // needed in PL/pgSQL — function body is implicitly atomic). Manual membership
-  // check guards against spoofed p_org_id from unauthenticated callers.
+  // SECURITY DEFINER: elevated privileges for atomic MAX(run_number) + INSERT.
 
   await client.query(`
     CREATE OR REPLACE FUNCTION create_ai_run(
@@ -138,10 +141,6 @@ async function run(): Promise<void> {
       v_new_id   text;
       v_result   jsonb;
     BEGIN
-      -- Manual auth guard: caller must be a member of the org.
-      -- auth.uid() is set by PostgREST from the JWT header.
-      -- Internal callers via INTERNAL_API_SECRET pass a non-Supabase token;
-      -- in that case auth.uid() is NULL and we trust the server-side validation.
       IF auth.uid() IS NOT NULL THEN
         IF NOT EXISTS (
           SELECT 1 FROM organization_members
@@ -151,7 +150,6 @@ async function run(): Promise<void> {
         END IF;
       END IF;
 
-      -- Atomic sequential run_number per org
       SELECT COALESCE(MAX(run_number), 0) + 1 INTO v_next_num
         FROM ai_runs WHERE organization_id = p_org_id;
 
@@ -172,10 +170,42 @@ async function run(): Promise<void> {
     END;
     $$;
   `);
-  console.log("[migrate-runtime-rpc] ✓ Created create_ai_run");
+  console.log("[migrate-runtime-rpc] ✓ create_ai_run");
+
+  // ── 3. Composite indexes for dashboard queries ────────────────────────────
+  // These make the RPC's 7 sequential inner SELECTs index-only scans.
+  // All CREATE INDEX ... IF NOT EXISTS — safe to re-run.
+
+  const indexes = [
+    // COUNT WHERE org AND status (removes double-index-scan for bi-column filter)
+    `CREATE INDEX IF NOT EXISTS idx_projects_org_status
+       ON projects(organization_id, status)
+       WHERE status = 'active'`,
+    `CREATE INDEX IF NOT EXISTS idx_ai_runs_org_status
+       ON ai_runs(organization_id, status)
+       WHERE status IN ('running', 'pending')`,
+    `CREATE INDEX IF NOT EXISTS idx_arch_profiles_org_status
+       ON architecture_profiles(organization_id, status)
+       WHERE status = 'active'`,
+    `CREATE INDEX IF NOT EXISTS idx_integrations_org_status
+       ON integrations(organization_id, status)
+       WHERE status = 'active'`,
+    // ORDER BY created_at / updated_at DESC LIMIT 5 (covering index → index-only scan)
+    `CREATE INDEX IF NOT EXISTS idx_ai_runs_org_created
+       ON ai_runs(organization_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_projects_org_updated
+       ON projects(organization_id, updated_at DESC)`,
+  ];
+
+  for (const sql of indexes) {
+    const name = sql.match(/IF NOT EXISTS (\S+)/)?.[1] ?? "?";
+    const t0 = Date.now();
+    await client.query(sql);
+    console.log(`[migrate-runtime-rpc] ✓ index ${name} (${Date.now() - t0}ms)`);
+  }
 
   await client.end();
-  console.log("[migrate-runtime-rpc] Done — both RPC functions are live in Supabase.");
+  console.log("[migrate-runtime-rpc] Done.");
 }
 
 run().catch((err) => {
