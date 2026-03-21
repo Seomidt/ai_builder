@@ -200,6 +200,15 @@ function setCachedMember(userId: string, organizationId: string, role: string): 
   memberCache.set(userId, { organizationId, role, exp: Date.now() + MEMBER_CACHE_TTL_MS });
 }
 
+// ── Platform admin email whitelist ────────────────────────────────────────────
+// Emails that are granted platform_admin role unconditionally after Supabase
+// token verification. Add platform operators here — no DB schema change needed.
+// Cached the same way as org members (30 s TTL via memberCache).
+
+const PLATFORM_ADMIN_EMAILS = new Set([
+  "seomidt@gmail.com",
+]);
+
 // ── Demo mode guard ───────────────────────────────────────────────────────────
 
 function isDemoModeEnabled(): boolean {
@@ -309,6 +318,18 @@ export async function authMiddleware(
       message: "Authentication check failed. Please try again.",
     });
     return;
+  }
+
+  // ── Platform admin whitelist: short-circuit before org lookup ────────────────
+  if (supabaseUser.email && PLATFORM_ADMIN_EMAILS.has(supabaseUser.email.toLowerCase())) {
+    req.user = {
+      id: supabaseUser.id,
+      email: supabaseUser.email,
+      organizationId: "platform",
+      role: "platform_admin",
+    };
+    req.resolvedActor = mapCurrentUserToCanonicalActor(req.user);
+    return next();
   }
 
   // ── Step 2: look up org membership (cached, non-fatal if DB unavailable) ──

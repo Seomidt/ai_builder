@@ -1,5 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
+import { db } from "../db";
+import { sql } from "drizzle-orm";
 import { runAiOpsQuery } from "../lib/ai-ops/orchestrator";
 import { generateWeeklyDigest } from "../lib/ai-ops/digest";
 import { getOpsSummary, invalidateOpsSummaryCache } from "../lib/ai-ops/ops-summary";
@@ -435,5 +437,60 @@ export function registerAdminRoutes(app: Express): void {
       d.hardLimitPct,
     );
     res.json({ data: result });
+  });
+
+  // ── UI data endpoints (governance pages) ─────────────────────────────────
+
+  // List anomaly events (newest first)
+  app.get("/api/admin/governance/anomalies", async (req: Request, res: Response) => {
+    const limit = Math.min(parseInt(String(req.query.limit ?? "100"), 10), 500);
+    const organizationId = req.query.organizationId as string | undefined;
+    try {
+      const rows = await db.execute(sql`
+        SELECT id, organization_id, anomaly_type, detected_at, window_minutes,
+               baseline_value::text  AS baseline_value,
+               observed_value::text  AS observed_value,
+               deviation_pct::text   AS deviation_pct,
+               severity, is_confirmed, linked_alert_id, metadata
+        FROM   ai_anomaly_events
+        ${organizationId ? sql`WHERE organization_id = ${organizationId}` : sql``}
+        ORDER BY detected_at DESC
+        LIMIT  ${sql.raw(String(limit))}
+      `);
+      res.json({ data: rows.rows });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Anomaly list failed" });
+    }
+  });
+
+  // List usage snapshots (newest first)
+  app.get("/api/admin/governance/snapshots-list", async (req: Request, res: Response) => {
+    const limit = Math.min(parseInt(String(req.query.limit ?? "100"), 10), 500);
+    const organizationId = req.query.organizationId as string | undefined;
+    try {
+      const rows = await db.execute(sql`
+        SELECT id, organization_id, period_start, period_end, period_type,
+               total_tokens, prompt_tokens, completion_tokens,
+               total_cost_usd_cents, request_count, failed_request_count,
+               model_breakdown, snapshot_at
+        FROM   tenant_ai_usage_snapshots
+        ${organizationId ? sql`WHERE organization_id = ${organizationId}` : sql``}
+        ORDER BY snapshot_at DESC
+        LIMIT  ${sql.raw(String(limit))}
+      `);
+      res.json({ data: rows.rows });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Snapshot list failed" });
+    }
+  });
+
+  // Platform-wide runaway protection status (read-only — no writes)
+  app.get("/api/admin/governance/runaway-status", async (_req: Request, res: Response) => {
+    try {
+      const results = await checkAllRunawayProtection();
+      res.json({ data: results });
+    } catch (err) {
+      res.status(500).json({ error: err instanceof Error ? err.message : "Runaway status failed" });
+    }
   });
 }

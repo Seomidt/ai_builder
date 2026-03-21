@@ -1,132 +1,90 @@
-import { lazy, Suspense } from "react";
-import { Switch, Route } from "wouter";
+/**
+ * App — Root entry point with canonical 3-surface domain split.
+ *
+ * CANONICAL DOMAIN MODEL:
+ *   blissops.com          → MarketingApp  (public site, no auth shell)
+ *   www.blissops.com      → MarketingApp
+ *   app.blissops.com      → TenantApp     (authenticated product surface)
+ *   admin.blissops.com    → AdminApp      (platform operations surface)
+ *
+ * LOCAL DEV:
+ *   localhost             → TenantApp     (primary dev surface)
+ *   app.localhost         → TenantApp
+ *   admin.localhost       → AdminApp
+ *
+ * ROUTING STRATEGY:
+ *   - marketing: MarketingApp handles everything (incl. /auth/* redirect to app domain)
+ *   - tenant:    Auth routes registered + TenantApp catch-all
+ *   - admin:     Auth routes registered + AdminApp catch-all
+ *
+ * SECURITY:
+ *   Domain controls UI surface selection ONLY.
+ *   Backend authorization (AdminRoute + /api/auth/session) remains mandatory.
+ *   NEVER trust hostname for access control decisions.
+ */
+
 import { queryClient } from "./lib/queryClient";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { AppShell } from "@/components/layout/AppShell";
-import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
-import { AdminRoute } from "@/components/auth/AdminRoute";
 import { I18nProvider } from "@/components/providers/I18nProvider";
+import { Switch, Route } from "wouter";
+import { getAppContext } from "@/lib/runtime/domain";
 
-// ── Eagerly loaded: core tenant pages (most frequently visited) ───────────────
-import Dashboard from "@/pages/dashboard";
-import Projects from "@/pages/projects";
-import Architectures from "@/pages/architectures";
-import Runs from "@/pages/runs";
-import NotFound from "@/pages/not-found";
-
-// ── Eagerly loaded: auth pages (needed immediately on login) ──────────────────
-import AuthLogin from "@/pages/auth/login";
+// ── Auth pages — registered on tenant + admin domains ─────────────────────────
+import AuthLogin               from "@/pages/auth/login";
 import AuthPasswordResetRequest from "@/pages/auth/password-reset-request";
 import AuthPasswordResetConfirm from "@/pages/auth/password-reset-confirm";
-import AuthEmailVerify from "@/pages/auth/email-verify";
-import AuthInviteAccept from "@/pages/auth/invite-accept";
-import AuthMfaChallenge from "@/pages/auth/mfa-challenge";
-import AuthCallback from "@/pages/auth/callback";
+import AuthEmailVerify          from "@/pages/auth/email-verify";
+import AuthInviteAccept         from "@/pages/auth/invite-accept";
+import AuthMfaChallenge         from "@/pages/auth/mfa-challenge";
+import AuthCallback             from "@/pages/auth/callback";
 
-// ── Lazy loaded: tenant detail pages ─────────────────────────────────────────
-const RunDetail = lazy(() => import("@/pages/run-detail"));
+// ── Domain-split app shells ───────────────────────────────────────────────────
+import { MarketingApp } from "@/apps/marketing/MarketingApp";
+import { AdminApp }     from "@/apps/admin/AdminApp";
+import { TenantApp }    from "@/apps/tenant/TenantApp";
 
-// ── Lazy loaded: admin-only pages — never downloaded by tenant users ──────────
-// Split into separate JS chunks: tenant bundle stays lean.
-const Integrations    = lazy(() => import("@/pages/integrations"));
-const Settings        = lazy(() => import("@/pages/settings"));
-const SecuritySettings = lazy(() => import("@/pages/settings/security"));
+// Computed once at boot — hostname does not change during a session.
+const appContext = getAppContext(window.location.hostname);
 
-// Ops console — admin-only surface, completely isolated from tenant bundle
-const OpsDashboard    = lazy(() => import("@/pages/ops/dashboard"));
-const OpsTenants      = lazy(() => import("@/pages/ops/tenants"));
-const OpsJobs         = lazy(() => import("@/pages/ops/jobs"));
-const OpsWebhooks     = lazy(() => import("@/pages/ops/webhooks"));
-const OpsAi           = lazy(() => import("@/pages/ops/ai"));
-const OpsBilling      = lazy(() => import("@/pages/ops/billing"));
-const OpsRecovery     = lazy(() => import("@/pages/ops/recovery"));
-const OpsSecurity     = lazy(() => import("@/pages/ops/security"));
-const OpsAssistant    = lazy(() => import("@/pages/ops/assistant"));
-const OpsRelease      = lazy(() => import("@/pages/ops/release"));
-const OpsAuthSecurity = lazy(() => import("@/pages/ops/auth"));
-const OpsStorage      = lazy(() => import("@/pages/ops/storage"));
-
-// ── Page-level loading fallback ───────────────────────────────────────────────
-function PageLoader() {
-  return (
-    <div className="flex items-center justify-center flex-1 h-full">
-      <div className="h-6 w-6 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-    </div>
-  );
+/**
+ * Marketing router: MarketingApp handles ALL routes (incl. /auth/* redirect).
+ * No auth shell, no sidebar, no tenant/admin routes.
+ */
+function MarketingRouter() {
+  return <MarketingApp />;
 }
 
 /**
- * Protected inner routes — only rendered when ProtectedRoute clears session.
- * AppShell (sidebar + layout) is only shown to authenticated users.
- * Lazy pages are wrapped in Suspense so the app shell renders immediately
- * while the route chunk downloads in the background.
+ * Authenticated routers (tenant + admin): auth pages first, then app shell.
+ * Auth routes are registered so ProtectedRoute/AdminRoute redirects work correctly.
  */
-function ProtectedApp() {
-  return (
-    <ProtectedRoute>
-      <AppShell>
-        <Suspense fallback={<PageLoader />}>
-          <Switch>
-            {/* Core tenant routes — eagerly loaded, no admin guard */}
-            <Route path="/" component={Dashboard} />
-            <Route path="/projects" component={Projects} />
-            <Route path="/architectures" component={Architectures} />
-            <Route path="/runs" component={Runs} />
-
-            {/* Lazy tenant route */}
-            <Route path="/runs/:id" component={RunDetail} />
-
-            {/* Admin-only routes — lazy, wrapped with AdminRoute */}
-            <Route path="/integrations"       component={() => <AdminRoute><Integrations /></AdminRoute>} />
-            <Route path="/settings"           component={() => <AdminRoute><Settings /></AdminRoute>} />
-            <Route path="/settings/security"  component={() => <AdminRoute><SecuritySettings /></AdminRoute>} />
-
-            {/* Ops Console routes — lazy, platform_admin only */}
-            <Route path="/ops"           component={() => <AdminRoute><OpsDashboard /></AdminRoute>} />
-            <Route path="/ops/tenants"   component={() => <AdminRoute><OpsTenants /></AdminRoute>} />
-            <Route path="/ops/jobs"      component={() => <AdminRoute><OpsJobs /></AdminRoute>} />
-            <Route path="/ops/webhooks"  component={() => <AdminRoute><OpsWebhooks /></AdminRoute>} />
-            <Route path="/ops/ai"        component={() => <AdminRoute><OpsAi /></AdminRoute>} />
-            <Route path="/ops/billing"   component={() => <AdminRoute><OpsBilling /></AdminRoute>} />
-            <Route path="/ops/recovery"  component={() => <AdminRoute><OpsRecovery /></AdminRoute>} />
-            <Route path="/ops/security"  component={() => <AdminRoute><OpsSecurity /></AdminRoute>} />
-            <Route path="/ops/assistant" component={() => <AdminRoute><OpsAssistant /></AdminRoute>} />
-            <Route path="/ops/release"   component={() => <AdminRoute><OpsRelease /></AdminRoute>} />
-            <Route path="/ops/auth"      component={() => <AdminRoute><OpsAuthSecurity /></AdminRoute>} />
-            <Route path="/ops/storage"   component={() => <AdminRoute><OpsStorage /></AdminRoute>} />
-
-            <Route component={NotFound} />
-          </Switch>
-        </Suspense>
-      </AppShell>
-    </ProtectedRoute>
-  );
-}
-
-/**
- * Top-level router.
- *
- * Auth routes (/auth/*) are PUBLIC — no ProtectedRoute, no AppShell.
- * Every other route falls into the catch-all which applies ProtectedRoute.
- */
-function Router() {
+function AuthenticatedRouter() {
   return (
     <Switch>
-      {/* Public auth routes — no guard, no sidebar */}
-      <Route path="/auth/login" component={AuthLogin} />
-      <Route path="/auth/password-reset" component={AuthPasswordResetRequest} />
+      {/* Auth routes — Supabase callbacks, login, reset, invite, MFA */}
+      <Route path="/auth/login"                  component={AuthLogin} />
+      <Route path="/auth/password-reset"         component={AuthPasswordResetRequest} />
       <Route path="/auth/password-reset-confirm" component={AuthPasswordResetConfirm} />
-      <Route path="/auth/email-verify" component={AuthEmailVerify} />
-      <Route path="/auth/invite-accept" component={AuthInviteAccept} />
-      <Route path="/auth/callback" component={AuthCallback} />
-      <Route path="/auth/mfa-challenge" component={AuthMfaChallenge} />
+      <Route path="/auth/email-verify"           component={AuthEmailVerify} />
+      <Route path="/auth/invite-accept"          component={AuthInviteAccept} />
+      <Route path="/auth/callback"               component={AuthCallback} />
+      <Route path="/auth/mfa-challenge"          component={AuthMfaChallenge} />
 
-      {/* All other routes — protected (session required) */}
-      <Route component={ProtectedApp} />
+      {/* Domain-split catch-all */}
+      <Route>
+        {() => appContext === "admin" ? <AdminApp /> : <TenantApp />}
+      </Route>
     </Switch>
   );
+}
+
+function Router() {
+  if (appContext === "marketing") {
+    return <MarketingRouter />;
+  }
+  return <AuthenticatedRouter />;
 }
 
 function App() {

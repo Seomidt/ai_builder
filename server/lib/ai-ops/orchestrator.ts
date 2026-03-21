@@ -20,6 +20,14 @@ import {
   buildBillingHealthContext,
   buildStorageHealthContext,
   buildSecurityContext,
+  type PlatformHealthContext,
+  type TenantUsageContext,
+  type AiCostContext,
+  type AnomalyContext,
+  type BillingHealthContext,
+  type RetentionContext,
+  type StorageHealthContext,
+  type SecurityContext,
 } from "./context-assembler";
 import { validateOpsResponse, makeBaseResponse, type OpsResponseBase } from "./response-contracts";
 import { assertAiOpsSafeContext, assertAiOpsOutputSafe, assertNoForbiddenIntent, assertNoRawTenantContent } from "./safety";
@@ -71,6 +79,108 @@ Produce a JSON object with these fields:
 - [intent-specific fields as required]
 
 Stay grounded. Only reference what is in the context above.`;
+}
+
+function injectIntentDefaults(
+  intent: OpsIntentId,
+  context: unknown,
+  scope: AiOpsScope,
+  enriched: Record<string, unknown>,
+): void {
+  switch (intent) {
+    case OPS_INTENT.PLATFORM_HEALTH_SUMMARY: {
+      const ctx = context as PlatformHealthContext;
+      if (enriched.activeAnomalies === undefined) enriched.activeAnomalies = ctx.recentAnomalyCount ?? 0;
+      if (enriched.systemStatus === undefined) enriched.systemStatus = ctx.systemStatus ?? "unknown";
+      break;
+    }
+    case OPS_INTENT.TENANT_USAGE_SUMMARY: {
+      const ctx = context as TenantUsageContext;
+      if (enriched.tenantId === undefined) enriched.tenantId = ctx.tenantId ?? scope.tenantId ?? "";
+      if (enriched.tokensConsumedTotal === undefined) {
+        enriched.tokensConsumedTotal = ctx.recentSnapshots?.reduce(
+          (s, r) => s + (r.tokensIn ?? 0) + (r.tokensOut ?? 0), 0
+        ) ?? 0;
+      }
+      if (enriched.estimatedCostUsd === undefined) {
+        enriched.estimatedCostUsd = ctx.recentSnapshots?.reduce(
+          (s, r) => s + parseFloat(r.costUsd ?? "0"), 0
+        ) ?? 0;
+      }
+      break;
+    }
+    case OPS_INTENT.AI_COST_SUMMARY: {
+      const ctx = context as AiCostContext;
+      if (enriched.totalCostUsd === undefined) enriched.totalCostUsd = ctx.totalSnapshotCostUsd ?? 0;
+      if (enriched.activeAlerts === undefined) enriched.activeAlerts = ctx.recentAlerts?.length ?? 0;
+      if (enriched.tenantsOverBudget === undefined) enriched.tenantsOverBudget = ctx.recentAlerts?.length ?? 0;
+      if (enriched.topCostDrivers === undefined) enriched.topCostDrivers = [];
+      break;
+    }
+    case OPS_INTENT.ANOMALY_EXPLANATION: {
+      const ctx = context as AnomalyContext;
+      if (enriched.anomalyCount === undefined) enriched.anomalyCount = ctx.anomalies?.length ?? 0;
+      if (enriched.mostRecentAnomalyAt === undefined) {
+        enriched.mostRecentAnomalyAt = ctx.anomalies?.[0]?.createdAt ?? null;
+      }
+      if (enriched.anomalyTypes === undefined) {
+        enriched.anomalyTypes = [...new Set(ctx.anomalies?.map((a) => a.eventType) ?? [])];
+      }
+      break;
+    }
+    case OPS_INTENT.BILLING_HEALTH_SUMMARY: {
+      const ctx = context as BillingHealthContext;
+      if (enriched.activeSubscriptions === undefined) {
+        enriched.activeSubscriptions = ctx.subscriptionStatusCounts?.["active"] ?? 0;
+      }
+      if (enriched.pastDueSubscriptions === undefined) {
+        enriched.pastDueSubscriptions = ctx.subscriptionStatusCounts?.["past_due"] ?? 0;
+      }
+      if (enriched.overdueInvoices === undefined) enriched.overdueInvoices = ctx.overdueCount ?? 0;
+      if (enriched.totalDueUsd === undefined) enriched.totalDueUsd = 0;
+      break;
+    }
+    case OPS_INTENT.RETENTION_SUMMARY: {
+      const ctx = context as RetentionContext;
+      if (enriched.activeUsersLast7d === undefined) enriched.activeUsersLast7d = ctx.retentionEvents ?? 0;
+      if (enriched.activeUsersLast30d === undefined) enriched.activeUsersLast30d = ctx.productEvents ?? 0;
+      if (enriched.churnSignals === undefined) enriched.churnSignals = [];
+      break;
+    }
+    case OPS_INTENT.SUPPORT_DEBUG_SUMMARY: {
+      if (enriched.tenantId === undefined) enriched.tenantId = scope.tenantId ?? "";
+      if (enriched.recentAlertCount === undefined) enriched.recentAlertCount = 0;
+      if (enriched.recentAnomalyCount === undefined) enriched.recentAnomalyCount = 0;
+      if (enriched.debugSignals === undefined) enriched.debugSignals = [];
+      break;
+    }
+    case OPS_INTENT.SECURITY_SUMMARY: {
+      const ctx = context as SecurityContext;
+      if (enriched.totalSecurityEvents === undefined) enriched.totalSecurityEvents = ctx.totalEvents ?? 0;
+      if (enriched.criticalEventCount === undefined) enriched.criticalEventCount = ctx.criticalCount ?? 0;
+      if (enriched.eventsByType === undefined) enriched.eventsByType = ctx.eventTypeCounts ?? {};
+      break;
+    }
+    case OPS_INTENT.STORAGE_HEALTH_SUMMARY: {
+      const ctx = context as StorageHealthContext;
+      if (enriched.totalFiles === undefined) enriched.totalFiles = ctx.totalFiles ?? 0;
+      if (enriched.totalBytes === undefined) enriched.totalBytes = ctx.totalBytes ?? 0;
+      if (enriched.orgCount === undefined) enriched.orgCount = ctx.orgCount ?? 0;
+      break;
+    }
+    case OPS_INTENT.WEEKLY_OPS_DIGEST: {
+      const now = new Date();
+      const weekAgo = new Date(now.getTime() - 7 * 86400_000);
+      if (enriched.weekStart === undefined) enriched.weekStart = weekAgo.toISOString().split("T")[0];
+      if (enriched.weekEnd === undefined) enriched.weekEnd = now.toISOString().split("T")[0];
+      if (enriched.highlights === undefined) enriched.highlights = [];
+      if (enriched.newAnomalies === undefined) enriched.newAnomalies = 0;
+      if (enriched.billingIssues === undefined) enriched.billingIssues = 0;
+      break;
+    }
+    default:
+      break;
+  }
 }
 
 async function assembleContext(intent: OpsIntentId, scope: AiOpsScope): Promise<{ context: unknown; sourceIds: AiOpsSourceId[] }> {
@@ -188,6 +298,8 @@ export async function runAiOpsQuery(input: OrchestratorInput): Promise<Orchestra
       dataFreshness: new Date().toISOString(),
       generatedAt: new Date().toISOString(),
     };
+
+    injectIntentDefaults(intentId, context, scope, enriched);
 
     const validated = validateOpsResponse(intentId, enriched);
 

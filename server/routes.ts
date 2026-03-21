@@ -89,6 +89,9 @@ function handleError(res: Response, error: unknown, requestId?: string | null) {
     // Phase 13.1: never expose stack traces — only message, and only if safe
     const status = error.message.toLowerCase().includes("not found") ? 404 : 500;
     const message = status === 404 ? error.message : "Internal server error";
+    if (status === 500) {
+      console.error("[handleError] 500:", error.message, error.stack?.split("\n")[1]?.trim());
+    }
     return res.status(status).json({
       error_code: status === 404 ? "NOT_FOUND" : "INTERNAL_ERROR",
       message,
@@ -109,6 +112,20 @@ function getOrgId(req: Request): string {
 
 function getUserId(req: Request): string {
   return req.user?.id ?? "system";
+}
+
+function checkAdminRole(req: Request, res: Response): boolean {
+  const role = req.user?.role;
+  if (!role) {
+    res.status(401).json({ error_code: "UNAUTHORIZED", message: "Authentication required." });
+    return false;
+  }
+  const elevated = ["owner", "superadmin", "platform_admin"];
+  if (!elevated.includes(role)) {
+    res.status(403).json({ error_code: "FORBIDDEN", message: "Elevated role required." });
+    return false;
+  }
+  return true;
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
@@ -419,8 +436,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/config/status", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       // Return only boolean connection flags — never expose env values or identifiers
       res.json({
         database: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
@@ -562,8 +578,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // GET /api/admin/security/health — security observability (admin-only, read-only)
   app.get("/api/admin/security/health", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       const health = await getSecurityHealth();
       return res.json(health);
     } catch (err) {
@@ -574,8 +589,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // GET /api/admin/security/events — tenant-scoped security events
   app.get("/api/admin/security/events", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       const tenantId = req.user?.organizationId;
       if (!tenantId) return res.status(400).json({ error_code: "MISSING_TENANT", message: "No tenant context" });
       const eventType = req.query.event_type as SecurityEventType | undefined;
@@ -590,8 +604,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // GET /api/admin/security/events/recent — recent events across all tenants (admin)
   app.get("/api/admin/security/events/recent", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 100;
       const events = await listRecentSecurityEvents({ limit });
       return res.json({ events, count: events.length });
@@ -603,8 +616,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // POST /api/admin/security/preview/sanitize — read-only sanitization preview
   app.post("/api/admin/security/preview/sanitize", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       const input = req.body?.input;
       if (typeof input === "string") {
         const sanitized = sanitizeInput(input);
@@ -635,8 +647,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // POST /api/admin/security/preview/rate-limit-context — read-only rate limit context
   app.post("/api/admin/security/preview/rate-limit-context", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       const config = getRateLimitConfig();
       const actorId = req.user?.id ?? null;
       const keyType = actorId && !actorId.startsWith("demo-") ? "actor_id" : "ip";
@@ -708,6 +719,261 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
       await updateTenantLocale(tenantId, update);
       return res.json({ ok: true, updated: update });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // ─── Tenant Surface Routes ────────────────────────────────────────────────────
+
+  // GET /api/tenant/settings — full tenant settings (locale + AI config)
+  app.get("/api/tenant/settings", async (req: Request, res: Response) => {
+    try {
+      const tenantId = (req.user as any)?.organizationId ?? (req.query.tenantId as string);
+      if (!tenantId) return res.status(400).json({ error_code: "MISSING_TENANT", message: "No tenant context" });
+      const { getTenantLocale } = await import("./lib/i18n/locale-service");
+      const locale = await getTenantLocale(tenantId);
+      return res.json({
+        tenant: {
+          defaultLanguage:  (locale as any)?.language  ?? "en",
+          defaultLocale:    (locale as any)?.locale     ?? "en-US",
+          currency:         (locale as any)?.currency   ?? "USD",
+          timezone:         (locale as any)?.timezone   ?? "UTC",
+          aiModel:          "gpt-4o",
+          maxTokensPerRun:  100_000,
+        },
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // GET /api/tenant/dashboard — aggregate metrics for tenant overview
+  app.get("/api/tenant/dashboard", async (req: Request, res: Response) => {
+    try {
+      const orgId   = getOrgId(req);
+      const storage = createStorageForRequest(req);
+      const [projects, runs, integrations] = await Promise.all([
+        storage.listProjects(orgId),
+        storage.listRuns(orgId),
+        storage.listIntegrations(orgId),
+      ]);
+      return res.json({
+        metrics: {
+          totalProjects:      projects.length,
+          activeRuns:         runs.filter((r) => r.status === "running").length,
+          failedRuns:         runs.filter((r) => r.status === "failed").length,
+          activeIntegrations: integrations.filter((i) => i.status === "active").length,
+          totalRuns:          runs.length,
+        },
+        recentRuns: runs.slice(0, 5).map((r) => ({
+          id: r.id, status: r.status, projectId: r.projectId, createdAt: r.createdAt,
+        })),
+        integrationHealth: integrations.slice(0, 6).map((i) => ({
+          id: i.id, provider: i.provider, status: i.status,
+        })),
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // GET /api/tenant/ai/runs — cursor-paginated AI runs for the tenant
+  app.get("/api/tenant/ai/runs", async (req: Request, res: Response) => {
+    try {
+      const orgId   = getOrgId(req);
+      const status  = req.query.status as string | undefined;
+      const limit   = Math.min(parseInt(String(req.query.limit ?? "20"), 10), 100);
+      const cursor  = req.query.cursor as string | undefined;
+
+      const filters: { status?: AiRunStatus } = {};
+      if (status && status !== "all") filters.status = status as AiRunStatus;
+
+      const allRuns = await createStorageForRequest(req).listRuns(orgId, filters);
+      let startIdx  = 0;
+      if (cursor) {
+        const idx = allRuns.findIndex((r) => r.id === cursor);
+        if (idx !== -1) startIdx = idx + 1;
+      }
+      const page       = allRuns.slice(startIdx, startIdx + limit);
+      const nextCursor = page.length === limit && startIdx + limit < allRuns.length
+        ? page[page.length - 1].id
+        : null;
+      return res.json({ runs: page, nextCursor, total: allRuns.length });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // GET /api/tenant/usage — token/cost usage summary + daily trends by period
+  app.get("/api/tenant/usage", async (req: Request, res: Response) => {
+    try {
+      const orgId  = getOrgId(req);
+      const period = (req.query.period as string) ?? "30d";
+      const days   = period === "7d" ? 7 : period === "90d" ? 90 : 30;
+      const since  = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+
+      const { getLatestSnapshot } = await import("./lib/ai-governance/usage-snapshotter");
+      const snapshot = await getLatestSnapshot(orgId, "monthly");
+
+      const runs     = await createStorageForRequest(req).listRuns(orgId);
+      const filtered = runs.filter((r) => new Date(r.createdAt) >= since);
+
+      const byDay: Record<string, { day: string; requests: number; costUsd: number }> = {};
+      for (const run of filtered) {
+        const day = new Date(run.createdAt).toISOString().slice(0, 10);
+        if (!byDay[day]) byDay[day] = { day, requests: 0, costUsd: 0 };
+        byDay[day].requests++;
+      }
+
+      return res.json({
+        tenantId: orgId,
+        period,
+        summary: {
+          tokensIn:    snapshot ? Number(snapshot.promptTokens)     : 0,
+          tokensOut:   snapshot ? Number(snapshot.completionTokens) : 0,
+          costUsd:     snapshot ? Number(snapshot.totalCostUsdCents) / 100 : 0,
+          requests:    snapshot ? snapshot.requestCount             : filtered.length,
+          modelsUsed:  snapshot ? Object.keys(snapshot.modelBreakdown ?? {}).length : 0,
+        },
+        daily: Object.values(byDay).sort((a, b) => a.day.localeCompare(b.day)),
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // GET /api/tenant/billing — budget and spend overview from governance tables
+  app.get("/api/tenant/billing", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { checkTenantBudget } = await import("./lib/ai-governance/budget-checker");
+      const result = await checkTenantBudget(orgId, "monthly");
+
+      if (!result) {
+        return res.json({
+          tenantId:              orgId,
+          budget:                null,
+          currentMonthSpendUsd:  0,
+          utilizationPercent:    0,
+          retrievedAt:           new Date().toISOString(),
+        });
+      }
+
+      return res.json({
+        tenantId: orgId,
+        budget: {
+          monthlyBudgetUsd:  Number(result.budgetUsdCents) / 100,
+          dailyBudgetUsd:    null,
+          softLimitPercent:  result.warningThresholdPct,
+          hardLimitPercent:  result.hardLimitPct,
+          updatedAt:         new Date().toISOString(),
+        },
+        currentMonthSpendUsd: Number(result.currentUsageUsdCents) / 100,
+        utilizationPercent:   Math.round(result.utilizationPct),
+        retrievedAt:          new Date().toISOString(),
+      });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // GET /api/tenant/team — org members list with cursor pagination
+  app.get("/api/tenant/team", async (req: Request, res: Response) => {
+    try {
+      const orgId  = getOrgId(req);
+      const limit  = Math.min(parseInt(String(req.query.limit ?? "20"), 10), 100);
+      const cursor = req.query.cursor as string | undefined;
+
+      const { db }                  = await import("./db");
+      const { organizationMembers } = await import("@shared/schema");
+      const { eq, gt, and }         = await import("drizzle-orm");
+
+      const conditions = [eq(organizationMembers.organizationId, orgId)];
+      if (cursor) conditions.push(gt(organizationMembers.id, cursor));
+
+      const rows = await db
+        .select()
+        .from(organizationMembers)
+        .where(and(...conditions))
+        .limit(limit + 1);
+
+      const hasMore   = rows.length > limit;
+      const members   = hasMore ? rows.slice(0, limit) : rows;
+      const nextCursor = hasMore ? members[members.length - 1].id : null;
+
+      return res.json({ members, nextCursor, total: members.length });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // POST /api/tenant/team/invite — invite a new member via Supabase
+  app.post("/api/tenant/team/invite", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { email, role } = req.body as { email?: string; role?: string };
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({ error_code: "INVALID_EMAIL", message: "A valid email is required" });
+      }
+      const memberRole = role === "owner" ? "owner" : "member";
+
+      const { createClient } = await import("@supabase/supabase-js");
+      const supabaseAdmin = createClient(
+        process.env.SUPABASE_URL!,
+        process.env.SUPABASE_SERVICE_ROLE_KEY!,
+        { auth: { autoRefreshToken: false, persistSession: false } },
+      );
+      const { error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
+        data: { organizationId: orgId, role: memberRole },
+      });
+      if (error) return res.status(400).json({ error_code: "INVITE_FAILED", message: error.message });
+      return res.json({ ok: true, email, role: memberRole });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // GET /api/tenant/audit — paginated tenant-scoped audit events
+  app.get("/api/tenant/audit", async (req: Request, res: Response) => {
+    try {
+      const orgId  = getOrgId(req);
+      const limit  = Math.min(parseInt(String(req.query.limit ?? "20"), 10), 100);
+      const cursor = req.query.cursor as string | undefined;
+      const offset = cursor ? parseInt(cursor, 10) : 0;
+
+      const { listAuditEventsByTenant } = await import("./lib/audit/audit-log");
+      const raw = await listAuditEventsByTenant({
+        tenantId: orgId,
+        limit:    limit + 1,
+        offset,
+      });
+
+      const hasMore    = raw.length > limit;
+      const page       = hasMore ? raw.slice(0, limit) : raw;
+      const nextOffset = hasMore ? offset + limit : null;
+
+      const events = page.map((r: Record<string, unknown>) => ({
+        id:        String(r.id ?? ""),
+        eventType: String(r.action ?? r.event_type ?? "unknown"),
+        tenantId:  r.tenant_id != null ? String(r.tenant_id) : null,
+        userId:    r.actor_id  != null ? String(r.actor_id)  : null,
+        ipAddress: r.ip_address != null ? String(r.ip_address) : null,
+        createdAt: String(r.created_at ?? r.createdAt ?? new Date().toISOString()),
+      }));
+
+      return res.json({
+        events,
+        pagination: {
+          hasMore,
+          nextCursor: nextOffset != null ? String(nextOffset) : null,
+          limit,
+        },
+        retrievedAt: new Date().toISOString(),
+      });
     } catch (err) {
       handleError(res, err);
     }
