@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Plus, Archive, MoreHorizontal, FolderOpen } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -15,8 +15,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { supabase } from "@/lib/supabase";
-import { QUERY_POLICY, PAGE_LIMIT } from "@/lib/query-policy";
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { invalidate } from "@/lib/invalidations";
 import { usePagePerf } from "@/lib/perf";
 
@@ -27,11 +26,6 @@ interface ProjectRow {
   status: string;
   description: string | null;
   createdAt: string;
-}
-
-interface ProjectPage {
-  items: ProjectRow[];
-  nextCursor: string | null;
 }
 
 const createProjectSchema = z.object({
@@ -92,31 +86,14 @@ export default function Projects() {
   const { toast } = useToast();
   const perf = usePagePerf("projects");
 
-  const {
-    data,
-    isLoading,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery<ProjectPage>({
+  const { data: projects = [], isLoading } = useQuery<ProjectRow[]>({
     queryKey: ["projects"],
-    queryFn: async ({ pageParam }) => {
-      const { data, error } = await supabase.rpc("get_projects_page", {
-        p_limit: PAGE_LIMIT.staticList,
-        p_cursor: (pageParam as string | null) ?? null,
-      });
-      if (error) throw new Error(error.message);
-      return (data as unknown as ProjectPage);
-    },
-    initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    queryFn: () => apiRequest("GET", "/api/projects").then((r) => r.json()),
     ...QUERY_POLICY.staticList,
   });
 
-  const projects = data?.pages.flatMap((p) => p.items) ?? [];
-
   useEffect(() => {
-    if (projects.length > 0) perf.record(projects.length, !!data && data.pages[0] !== undefined);
+    if (projects.length > 0) perf.record(projects.length, true);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projects.length]);
 
@@ -175,26 +152,11 @@ export default function Projects() {
           </Button>
         </div>
       ) : (
-        <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {projects.map((p) => (
-              <ProjectCard key={p.id} project={p} onArchive={(id) => archiveMutation.mutate(id)} />
-            ))}
-          </div>
-          {hasNextPage && (
-            <div className="flex justify-center pt-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => fetchNextPage()}
-                disabled={isFetchingNextPage}
-                data-testid="btn-load-more-projects"
-              >
-                {isFetchingNextPage ? "Loading…" : "Load more"}
-              </Button>
-            </div>
-          )}
-        </>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {projects.map((p) => (
+            <ProjectCard key={p.id} project={p} onArchive={(id) => archiveMutation.mutate(id)} />
+          ))}
+        </div>
       )}
 
       <Dialog open={open} onOpenChange={setOpen}>

@@ -83,9 +83,11 @@ function assertNoError(error: { message: string } | null, context: string): void
 export class SupabaseStorage implements IStorage {
   private readonly rls: SupabaseClient;   // user JWT — RLS enforced reads
   private readonly admin: SupabaseClient; // service_role — server-validated writes
+  private readonly hasToken: boolean;     // false when called without a user JWT
 
   constructor(accessToken: string) {
-    this.rls  = createServerSupabaseClient(accessToken);
+    this.hasToken = accessToken.length > 0;
+    this.rls  = this.hasToken ? createServerSupabaseClient(accessToken) : getSupabaseAdmin();
     this.admin = getSupabaseAdmin();
   }
 

@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { CheckCircle, Circle, Settings, AlertCircle } from "lucide-react";
 import { SiGithub, SiOpenai, SiVercel, SiSupabase, SiCloudflare } from "react-icons/si";
 import { Card, CardContent } from "@/components/ui/card";
@@ -9,8 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { useState, useEffect } from "react";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { supabase } from "@/lib/supabase";
-import { QUERY_POLICY, PAGE_LIMIT } from "@/lib/query-policy";
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { invalidate } from "@/lib/invalidations";
 import { usePagePerf } from "@/lib/perf";
 import { useAuth } from "@/hooks/use-auth";
@@ -23,11 +22,6 @@ interface IntegrationRow {
   provider: Provider;
   status: string;
   createdAt: string;
-}
-
-interface IntegrationPage {
-  items: IntegrationRow[];
-  nextCursor: string | null;
 }
 
 interface ConfigStatus {
@@ -178,26 +172,12 @@ export default function Integrations() {
   const { user } = useAuth();
   const isPlatformAdmin = user?.role === "platform_admin";
 
-  const {
-    data,
-    isLoading,
-  } = useInfiniteQuery<IntegrationPage>({
+  const { data: integrations = [], isLoading } = useQuery<IntegrationRow[]>({
     queryKey: ["integrations"],
-    queryFn: async ({ pageParam }) => {
-      const { data, error } = await supabase.rpc("get_integrations_page", {
-        p_limit: PAGE_LIMIT.integrations,
-        p_cursor: (pageParam as string | null) ?? null,
-      });
-      if (error) throw new Error(error.message);
-      return (data as unknown as IntegrationPage);
-    },
-    initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    queryFn: () => apiRequest("GET", "/api/integrations").then((r) => r.json()),
     ...QUERY_POLICY.staticList,
     enabled: isPlatformAdmin,
   });
-
-  const integrations = data?.pages.flatMap((p) => p.items) ?? [];
 
   useEffect(() => {
     if (integrations.length > 0 || !isLoading) perf.record(integrations.length);

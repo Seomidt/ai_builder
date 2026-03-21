@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useInfiniteQuery, useMutation } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { Plus, Cpu, MoreHorizontal, Tag } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -15,8 +15,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
-import { supabase } from "@/lib/supabase";
-import { QUERY_POLICY, PAGE_LIMIT } from "@/lib/query-policy";
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { invalidate } from "@/lib/invalidations";
 import { usePagePerf } from "@/lib/perf";
 
@@ -29,11 +28,6 @@ interface ArchRow {
   category: string | null;
   currentVersionId: string | null;
   createdAt: string;
-}
-
-interface ArchPage {
-  items: ArchRow[];
-  nextCursor: string | null;
 }
 
 const createSchema = z.object({
@@ -114,28 +108,11 @@ export default function Architectures() {
   const { toast } = useToast();
   const perf = usePagePerf("architectures");
 
-  const {
-    data,
-    isLoading,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery<ArchPage>({
+  const { data: architectures = [], isLoading } = useQuery<ArchRow[]>({
     queryKey: ["architectures"],
-    queryFn: async ({ pageParam }) => {
-      const { data, error } = await supabase.rpc("get_architectures_page", {
-        p_limit: PAGE_LIMIT.staticList,
-        p_cursor: (pageParam as string | null) ?? null,
-      });
-      if (error) throw new Error(error.message);
-      return (data as unknown as ArchPage);
-    },
-    initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
+    queryFn: () => apiRequest("GET", "/api/architectures").then((r) => r.json()),
     ...QUERY_POLICY.staticList,
   });
-
-  const architectures = data?.pages.flatMap((p) => p.items) ?? [];
 
   useEffect(() => {
     if (architectures.length > 0 || !isLoading) perf.record(architectures.length);
@@ -197,26 +174,11 @@ export default function Architectures() {
           </Button>
         </div>
       ) : (
-        <>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {architectures.map((a) => (
-              <ArchCard key={a.id} arch={a} onArchive={(id) => archiveMutation.mutate(id)} />
-            ))}
-          </div>
-          {hasNextPage && (
-            <div className="flex justify-center pt-2">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => fetchNextPage()}
-                disabled={isFetchingNextPage}
-                data-testid="btn-load-more-architectures"
-              >
-                {isFetchingNextPage ? "Loading…" : "Load more"}
-              </Button>
-            </div>
-          )}
-        </>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {architectures.map((a) => (
+            <ArchCard key={a.id} arch={a} onArchive={(id) => archiveMutation.mutate(id)} />
+          ))}
+        </div>
       )}
 
       <Dialog open={open} onOpenChange={setOpen}>

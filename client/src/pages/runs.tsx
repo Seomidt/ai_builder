@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useInfiniteQuery, useMutation, useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { PlayCircle, Filter, Plus, Loader2 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -9,8 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
-import { supabase } from "@/lib/supabase";
-import { QUERY_POLICY, PAGE_LIMIT } from "@/lib/query-policy";
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { invalidate } from "@/lib/invalidations";
 import { usePagePerf } from "@/lib/perf";
 import { useQueryState } from "@/lib/use-query-state";
@@ -32,16 +31,6 @@ interface RunRow {
 interface ArchRow {
   id: string;
   currentVersionId: string | null;
-}
-
-interface ArchPage {
-  items: ArchRow[];
-  nextCursor: string | null;
-}
-
-interface RunPage {
-  items: RunRow[];
-  nextCursor: string | null;
 }
 
 const STATUS_OPTIONS = ["all", "pending", "running", "completed", "failed", "cancelled"] as const;
@@ -74,51 +63,27 @@ export default function Runs() {
   const { toast } = useToast();
   const perf = usePagePerf("runs");
 
-  const {
-    data,
-    isLoading,
-    fetchNextPage,
-    hasNextPage,
-    isFetchingNextPage,
-  } = useInfiniteQuery<RunPage>({
+  const { data: runs = [], isLoading } = useQuery<RunRow[]>({
     queryKey: ["runs", statusFilter],
-    queryFn: async ({ pageParam }) => {
-      const { data, error } = await supabase.rpc("get_runs_page", {
-        p_limit: PAGE_LIMIT.runs,
-        p_cursor: (pageParam as string | null) ?? null,
-        p_status: statusFilter === "all" ? null : statusFilter,
-      });
-      if (error) throw new Error(error.message);
-      return (data as unknown as RunPage);
+    queryFn: () => {
+      const params = statusFilter !== "all" ? `?status=${statusFilter}` : "";
+      return apiRequest("GET", `/api/runs${params}`).then((r) => r.json());
     },
-    initialPageParam: null as string | null,
-    getNextPageParam: (lastPage) => lastPage.nextCursor ?? undefined,
-    maxPages: 3,
     ...QUERY_POLICY.semiLive,
   });
-
-  const runs = data?.pages.flatMap((p) => p.items) ?? [];
 
   useEffect(() => {
     if (runs.length > 0 || !isLoading) perf.record(runs.length);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runs.length, isLoading]);
 
-  // Shared architectures cache — reuses key from architectures page if visited
-  const { data: archData } = useQuery<ArchPage>({
+  const { data: architectures = [] } = useQuery<ArchRow[]>({
     queryKey: ["architectures"],
-    queryFn: async () => {
-      const { data, error } = await supabase.rpc("get_architectures_page", {
-        p_limit: 1,
-        p_cursor: null,
-      });
-      if (error) throw new Error(error.message);
-      return (data as unknown as ArchPage);
-    },
+    queryFn: () => apiRequest("GET", "/api/architectures").then((r) => r.json()),
     ...QUERY_POLICY.staticList,
   });
 
-  const firstArch = archData?.items?.[0];
+  const firstArch = architectures[0];
 
   const createRunMutation = useMutation({
     mutationFn: async () => {
@@ -245,19 +210,6 @@ export default function Runs() {
                   <div className="col-span-1 text-xs text-muted-foreground font-mono">—</div>
                 </div>
               ))}
-              {hasNextPage && (
-                <div className="flex justify-center p-4">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => fetchNextPage()}
-                    disabled={isFetchingNextPage}
-                    data-testid="btn-load-more-runs"
-                  >
-                    {isFetchingNextPage ? "Loading…" : "Load more"}
-                  </Button>
-                </div>
-              )}
             </div>
           )}
         </CardContent>

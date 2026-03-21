@@ -174,7 +174,7 @@ export default function RunDetail() {
   // Primary query — detail policy + dynamic refetchInterval when active
   const { data: run, isLoading } = useQuery<RunDetail>({
     queryKey: ["/api/runs", id],
-    queryFn: () => fetch(`/api/runs/${id}`, { credentials: "include" }).then((r) => r.json()),
+    queryFn: () => apiRequest("GET", `/api/runs/${id}`).then((r) => r.json()),
     ...QUERY_POLICY.detailLive,
     refetchInterval: (query) => {
       const data = query.state.data as RunDetail | undefined;
@@ -186,7 +186,7 @@ export default function RunDetail() {
   // Does not block shell or primary tab content
   const { data: commitPreview } = useQuery<CommitPreview>({
     queryKey: ["/api/runs", id, "commit-preview"],
-    queryFn: () => fetch(`/api/runs/${id}/commit-preview`, { credentials: "include" }).then((r) => r.json()),
+    queryFn: () => apiRequest("GET", `/api/runs/${id}/commit-preview`).then((r) => r.json()),
     enabled: !!run && (run.status === "completed" || run.status === "running"),
     ...QUERY_POLICY.detail,
   });
