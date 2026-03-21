@@ -1,70 +1,95 @@
 /**
  * Runtime domain detection — determines which app surface to render.
  *
- * Separation model:
- *   blissops.com          → tenant product surface
- *   admin.blissops.com    → platform admin surface
+ * CANONICAL DOMAIN MODEL (production-grade SaaS):
+ *   blissops.com          → MarketingApp  (public landing / marketing site)
+ *   www.blissops.com      → MarketingApp  (same as above)
+ *   app.blissops.com      → TenantApp     (authenticated product surface)
+ *   admin.blissops.com    → AdminApp      (platform operations surface)
  *
- * Local dev:
- *   localhost             → tenant surface
- *   admin.localhost       → admin surface
- *   admin.localhost:*     → admin surface
+ * LOCAL DEV EQUIVALENTS:
+ *   localhost             → TenantApp     (most common dev scenario, documented)
+ *   app.localhost         → TenantApp     (explicit tenant-surface dev)
+ *   admin.localhost       → AdminApp      (admin surface dev)
+ *   (no marketing localhost — use blissops.com staging or code-split)
  *
- * SECURITY NOTE:
- *   Domain == UI selection ONLY.
- *   All backend authorization is still enforced server-side.
- *   AdminRoute + /api/auth/session role check remain mandatory.
+ * AUTH:
+ *   - Session cookie domain ".blissops.com" — shared across app + admin
+ *   - Marketing host has no authenticated shell
+ *   - Auth routes on marketing host redirect → app.blissops.com/auth/*
+ *
+ * SECURITY:
+ *   Domain == UI surface selection ONLY.
+ *   Backend authorization (AdminRoute + /api/auth/session) is MANDATORY.
  *   NEVER trust hostname for access control decisions.
  */
 
-export type AppContext = "admin" | "tenant";
+export type AppContext = "marketing" | "tenant" | "admin";
 
 /**
  * Determine which application surface to render based on the hostname.
  */
 export function getAppContext(hostname: string): AppContext {
   const h = hostname.toLowerCase().replace(/:\d+$/, ""); // strip port
-  if (h.startsWith("admin.")) return "admin";
-  return "tenant";
-}
 
-/**
- * Returns true when the current origin is the admin surface.
- */
-export function isAdminDomain(hostname = window.location.hostname): boolean {
-  return getAppContext(hostname) === "admin";
+  if (h.startsWith("admin."))                               return "admin";
+  if (h.startsWith("app."))                                 return "tenant";
+  if (h === "blissops.com" || h === "www.blissops.com")     return "marketing";
+
+  // localhost default → tenant (most ergonomic for development)
+  // Use admin.localhost or app.localhost for explicit surface targeting
+  return "tenant";
 }
 
 /**
  * Returns the cookie domain for cross-subdomain session sharing.
  *
- * - Production: .blissops.com (covers blissops.com + admin.blissops.com)
- * - Local dev: empty string (cookie scoped to localhost, no domain needed)
+ * Extracts the root domain (last two parts) so:
+ *   app.blissops.com   → .blissops.com  (shared with admin)
+ *   admin.blissops.com → .blissops.com
+ *   blissops.com       → .blissops.com
+ *   localhost          → ""  (no domain attr, scoped to localhost)
+ *   app.localhost      → ""
  */
 export function getAuthCookieDomain(hostname = window.location.hostname): string {
   const h = hostname.toLowerCase().replace(/:\d+$/, "");
   if (h === "localhost" || h === "127.0.0.1") return "";
-  // Strip leading admin. to get root domain
-  const root = h.replace(/^admin\./, "");
-  return `.${root}`;
+  if (h.endsWith(".localhost")) return ""; // app.localhost / admin.localhost
+  const parts = h.split(".");
+  if (parts.length <= 2) return `.${h}`;               // already a root domain
+  return `.${parts.slice(-2).join(".")}`;              // e.g. .blissops.com
 }
 
-/**
- * Build a URL on the tenant domain preserving the current path if needed.
- */
-export function getTenantOrigin(hostname = window.location.hostname): string {
+// ─── Origin builders ─────────────────────────────────────────────────────────
+// Used internally by urls.ts — prefer importing from urls.ts in components.
+
+function _devPort(): string {
+  return typeof window !== "undefined" ? `:${window.location.port || "5000"}` : ":5000";
+}
+
+/** Raw origin for the marketing/public surface */
+export function getMarketingOrigin(hostname = window.location.hostname): string {
   const h = hostname.toLowerCase();
-  if (h.startsWith("localhost") || h.startsWith("127.")) return "http://localhost:5000";
-  const root = h.replace(/^admin\./, "");
+  if (h.startsWith("localhost") || h.startsWith("127.")) return `http://localhost${_devPort()}`;
+  if (h.endsWith(".localhost")) return `http://localhost${_devPort()}`;
+  const root = h.split(".").slice(-2).join(".");
   return `https://${root}`;
 }
 
-/**
- * Build a URL on the admin domain.
- */
+/** Raw origin for the tenant product surface */
+export function getTenantOrigin(hostname = window.location.hostname): string {
+  const h = hostname.toLowerCase();
+  if (h.startsWith("localhost") || h.startsWith("127.")) return `http://localhost${_devPort()}`;
+  if (h.endsWith(".localhost")) return `http://app.localhost${_devPort()}`;
+  const root = h.split(".").slice(-2).join(".");
+  return `https://app.${root}`;
+}
+
+/** Raw origin for the admin surface */
 export function getAdminOrigin(hostname = window.location.hostname): string {
   const h = hostname.toLowerCase();
-  if (h.startsWith("localhost") || h.startsWith("127.")) return "http://admin.localhost:5000";
-  const root = h.replace(/^admin\./, "");
+  if (h.startsWith("localhost") || h.startsWith("127.")) return `http://admin.localhost${_devPort()}`;
+  if (h.endsWith(".localhost")) return `http://admin.localhost${_devPort()}`;
+  const root = h.split(".").slice(-2).join(".");
   return `https://admin.${root}`;
 }

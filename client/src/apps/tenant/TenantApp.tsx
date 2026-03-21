@@ -1,7 +1,7 @@
 /**
  * TenantApp — Tenant Product Surface
  *
- * Rendered exclusively on blissops.com (and localhost in dev).
+ * Rendered exclusively on app.blissops.com (and localhost in dev).
  *
  * Contains:
  *   - TenantSidebar (tenant-only nav — ZERO admin links)
@@ -10,8 +10,9 @@
  *
  * SECURITY:
  *   - Admin routes (/ops/*, /integrations, /settings) are NOT registered here
- *   - If a tenant user hits /ops on tenant domain → 404 (not found)
+ *   - If a user navigates to /ops on app domain → 404 (NotFound)
  *   - Backend still enforces platform_admin on all /api/admin/* routes
+ *   - Domain is UI routing ONLY — no auth trust from hostname
  */
 
 import { lazy, Suspense } from "react";
@@ -81,7 +82,7 @@ export function TenantApp() {
             <Route path="/tenant/settings"     component={TenantSettings} />
             <Route path="/tenant/audit"        component={TenantAudit} />
 
-            {/* Admin routes on tenant domain → 404 (not exposed here) */}
+            {/* Admin/ops routes on tenant domain → not registered → 404 */}
             <Route component={NotFound} />
           </Switch>
         </Suspense>

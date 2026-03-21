@@ -1,21 +1,25 @@
 /**
- * App — Root entry point with hostname-based domain split.
+ * App — Root entry point with canonical 3-surface domain split.
  *
- * Domain routing:
- *   blissops.com        → TenantApp  (product surface)
- *   admin.blissops.com  → AdminApp   (platform ops surface)
+ * CANONICAL DOMAIN MODEL:
+ *   blissops.com          → MarketingApp  (public site, no auth shell)
+ *   www.blissops.com      → MarketingApp
+ *   app.blissops.com      → TenantApp     (authenticated product surface)
+ *   admin.blissops.com    → AdminApp      (platform operations surface)
  *
- * Local dev:
- *   localhost           → TenantApp
- *   admin.localhost     → AdminApp
+ * LOCAL DEV:
+ *   localhost             → TenantApp     (primary dev surface)
+ *   app.localhost         → TenantApp
+ *   admin.localhost       → AdminApp
  *
- * Auth routes (/auth/*) are accessible on BOTH domains:
- *   - Supabase callbacks arrive on any domain
- *   - Invite links / password-reset must work regardless of which domain opens
+ * ROUTING STRATEGY:
+ *   - marketing: MarketingApp handles everything (incl. /auth/* redirect to app domain)
+ *   - tenant:    Auth routes registered + TenantApp catch-all
+ *   - admin:     Auth routes registered + AdminApp catch-all
  *
  * SECURITY:
- *   Domain detection controls only which UI shell is rendered.
- *   All backend authorization (AdminRoute + /api/auth/session) remains mandatory.
+ *   Domain controls UI surface selection ONLY.
+ *   Backend authorization (AdminRoute + /api/auth/session) remains mandatory.
  *   NEVER trust hostname for access control decisions.
  */
 
@@ -27,7 +31,7 @@ import { I18nProvider } from "@/components/providers/I18nProvider";
 import { Switch, Route } from "wouter";
 import { getAppContext } from "@/lib/runtime/domain";
 
-// ── Auth pages — shared across both domains ───────────────────────────────────
+// ── Auth pages — registered on tenant + admin domains ─────────────────────────
 import AuthLogin               from "@/pages/auth/login";
 import AuthPasswordResetRequest from "@/pages/auth/password-reset-request";
 import AuthPasswordResetConfirm from "@/pages/auth/password-reset-confirm";
@@ -37,16 +41,29 @@ import AuthMfaChallenge         from "@/pages/auth/mfa-challenge";
 import AuthCallback             from "@/pages/auth/callback";
 
 // ── Domain-split app shells ───────────────────────────────────────────────────
-import { AdminApp }  from "@/apps/admin/AdminApp";
-import { TenantApp } from "@/apps/tenant/TenantApp";
+import { MarketingApp } from "@/apps/marketing/MarketingApp";
+import { AdminApp }     from "@/apps/admin/AdminApp";
+import { TenantApp }    from "@/apps/tenant/TenantApp";
 
 // Computed once at boot — hostname does not change during a session.
 const appContext = getAppContext(window.location.hostname);
 
-function Router() {
+/**
+ * Marketing router: MarketingApp handles ALL routes (incl. /auth/* redirect).
+ * No auth shell, no sidebar, no tenant/admin routes.
+ */
+function MarketingRouter() {
+  return <MarketingApp />;
+}
+
+/**
+ * Authenticated routers (tenant + admin): auth pages first, then app shell.
+ * Auth routes are registered so ProtectedRoute/AdminRoute redirects work correctly.
+ */
+function AuthenticatedRouter() {
   return (
     <Switch>
-      {/* Auth routes — accessible on both domains */}
+      {/* Auth routes — Supabase callbacks, login, reset, invite, MFA */}
       <Route path="/auth/login"                  component={AuthLogin} />
       <Route path="/auth/password-reset"         component={AuthPasswordResetRequest} />
       <Route path="/auth/password-reset-confirm" component={AuthPasswordResetConfirm} />
@@ -57,12 +74,17 @@ function Router() {
 
       {/* Domain-split catch-all */}
       <Route>
-        {() =>
-          appContext === "admin" ? <AdminApp /> : <TenantApp />
-        }
+        {() => appContext === "admin" ? <AdminApp /> : <TenantApp />}
       </Route>
     </Switch>
   );
+}
+
+function Router() {
+  if (appContext === "marketing") {
+    return <MarketingRouter />;
+  }
+  return <AuthenticatedRouter />;
 }
 
 function App() {

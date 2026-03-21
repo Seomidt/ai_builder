@@ -28,7 +28,7 @@ import { useTranslations } from "@/hooks/use-translations";
 import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
 import { useAuth } from "@/hooks/use-auth";
 import { signOut } from "@/lib/supabase";
-import { getTenantOrigin } from "@/lib/runtime/domain";
+import { getTenantAppUrl, getPostLogoutUrl } from "@/lib/runtime/urls";
 
 const opsItems = [
   { href: "/ops",           label: "Ops Console",   icon: ShieldAlert    },
@@ -65,7 +65,7 @@ export function AdminSidebar() {
 
   async function handleLogout() {
     await signOut();
-    window.location.href = "/auth/login";
+    window.location.href = getPostLogoutUrl();
   }
 
   const initials    = user?.email ? user.email.slice(0, 2).toUpperCase() : "??";
@@ -187,13 +187,14 @@ export function AdminSidebar() {
             <LogOut className="w-3.5 h-3.5" />
           </button>
         </div>
+        {/* Cross-surface link: switch to tenant product app */}
         <a
-          href={getTenantOrigin()}
+          href={getTenantAppUrl()}
           className="flex items-center gap-1.5 text-xs text-sidebar-foreground/50 hover:text-sidebar-foreground transition-colors"
           data-testid="link-switch-to-tenant"
         >
           <Cpu className="w-3 h-3" />
-          Switch to tenant app
+          Skift til tenant app
         </a>
         <LocaleSwitcher />
       </div>

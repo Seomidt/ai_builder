@@ -7,12 +7,14 @@ import {
   Building2,
   LogOut,
   ChevronRight,
+  ShieldAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTranslations } from "@/hooks/use-translations";
 import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
 import { useAuth } from "@/hooks/use-auth";
 import { signOut } from "@/lib/supabase";
+import { getAdminAppUrl, getPostLogoutUrl } from "@/lib/runtime/urls";
 
 export function TenantSidebar() {
   const [location] = useLocation();
@@ -21,12 +23,13 @@ export function TenantSidebar() {
 
   async function handleLogout() {
     await signOut();
-    window.location.href = "/auth/login";
+    window.location.href = getPostLogoutUrl();
   }
 
   const initials    = user?.email ? user.email.slice(0, 2).toUpperCase() : "??";
   const displayEmail = user?.email ?? "—";
   const displayOrg   = user?.organizationId ?? "—";
+  const isPlatformAdmin = user?.role === "platform_admin";
 
   const isTenantPath = location.startsWith("/tenant");
 
@@ -81,6 +84,23 @@ export function TenantSidebar() {
             </Link>
           );
         })}
+
+        {/* Cross-surface link — only visible to platform_admin users */}
+        {isPlatformAdmin && (
+          <div className="pt-3">
+            <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40 pb-1">
+              Platform
+            </p>
+            <a
+              href={getAdminAppUrl()}
+              className="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors text-sidebar-foreground/60 hover:text-destructive hover:bg-destructive/10"
+              data-testid="link-switch-to-admin"
+            >
+              <ShieldAlert className="w-4 h-4 shrink-0" />
+              <span className="flex-1">Platform Ops</span>
+            </a>
+          </div>
+        )}
       </nav>
 
       {/* Footer */}
