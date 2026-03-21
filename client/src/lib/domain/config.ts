@@ -1,22 +1,23 @@
 /**
  * Domain Architecture Configuration
- * Phase 49 — Domain/Subdomain Architecture
+ * Phase 49 → updated 2026-03-21 — Admin Domain Split
  *
  * Platform: blissops.com — AI Builder Platform
- * Model: single-domain — entire app on blissops.com
- * Updated: 2026-03-19 — migrated from multi-subdomain to single-domain
+ * Model: multi-domain — tenant product + admin ops on separate subdomains
  *
- * CURRENT MODE: single-domain
- *   - blissops.com → authenticated application (all routes)
- *   - www.blissops.com → 301 redirect to blissops.com
- *   - app.blissops.com → NOT LIVE (planned future subdomain)
- *   - admin.blissops.com → NOT LIVE (planned future subdomain)
+ * CURRENT MODE: multi-domain
+ *   - blissops.com       → tenant product surface (TenantApp)
+ *   - admin.blissops.com → platform operations surface (AdminApp)
+ *   - www.blissops.com   → 301 redirect to blissops.com
  *
- * When migrating to multi-domain:
- *   - Change APP + AUTH + ADMIN back to their respective subdomains
- *   - Update Supabase allow-list
- *   - Update Vercel project domains
- *   - Update DOMAIN_CONFIG.mode in server/lib/platform/domain-config.ts
+ * Auth:
+ *   - Supabase session shared via cookie domain=".blissops.com"
+ *   - Auth callbacks registered on blissops.com (primary Supabase redirect URL)
+ *   - /auth/* routes accessible on BOTH domains
+ *
+ * Security:
+ *   - Domain = UI routing ONLY, never used for access control
+ *   - AdminRoute + backend /api/auth/session enforce platform_admin role
  */
 
 // ─── Domain Role Enum ────────────────────────────────────────────────────────
@@ -33,16 +34,16 @@ export type DomainRole = (typeof DOMAIN_ROLE)[keyof typeof DOMAIN_ROLE];
 // ─── Canonical Hostnames ─────────────────────────────────────────────────────
 
 /**
- * Single-domain mode: everything lives on blissops.com.
- *
- * All roles map to the same host. Auth callbacks, app routes,
- * and admin/ops routes all live under blissops.com.
+ * Multi-domain mode:
+ *   - blissops.com       → tenant product (TenantApp)
+ *   - admin.blissops.com → platform ops (AdminApp)
+ * Session shared via cookie domain=".blissops.com"
  */
 export const CANONICAL_HOSTS: Record<DomainRole, string> = {
   [DOMAIN_ROLE.PUBLIC]: "blissops.com",
-  [DOMAIN_ROLE.APP]:    "blissops.com",   // single-domain: was app.blissops.com
-  [DOMAIN_ROLE.ADMIN]:  "blissops.com",   // single-domain: was admin.blissops.com
-  [DOMAIN_ROLE.AUTH]:   "blissops.com",   // single-domain: auth callbacks on blissops.com
+  [DOMAIN_ROLE.APP]:    "blissops.com",
+  [DOMAIN_ROLE.ADMIN]:  "admin.blissops.com",
+  [DOMAIN_ROLE.AUTH]:   "blissops.com",
 };
 
 /** www always redirects to apex public domain */
@@ -97,14 +98,14 @@ export const DOMAIN_CONFIGS: Record<DomainRole, DomainConfig> = {
   },
   [DOMAIN_ROLE.ADMIN]: {
     role:             DOMAIN_ROLE.ADMIN,
-    host:             "blissops.com",
+    host:             "admin.blissops.com",
     purpose:          "Internal ops console — tenant management, jobs, AI governance, security",
     audience:         "Platform staff only (platform_admin role required)",
     indexed:          false,
     localeStrategy:   "default-only",
     authRequired:     true,
     sharedDeployment: DOMAIN_ROLE.APP,
-    notes:            "Single-domain mode: ops routes on blissops.com/ops/*. Role-based, not host-based.",
+    notes:            "Multi-domain: admin.blissops.com. Session shared via .blissops.com cookie. Role still backend-enforced.",
   },
   [DOMAIN_ROLE.AUTH]: {
     role:             DOMAIN_ROLE.AUTH,
@@ -137,9 +138,11 @@ export function isKnownHost(hostname: string): boolean {
 /** Resolve domain role from hostname */
 export function getDomainRoleFromHost(hostname: string): DomainRole | null {
   const h = hostname.toLowerCase().replace(/:\d+$/, ""); // strip port
-  // Single-domain: blissops.com is everything
+  // Admin subdomain
+  if (h === "admin.blissops.com" || h === "admin.localhost") return DOMAIN_ROLE.ADMIN;
+  // Tenant product
   if (h === "blissops.com" || h === `www.${ROOT_DOMAIN}`) return DOMAIN_ROLE.PUBLIC;
-  // localhost / dev
+  // localhost / dev (tenant by default)
   if (h === "localhost" || h === "127.0.0.1") return DOMAIN_ROLE.APP;
   return null;
 }
