@@ -89,6 +89,9 @@ function handleError(res: Response, error: unknown, requestId?: string | null) {
     // Phase 13.1: never expose stack traces — only message, and only if safe
     const status = error.message.toLowerCase().includes("not found") ? 404 : 500;
     const message = status === 404 ? error.message : "Internal server error";
+    if (status === 500) {
+      console.error("[handleError] 500:", error.message, error.stack?.split("\n")[1]?.trim());
+    }
     return res.status(status).json({
       error_code: status === 404 ? "NOT_FOUND" : "INTERNAL_ERROR",
       message,
@@ -109,6 +112,20 @@ function getOrgId(req: Request): string {
 
 function getUserId(req: Request): string {
   return req.user?.id ?? "system";
+}
+
+function checkAdminRole(req: Request, res: Response): boolean {
+  const role = req.user?.role;
+  if (!role) {
+    res.status(401).json({ error_code: "UNAUTHORIZED", message: "Authentication required." });
+    return false;
+  }
+  const elevated = ["owner", "superadmin", "platform_admin"];
+  if (!elevated.includes(role)) {
+    res.status(403).json({ error_code: "FORBIDDEN", message: "Elevated role required." });
+    return false;
+  }
+  return true;
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
@@ -419,8 +436,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.get("/api/config/status", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       // Return only boolean connection flags — never expose env values or identifiers
       res.json({
         database: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
@@ -562,8 +578,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // GET /api/admin/security/health — security observability (admin-only, read-only)
   app.get("/api/admin/security/health", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       const health = await getSecurityHealth();
       return res.json(health);
     } catch (err) {
@@ -574,8 +589,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // GET /api/admin/security/events — tenant-scoped security events
   app.get("/api/admin/security/events", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       const tenantId = req.user?.organizationId;
       if (!tenantId) return res.status(400).json({ error_code: "MISSING_TENANT", message: "No tenant context" });
       const eventType = req.query.event_type as SecurityEventType | undefined;
@@ -590,8 +604,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // GET /api/admin/security/events/recent — recent events across all tenants (admin)
   app.get("/api/admin/security/events/recent", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 100;
       const events = await listRecentSecurityEvents({ limit });
       return res.json({ events, count: events.length });
@@ -603,8 +616,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // POST /api/admin/security/preview/sanitize — read-only sanitization preview
   app.post("/api/admin/security/preview/sanitize", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       const input = req.body?.input;
       if (typeof input === "string") {
         const sanitized = sanitizeInput(input);
@@ -635,8 +647,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // POST /api/admin/security/preview/rate-limit-context — read-only rate limit context
   app.post("/api/admin/security/preview/rate-limit-context", async (req: Request, res: Response) => {
     try {
-      const { requireOwnerRole } = await import("./lib/security/tenant-check");
-      requireOwnerRole(req.user?.role);
+      if (!checkAdminRole(req, res)) return;
       const config = getRateLimitConfig();
       const actorId = req.user?.id ?? null;
       const keyType = actorId && !actorId.startsWith("demo-") ? "actor_id" : "ip";
