@@ -34,6 +34,7 @@ import type {
   AppendToolCallInput, AppendApprovalInput, ResolveApprovalInput,
 } from "../services/runs.service";
 import type { UpsertIntegrationInput } from "../services/integrations.service";
+import { mapSupabaseError } from "./errors";
 
 // ── Column name conversion ────────────────────────────────────────────────────
 // Supabase / PostgREST returns snake_case column names from Postgres.
@@ -73,9 +74,17 @@ function objToSnake(obj: Record<string, unknown>): Record<string, unknown> {
 }
 
 // ── Error helper ──────────────────────────────────────────────────────────────
+// Maps known Postgres / Supabase error codes to typed AppErrors before falling
+// back to a generic Error (which handleError maps to 500).
 
-function assertNoError(error: { message: string } | null, context: string): void {
-  if (error) throw new Error(`[supabase-runtime] ${context}: ${error.message}`);
+function assertNoError(
+  error: { message: string; code?: string; details?: string; hint?: string } | null,
+  context: string,
+): void {
+  if (!error) return;
+  const typed = mapSupabaseError(error, context);
+  if (typed) throw typed;
+  throw new Error(`[supabase-runtime] ${context}: ${error.message}`);
 }
 
 // ── SupabaseStorage class ─────────────────────────────────────────────────────

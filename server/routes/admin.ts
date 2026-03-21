@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { db } from "../db";
 import { sql } from "drizzle-orm";
+
 import { runAiOpsQuery } from "../lib/ai-ops/orchestrator";
 import { generateWeeklyDigest } from "../lib/ai-ops/digest";
 import { getOpsSummary, invalidateOpsSummaryCache } from "../lib/ai-ops/ops-summary";
@@ -28,6 +29,18 @@ function resolveUser(req: Request) {
   });
 }
 
+/**
+ * Central admin error helper.
+ * Produces the standard { error_code, message } shape.
+ * For 500s it logs internally but never exposes internal detail to the client.
+ */
+function adminErr(res: Response, status: number, errorCode: string, message: string, err?: unknown): void {
+  if (err !== undefined) {
+    console.error(`[admin/${errorCode}]`, err instanceof Error ? err.message : err);
+  }
+  res.status(status).json({ error_code: errorCode, message: status === 500 ? "Internal server error" : message });
+}
+
 export function registerAdminRoutes(app: Express): void {
 
   app.get("/api/admin/health", (_req: Request, res: Response) => {
@@ -41,7 +54,7 @@ export function registerAdminRoutes(app: Express): void {
       const summary = await getOpsSummary(forceRefresh);
       res.json({ data: summary });
     } catch (err: unknown) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Ops summary failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -132,17 +145,14 @@ export function registerAdminRoutes(app: Express): void {
   app.post("/api/admin/ai-ops/query", async (req: Request, res: Response) => {
     const parsed = AiOpsQuerySchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ error: "Invalid request", details: parsed.error.flatten() });
+      adminErr(res, 422, "VALIDATION_ERROR", "Invalid request");
       return;
     }
 
     const { intent, organizationId, tenantId } = parsed.data;
 
     if (!isValidIntent(intent)) {
-      res.status(400).json({
-        error: `Unsupported intent: "${intent}"`,
-        supportedIntents: SUPPORTED_INTENTS,
-      });
+      adminErr(res, 422, "VALIDATION_ERROR", "Unsupported intent");
       return;
     }
 
@@ -154,13 +164,13 @@ export function registerAdminRoutes(app: Express): void {
     });
 
     if (!result.success) {
-      const statusCode =
-        result.error?.includes("access") || result.error?.includes("role")
-          ? 403
-          : result.error?.includes("required") || result.error?.includes("Unsupported")
-            ? 400
-            : 500;
-      res.status(statusCode).json({ error: result.error, auditId: result.auditId });
+      const is403 = result.error?.includes("access") || result.error?.includes("role");
+      const is422 = result.error?.includes("required") || result.error?.includes("Unsupported");
+      const statusCode = is403 ? 403 : is422 ? 422 : 500;
+      const errorCode  = is403 ? "PLATFORM_ADMIN_REQUIRED" : is422 ? "VALIDATION_ERROR" : "INTERNAL_ERROR";
+      const message    = statusCode === 500 ? "Internal server error" : (result.error ?? "AI ops query failed");
+      if (statusCode === 500) console.error("[admin/ai-ops/query]", result.error);
+      res.status(statusCode).json({ error_code: errorCode, message, audit_id: result.auditId ?? null });
       return;
     }
 
@@ -175,7 +185,11 @@ export function registerAdminRoutes(app: Express): void {
     });
 
     if (!result.success) {
-      res.status(result.error?.includes("access") ? 403 : 500).json({ error: result.error });
+      const is403 = !!result.error?.includes("access");
+      const statusCode = is403 ? 403 : 500;
+      const errorCode  = is403 ? "PLATFORM_ADMIN_REQUIRED" : "INTERNAL_ERROR";
+      if (!is403) console.error("[admin/ai-ops/health-summary]", result.error);
+      res.status(statusCode).json({ error_code: errorCode, message: is403 ? (result.error ?? "Access denied.") : "Internal server error" });
       return;
     }
     res.json({ data: result.response });
@@ -187,14 +201,14 @@ export function registerAdminRoutes(app: Express): void {
       const digest = await generateWeeklyDigest(forceRefresh);
       res.json({ data: digest });
     } catch (err: unknown) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Digest generation failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
   app.get("/api/admin/ai-ops/tenant/:organizationId/summary", async (req: Request, res: Response) => {
     const { organizationId } = req.params;
     if (!organizationId) {
-      res.status(400).json({ error: "organizationId is required" });
+      adminErr(res, 422, "VALIDATION_ERROR", "organizationId is required");
       return;
     }
 
@@ -206,9 +220,11 @@ export function registerAdminRoutes(app: Express): void {
     });
 
     if (!result.success) {
-      const statusCode =
-        result.error?.includes("access") || result.error?.includes("Cross-tenant") ? 403 : 500;
-      res.status(statusCode).json({ error: result.error });
+      const is403 = result.error?.includes("access") || result.error?.includes("Cross-tenant");
+      const statusCode = is403 ? 403 : 500;
+      const errorCode  = is403 ? "PLATFORM_ADMIN_REQUIRED" : "INTERNAL_ERROR";
+      if (!is403) console.error("[admin/ai-ops/tenant-summary]", result.error);
+      res.status(statusCode).json({ error_code: errorCode, message: is403 ? (result.error ?? "Access denied.") : "Internal server error" });
       return;
     }
     res.json({ data: result.response });
@@ -234,15 +250,15 @@ export function registerAdminRoutes(app: Express): void {
     const periodType = (req.query.periodType as PeriodType) ?? "monthly";
     const validPeriods: PeriodType[] = ["daily", "weekly", "monthly", "annual"];
     if (!validPeriods.includes(periodType)) {
-      res.status(400).json({ error: "periodType must be daily|weekly|monthly|annual" });
+      adminErr(res, 422, "VALIDATION_ERROR", "periodType must be daily, weekly, monthly, or annual");
       return;
     }
     try {
       const result = await checkTenantBudget(organizationId, periodType);
-      if (!result) { res.status(404).json({ error: "No active budget for this organization+period" }); return; }
+      if (!result) { adminErr(res, 404, "NOT_FOUND", "No active budget for this organization+period"); return; }
       res.json({ data: result });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Budget check failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -252,7 +268,7 @@ export function registerAdminRoutes(app: Express): void {
       const { results, errors } = await checkAllTenantBudgets(periodType);
       res.json({ data: results, errors });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Budget sweep failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -264,7 +280,7 @@ export function registerAdminRoutes(app: Express): void {
       const result = await snapshotTenantUsage(organizationId, periodType);
       res.json({ data: result });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Snapshot failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -273,7 +289,7 @@ export function registerAdminRoutes(app: Express): void {
       const { results, errors } = await snapshotAllTenants("monthly");
       res.json({ data: results, errors });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Snapshot sweep failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -282,10 +298,10 @@ export function registerAdminRoutes(app: Express): void {
     const periodType = (req.query.periodType as PeriodType) ?? "monthly";
     try {
       const snapshot = await getLatestSnapshot(organizationId, periodType);
-      if (!snapshot) { res.status(404).json({ error: "No snapshot found" }); return; }
+      if (!snapshot) { adminErr(res, 404, "NOT_FOUND", "No snapshot found"); return; }
       res.json({ data: snapshot });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Snapshot fetch failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -298,7 +314,7 @@ export function registerAdminRoutes(app: Express): void {
       const ids = await persistAnomalies(candidates);
       res.json({ data: { candidates, persistedIds: ids } });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Anomaly detection failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -307,7 +323,7 @@ export function registerAdminRoutes(app: Express): void {
       const result = await detectAllTenantAnomalies("monthly");
       res.json({ data: result });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Anomaly sweep failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -319,7 +335,7 @@ export function registerAdminRoutes(app: Express): void {
       const alerts = await listOpenAlerts(organizationId, limit);
       res.json({ data: alerts });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Alert fetch failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -329,7 +345,7 @@ export function registerAdminRoutes(app: Express): void {
       const alertResult = await generateBudgetAlerts(results);
       res.json({ data: alertResult });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Budget alert generation failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -337,10 +353,10 @@ export function registerAdminRoutes(app: Express): void {
     const { alertId } = req.params;
     try {
       const ok = await acknowledgeAlert(alertId);
-      if (!ok) { res.status(404).json({ error: "Alert not found or already closed" }); return; }
+      if (!ok) { adminErr(res, 404, "NOT_FOUND", "Alert not found or already closed"); return; }
       res.json({ data: { acknowledged: true, alertId } });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Acknowledge failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -348,10 +364,10 @@ export function registerAdminRoutes(app: Express): void {
     const { alertId } = req.params;
     try {
       const ok = await resolveAlert(alertId);
-      if (!ok) { res.status(404).json({ error: "Alert not found or already resolved" }); return; }
+      if (!ok) { adminErr(res, 404, "NOT_FOUND", "Alert not found or already resolved"); return; }
       res.json({ data: { resolved: true, alertId } });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Resolve failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -362,7 +378,7 @@ export function registerAdminRoutes(app: Express): void {
       const result = await checkRunawayProtection(organizationId);
       res.json({ data: result });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Runaway check failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -371,7 +387,7 @@ export function registerAdminRoutes(app: Express): void {
       const results = await checkAllRunawayProtection();
       res.json({ data: results });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Runaway sweep failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -403,7 +419,7 @@ export function registerAdminRoutes(app: Express): void {
         },
       });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Governance cycle failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -412,7 +428,7 @@ export function registerAdminRoutes(app: Express): void {
     const periodType = (req.query.periodType as PeriodType) ?? "monthly";
     const validPeriods: PeriodType[] = ["daily", "weekly", "monthly", "annual"];
     if (!validPeriods.includes(periodType)) {
-      res.status(400).json({ error: "periodType must be daily|weekly|monthly|annual" });
+      adminErr(res, 422, "VALIDATION_ERROR", "periodType must be daily, weekly, monthly, or annual");
       return;
     }
     const bounds = currentPeriodBounds(periodType);
@@ -428,7 +444,7 @@ export function registerAdminRoutes(app: Express): void {
       hardLimitPct:         z.number().int().min(1).max(100).default(100),
     });
     const parsed = schema.safeParse(req.body);
-    if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+    if (!parsed.success) { adminErr(res, 422, "VALIDATION_ERROR", "Invalid request body"); return; }
     const d = parsed.data;
     const result = classifyBudgetStatus(
       BigInt(d.currentUsageUsdCents),
@@ -459,7 +475,7 @@ export function registerAdminRoutes(app: Express): void {
       `);
       res.json({ data: rows.rows });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Anomaly list failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -480,7 +496,7 @@ export function registerAdminRoutes(app: Express): void {
       `);
       res.json({ data: rows.rows });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Snapshot list failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 
@@ -490,7 +506,7 @@ export function registerAdminRoutes(app: Express): void {
       const results = await checkAllRunawayProtection();
       res.json({ data: results });
     } catch (err) {
-      res.status(500).json({ error: err instanceof Error ? err.message : "Runaway status failed" });
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
   });
 }

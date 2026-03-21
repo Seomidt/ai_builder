@@ -13,7 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, ApiError } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { QUERY_POLICY } from "@/lib/query-policy";
 import { invalidate } from "@/lib/invalidations";
@@ -134,7 +134,15 @@ export default function Architectures() {
       form.reset();
       toast({ title: "Architecture created" });
     },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => {
+      const code = e instanceof ApiError ? e.errorCode : null;
+      const title =
+        code === "DUPLICATE_SLUG" ? "Slug already in use" :
+        code === "CONFLICT"       ? "Conflict" :
+        code === "VALIDATION_ERROR" ? "Validation error" :
+        "Could not create architecture";
+      toast({ title, description: e.message, variant: "destructive" });
+    },
   });
 
   const archiveMutation = useMutation({

@@ -20,7 +20,7 @@ import { createStorageForRequest } from "./storage";
 import { previewCommit } from "./lib/github-commit-format";
 import { runExecutorService } from "./services/run-executor.service";
 import { summarize } from "./features/ai-summarize/summarize.service";
-import { ZodError } from "zod";
+import { z, ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 import { AiError } from "./lib/ai/errors";
 import {
@@ -36,40 +36,46 @@ import {
   explainStripeWebhookOutcome,
 } from "./lib/ai/stripe-webhook-summary";
 import type { IStorage } from "./storage";
+import { AppError } from "./lib/errors";
 
 
 /**
  * Central error → HTTP response mapper.
  *
- * Phase 13.1 hardening:
- *   - All responses include error_code, message, and request_id.
- *   - Stack traces are NEVER exposed to the client.
- *   - ForbiddenError (403) and UnauthorizedError (401) handled explicitly.
- *   - AI typed errors (AiError subclasses) carry their own httpStatus/errorCode.
+ * Priority order:
+ *  1. AppError (typed: UnauthorizedError, ForbiddenError, NotFoundError, ConflictError, ValidationError)
+ *  2. ZodError → 422 VALIDATION_ERROR
+ *  3. AiError (typed AI errors with retry-after)
+ *  4. Generic Error with "statusCode" duck-typed property (legacy compat)
+ *  5. Heuristic: "not found" → 404; all else → 500 INTERNAL_ERROR
  *
- * Stable response shape: { error_code, message, request_id }
+ * Contract: { error_code, message, request_id } — no stacks, no raw Supabase detail.
  */
 function handleError(res: Response, error: unknown, requestId?: string | null) {
   const reqId = requestId ?? null;
 
+  // 1. Typed AppError (highest priority — always trusted)
+  if (error instanceof AppError) {
+    if (error.statusCode === 500) {
+      console.error(`[handleError] ${error.errorCode}:`, error.message);
+    }
+    return res.status(error.statusCode).json({
+      error_code: error.errorCode,
+      message: error.message,
+      request_id: reqId,
+    });
+  }
+
+  // 2. Zod validation error → 422 (not 400 — consistent with spec)
   if (error instanceof ZodError) {
-    return res.status(400).json({
+    return res.status(422).json({
       error_code: "VALIDATION_ERROR",
       message: fromZodError(error).message,
       request_id: reqId,
     });
   }
 
-  // Dynamic imports may produce ForbiddenError/UnauthorizedError from tenant-check.ts
-  if (error instanceof Error && (error as any).statusCode) {
-    const typedErr = error as Error & { statusCode: number; errorCode: string };
-    return res.status(typedErr.statusCode).json({
-      error_code: typedErr.errorCode ?? "ERROR",
-      message: typedErr.message,
-      request_id: reqId,
-    });
-  }
-
+  // 3. AI typed errors (carry own httpStatus / errorCode / retryAfter)
   if (error instanceof AiError) {
     if (error.retryAfterSeconds !== undefined) {
       res.set("Retry-After", String(error.retryAfterSeconds));
@@ -85,9 +91,23 @@ function handleError(res: Response, error: unknown, requestId?: string | null) {
     return res.status(error.httpStatus).json(payload);
   }
 
+  // 4. Legacy duck-typed errors (e.g. from dynamically imported tenant-check.ts)
+  if (error instanceof Error && (error as unknown as { statusCode?: number }).statusCode) {
+    const typedErr = error as Error & { statusCode: number; errorCode: string };
+    if (typedErr.statusCode === 500) {
+      console.error("[handleError] legacy typed 500:", typedErr.message);
+    }
+    return res.status(typedErr.statusCode).json({
+      error_code: typedErr.errorCode ?? "ERROR",
+      message: typedErr.message,
+      request_id: reqId,
+    });
+  }
+
+  // 5. Generic Error — heuristic classification; never expose stack to client
   if (error instanceof Error) {
-    // Phase 13.1: never expose stack traces — only message, and only if safe
-    const status = error.message.toLowerCase().includes("not found") ? 404 : 500;
+    const lc = error.message.toLowerCase();
+    const status = lc.includes("not found") ? 404 : 500;
     const message = status === 404 ? error.message : "Internal server error";
     if (status === 500) {
       console.error("[handleError] 500:", error.message, error.stack?.split("\n")[1]?.trim());
@@ -99,6 +119,7 @@ function handleError(res: Response, error: unknown, requestId?: string | null) {
     });
   }
 
+  console.error("[handleError] unknown error type:", error);
   return res.status(500).json({
     error_code: "INTERNAL_ERROR",
     message: "Internal server error",
@@ -117,16 +138,31 @@ function getUserId(req: Request): string {
 function checkAdminRole(req: Request, res: Response): boolean {
   const role = req.user?.role;
   if (!role) {
-    res.status(401).json({ error_code: "UNAUTHORIZED", message: "Authentication required." });
+    res.status(401).json({ error_code: "SESSION_REQUIRED", message: "Authentication required." });
     return false;
   }
   const elevated = ["owner", "superadmin", "platform_admin"];
   if (!elevated.includes(role)) {
-    res.status(403).json({ error_code: "FORBIDDEN", message: "Elevated role required." });
+    res.status(403).json({ error_code: "PLATFORM_ADMIN_REQUIRED", message: "Platform admin role required." });
     return false;
   }
   return true;
 }
+
+// ── Input validation schemas ──────────────────────────────────────────────────
+
+const CreateProjectSchema = z.object({
+  name: z.string().min(1, "name is required"),
+  slug: z.string().min(1, "slug is required").regex(/^[a-z0-9-]+$/, "slug must be lowercase letters, numbers, and hyphens only"),
+  description: z.string().optional(),
+});
+
+const CreateArchitectureSchema = z.object({
+  name: z.string().min(1, "name is required"),
+  slug: z.string().min(1, "slug is required").regex(/^[a-z0-9-]+$/, "slug must be lowercase letters, numbers, and hyphens only"),
+  description: z.string().optional(),
+  category: z.string().optional(),
+});
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
 
@@ -141,8 +177,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/projects", async (req, res) => {
     try {
+      const body = CreateProjectSchema.parse(req.body);
       const project = await createStorageForRequest(req).createProject({
-        ...req.body,
+        ...body,
         organizationId: getOrgId(req),
         createdBy: getUserId(req),
       });
@@ -182,8 +219,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   app.post("/api/architectures", async (req, res) => {
     try {
+      const body = CreateArchitectureSchema.parse(req.body);
       const profile = await createStorageForRequest(req).createArchitectureProfile({
-        ...req.body,
+        ...body,
         organizationId: getOrgId(req),
       });
       res.status(201).json(profile);

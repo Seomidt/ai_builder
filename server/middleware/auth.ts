@@ -284,12 +284,12 @@ export async function authMiddleware(
 
   const authHeader = req.headers.authorization;
 
-  // ── No token: demo fallback (only if DEMO_MODE=true) ─────────────────────
-  if (!authHeader?.startsWith("Bearer ")) {
+  // ── No / malformed Authorization header ──────────────────────────────────
+  if (!authHeader) {
     if (!isDemoModeEnabled()) {
       res.status(401).json({
-        error_code: "UNAUTHORIZED",
-        message: "Authentication required. Provide a Bearer token.",
+        error_code: "SESSION_REQUIRED",
+        message: "Authentication required. Provide an Authorization: Bearer <token> header.",
       });
       return;
     }
@@ -298,7 +298,24 @@ export async function authMiddleware(
     return next();
   }
 
+  if (!authHeader.startsWith("Bearer ")) {
+    res.status(401).json({
+      error_code: "INVALID_AUTH_HEADER",
+      message: "Malformed Authorization header. Expected format: Bearer <token>.",
+    });
+    return;
+  }
+
   const token = authHeader.slice(7);
+
+  // ── Empty bearer token (also catches "Bearer   " with only whitespace) ──
+  if (!token || !token.trim()) {
+    res.status(401).json({
+      error_code: "EMPTY_BEARER_TOKEN",
+      message: "Authorization header contains an empty token.",
+    });
+    return;
+  }
 
   // ── Step 1: verify JWT (cached — avoids remote Supabase call per request) ──
   let supabaseUser: { id: string; email?: string } | null = null;
@@ -306,15 +323,15 @@ export async function authMiddleware(
     supabaseUser = await getVerifiedUser(token);
     if (!supabaseUser) {
       res.status(401).json({
-        error_code: "UNAUTHORIZED",
-        message: "Invalid or expired authentication token.",
+        error_code: "INVALID_SESSION",
+        message: "Invalid or expired authentication token. Please sign in again.",
       });
       return;
     }
   } catch (err) {
     console.error("[auth] token verification failed:", err);
     res.status(401).json({
-      error_code: "UNAUTHORIZED",
+      error_code: "INVALID_SESSION",
       message: "Authentication check failed. Please try again.",
     });
     return;

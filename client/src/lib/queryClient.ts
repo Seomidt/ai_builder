@@ -1,10 +1,36 @@
 import { QueryClient, QueryFunction } from "@tanstack/react-query";
 import { getSessionToken } from "./supabase";
 
+/**
+ * Typed API error.  Thrown by apiRequest / getQueryFn whenever the server
+ * returns a non-2xx response that carries a typed `error_code` payload.
+ *
+ * Consumers can narrow on `errorCode`:
+ *   if (err instanceof ApiError && err.errorCode === "DUPLICATE_SLUG") { ... }
+ */
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly errorCode: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
-    const text = (await res.text()) || res.statusText;
-    throw new Error(`${res.status}: ${text}`);
+    let errorCode = "UNKNOWN_ERROR";
+    let message = res.statusText;
+    try {
+      const body = (await res.json()) as { error_code?: string; message?: string };
+      if (body.error_code) errorCode = body.error_code;
+      if (body.message) message = body.message;
+    } catch {
+      message = (await res.text().catch(() => res.statusText)) || res.statusText;
+    }
+    throw new ApiError(res.status, errorCode, message);
   }
 }
 
