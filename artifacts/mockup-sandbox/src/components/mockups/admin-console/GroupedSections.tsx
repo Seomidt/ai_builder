@@ -1,26 +1,26 @@
 import React from "react";
-import { 
-  ShieldAlert, 
-  Building2, 
-  BrainCircuit, 
-  CreditCard, 
-  Shield, 
-  DatabaseBackup, 
-  Rocket, 
-  UserCheck, 
-  HardDrive, 
-  Bot, 
-  Clock, 
-  Webhook, 
-  Plug, 
-  Settings, 
-  DollarSign, 
-  BarChart3, 
-  Bell, 
-  Zap, 
-  Lock, 
-  LogOut, 
-  RefreshCw 
+import {
+  ShieldAlert,
+  Building2,
+  BrainCircuit,
+  CreditCard,
+  Shield,
+  DatabaseBackup,
+  Rocket,
+  UserCheck,
+  HardDrive,
+  Bot,
+  Clock,
+  Webhook,
+  Plug,
+  Settings,
+  DollarSign,
+  BarChart3,
+  Bell,
+  Zap,
+  Lock,
+  LogOut,
+  RefreshCw,
 } from "lucide-react";
 
 export function GroupedSections() {
@@ -46,8 +46,8 @@ export function GroupedSections() {
           </div>
         </div>
 
-        {/* Navigation Scroll Area */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden py-2 custom-scrollbar">
+        {/* Navigation */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden py-2">
           {/* OPS GROUP */}
           <div className="mb-4">
             <div className="bg-red-500/5 border-b border-red-500/10 px-4 py-1.5 mb-1">
@@ -89,11 +89,11 @@ export function GroupedSections() {
               <span className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">Governance</span>
             </div>
             <nav className="flex flex-col gap-0.5">
-              <NavItem icon={DollarSign} label="Budgets" colorClass="text-amber-500/80 hover:text-amber-400" iconColorClass="text-amber-500/70" />
-              <NavItem icon={BarChart3} label="Usage" colorClass="text-amber-500/80 hover:text-amber-400" iconColorClass="text-amber-500/70" />
-              <NavItem icon={Bell} label="Alerts" colorClass="text-amber-500/80 hover:text-amber-400" iconColorClass="text-amber-500/70" />
-              <NavItem icon={Zap} label="Anomalies" colorClass="text-amber-500/80 hover:text-amber-400" iconColorClass="text-amber-500/70" />
-              <NavItem icon={Lock} label="Runaway" colorClass="text-amber-500/80 hover:text-amber-400" iconColorClass="text-amber-500/70" />
+              <NavItem icon={DollarSign} label="Budgets" gold />
+              <NavItem icon={BarChart3} label="Usage" gold />
+              <NavItem icon={Bell} label="Alerts" gold />
+              <NavItem icon={Zap} label="Anomalies" gold />
+              <NavItem icon={Lock} label="Runaway" gold />
             </nav>
           </div>
         </div>
@@ -107,7 +107,7 @@ export function GroupedSections() {
               </div>
               <div className="flex flex-col">
                 <span className="text-xs font-medium text-white truncate w-24">john@blissops.io</span>
-                <a href="#" className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors">← App</a>
+                <a href="#" className="text-[10px] text-slate-500 hover:text-slate-300 transition-colors">&#8592; App</a>
               </div>
             </div>
             <button className="text-slate-500 hover:text-white transition-colors p-1.5 rounded hover:bg-white/5">
@@ -137,10 +137,10 @@ export function GroupedSections() {
           </button>
         </header>
 
-        {/* Content Scroll Area */}
-        <main className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+        {/* Content */}
+        <main className="flex-1 overflow-y-auto p-6">
           <div className="max-w-6xl mx-auto space-y-6">
-            
+
             {/* KPI ROW */}
             <div className="grid grid-cols-4 gap-4">
               <KpiCard value="47" label="Tenants" valueColor="text-cyan-400" />
@@ -159,7 +159,7 @@ export function GroupedSections() {
                   <HealthRow name="Database" status="green" value="3ms" />
                   <HealthRow name="Auth" status="green" value="8ms" />
                   <HealthRow name="Storage" status="gold" value="45ms" />
-                  <HealthRow name="AI Engine" status="cyan" value="Kørende" isText />
+                  <HealthRow name="AI Engine" status="cyan" value="Kørende" />
                 </div>
               </div>
 
@@ -170,26 +170,14 @@ export function GroupedSections() {
                   Aktive Advarsler
                 </h2>
                 <div className="space-y-3">
-                  <AlertRow 
-                    severity="CRITICAL" 
-                    title="Uautoriseret adgang forsøgt" 
-                    time="2m" 
-                  />
-                  <AlertRow 
-                    severity="WARNING" 
-                    title="CPU spike 94% — ops/ai" 
-                    time="8m" 
-                  />
-                  <AlertRow 
-                    severity="INFO" 
-                    title="Ny tenant onboardet" 
-                    time="1t" 
-                  />
+                  <AlertRow severity="CRITICAL" title="Uautoriseret adgang forsøgt" time="2m" />
+                  <AlertRow severity="WARNING" title="CPU spike 94% — ops/ai" time="8m" />
+                  <AlertRow severity="INFO" title="Ny tenant onboardet" time="1t" />
                 </div>
               </div>
             </div>
 
-            {/* BOTTOM "Top Tenants — Forbrug" */}
+            {/* BOTTOM — Top Tenants */}
             <div className="bg-[#1a1f2b] rounded-xl p-5 border border-white/5 shadow-lg">
               <h2 className="text-base font-semibold text-white mb-5">Top Tenants — Forbrug</h2>
               <div className="space-y-4">
@@ -204,97 +192,74 @@ export function GroupedSections() {
           </div>
         </main>
       </div>
-
-      <style dangerouslySetInnerHTML={{__html: `
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 6px;
-          height: 6px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: rgba(255, 255, 255, 0.1);
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: rgba(255, 255, 255, 0.2);
-        }
-      `}} />
     </div>
   );
 }
 
-// Subcomponents
-
-function NavItem({ 
-  icon: Icon, 
-  label, 
-  colorClass = "text-slate-400 hover:text-slate-200 hover:bg-white/5 border-l-2 border-transparent",
-  iconColorClass = "text-slate-500 group-hover:text-slate-300"
-}: { 
-  icon: React.ElementType, 
-  label: string,
-  colorClass?: string,
-  iconColorClass?: string
+function NavItem({
+  icon: Icon,
+  label,
+  gold = false,
+}: {
+  icon: React.ElementType;
+  label: string;
+  gold?: boolean;
 }) {
+  const cls = gold
+    ? "flex items-center gap-3 px-4 py-2 transition-colors text-amber-500/80 hover:text-amber-400 hover:bg-white/5 border-l-2 border-transparent"
+    : "flex items-center gap-3 px-4 py-2 transition-colors text-slate-400 hover:text-slate-200 hover:bg-white/5 border-l-2 border-transparent";
+  const iconCls = gold ? "w-4 h-4 text-amber-500/70" : "w-4 h-4 text-slate-500";
   return (
-    <a href="#" className={\`flex items-center gap-3 px-4 py-2 transition-colors group \${colorClass}\`}>
-      <Icon className={\`w-4 h-4 transition-colors \${iconColorClass}\`} />
+    <a href="#" className={cls}>
+      <Icon className={iconCls} />
       <span className="text-sm font-medium">{label}</span>
     </a>
   );
 }
 
-function KpiCard({ value, label, valueColor }: { value: string, label: string, valueColor: string }) {
+function KpiCard({ value, label, valueColor }: { value: string; label: string; valueColor: string }) {
   return (
     <div className="bg-[#1a1f2b] rounded-xl p-5 border border-white/5 shadow-sm flex flex-col justify-between h-28 hover:bg-[#1d2230] transition-colors">
       <div className="text-sm text-slate-400 font-medium uppercase tracking-wide">{label}</div>
-      <div className={\`text-3xl font-bold tracking-tight \${valueColor}\`}>{value}</div>
+      <div className={"text-3xl font-bold tracking-tight " + valueColor}>{value}</div>
     </div>
   );
 }
 
-function HealthRow({ name, status, value, isText = false }: { name: string, status: 'green' | 'gold' | 'cyan', value: string, isText?: boolean }) {
-  const statusColors = {
-    green: "bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]",
-    gold: "bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.4)]",
-    cyan: "bg-cyan-500 shadow-[0_0_8px_rgba(6,182,212,0.4)]"
-  };
-  
-  const valueColors = {
-    green: "text-slate-300",
-    gold: "text-amber-400 font-medium",
-    cyan: "text-cyan-400 font-medium"
-  };
-
+function HealthRow({ name, status, value }: { name: string; status: "green" | "gold" | "cyan"; value: string }) {
+  const dotCls =
+    status === "green"
+      ? "w-2 h-2 rounded-full bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.4)]"
+      : status === "gold"
+      ? "w-2 h-2 rounded-full bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,0.4)]"
+      : "w-2 h-2 rounded-full bg-cyan-500 shadow-[0_0_8px_rgba(6,182,212,0.4)]";
+  const valCls =
+    status === "green"
+      ? "text-sm text-slate-300"
+      : status === "gold"
+      ? "text-sm text-amber-400 font-medium"
+      : "text-sm text-cyan-400 font-medium";
   return (
     <div className="flex items-center justify-between py-2 border-b border-white/5 last:border-0 hover:bg-white/[0.02] px-2 rounded -mx-2 transition-colors">
       <div className="flex items-center gap-3">
-        <div className={\`w-2 h-2 rounded-full \${statusColors[status]}\`}></div>
+        <div className={dotCls}></div>
         <span className="text-sm font-medium text-slate-200">{name}</span>
       </div>
-      <span className={\`text-sm \${isText ? valueColors[status] : 'text-slate-400 font-mono'}\`}>
-        {value}
-      </span>
+      <span className={valCls}>{value}</span>
     </div>
   );
 }
 
-function AlertRow({ severity, title, time }: { severity: 'CRITICAL' | 'WARNING' | 'INFO', title: string, time: string }) {
-  const styles = {
-    CRITICAL: { bg: "bg-red-500/10", text: "text-red-400", border: "border-red-500/20" },
-    WARNING: { bg: "bg-amber-500/10", text: "text-amber-400", border: "border-amber-500/20" },
-    INFO: { bg: "bg-blue-500/10", text: "text-blue-400", border: "border-blue-500/20" }
-  };
-  
-  const currentStyle = styles[severity];
-
+function AlertRow({ severity, title, time }: { severity: "CRITICAL" | "WARNING" | "INFO"; title: string; time: string }) {
+  const badgeCls =
+    severity === "CRITICAL"
+      ? "text-[10px] font-bold px-1.5 py-0.5 rounded border bg-red-500/10 text-red-400 border-red-500/20 mt-0.5"
+      : severity === "WARNING"
+      ? "text-[10px] font-bold px-1.5 py-0.5 rounded border bg-amber-500/10 text-amber-400 border-amber-500/20 mt-0.5"
+      : "text-[10px] font-bold px-1.5 py-0.5 rounded border bg-blue-500/10 text-blue-400 border-blue-500/20 mt-0.5";
   return (
     <div className="flex items-start gap-3 p-3 rounded-lg bg-white/[0.02] border border-white/5 hover:bg-white/[0.04] transition-colors">
-      <div className={\`text-[10px] font-bold px-1.5 py-0.5 rounded border \${currentStyle.bg} \${currentStyle.text} \${currentStyle.border} mt-0.5\`}>
-        {severity}
-      </div>
+      <div className={badgeCls}>{severity}</div>
       <div className="flex-1">
         <div className="text-sm text-slate-200 font-medium leading-tight mb-1">{title}</div>
         <div className="text-xs text-slate-500 flex items-center gap-1.5">
@@ -306,25 +271,17 @@ function AlertRow({ severity, title, time }: { severity: 'CRITICAL' | 'WARNING' 
   );
 }
 
-function TenantUsageRow({ name, runs, percent }: { name: string, runs: string, percent: number }) {
+function TenantUsageRow({ name, runs, percent }: { name: string; runs: string; percent: number }) {
   return (
-    <div className="flex items-center gap-4 group">
-      <div className="w-36 text-sm font-medium text-slate-300 truncate group-hover:text-white transition-colors">{name}</div>
+    <div className="flex items-center gap-4">
+      <div className="w-36 text-sm font-medium text-slate-300 truncate">{name}</div>
       <div className="flex-1 h-3 bg-[#131720] rounded-full overflow-hidden border border-white/5">
-        <div 
-          className="h-full bg-cyan-500/70 rounded-full relative overflow-hidden" 
-          style={{ width: \`\${percent}%\` }}
-        >
-          <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent translate-x-[-100%] animate-[shimmer_2s_infinite]"></div>
-        </div>
+        <div
+          className="h-full bg-cyan-500/70 rounded-full"
+          style={{ width: percent + "%" }}
+        ></div>
       </div>
       <div className="w-16 text-right text-sm font-mono text-slate-400">{runs}</div>
-      
-      <style dangerouslySetInnerHTML={{__html: \`
-        @keyframes shimmer {
-          100% { transform: translateX(100%); }
-        }
-      \`}} />
     </div>
   );
 }
