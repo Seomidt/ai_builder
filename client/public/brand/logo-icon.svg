@@ -1,25 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" fill="none">
+<svg width="64" height="64" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
   <defs>
-    <filter id="icon-glow-cyan" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="1.8" result="blur"/>
-      <feFlood flood-color="#22D3EE" flood-opacity="0.5" result="color"/>
-      <feComposite in="color" in2="blur" operator="in" result="glow"/>
-      <feMerge><feMergeNode in="glow"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-    <filter id="icon-glow-gold" x="-50%" y="-50%" width="200%" height="200%">
-      <feGaussianBlur stdDeviation="1.8" result="blur"/>
-      <feFlood flood-color="#F59E0B" flood-opacity="0.5" result="color"/>
-      <feComposite in="color" in2="blur" operator="in" result="glow"/>
-      <feMerge><feMergeNode in="glow"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
+    <linearGradient id="g1" x1="0" y1="0" x2="512" y2="512">
+      <stop stop-color="#22D3EE"/>
+      <stop offset="1" stop-color="#F59E0B"/>
+    </linearGradient>
   </defs>
-  <rect width="40" height="40" rx="10" fill="#0B1220"/>
-  <g filter="url(#icon-glow-cyan)">
-    <path d="M8 20 C8 14 12 10 17 10 C22 10 25 14 20 20 C25 26 22 30 17 30 C12 30 8 26 8 20 Z" stroke="#22D3EE" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="17" cy="20" r="2" fill="#22D3EE" opacity="0.8"/>
-  </g>
-  <g filter="url(#icon-glow-gold)">
-    <path d="M20 20 C25 14 28 10 23 10 C28 10 32 14 32 20 C32 26 28 30 23 30 C28 30 25 26 20 20 Z" stroke="#F59E0B" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-    <circle cx="23" cy="20" r="2" fill="#F59E0B" opacity="0.9"/>
-  </g>
+  <circle cx="256" cy="256" r="180" stroke="url(#g1)" stroke-width="80" fill="none"/>
+  <circle cx="380" cy="256" r="180" stroke="url(#g1)" stroke-width="80" fill="none"/>
 </svg>
