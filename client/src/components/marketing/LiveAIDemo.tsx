@@ -238,7 +238,6 @@ export function LiveAIDemo() {
             ${fading ? "opacity-0 translate-y-1" : "opacity-100 translate-y-0"}
             ${colors.border} ${colors.bg}
           `}
-          style={{ minHeight: 120 }}
         >
           {/* Step header */}
           <div className="flex items-center gap-2.5 px-4 pt-3.5 pb-2.5 border-b border-white/5">
@@ -266,8 +265,8 @@ export function LiveAIDemo() {
             </div>
           </div>
 
-          {/* Lines */}
-          <div className="px-4 py-3 space-y-2.5">
+          {/* Lines — fixed minHeight for 4 lines so card never changes size */}
+          <div className="px-4 py-3 space-y-2.5" style={{ minHeight: "9.5rem" }}>
             {currentStepData.lines.map((line, i) => (
               <div
                 key={i}
