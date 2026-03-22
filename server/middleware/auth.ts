@@ -338,12 +338,32 @@ export async function authMiddleware(
     return;
   }
 
-  // ── Platform admin whitelist: short-circuit before org lookup ────────────────
+  // ── Platform admin whitelist: role = platform_admin, but also look up org ────
+  // so platform admins can use the tenant surface (create projects, etc.)
   if (supabaseUser.email && PLATFORM_ADMIN_EMAILS.has(supabaseUser.email.toLowerCase())) {
+    let organizationId = "blissops-main"; // safe fallback — org exists in DB
+    const cachedAdmin = getCachedMember(supabaseUser.id);
+    if (cachedAdmin) {
+      organizationId = cachedAdmin.organizationId;
+    } else {
+      try {
+        const members = await db
+          .select()
+          .from(organizationMembers)
+          .where(eq(organizationMembers.userId, supabaseUser.id))
+          .limit(1);
+        if (members[0]) {
+          organizationId = members[0].organizationId;
+        }
+        setCachedMember(supabaseUser.id, organizationId, "platform_admin");
+      } catch (dbErr) {
+        console.error("[auth] platform admin org lookup failed (using default):", dbErr);
+      }
+    }
     req.user = {
       id: supabaseUser.id,
       email: supabaseUser.email,
-      organizationId: "platform",
+      organizationId,
       role: "platform_admin",
     };
     req.resolvedActor = mapCurrentUserToCanonicalActor(req.user);
