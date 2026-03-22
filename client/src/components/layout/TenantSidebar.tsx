@@ -16,14 +16,15 @@ import { signOut } from "@/lib/supabase";
 import { getAdminAppUrl, getPostLogoutUrl } from "@/lib/runtime/urls";
 
 function BlissOpsLogo({ size = "md" }: { size?: "sm" | "md" }) {
-  const iconSize = size === "sm" ? 22 : 28;
+  const px = size === "sm" ? 22 : 28;
   return (
-    <svg width={iconSize} height={iconSize} viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="32" height="32" rx="8" fill="rgba(34,211,238,0.12)" />
-      <path d="M6 16 C6 11 9.5 8 13.5 8 C17.5 8 20 11.5 16 16 C20 20.5 17.5 24 13.5 24 C9.5 24 6 21 6 16 Z" stroke="#22D3EE" strokeWidth="2" fill="none" strokeLinecap="round"/>
-      <path d="M16 16 C20 11.5 22.5 8 18.5 8" stroke="#22D3EE" strokeWidth="2" fill="none" strokeLinecap="round" opacity="0.35"/>
-      <path d="M16 16 C20 20.5 22.5 24 18.5 24" stroke="#F59E0B" strokeWidth="2" fill="none" strokeLinecap="round"/>
-    </svg>
+    <img
+      src="/brand/icon.jpeg"
+      alt="BlissOps"
+      width={px}
+      height={px}
+      style={{ borderRadius: 6, objectFit: "cover" }}
+    />
   );
 }
 
