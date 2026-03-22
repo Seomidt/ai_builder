@@ -25,6 +25,6 @@ export async function getInvoiceStripeLifecycle(
   return [];
 }
 
-export function explainStripeWebhookOutcome(event: StripeWebhookEvent): string {
-  return `Stripe event ${event.eventType} (${event.stripeEventId}) — status: ${event.status}`;
+export function explainStripeWebhookOutcome(stripeEventId: string): string {
+  return `Stripe event ${stripeEventId} — no data available (STRIPE_NOT_CONFIGURED)`;
 }

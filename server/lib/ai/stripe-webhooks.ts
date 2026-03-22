@@ -1,5 +1,6 @@
-import { Request, Response } from "express";
-
-export async function handleStripeWebhook(req: Request, res: Response): Promise<void> {
-  res.status(400).json({ error_code: "STRIPE_NOT_CONFIGURED", message: "Stripe webhooks not configured" });
+export async function handleStripeWebhook(
+  _rawBody: Buffer,
+  _sig:     string,
+): Promise<{ outcome: string; reason: string }> {
+  return { outcome: "skipped", reason: "STRIPE_NOT_CONFIGURED" };
 }
