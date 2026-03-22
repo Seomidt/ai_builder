@@ -57,27 +57,6 @@ const governanceItems = [
   { href: "/ops/governance/runaway",   label: "Runaway",   icon: Lock       },
 ];
 
-function BlissOpsAdminIcon() {
-  return (
-    <div
-      className="flex items-center justify-center w-7 h-7 rounded-md shrink-0"
-      style={{ background: "rgba(239,68,68,0.15)", border: "1px solid rgba(239,68,68,0.25)" }}
-    >
-      <ShieldAlert className="w-4 h-4 text-destructive" />
-    </div>
-  );
-}
-
-function SectionLabel({ label }: { label: string }) {
-  return (
-    <div className="pt-4 pb-1.5">
-      <p className="px-3 text-[9px] font-semibold uppercase tracking-widest text-sidebar-foreground/60">
-        {label}
-      </p>
-    </div>
-  );
-}
-
 export function AdminSidebar() {
   const [location] = useLocation();
   const { t } = useTranslations("common");
@@ -96,80 +75,121 @@ export function AdminSidebar() {
     return location.startsWith(href);
   }
 
-  function NavItem({ href, label, icon: Icon, section }: { href: string; label: string; icon: React.ElementType; section?: "governance" }) {
+  function NavItem({
+    href,
+    label,
+    icon: Icon,
+    section,
+  }: {
+    href: string;
+    label: string;
+    icon: React.ElementType;
+    section?: "ops" | "governance";
+  }) {
     const active = isActive(href);
     const isGov  = section === "governance";
+    const isOps  = section === "ops";
 
     return (
       <Link
         href={href}
         data-testid={`admin-nav-${href.replace(/\//g, "-").replace(/^-/, "")}`}
         className={cn(
-          "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer relative",
+          "flex items-center gap-3 px-4 py-2 text-sm font-medium transition-colors border-l-2 cursor-pointer",
           active
             ? isGov
-              ? "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"
-              : "bg-destructive/12 text-destructive border border-destructive/20"
-            : "text-sidebar-foreground/85 hover:text-sidebar-foreground hover:bg-white/8 border border-transparent",
+              ? "bg-amber-500/10 text-amber-400 border-amber-500"
+              : "bg-destructive/10 text-destructive border-destructive"
+            : isGov
+            ? "text-amber-500/80 hover:text-amber-400 hover:bg-white/5 border-transparent"
+            : "text-sidebar-foreground/80 hover:text-sidebar-foreground hover:bg-white/5 border-transparent",
         )}
-        style={active && !isGov ? { boxShadow: "0 0 12px rgba(239,68,68,0.10), inset 0 0 12px rgba(239,68,68,0.04)" } : {}}
       >
-        {active && (
-          <span
-            className={cn(
-              "absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 rounded-full",
-              isGov ? "bg-yellow-400" : "bg-destructive",
-            )}
-            style={{ boxShadow: isGov ? "0 0 8px rgba(234,179,8,0.6)" : "0 0 8px rgba(239,68,68,0.6)" }}
-          />
-        )}
-        <Icon className={cn(
-          "w-4 h-4 shrink-0",
-          active
-            ? isGov ? "text-yellow-400" : "text-destructive"
-            : "text-sidebar-foreground/70",
-        )} />
+        <Icon
+          className={cn(
+            "w-4 h-4 shrink-0",
+            active
+              ? isGov ? "text-amber-400" : "text-destructive"
+              : isGov
+              ? "text-amber-500/70"
+              : "text-sidebar-foreground/60",
+          )}
+        />
         <span className="flex-1">{label}</span>
       </Link>
     );
   }
 
   return (
-    <aside className="flex flex-col w-56 shrink-0 h-screen sidebar-gradient-admin border-r border-sidebar-border">
+    <aside className="flex flex-col w-60 shrink-0 h-screen border-r border-sidebar-border overflow-hidden" style={{ backgroundColor: "hsl(218 30% 10%)" }}>
 
-      {/* Brand — admin surface */}
-      <div className="flex items-center gap-2.5 px-4 py-5 border-b border-sidebar-border">
-        <BlissOpsAdminIcon />
-        <div className="flex-1 min-w-0">
-          <span className="text-sm font-bold text-sidebar-foreground tracking-wide">
-            Bliss<span className="text-destructive">Ops</span>
+      {/* Brand */}
+      <div className="px-4 py-4 border-b border-white/5 flex flex-col gap-1 shrink-0">
+        <div className="flex items-center gap-2">
+          <div className="bg-destructive rounded-md p-1.5 flex items-center justify-center shrink-0">
+            <ShieldAlert className="w-4 h-4 text-white" />
+          </div>
+          <div className="flex items-baseline gap-1 min-w-0">
+            <span className="font-bold text-white tracking-tight text-sm">BlissOps</span>
+            <span className="text-destructive font-medium text-xs">Ops</span>
+          </div>
+        </div>
+        <div className="mt-1">
+          <span className="text-[10px] uppercase tracking-wider font-bold bg-destructive/20 text-destructive/80 px-2 py-0.5 rounded-full inline-block">
+            Superadmin
           </span>
-          <p className="text-[9px] uppercase tracking-widest text-destructive/60 font-semibold mt-0.5">
-            Platform Ops
-          </p>
         </div>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-2 py-2 space-y-0.5 overflow-y-auto">
-        <SectionLabel label={t("nav.platformOps")} />
-        {opsItems.map(({ href, label, icon }) => (
-          <NavItem key={href} href={href} label={label} icon={icon} />
-        ))}
+      <nav className="flex-1 overflow-y-auto py-2">
 
-        <SectionLabel label="Admin" />
-        {adminItems.map(({ href, label, icon }) => (
-          <NavItem key={href} href={href} label={label} icon={icon} />
-        ))}
+        {/* OPS GROUP */}
+        <div className="mb-3">
+          <div className="bg-destructive/5 border-b border-destructive/10 px-4 py-1.5 mb-1">
+            <span className="text-[10px] font-bold text-destructive uppercase tracking-widest">
+              {t("nav.platformOps")}
+            </span>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            {opsItems.map(({ href, label, icon }) => (
+              <NavItem key={href} href={href} label={label} icon={icon} section="ops" />
+            ))}
+          </div>
+        </div>
 
-        <SectionLabel label="Governance" />
-        {governanceItems.map(({ href, label, icon }) => (
-          <NavItem key={href} href={href} label={label} icon={icon} section="governance" />
-        ))}
+        {/* ADMIN GROUP */}
+        <div className="mb-3">
+          <div className="px-4 py-1.5 mb-1">
+            <span className="text-[10px] font-bold text-sidebar-foreground/50 uppercase tracking-widest">
+              Admin
+            </span>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            {adminItems.map(({ href, label, icon }) => (
+              <NavItem key={href} href={href} label={label} icon={icon} />
+            ))}
+          </div>
+        </div>
+
+        {/* GOVERNANCE GROUP */}
+        <div className="mb-2">
+          <div className="bg-amber-500/5 border-b border-amber-500/10 px-4 py-1.5 mb-1">
+            <span className="text-[10px] font-bold text-amber-500 uppercase tracking-widest">
+              Governance
+            </span>
+          </div>
+          <div className="flex flex-col gap-0.5">
+            {governanceItems.map(({ href, label, icon }) => (
+              <NavItem key={href} href={href} label={label} icon={icon} section="governance" />
+            ))}
+          </div>
+        </div>
+
       </nav>
 
       {/* Footer */}
-      <div className="px-3 py-3 border-t border-sidebar-border space-y-2.5 bg-black/15">
+      <div className="px-4 py-3 border-t border-white/5 space-y-2.5 shrink-0" style={{ backgroundColor: "hsl(218 32% 8%)" }}>
         <div className="flex items-center gap-2">
           <div
             className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[10px] font-bold text-destructive"
@@ -177,7 +197,10 @@ export function AdminSidebar() {
           >
             {initials}
           </div>
-          <p className="text-xs font-medium text-sidebar-foreground truncate flex-1" data-testid="text-admin-sidebar-email">
+          <p
+            className="text-xs font-medium text-sidebar-foreground truncate flex-1"
+            data-testid="text-admin-sidebar-email"
+          >
             {displayEmail}
           </p>
           <button
