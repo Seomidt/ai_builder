@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { redirectAuthToTenantApp } from "@/lib/runtime/urls";
 import { BrandMark } from "@/components/brand/BrandMark";
+import { LiveAIDemo } from "@/components/marketing/LiveAIDemo";
 
 /** Intercept /auth/* on marketing host and send to tenant app */
 function AuthRedirect() {
@@ -357,17 +358,17 @@ function MarketingHome() {
         </div>
       </section>
 
-      {/* VISUAL BUILDER */}
+      {/* VISUAL BUILDER — Live AI Demo */}
       <section className="py-24 border-t border-white/5 bg-[#0F1629]">
         <div className="max-w-[1000px] mx-auto px-6">
-          <div className="grid md:grid-cols-2 gap-16 items-center">
+          <div className="grid md:grid-cols-2 gap-12 items-center">
             <div>
               <div className="w-12 h-12 rounded-xl bg-cyan-500/10 flex items-center justify-center mb-6 border border-cyan-500/20">
                 <Layers className="w-6 h-6 text-cyan-400" />
               </div>
               <h2 className="text-3xl font-bold text-white mb-4">Design AI experts visually</h2>
               <p className="text-slate-400 leading-relaxed mb-6">
-                Define how your AI thinks — what data it uses, which rules it follows, how it responds.
+                Define how your AI thinks — what data it uses, which rules it follows, how it responds, and how it validates decisions.
               </p>
               <ul className="space-y-3">
                 {[
@@ -381,26 +382,8 @@ function MarketingHome() {
                 ))}
               </ul>
             </div>
-            <div className="relative">
-              <div className="absolute inset-0 bg-gradient-to-tr from-cyan-500/10 to-transparent blur-2xl rounded-full" />
-              <div className="relative aspect-[4/3] rounded-2xl border border-white/10 bg-[#161F33] overflow-hidden p-6 shadow-2xl">
-                <div className="h-full flex flex-col gap-3 justify-center">
-                  <div className="bg-[#1A233A] border border-white/5 rounded-lg px-4 py-3 flex items-center gap-3">
-                    <Upload className="w-4 h-4 text-cyan-400" />
-                    <span className="text-xs font-mono text-slate-300">Upload: company_policies.pdf</span>
-                  </div>
-                  <div className="ml-6 w-px h-4 bg-cyan-500/20" />
-                  <div className="bg-[#1A233A] border border-white/5 rounded-lg px-4 py-3 flex items-center gap-3">
-                    <Settings2 className="w-4 h-4 text-amber-400" />
-                    <span className="text-xs font-mono text-slate-300">Rule: max_refund ≤ 500</span>
-                  </div>
-                  <div className="ml-6 w-px h-4 bg-cyan-500/20" />
-                  <div className="bg-gradient-to-r from-cyan-500 to-blue-600 rounded-lg px-4 py-3 flex items-center gap-3 shadow-lg shadow-cyan-500/20">
-                    <Cpu className="w-4 h-4 text-white" />
-                    <span className="text-xs font-bold text-white">AI Expert → deployed</span>
-                  </div>
-                </div>
-              </div>
+            <div className="flex items-center justify-center">
+              <LiveAIDemo />
             </div>
           </div>
         </div>
