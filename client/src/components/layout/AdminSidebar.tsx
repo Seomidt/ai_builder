@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { Link, useLocation } from "wouter";
 import {
   ShieldAlert,
@@ -21,6 +22,8 @@ import {
   Lock,
   LogOut,
   Cpu,
+  Menu,
+  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTranslations } from "@/hooks/use-translations";
@@ -61,6 +64,11 @@ export function AdminSidebar() {
   const [location] = useLocation();
   const { t } = useTranslations("common");
   const { user } = useAuth();
+  const [mobileOpen, setMobileOpen] = useState(false);
+
+  useEffect(() => {
+    setMobileOpen(false);
+  }, [location]);
 
   async function handleLogout() {
     await signOut();
@@ -121,7 +129,56 @@ export function AdminSidebar() {
   }
 
   return (
-    <aside className="flex flex-col w-60 shrink-0 h-screen border-r border-white/10 overflow-hidden" style={{ backgroundColor: "hsl(218 30% 10%)" }}>
+    <>
+      {/* ── Mobile top bar (hidden on lg+) ──────────────────────────────── */}
+      <div
+        className="fixed top-0 left-0 right-0 h-14 z-40 flex items-center px-4 border-b border-white/10 lg:hidden"
+        style={{ backgroundColor: "hsl(218 30% 10%)" }}
+      >
+        <button
+          onClick={() => setMobileOpen(true)}
+          data-testid="button-admin-mobile-menu-open"
+          className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+          aria-label="Åbn menu"
+        >
+          <Menu className="w-5 h-5" />
+        </button>
+        <div className="flex items-center gap-2 ml-3">
+          <div className="bg-destructive rounded-md p-1 flex items-center justify-center shrink-0">
+            <ShieldAlert className="w-3.5 h-3.5 text-white" />
+          </div>
+          <span className="text-sm font-semibold text-white tracking-tight">BlissOps</span>
+          <span className="text-destructive font-medium text-xs">Ops</span>
+        </div>
+      </div>
+
+      {/* ── Mobile backdrop ──────────────────────────────────────────────── */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 bg-black/60 z-40 lg:hidden"
+          onClick={() => setMobileOpen(false)}
+        />
+      )}
+
+      {/* ── Sidebar ─────────────────────────────────────────────────────── */}
+      <aside
+        className={cn(
+          "fixed inset-y-0 left-0 z-50 flex flex-col w-60 shrink-0 h-screen border-r border-white/10 overflow-hidden transition-transform duration-300",
+          "lg:relative lg:translate-x-0 lg:z-auto",
+          mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
+        )}
+        style={{ backgroundColor: "hsl(218 30% 10%)" }}
+      >
+
+      {/* Mobile close button */}
+      <button
+        onClick={() => setMobileOpen(false)}
+        data-testid="button-admin-mobile-menu-close"
+        className="absolute top-3 right-3 p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors lg:hidden"
+        aria-label="Luk menu"
+      >
+        <X className="w-4 h-4" />
+      </button>
 
       {/* Brand */}
       <div className="px-4 py-4 border-b border-white/5 flex flex-col gap-1 shrink-0">
@@ -223,5 +280,6 @@ export function AdminSidebar() {
         <LocaleSwitcher />
       </div>
     </aside>
+    </>
   );
 }
