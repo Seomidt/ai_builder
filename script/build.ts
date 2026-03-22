@@ -2,6 +2,22 @@ import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
 import { rm, readFile } from "fs/promises";
 
+// ── Serverless handler entries ────────────────────────────────────────────────
+const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
+  { name: "auth",          entry: "api/_src/auth.ts",          out: "api/auth.js"          },
+  { name: "dashboard",     entry: "api/_src/dashboard.ts",     out: "api/dashboard.js"     },
+  { name: "projects",      entry: "api/_src/projects.ts",      out: "api/projects.js"      },
+  { name: "architectures", entry: "api/_src/architectures.ts", out: "api/architectures.js" },
+  { name: "runs",          entry: "api/_src/runs.ts",          out: "api/runs.js"          },
+  { name: "integrations",  entry: "api/_src/integrations.ts",  out: "api/integrations.js"  },
+  { name: "config",        entry: "api/_src/config.ts",        out: "api/config.js"        },
+  { name: "analytics",     entry: "api/_src/analytics.ts",     out: "api/analytics.js"     },
+  { name: "storage",       entry: "api/_src/storage.ts",       out: "api/storage.js"       },
+  { name: "waitlist",      entry: "api/_src/waitlist.ts",      out: "api/waitlist.js"      },
+  { name: "tenant",        entry: "api/_src/tenant.ts",        out: "api/tenant.js"        },
+  { name: "admin",         entry: "api/_src/admin.ts",         out: "api/admin.js"         },
+];
+
 const allowlist = [
   "@google/generative-ai",
   "@supabase/supabase-js",
@@ -81,36 +97,37 @@ async function buildAll() {
     },
   };
 
-  console.log("building Vercel serverless function (api/index.js)...");
-  await esbuild({
-    entryPoints: ["server/vercel-entry.ts"],
-    platform: "node",
-    bundle: true,
-    format: "cjs",
-    outfile: "api/index.js",
-    tsconfig: "tsconfig.json",
-    define: {
-      "process.env.NODE_ENV": '"production"',
-    },
-    minifySyntax: true,
-    minifyWhitespace: true,
-    minifyIdentifiers: false,
-    plugins: [stubPgNative],
-    logLevel: "info",
-    banner: {
-      js: "// @vercel-bundled — esbuild pre-compiled, do not edit\n",
-    },
-    footer: {
-      js: [
-        "",
-        "// Vercel CJS compatibility: expose handler directly on module.exports",
-        "// @vercel/node invokes module.exports as a function, not module.exports.default",
-        "if (module.exports && module.exports.__esModule && typeof module.exports.default === 'function') {",
-        "  module.exports = module.exports.default;",
-        "}",
-      ].join("\n"),
-    },
-  });
+  // ── Serverless split — one function per route group ──────────────────────
+  // No Express, no supabase-js, no drizzle — only Node.js built-ins + fetch.
+  // Target sizes: auth/analytics/waitlist <50KB, core routes <150KB, admin <300KB.
+
+  const cjsCompatFooter = [
+    "",
+    "// Vercel CJS compatibility: expose handler directly on module.exports",
+    "if (module.exports && module.exports.__esModule && typeof module.exports.default === 'function') {",
+    "  module.exports = module.exports.default;",
+    "}",
+  ].join("\n");
+
+  for (const h of HANDLERS) {
+    console.log(`building Vercel function: ${h.name} → ${h.out}`);
+    await esbuild({
+      entryPoints: [h.entry],
+      platform:    "node",
+      bundle:      true,
+      format:      "cjs",
+      outfile:     h.out,
+      tsconfig:    "tsconfig.json",
+      define:      { "process.env.NODE_ENV": '"production"' },
+      minifySyntax:      true,
+      minifyWhitespace:  true,
+      minifyIdentifiers: false,
+      plugins:     [stubPgNative],
+      logLevel:    "info",
+      banner:      { js: `// @vercel-bundled [${h.name}] — esbuild pre-compiled, do not edit\n` },
+      footer:      { js: cjsCompatFooter },
+    });
+  }
 
   console.log("build complete.");
 }
