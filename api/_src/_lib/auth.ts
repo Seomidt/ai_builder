@@ -1,17 +1,22 @@
 import { createHmac, timingSafeEqual } from "crypto";
 import type { IncomingMessage } from "http";
 
-const SUPABASE_JWT_SECRET   = process.env.SUPABASE_JWT_SECRET   ?? "";
-const SUPABASE_URL          = process.env.SUPABASE_URL           ?? "";
-const SUPABASE_SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
-const INTERNAL_API_SECRET   = process.env.INTERNAL_API_SECRET   ?? "";
+// Trim all secrets — Vercel/env editors sometimes add trailing newlines/spaces
+const SUPABASE_JWT_SECRET   = (process.env.SUPABASE_JWT_SECRET   ?? "").trim();
+const SUPABASE_URL          = (process.env.SUPABASE_URL           ?? "").trim();
+const SUPABASE_SERVICE_KEY  = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
+// Anon key: always available (used by frontend too), safe to use as `apikey`
+const SUPABASE_ANON_KEY     = (process.env.SUPABASE_ANON_KEY     ?? "").trim();
+const INTERNAL_API_SECRET   = (process.env.INTERNAL_API_SECRET   ?? "").trim();
+
 const PLATFORM_ADMIN_EMAILS = new Set(
   (process.env.PLATFORM_ADMIN_EMAILS ?? "seomidt@gmail.com")
     .split(",").map((e) => e.trim().toLowerCase()).filter(Boolean),
 );
 const LOCKDOWN_ENABLED   = process.env.LOCKDOWN_ENABLED === "true";
 const LOCKDOWN_ALLOWLIST = new Set(
-  (process.env.LOCKDOWN_ALLOWLIST ?? "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean),
+  (process.env.LOCKDOWN_ALLOWLIST ?? "seomidt@gmail.com")
+    .split(",").map((e) => e.trim().toLowerCase()).filter(Boolean),
 );
 
 // ── JWT verification (fast path — local HMAC, no network) ────────────────────
@@ -39,8 +44,8 @@ function verifyLocalJwt(token: string): { id: string; email?: string } | null {
 }
 
 // ── Supabase API fallback (slow path — network call to Supabase Auth API) ────
-// Used when SUPABASE_JWT_SECRET is not set or local verification fails.
-// Matches behaviour of Express server/middleware/auth.ts.
+// Uses SUPABASE_ANON_KEY as apikey (always available, identifies the project).
+// Falls back to SUPABASE_SERVICE_KEY if anon key is missing.
 
 interface SupabaseUserResponse {
   id?: string;
@@ -52,16 +57,17 @@ interface SupabaseUserResponse {
 const supabaseUserCache = new Map<string, { id: string; email?: string; exp: number }>();
 
 async function verifyViaSupabaseApi(token: string): Promise<{ id: string; email?: string } | null> {
-  // Cache result for 30 s to avoid hammering the Supabase Auth API
   const cached = supabaseUserCache.get(token);
   if (cached && cached.exp > Date.now()) return { id: cached.id, email: cached.email };
 
+  // Prefer anon key as apikey — always available, sufficient to identify project.
+  // Service key works too but may not be configured in all environments.
+  const apikey = SUPABASE_ANON_KEY || SUPABASE_SERVICE_KEY;
+  if (!SUPABASE_URL || !apikey) return null;
+
   try {
     const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-      headers: {
-        apikey:        SUPABASE_SERVICE_KEY,
-        Authorization: `Bearer ${token}`,
-      },
+      headers: { apikey, Authorization: `Bearer ${token}` },
     });
     if (!res.ok) return null;
     const data = (await res.json()) as SupabaseUserResponse;
@@ -81,10 +87,13 @@ async function lookupMembership(userId: string): Promise<{ orgId: string; role: 
   const hit = memberCache.get(userId);
   if (hit && hit.exp > Date.now()) return { orgId: hit.orgId, role: hit.role };
 
+  const apikey = SUPABASE_SERVICE_KEY || SUPABASE_ANON_KEY;
+  if (!SUPABASE_URL || !apikey) return { orgId: "blissops-main", role: "member" };
+
   try {
     const res = await fetch(
       `${SUPABASE_URL}/rest/v1/organization_members?user_id=eq.${encodeURIComponent(userId)}&select=organization_id,role&limit=1`,
-      { headers: { apikey: SUPABASE_SERVICE_KEY, Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } },
+      { headers: { apikey, Authorization: `Bearer ${apikey}` } },
     );
     const rows = (await res.json()) as Array<{ organization_id: string; role: string }>;
     const orgId = rows[0]?.organization_id ?? "blissops-main";
@@ -113,11 +122,10 @@ export async function authenticate(req: IncomingMessage): Promise<
 > {
   // Internal tooling bypass
   if (INTERNAL_API_SECRET && req.headers["x-internal-token"] === INTERNAL_API_SECRET) {
-    const user: AuthUser = {
-      id: "internal-script", email: "internal@blissops.com",
-      organizationId: "blissops-main", role: "platform_admin",
+    return {
+      user: { id: "internal-script", email: "internal@blissops.com", organizationId: "blissops-main", role: "platform_admin" },
+      status: "ok",
     };
-    return { user, status: "ok" };
   }
 
   const authHeader = req.headers.authorization;
@@ -128,14 +136,8 @@ export async function authenticate(req: IncomingMessage): Promise<
   // Fast path: local JWT verification (< 1 ms, no network)
   let jwt = verifyLocalJwt(token);
 
-  // Slow path fallback: call Supabase Auth API when:
-  //   - SUPABASE_JWT_SECRET is not set in this environment
-  //   - local verification failed (e.g. secret mismatch)
-  // This mirrors the Express server/middleware/auth.ts behaviour so the
-  // serverless functions work even without the JWT secret configured.
-  if (!jwt) {
-    jwt = await verifyViaSupabaseApi(token);
-  }
+  // Slow path: call Supabase Auth API when local verification fails
+  if (!jwt) jwt = await verifyViaSupabaseApi(token);
 
   if (!jwt) return { user: null, status: "unauthenticated" };
 
@@ -144,7 +146,7 @@ export async function authenticate(req: IncomingMessage): Promise<
     return { user: null, status: "lockdown" };
   }
 
-  // Platform admin
+  // Platform admin — always gets full access
   if (jwt.email && PLATFORM_ADMIN_EMAILS.has(jwt.email.toLowerCase())) {
     const { orgId } = await lookupMembership(jwt.id);
     return {
