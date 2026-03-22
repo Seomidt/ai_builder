@@ -14,7 +14,7 @@ const LOCKDOWN_ALLOWLIST = new Set(
   (process.env.LOCKDOWN_ALLOWLIST ?? "").split(",").map((e) => e.trim().toLowerCase()).filter(Boolean),
 );
 
-// ── JWT verification ─────────────────────────────────────────────────────────
+// ── JWT verification (fast path — local HMAC, no network) ────────────────────
 
 function b64UrlToBuffer(s: string): Buffer {
   return Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
@@ -36,6 +36,41 @@ function verifyLocalJwt(token: string): { id: string; email?: string } | null {
     if (typeof payload.sub !== "string") return null;
     return { id: payload.sub, email: typeof payload.email === "string" ? payload.email : undefined };
   } catch { return null; }
+}
+
+// ── Supabase API fallback (slow path — network call to Supabase Auth API) ────
+// Used when SUPABASE_JWT_SECRET is not set or local verification fails.
+// Matches behaviour of Express server/middleware/auth.ts.
+
+interface SupabaseUserResponse {
+  id?: string;
+  email?: string;
+  error?: string;
+  message?: string;
+}
+
+const supabaseUserCache = new Map<string, { id: string; email?: string; exp: number }>();
+
+async function verifyViaSupabaseApi(token: string): Promise<{ id: string; email?: string } | null> {
+  // Cache result for 30 s to avoid hammering the Supabase Auth API
+  const cached = supabaseUserCache.get(token);
+  if (cached && cached.exp > Date.now()) return { id: cached.id, email: cached.email };
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: {
+        apikey:        SUPABASE_SERVICE_KEY,
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as SupabaseUserResponse;
+    if (!data.id) return null;
+    supabaseUserCache.set(token, { id: data.id, email: data.email, exp: Date.now() + 30_000 });
+    return { id: data.id, email: data.email };
+  } catch {
+    return null;
+  }
 }
 
 // ── Membership cache (30 s TTL per process instance) ─────────────────────────
@@ -90,7 +125,18 @@ export async function authenticate(req: IncomingMessage): Promise<
   const token = authHeader.slice(7).trim();
   if (!token) return { user: null, status: "unauthenticated" };
 
-  const jwt = verifyLocalJwt(token);
+  // Fast path: local JWT verification (< 1 ms, no network)
+  let jwt = verifyLocalJwt(token);
+
+  // Slow path fallback: call Supabase Auth API when:
+  //   - SUPABASE_JWT_SECRET is not set in this environment
+  //   - local verification failed (e.g. secret mismatch)
+  // This mirrors the Express server/middleware/auth.ts behaviour so the
+  // serverless functions work even without the JWT secret configured.
+  if (!jwt) {
+    jwt = await verifyViaSupabaseApi(token);
+  }
+
   if (!jwt) return { user: null, status: "unauthenticated" };
 
   // Lockdown guard
