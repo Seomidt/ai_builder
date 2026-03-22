@@ -1,6 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
+  <defs>
+    <filter id="fav-glow-cyan" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1.5" result="blur"/>
+      <feFlood flood-color="#22D3EE" flood-opacity="0.5" result="color"/>
+      <feComposite in="color" in2="blur" operator="in" result="glow"/>
+      <feMerge><feMergeNode in="glow"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="fav-glow-gold" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="1.5" result="blur"/>
+      <feFlood flood-color="#F59E0B" flood-opacity="0.5" result="color"/>
+      <feComposite in="color" in2="blur" operator="in" result="glow"/>
+      <feMerge><feMergeNode in="glow"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
   <rect width="32" height="32" rx="8" fill="#0B1220"/>
-  <path d="M6 16 C6 11 9.5 8 13.5 8 C17.5 8 20 11.5 16 16 C20 20.5 17.5 24 13.5 24 C9.5 24 6 21 6 16 Z" stroke="#22D3EE" stroke-width="2" fill="none" stroke-linecap="round"/>
-  <path d="M16 16 C20 11.5 22.5 8 18.5 8" stroke="#22D3EE" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.3"/>
-  <path d="M16 16 C20 20.5 22.5 24 18.5 24" stroke="#F59E0B" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <g filter="url(#fav-glow-cyan)">
+    <path d="M6 16 C6 11 9.5 8 13.5 8 C17.5 8 20 11.5 16 16 C20 20.5 17.5 24 13.5 24 C9.5 24 6 21 6 16 Z" stroke="#22D3EE" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="13.5" cy="16" r="1.5" fill="#22D3EE" opacity="0.8"/>
+  </g>
+  <g filter="url(#fav-glow-gold)">
+    <path d="M16 16 C20 11.5 22.5 8 18.5 8 C22.5 8 26 11 26 16 C26 21 22.5 24 18.5 24 C22.5 24 20 20.5 16 16 Z" stroke="#F59E0B" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="18.5" cy="16" r="1.5" fill="#F59E0B" opacity="0.9"/>
+  </g>
 </svg>
