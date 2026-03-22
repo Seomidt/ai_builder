@@ -93,30 +93,30 @@
   --elevate-1: rgba(255,255,255, .04);
   --elevate-2: rgba(255,255,255, .09);
 
-  /* Mørk navy baggrund — løftet til klart synlig blågrå */
-  --background: 218 28% 18%;
-  --foreground: 210 15% 92%;
-  --border: 218 18% 28%;
+  /* Mørk navy baggrund — klart læselig blågrå */
+  --background: 218 25% 22%;
+  --foreground: 210 12% 93%;
+  --border: 218 16% 32%;
 
   /* Kort — lettere end baggrund */
-  --card: 218 24% 22%;
-  --card-foreground: 210 15% 92%;
-  --card-border: 218 18% 30%;
+  --card: 218 22% 26%;
+  --card-foreground: 210 12% 93%;
+  --card-border: 218 16% 34%;
 
-  /* Sidebar — lidt mørkere end baggrund */
-  --sidebar: 218 30% 13%;
-  --sidebar-foreground: 210 15% 94%;
-  --sidebar-border: 218 18% 26%;
+  /* Sidebar — mørkere end baggrund */
+  --sidebar: 218 28% 15%;
+  --sidebar-foreground: 210 12% 95%;
+  --sidebar-border: 218 16% 28%;
   --sidebar-primary: 175 70% 48%;
   --sidebar-primary-foreground: 218 30% 8%;
-  --sidebar-accent: 218 24% 20%;
-  --sidebar-accent-foreground: 210 15% 94%;
+  --sidebar-accent: 218 22% 22%;
+  --sidebar-accent-foreground: 210 12% 95%;
   --sidebar-ring: 175 70% 48%;
 
   /* Popovers */
-  --popover: 218 26% 16%;
-  --popover-foreground: 210 15% 92%;
-  --popover-border: 218 18% 28%;
+  --popover: 218 24% 20%;
+  --popover-foreground: 210 12% 93%;
+  --popover-border: 218 16% 32%;
 
   /* Teal/cyan primær accent */
   --primary: 175 75% 42%;
@@ -247,16 +247,16 @@
   /* Sidebar gradient utility */
   .sidebar-gradient {
     background: linear-gradient(180deg,
-      hsl(218 30% 13%) 0%,
-      hsl(218 30% 12%) 60%,
-      hsl(218 30% 11%) 100%
+      hsl(218 28% 15%) 0%,
+      hsl(218 28% 14%) 60%,
+      hsl(218 28% 13%) 100%
     );
   }
   .sidebar-gradient-admin {
     background: linear-gradient(180deg,
-      hsl(218 32% 11%) 0%,
-      hsl(218 32% 10%) 60%,
-      hsl(218 32% 9%) 100%
+      hsl(218 30% 13%) 0%,
+      hsl(218 30% 12%) 60%,
+      hsl(218 30% 11%) 100%
     );
   }
 

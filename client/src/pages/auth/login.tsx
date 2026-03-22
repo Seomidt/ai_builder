@@ -70,7 +70,7 @@ export default function AuthLogin() {
   return (
     <div
       className="min-h-screen flex items-center justify-center px-4 relative overflow-hidden"
-      style={{ background: "hsl(220 35% 9%)" }}
+      style={{ background: "hsl(218 25% 22%)" }}
       data-testid="page-auth-login"
     >
       {/* Background glow */}
@@ -83,11 +83,15 @@ export default function AuthLogin() {
         {/* Logo + Brand */}
         <div className="flex flex-col items-center mb-8 text-center">
           <img
-            src="/brand/logo-full.png"
+            src="/brand/icon.png"
             alt="BlissOps"
-            className="w-56 h-auto object-contain"
+            className="h-24 w-auto object-contain"
+            style={{ filter: "drop-shadow(0 0 20px rgba(34,211,238,0.35))" }}
           />
-          <p className="mt-3 text-sm text-muted-foreground">AI Platform — Log ind for at fortsætte</p>
+          <h1 className="mt-4 text-2xl font-bold tracking-tight" style={{ color: "#F3F4F6" }}>
+            Bliss<span style={{ color: "#22D3EE" }}>Ops</span>
+          </h1>
+          <p className="mt-1.5 text-sm text-muted-foreground">AI Platform — Log ind for at fortsætte</p>
         </div>
 
         {/* Card */}
