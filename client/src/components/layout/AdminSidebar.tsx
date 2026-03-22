@@ -163,33 +163,31 @@ export function AdminSidebar() {
       {/* ── Sidebar ─────────────────────────────────────────────────────── */}
       <aside
         className={cn(
-          "fixed inset-y-0 left-0 z-50 flex flex-col w-60 shrink-0 h-screen border-r border-white/10 overflow-hidden transition-transform duration-300",
+          "fixed top-0 left-0 z-50 flex flex-col w-60 shrink-0 border-r border-white/10 overflow-hidden transition-transform duration-300",
           "lg:relative lg:translate-x-0 lg:z-auto",
           mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
         )}
-        style={{ backgroundColor: "hsl(218 30% 10%)" }}
+        style={{ backgroundColor: "hsl(218 30% 10%)", height: "100dvh" }}
       >
 
-      {/* Mobile close button */}
-      <button
-        onClick={() => setMobileOpen(false)}
-        data-testid="button-admin-mobile-menu-close"
-        className="absolute top-3 right-3 p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors lg:hidden"
-        aria-label="Luk menu"
-      >
-        <X className="w-4 h-4" />
-      </button>
-
-      {/* Brand */}
+      {/* Brand + mobile close */}
       <div className="px-4 py-4 border-b border-white/5 flex flex-col gap-1 shrink-0">
         <div className="flex items-center gap-2">
           <div className="bg-destructive rounded-md p-1.5 flex items-center justify-center shrink-0">
             <ShieldAlert className="w-4 h-4 text-white" />
           </div>
-          <div className="flex items-baseline gap-1 min-w-0">
+          <div className="flex items-baseline gap-1 min-w-0 flex-1">
             <span className="font-bold text-white tracking-tight text-sm">BlissOps</span>
             <span className="text-destructive font-medium text-xs">Ops</span>
           </div>
+          <button
+            onClick={() => setMobileOpen(false)}
+            data-testid="button-admin-mobile-menu-close"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors lg:hidden shrink-0"
+            aria-label="Luk menu"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
         <div className="mt-1">
           <span className="text-[10px] uppercase tracking-wider font-bold bg-destructive/20 text-destructive/80 px-2 py-0.5 rounded-full inline-block">
