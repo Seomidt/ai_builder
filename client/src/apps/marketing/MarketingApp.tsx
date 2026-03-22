@@ -44,14 +44,15 @@ function AuthRedirect() {
 // ─── Brand Logo ───────────────────────────────────────────────────────────────
 
 function Logo({ size = "md" }: { size?: "sm" | "md" | "lg" }) {
-  const dim = size === "lg" ? 36 : size === "sm" ? 24 : 30;
+  const dim = size === "lg" ? 40 : size === "sm" ? 26 : 32;
   return (
-    <svg width={dim} height={dim} viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="32" height="32" rx="8" fill="rgba(34,211,238,0.12)" />
-      <path d="M6 16 C6 11 9.5 8 13.5 8 C17.5 8 20 11.5 16 16 C20 20.5 17.5 24 13.5 24 C9.5 24 6 21 6 16 Z" stroke="#22D3EE" strokeWidth="2" fill="none" strokeLinecap="round"/>
-      <path d="M16 16 C20 11.5 22.5 8 18.5 8" stroke="#22D3EE" strokeWidth="2" fill="none" strokeLinecap="round" opacity="0.3"/>
-      <path d="M16 16 C20 20.5 22.5 24 18.5 24" stroke="#F59E0B" strokeWidth="2" fill="none" strokeLinecap="round"/>
-    </svg>
+    <img
+      src="/brand/icon.jpeg"
+      alt="BlissOps"
+      width={dim}
+      height={dim}
+      style={{ borderRadius: 7, objectFit: "cover" }}
+    />
   );
 }
 
@@ -257,7 +258,7 @@ function MarketingLanding() {
     <div className="min-h-screen bg-background flex flex-col overflow-x-hidden">
 
       {/* ── Navigation ── */}
-      <header className="sticky top-0 z-50" style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", background: "rgba(11,18,32,0.90)", backdropFilter: "blur(12px)" }}>
+      <header className="sticky top-0 z-50" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)", background: "hsl(218 28% 15% / 0.92)", backdropFilter: "blur(14px)" }}>
         <div className="max-w-[1200px] mx-auto px-6 h-16 flex items-center justify-between">
 
           {/* Logo */}
@@ -300,6 +301,16 @@ function MarketingLanding() {
         }} />
 
         <div className="relative max-w-[1200px] mx-auto px-6 pt-24 pb-24 text-center">
+
+          {/* Hero logo */}
+          <div className="flex justify-center mb-8">
+            <img
+              src="/brand/logo-full.jpeg"
+              alt="BlissOps"
+              className="w-64 h-auto object-contain rounded-2xl"
+              style={{ filter: "drop-shadow(0 0 32px rgba(34,211,238,0.25))" }}
+            />
+          </div>
 
           {/* Badge */}
           <div
@@ -454,7 +465,7 @@ function MarketingLanding() {
       </section>
 
       {/* ── Footer ── */}
-      <footer style={{ borderTop: "1px solid rgba(255,255,255,0.05)", background: "rgba(0,0,0,0.15)" }}>
+      <footer style={{ borderTop: "1px solid rgba(255,255,255,0.08)", background: "hsl(218 28% 13% / 0.80)" }}>
         <div className="max-w-[1200px] mx-auto px-6 py-8">
           <div className="flex flex-col md:flex-row items-center justify-between gap-6">
 
