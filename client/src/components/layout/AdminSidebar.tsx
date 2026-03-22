@@ -71,7 +71,7 @@ function BlissOpsAdminIcon() {
 function SectionLabel({ label }: { label: string }) {
   return (
     <div className="pt-4 pb-1.5">
-      <p className="px-3 text-[9px] font-semibold uppercase tracking-widest text-sidebar-foreground/30">
+      <p className="px-3 text-[9px] font-semibold uppercase tracking-widest text-sidebar-foreground/60">
         {label}
       </p>
     </div>
@@ -110,7 +110,7 @@ export function AdminSidebar() {
             ? isGov
               ? "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"
               : "bg-destructive/12 text-destructive border border-destructive/20"
-            : "text-sidebar-foreground/55 hover:text-sidebar-foreground hover:bg-white/5 border border-transparent",
+            : "text-sidebar-foreground/85 hover:text-sidebar-foreground hover:bg-white/8 border border-transparent",
         )}
         style={active && !isGov ? { boxShadow: "0 0 12px rgba(239,68,68,0.10), inset 0 0 12px rgba(239,68,68,0.04)" } : {}}
       >
@@ -127,7 +127,7 @@ export function AdminSidebar() {
           "w-4 h-4 shrink-0",
           active
             ? isGov ? "text-yellow-400" : "text-destructive"
-            : "text-sidebar-foreground/35",
+            : "text-sidebar-foreground/70",
         )} />
         <span className="flex-1">{label}</span>
       </Link>
@@ -135,10 +135,10 @@ export function AdminSidebar() {
   }
 
   return (
-    <aside className="flex flex-col w-56 shrink-0 h-screen sidebar-gradient-admin border-r border-sidebar-border/80">
+    <aside className="flex flex-col w-56 shrink-0 h-screen sidebar-gradient-admin border-r border-sidebar-border">
 
       {/* Brand — admin surface */}
-      <div className="flex items-center gap-2.5 px-4 py-5 border-b border-sidebar-border/60">
+      <div className="flex items-center gap-2.5 px-4 py-5 border-b border-sidebar-border">
         <BlissOpsAdminIcon />
         <div className="flex-1 min-w-0">
           <span className="text-sm font-bold text-sidebar-foreground tracking-wide">
@@ -169,7 +169,7 @@ export function AdminSidebar() {
       </nav>
 
       {/* Footer */}
-      <div className="px-3 py-3 border-t border-sidebar-border/60 space-y-2.5 bg-black/15">
+      <div className="px-3 py-3 border-t border-sidebar-border space-y-2.5 bg-black/15">
         <div className="flex items-center gap-2">
           <div
             className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-[10px] font-bold text-destructive"
@@ -184,14 +184,14 @@ export function AdminSidebar() {
             onClick={handleLogout}
             title="Log ud"
             data-testid="button-admin-logout"
-            className="shrink-0 p-1.5 rounded-md text-sidebar-foreground/30 hover:text-destructive hover:bg-destructive/10 transition-colors"
+            className="shrink-0 p-1.5 rounded-md text-sidebar-foreground/60 hover:text-destructive hover:bg-destructive/10 transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" />
           </button>
         </div>
         <a
           href={getTenantAppUrl()}
-          className="flex items-center gap-1.5 text-xs text-sidebar-foreground/35 hover:text-sidebar-foreground transition-colors"
+          className="flex items-center gap-1.5 text-xs text-sidebar-foreground/65 hover:text-sidebar-foreground transition-colors"
           data-testid="link-switch-to-tenant"
         >
           <Cpu className="w-3 h-3" />

@@ -105,13 +105,13 @@
 
   /* Sidebar mørkere end baggrund */
   --sidebar: 220 35% 7%;
-  --sidebar-foreground: 220 15% 82%;
-  --sidebar-border: 220 20% 14%;
-  --sidebar-primary: 175 75% 42%;
+  --sidebar-foreground: 210 20% 95%;
+  --sidebar-border: 220 20% 22%;
+  --sidebar-primary: 175 75% 48%;
   --sidebar-primary-foreground: 220 35% 5%;
-  --sidebar-accent: 220 25% 14%;
-  --sidebar-accent-foreground: 220 15% 85%;
-  --sidebar-ring: 175 75% 42%;
+  --sidebar-accent: 220 25% 18%;
+  --sidebar-accent-foreground: 210 20% 95%;
+  --sidebar-ring: 175 75% 48%;
 
   /* Popovers */
   --popover: 220 30% 12%;
