@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 40" fill="none">
+  <!-- Infinity mark -->
+  <path d="M20 20 C20 14 24 10 29 10 C34 10 37 14 40 20 C37 26 34 30 29 30 C24 30 20 26 20 20 Z" stroke="#22D3EE" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <path d="M40 20 C43 14 46 10 51 10 C56 10 60 14 60 20 C60 26 56 30 51 30 C46 30 43 26 40 20 Z" stroke="#22D3EE" stroke-width="2.5" fill="none" stroke-linecap="round"/>
+  <circle cx="29" cy="20" r="2.5" fill="#22D3EE" opacity="0.6"/>
+  <circle cx="51" cy="20" r="2.5" fill="#F59E0B" opacity="0.8"/>
+  <!-- Wordmark -->
+  <text x="72" y="25" font-family="Inter, system-ui, sans-serif" font-size="15" font-weight="700" letter-spacing="-0.3" fill="#E5E7EB">Bliss<tspan fill="#22D3EE">Ops</tspan></text>
+</svg>

@@ -6,7 +6,6 @@ import {
   PlayCircle,
   Building2,
   LogOut,
-  ChevronRight,
   ShieldAlert,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -15,6 +14,18 @@ import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
 import { useAuth } from "@/hooks/use-auth";
 import { signOut } from "@/lib/supabase";
 import { getAdminAppUrl, getPostLogoutUrl } from "@/lib/runtime/urls";
+
+function BlissOpsLogo({ size = "md" }: { size?: "sm" | "md" }) {
+  const iconSize = size === "sm" ? 22 : 28;
+  return (
+    <svg width={iconSize} height={iconSize} viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="32" height="32" rx="8" fill="rgba(34,211,238,0.12)" />
+      <path d="M6 16 C6 11 9.5 8 13.5 8 C17.5 8 20 11.5 16 16 C20 20.5 17.5 24 13.5 24 C9.5 24 6 21 6 16 Z" stroke="#22D3EE" strokeWidth="2" fill="none" strokeLinecap="round"/>
+      <path d="M16 16 C20 11.5 22.5 8 18.5 8" stroke="#22D3EE" strokeWidth="2" fill="none" strokeLinecap="round" opacity="0.35"/>
+      <path d="M16 16 C20 20.5 22.5 24 18.5 24" stroke="#F59E0B" strokeWidth="2" fill="none" strokeLinecap="round"/>
+    </svg>
+  );
+}
 
 export function TenantSidebar() {
   const [location] = useLocation();
@@ -26,7 +37,7 @@ export function TenantSidebar() {
     window.location.href = getPostLogoutUrl();
   }
 
-  const initials    = user?.email ? user.email.slice(0, 2).toUpperCase() : "??";
+  const initials     = user?.email ? user.email.slice(0, 2).toUpperCase() : "??";
   const displayEmail = user?.email ?? "—";
   const displayOrg   = user?.organizationId ?? "—";
   const isPlatformAdmin = user?.role === "platform_admin";
@@ -47,25 +58,27 @@ export function TenantSidebar() {
     return location.startsWith(href);
   }
 
-  function navClass(active: boolean) {
-    if (active) return "bg-sidebar-primary/15 text-sidebar-primary border border-sidebar-primary/25";
-    return "text-sidebar-foreground/70 hover:text-sidebar-foreground hover:bg-sidebar-accent";
-  }
-
   return (
-    <aside className="flex flex-col w-56 shrink-0 h-screen bg-sidebar border-r border-sidebar-border">
+    <aside className="flex flex-col w-56 shrink-0 h-screen sidebar-gradient border-r border-sidebar-border">
+
       {/* Brand */}
-      <div className="flex items-center gap-2.5 px-4 py-5 border-b border-sidebar-border">
-        <div className="flex items-center justify-center w-7 h-7 rounded-md bg-sidebar-primary">
-          <Cpu className="w-4 h-4 text-sidebar-primary-foreground" />
+      <div className="flex items-center gap-2.5 px-4 py-5 border-b border-sidebar-border/60">
+        <BlissOpsLogo />
+        <div className="flex-1 min-w-0">
+          <span className="text-sm font-bold text-sidebar-foreground tracking-wide">
+            Bliss<span className="text-primary">Ops</span>
+          </span>
+          <p className="text-[9px] uppercase tracking-widest text-sidebar-foreground/35 font-medium mt-0.5">
+            AI Platform
+          </p>
         </div>
-        <span className="text-sm font-semibold text-sidebar-foreground tracking-wide">
-          {t("brand.name")}
-        </span>
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto">
+      <nav className="flex-1 px-2 py-4 space-y-0.5 overflow-y-auto">
+        <p className="px-3 pb-2 text-[9px] uppercase tracking-widest font-semibold text-sidebar-foreground/30">
+          Workspace
+        </p>
         {navItems.map(({ href, label, icon: Icon }) => {
           const active = isActive(href);
           return (
@@ -74,26 +87,31 @@ export function TenantSidebar() {
               href={href}
               data-testid={`nav-link-${href.replace(/\//g, "-").replace(/^-/, "") || "dashboard"}`}
               className={cn(
-                "flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors cursor-pointer",
-                navClass(active),
+                "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all duration-150 cursor-pointer relative",
+                active
+                  ? "bg-primary/12 text-primary border border-primary/20 shadow-sm"
+                  : "text-sidebar-foreground/60 hover:text-sidebar-foreground hover:bg-white/5 border border-transparent",
               )}
+              style={active ? { boxShadow: "0 0 12px rgba(34,211,238,0.10), inset 0 0 12px rgba(34,211,238,0.04)" } : {}}
             >
-              <Icon className="w-4 h-4 shrink-0" />
+              {active && (
+                <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-primary rounded-full" style={{ boxShadow: "0 0 8px rgba(34,211,238,0.6)" }} />
+              )}
+              <Icon className={cn("w-4 h-4 shrink-0", active ? "text-primary" : "text-sidebar-foreground/40")} />
               <span className="flex-1">{label}</span>
-              {active && <ChevronRight className="w-3 h-3 opacity-60" />}
             </Link>
           );
         })}
 
-        {/* Cross-surface link — only visible to platform_admin users */}
+        {/* Platform admin cross-surface link */}
         {isPlatformAdmin && (
-          <div className="pt-3">
-            <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40 pb-1">
+          <div className="pt-4">
+            <p className="px-3 pb-2 text-[9px] uppercase tracking-widest font-semibold text-sidebar-foreground/30">
               Platform
             </p>
             <a
               href={getAdminAppUrl()}
-              className="flex items-center gap-3 px-3 py-2 rounded-md text-sm font-medium transition-colors text-sidebar-foreground/60 hover:text-destructive hover:bg-destructive/10"
+              className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all text-sidebar-foreground/40 hover:text-destructive hover:bg-destructive/8 border border-transparent"
               data-testid="link-switch-to-admin"
             >
               <ShieldAlert className="w-4 h-4 shrink-0" />
@@ -104,16 +122,19 @@ export function TenantSidebar() {
       </nav>
 
       {/* Footer */}
-      <div className="px-4 py-3 border-t border-sidebar-border space-y-2">
+      <div className="px-3 py-3 border-t border-sidebar-border/60 space-y-2.5 bg-black/10">
         <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-full bg-sidebar-primary/20 flex items-center justify-center shrink-0">
-            <span className="text-xs font-semibold text-sidebar-primary">{initials}</span>
+          <div
+            className="w-7 h-7 rounded-full flex items-center justify-center shrink-0 text-xs font-bold text-primary"
+            style={{ background: "rgba(34,211,238,0.12)", border: "1px solid rgba(34,211,238,0.2)" }}
+          >
+            {initials}
           </div>
           <div className="flex-1 min-w-0">
             <p className="text-xs font-medium text-sidebar-foreground truncate" data-testid="text-sidebar-email">
               {displayEmail}
             </p>
-            <p className="text-xs text-sidebar-foreground/40 truncate" data-testid="text-sidebar-org">
+            <p className="text-[10px] text-sidebar-foreground/35 truncate" data-testid="text-sidebar-org">
               {displayOrg}
             </p>
           </div>
@@ -121,7 +142,7 @@ export function TenantSidebar() {
             onClick={handleLogout}
             title="Log ud"
             data-testid="button-logout"
-            className="shrink-0 p-1 rounded text-sidebar-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-colors"
+            className="shrink-0 p-1.5 rounded-md text-sidebar-foreground/30 hover:text-destructive hover:bg-destructive/10 transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" />
           </button>

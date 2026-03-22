@@ -22,17 +22,20 @@ interface TenantDashboard {
 }
 
 function MetricCard({
-  label, value, icon: Icon, color, testId,
-}: { label: string; value: number | string; icon: React.ElementType; color: string; testId: string }) {
+  label, value, icon: Icon, color, barColor, testId,
+}: { label: string; value: number | string; icon: React.ElementType; color: string; barColor?: string; testId: string }) {
   return (
-    <Card className="bg-card border-card-border" data-testid={`metric-card-${testId}`}>
-      <CardContent className="flex items-center gap-4 pt-5">
-        <div className={`flex items-center justify-center w-10 h-10 rounded-lg ${color}`}>
+    <Card className="bg-card border-card-border relative overflow-hidden transition-all duration-200 hover:-translate-y-0.5 hover:border-primary/25" data-testid={`metric-card-${testId}`}>
+      {barColor && (
+        <span className={`absolute left-0 top-0 bottom-0 w-0.5 rounded-r-full ${barColor}`} />
+      )}
+      <CardContent className="flex items-center gap-4 pt-5 pb-5">
+        <div className={`flex items-center justify-center w-10 h-10 rounded-xl ${color} shrink-0`}>
           <Icon className="w-5 h-5" />
         </div>
         <div>
-          <p className="text-2xl font-bold text-card-foreground" data-testid={`metric-value-${testId}`}>{value}</p>
-          <p className="text-xs text-muted-foreground">{label}</p>
+          <p className="text-2xl font-bold text-card-foreground tabular-nums" data-testid={`metric-value-${testId}`}>{value}</p>
+          <p className="text-xs text-muted-foreground font-medium mt-0.5">{label}</p>
         </div>
       </CardContent>
     </Card>
@@ -75,10 +78,10 @@ export default function TenantDashboard() {
             Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-20" />)
           ) : (
             <>
-              <MetricCard label="Projects"     value={data?.metrics.totalProjects ?? 0}     icon={FolderKanban} color="bg-primary/15 text-primary"         testId="projects" />
-              <MetricCard label="Active Runs"  value={data?.metrics.activeRuns ?? 0}         icon={PlayCircle}   color="bg-green-500/15 text-green-400"       testId="active-runs" />
-              <MetricCard label="Failed Runs"  value={data?.metrics.failedRuns ?? 0}          icon={AlertTriangle} color="bg-destructive/15 text-destructive" testId="failed-runs" />
-              <MetricCard label="Integrations" value={data?.metrics.activeIntegrations ?? 0} icon={Plug}         color="bg-secondary/15 text-secondary"       testId="integrations" />
+              <MetricCard label="Projects"     value={data?.metrics.totalProjects ?? 0}     icon={FolderKanban}  color="bg-primary/12 text-primary"      barColor="bg-primary"      testId="projects" />
+              <MetricCard label="Active Runs"  value={data?.metrics.activeRuns ?? 0}         icon={PlayCircle}    color="bg-green-500/12 text-green-400"   barColor="bg-green-400"    testId="active-runs" />
+              <MetricCard label="Failed Runs"  value={data?.metrics.failedRuns ?? 0}          icon={AlertTriangle} color="bg-destructive/12 text-destructive" barColor="bg-destructive" testId="failed-runs" />
+              <MetricCard label="Integrations" value={data?.metrics.activeIntegrations ?? 0} icon={Plug}          color="bg-secondary/12 text-secondary"   barColor="bg-secondary"    testId="integrations" />
             </>
           )}
         </div>

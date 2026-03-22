@@ -109,11 +109,16 @@ export default function Runs() {
   });
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Runs</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">{runs.length} run{runs.length !== 1 ? "s" : ""}</p>
+    <div className="p-6 md:p-8 space-y-6 max-w-6xl">
+      <div className="flex items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5">
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-green-500/12 shrink-0" style={{ boxShadow: "0 0 12px rgba(34,197,94,0.12)" }}>
+              <PlayCircle className="w-4 h-4 text-green-400" />
+            </div>
+            <h1 className="text-xl font-bold text-foreground tracking-tight">Runs</h1>
+          </div>
+          <p className="text-sm text-muted-foreground ml-10">{runs.length} run{runs.length !== 1 ? "s" : ""}</p>
         </div>
         <div className="flex items-center gap-2">
           <Filter className="w-4 h-4 text-muted-foreground" />

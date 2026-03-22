@@ -157,11 +157,16 @@ export default function Architectures() {
   });
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Architectures</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">{architectures.length} architecture profile{architectures.length !== 1 ? "s" : ""}</p>
+    <div className="p-6 md:p-8 space-y-6 max-w-6xl">
+      <div className="flex items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5">
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-secondary/12 shrink-0" style={{ boxShadow: "0 0 12px rgba(245,158,11,0.12)" }}>
+              <Cpu className="w-4 h-4 text-secondary" />
+            </div>
+            <h1 className="text-xl font-bold text-foreground tracking-tight">Architectures</h1>
+          </div>
+          <p className="text-sm text-muted-foreground ml-10">{architectures.length} architecture profile{architectures.length !== 1 ? "s" : ""}</p>
         </div>
         <Button size="sm" onClick={() => setOpen(true)} data-testid="btn-new-architecture">
           <Plus className="w-3.5 h-3.5 mr-1.5" /> New Architecture

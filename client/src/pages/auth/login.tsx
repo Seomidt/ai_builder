@@ -9,9 +9,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Card, CardContent, CardDescription, CardHeader, CardTitle,
-} from "@/components/ui/card";
 
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/hooks/use-auth";
@@ -21,6 +18,17 @@ const schema = z.object({
   password: z.string().min(6, "Adgangskoden skal være mindst 6 tegn"),
 });
 type FormValues = z.infer<typeof schema>;
+
+function BlissOpsLogo() {
+  return (
+    <svg width="36" height="36" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="32" height="32" rx="9" fill="rgba(34,211,238,0.12)" />
+      <path d="M6 16 C6 11 9.5 8 13.5 8 C17.5 8 20 11.5 16 16 C20 20.5 17.5 24 13.5 24 C9.5 24 6 21 6 16 Z" stroke="#22D3EE" strokeWidth="2" fill="none" strokeLinecap="round"/>
+      <path d="M16 16 C20 11.5 22.5 8 18.5 8" stroke="#22D3EE" strokeWidth="2" fill="none" strokeLinecap="round" opacity="0.3"/>
+      <path d="M16 16 C20 20.5 22.5 24 18.5 24" stroke="#F59E0B" strokeWidth="2" fill="none" strokeLinecap="round"/>
+    </svg>
+  );
+}
 
 export default function AuthLogin() {
   const [authError, setAuthError] = useState<string | null>(null);
@@ -34,7 +42,6 @@ export default function AuthLogin() {
 
   const { isSubmitting } = form.formState;
 
-  // Safety fallback: already authenticated users bounce immediately
   if (isAuthed) {
     return <Redirect to="/" />;
   }
@@ -56,10 +63,6 @@ export default function AuthLogin() {
         return;
       }
 
-      // Prefetch dashboard summary immediately after login — fire-and-forget.
-      // Calls Supabase RPC directly (no server hop). The session JWT is now
-      // in localStorage so supabase.rpc() will include it automatically.
-      // By the time auth state change navigates to "/", the cache is warm.
       queryClient.prefetchQuery({
         queryKey: ["dashboard-summary"],
         queryFn: async () => {
@@ -76,21 +79,35 @@ export default function AuthLogin() {
 
   return (
     <div
-      className="min-h-screen flex items-center justify-center bg-background px-4"
+      className="min-h-screen flex items-center justify-center px-4 relative overflow-hidden"
+      style={{ background: "hsl(220 35% 9%)" }}
       data-testid="page-auth-login"
     >
-      <Card className="w-full max-w-sm shadow-lg">
-        <CardHeader className="space-y-1 pb-4">
-          <CardTitle
-            className="text-2xl font-bold tracking-tight"
-            data-testid="text-auth-login-title"
-          >
-            BlissOps
-          </CardTitle>
-          <CardDescription>Log ind for at tilgå platformen</CardDescription>
-        </CardHeader>
+      {/* Background glow */}
+      <div aria-hidden className="pointer-events-none absolute inset-0" style={{
+        background: "radial-gradient(ellipse 70% 50% at 50% 0%, rgba(34,211,238,0.08) 0%, transparent 60%)",
+      }} />
 
-        <CardContent>
+      <div className="relative w-full max-w-sm">
+
+        {/* Logo + Brand */}
+        <div className="flex flex-col items-center mb-8 text-center">
+          <BlissOpsLogo />
+          <h1 className="mt-4 text-xl font-bold text-foreground tracking-tight">
+            Bliss<span style={{ color: "#22D3EE" }}>Ops</span>
+          </h1>
+          <p className="mt-1.5 text-sm text-muted-foreground">AI Platform — Log ind for at fortsætte</p>
+        </div>
+
+        {/* Card */}
+        <div
+          className="rounded-2xl p-8"
+          style={{
+            background: "rgba(255,255,255,0.03)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            boxShadow: "0 24px 48px rgba(0,0,0,0.4)",
+          }}
+        >
           {isLoading ? (
             <div className="flex justify-center py-8" data-testid="auth-loading">
               <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -99,11 +116,11 @@ export default function AuthLogin() {
             <form
               onSubmit={form.handleSubmit(onSubmit)}
               noValidate
-              className="space-y-4"
+              className="space-y-5"
               data-testid="form-login"
             >
               <div className="space-y-1.5">
-                <Label htmlFor="email">E-mail</Label>
+                <Label htmlFor="email" className="text-sm font-medium text-foreground/80">E-mail</Label>
                 <Input
                   id="email"
                   type="email"
@@ -111,6 +128,7 @@ export default function AuthLogin() {
                   placeholder="dig@eksempel.com"
                   data-testid="input-email"
                   {...form.register("email")}
+                  className="h-10"
                 />
                 {form.formState.errors.email && (
                   <p className="text-xs text-destructive" data-testid="error-email">
@@ -120,7 +138,7 @@ export default function AuthLogin() {
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="password">Adgangskode</Label>
+                <Label htmlFor="password" className="text-sm font-medium text-foreground/80">Adgangskode</Label>
                 <Input
                   id="password"
                   type="password"
@@ -128,6 +146,7 @@ export default function AuthLogin() {
                   placeholder="••••••••"
                   data-testid="input-password"
                   {...form.register("password")}
+                  className="h-10"
                 />
                 {form.formState.errors.password && (
                   <p className="text-xs text-destructive" data-testid="error-password">
@@ -138,7 +157,7 @@ export default function AuthLogin() {
 
               {authError && (
                 <div
-                  className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                  className="flex items-start gap-2 rounded-xl border border-destructive/30 bg-destructive/8 px-3 py-2.5 text-sm text-destructive"
                   data-testid="error-auth"
                 >
                   <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -148,21 +167,26 @@ export default function AuthLogin() {
 
               <Button
                 type="submit"
-                className="w-full"
+                className="w-full h-10 font-semibold"
                 disabled={isSubmitting}
                 data-testid="button-login-submit"
+                style={{ boxShadow: "0 0 20px rgba(34,211,238,0.20)" }}
               >
                 {isSubmitting ? (
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
-                  <LogIn className="mr-2 h-4 w-4" />
+                  <LogIn className="h-4 w-4" />
                 )}
                 {isSubmitting ? "Logger ind…" : "Log ind"}
               </Button>
             </form>
           )}
-        </CardContent>
-      </Card>
+        </div>
+
+        <p className="text-center text-xs text-muted-foreground/50 mt-6">
+          © {new Date().getFullYear()} BlissOps
+        </p>
+      </div>
     </div>
   );
 }
