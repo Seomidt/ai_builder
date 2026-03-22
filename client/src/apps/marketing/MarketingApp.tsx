@@ -164,12 +164,12 @@ function MarketingHome() {
 
                 <div className="space-y-3 mb-8">
                   {[
-                    { icon: <CheckCircle2 className="w-5 h-5" />, color: "green", name: "Customer Support Triage", id: "bls_8f92a", ago: "2m ago", status: "COMPLETED", time: "1.2s" },
-                    { icon: <PlayCircle className="w-5 h-5 animate-pulse" />, color: "cyan", name: "Invoice Data Extraction", id: "bls_4a19x", ago: "Just now", status: "RUNNING", time: "..." },
+                    { icon: <CheckCircle2 className="w-5 h-5" />, iconCls: "w-10 h-10 rounded-lg bg-green-500/10 flex items-center justify-center text-green-400", badgeCls: "inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-green-500/10 text-green-400 border border-green-500/20", name: "Customer Support Triage", id: "bls_8f92a", ago: "2m ago", status: "COMPLETED", time: "1.2s" },
+                    { icon: <PlayCircle className="w-5 h-5 animate-pulse" />, iconCls: "w-10 h-10 rounded-lg bg-cyan-500/10 flex items-center justify-center text-cyan-400", badgeCls: "inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-cyan-500/10 text-cyan-400 border border-cyan-500/20", name: "Invoice Data Extraction", id: "bls_4a19x", ago: "Just now", status: "RUNNING", time: "..." },
                   ].map((run, i) => (
                     <div key={i} className="bg-[#1A233A] border border-white/5 rounded-xl p-4 flex items-center justify-between hover:border-cyan-500/30 transition-colors">
                       <div className="flex items-center gap-4">
-                        <div className={`w-10 h-10 rounded-lg bg-${run.color}-500/10 flex items-center justify-center text-${run.color}-400`}>
+                        <div className={run.iconCls}>
                           {run.icon}
                         </div>
                         <div>
@@ -178,7 +178,7 @@ function MarketingHome() {
                         </div>
                       </div>
                       <div className="text-right">
-                        <div className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-${run.color}-500/10 text-${run.color}-400 border border-${run.color}-500/20`}>
+                        <div className={run.badgeCls}>
                           {run.status}
                         </div>
                         <div className="text-slate-500 text-xs mt-1">{run.time}</div>
