@@ -277,7 +277,7 @@ export async function authMiddleware(
     req.user = {
       id: "internal-script",
       email: "internal@blissops.com",
-      organizationId: "platform",
+      organizationId: "blissops-main",
       role: "platform_admin",
     };
     return next();
