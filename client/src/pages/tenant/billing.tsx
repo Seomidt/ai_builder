@@ -65,11 +65,17 @@ export default function TenantBilling() {
     <div className="flex flex-col h-full">
       <TenantNav />
       <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-6xl">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground flex items-center gap-2">
-            <CreditCard className="w-5 h-5 text-primary" /> Billing
-          </h1>
-          <p className="text-sm text-muted-foreground mt-0.5">Subscription, usage costs, and budget management</p>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5">
+            <div
+              className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0"
+              style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.20)" }}
+            >
+              <CreditCard className="w-4 h-4 text-secondary" />
+            </div>
+            <h1 className="text-xl font-bold text-foreground tracking-tight">Billing</h1>
+          </div>
+          <p className="text-sm text-muted-foreground ml-10">Subscription, usage costs, and budget management</p>
         </div>
 
         {isLoading ? (

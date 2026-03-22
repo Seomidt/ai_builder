@@ -37,20 +37,26 @@ export default function OpsTenants() {
   );
 
   return (
-    <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-6xl" data-testid="ops-tenants-page">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground flex items-center gap-2" data-testid="text-ops-tenants-title">
-            <Building2 className="w-5 h-5 text-primary" /> Tenant Management
-          </h1>
-          <p className="text-sm text-muted-foreground mt-0.5">All tenants on the platform</p>
+    <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6 max-w-6xl" data-testid="ops-tenants-page">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5">
+            <div
+              className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0"
+              style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.20)" }}
+            >
+              <Building2 className="w-4 h-4 text-destructive" />
+            </div>
+            <h1 className="text-xl font-bold text-foreground tracking-tight" data-testid="text-ops-tenants-title">
+              Tenant Management
+            </h1>
+          </div>
+          <p className="text-sm text-muted-foreground ml-10">All tenants on the platform</p>
         </div>
-        <div className="flex items-center gap-2">
-          <Badge variant="outline" className="text-xs" data-testid="tenants-total-badge">
-            <Users className="w-3 h-3 mr-1" />
-            {isLoading ? "…" : tenants.length} tenants
-          </Badge>
-        </div>
+        <Badge variant="outline" className="text-xs shrink-0" data-testid="tenants-total-badge">
+          <Users className="w-3 h-3 mr-1" />
+          {isLoading ? "…" : tenants.length} tenants
+        </Badge>
       </div>
 
       <div className="relative">

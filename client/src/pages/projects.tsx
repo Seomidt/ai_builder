@@ -38,7 +38,7 @@ type CreateProjectValues = z.infer<typeof createProjectSchema>;
 
 function ProjectCard({ project, onArchive }: { project: ProjectRow; onArchive: (id: string) => void }) {
   return (
-    <Card data-testid={`project-card-${project.id}`} className="bg-card border-card-border hover:border-primary/30 transition-colors">
+    <Card data-testid={`project-card-${project.id}`} className="bg-card border-card-border hover:border-primary/30 transition-all duration-200 hover:-translate-y-0.5 relative overflow-hidden">
       <CardContent className="pt-4 pb-4">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-3 min-w-0">
@@ -135,14 +135,19 @@ export default function Projects() {
   });
 
   return (
-    <div className="p-6 space-y-5 max-w-6xl">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Projects</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">{projects.length} project{projects.length !== 1 ? "s" : ""}</p>
+    <div className="p-6 md:p-8 space-y-6 max-w-6xl">
+      <div className="flex items-center justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5">
+            <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary/12 shrink-0" style={{ boxShadow: "0 0 12px rgba(34,211,238,0.12)" }}>
+              <FolderOpen className="w-4 h-4 text-primary" />
+            </div>
+            <h1 className="text-xl font-bold text-foreground tracking-tight">Projects</h1>
+          </div>
+          <p className="text-sm text-muted-foreground ml-10">{projects.length} project{projects.length !== 1 ? "s" : ""}</p>
         </div>
         <Button size="sm" onClick={() => setOpen(true)} data-testid="btn-new-project">
-          <Plus className="w-3.5 h-3.5 mr-1.5" /> New Project
+          <Plus className="w-3.5 h-3.5" /> New Project
         </Button>
       </div>
 

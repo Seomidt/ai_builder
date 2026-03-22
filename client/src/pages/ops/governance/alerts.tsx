@@ -1,5 +1,5 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { RefreshCw, Bell, CheckCheck, X } from "lucide-react";
+import { RefreshCw, Bell, CheckCheck, X, AlertTriangle } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -87,11 +87,19 @@ export default function GovernanceAlerts() {
   const criticalCount = all.filter((r) => r.severity === "critical" && r.status === "open").length;
 
   return (
-    <div className="p-6 space-y-5 max-w-5xl">
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Governance Alerts</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
+    <div className="p-6 md:p-8 space-y-5 max-w-5xl">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5">
+            <div
+              className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0"
+              style={{ background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.20)" }}
+            >
+              <AlertTriangle className="w-4 h-4 text-destructive" />
+            </div>
+            <h1 className="text-xl font-bold text-foreground tracking-tight">Governance Alerts</h1>
+          </div>
+          <p className="text-sm text-muted-foreground ml-10">
             Budget, anomaly, and runaway alerts across all tenants
           </p>
         </div>

@@ -40,11 +40,17 @@ export default function OpsBilling() {
 
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-6xl" data-testid="ops-billing-page">
-      <div>
-        <h1 className="text-xl font-semibold text-foreground flex items-center gap-2" data-testid="text-ops-billing-title">
-          <CreditCard className="w-5 h-5 text-primary" /> Billing &amp; Subscriptions
-        </h1>
-        <p className="text-sm text-muted-foreground mt-0.5">Platform plans, tenant subscriptions, and invoice management</p>
+      <div className="space-y-1">
+        <div className="flex items-center gap-2.5">
+          <div
+            className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0"
+            style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.20)" }}
+          >
+            <CreditCard className="w-4 h-4 text-secondary" />
+          </div>
+          <h1 className="text-xl font-bold text-foreground tracking-tight" data-testid="text-ops-billing-title">Billing &amp; Subscriptions</h1>
+        </div>
+        <p className="text-sm text-muted-foreground ml-10">Platform plans, tenant subscriptions, and invoice management</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

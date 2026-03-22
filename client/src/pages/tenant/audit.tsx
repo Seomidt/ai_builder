@@ -70,11 +70,17 @@ export default function TenantAudit() {
       <TenantNav />
       <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-6xl">
         <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-xl font-semibold text-foreground flex items-center gap-2">
-              <ScrollText className="w-5 h-5 text-primary" /> Audit Log
-            </h1>
-            <p className="text-sm text-muted-foreground mt-0.5">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2.5">
+              <div
+                className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0"
+                style={{ background: "rgba(34,211,238,0.12)", border: "1px solid rgba(34,211,238,0.20)" }}
+              >
+                <ScrollText className="w-4 h-4 text-primary" />
+              </div>
+              <h1 className="text-xl font-bold text-foreground tracking-tight">Audit Log</h1>
+            </div>
+            <p className="text-sm text-muted-foreground ml-10">
               Immutable activity history — user actions, API events, security
             </p>
           </div>

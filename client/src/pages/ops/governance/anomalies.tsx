@@ -65,11 +65,19 @@ export default function GovernanceAnomalies() {
   const confirmedCount = rows.filter((r) => r.is_confirmed).length;
 
   return (
-    <div className="p-6 space-y-5 max-w-5xl">
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-foreground">Anomaly Events</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
+    <div className="p-6 md:p-8 space-y-5 max-w-5xl">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5">
+            <div
+              className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0"
+              style={{ background: "rgba(245,158,11,0.12)", border: "1px solid rgba(245,158,11,0.20)" }}
+            >
+              <Zap className="w-4 h-4 text-secondary" />
+            </div>
+            <h1 className="text-xl font-bold text-foreground tracking-tight">Anomaly Events</h1>
+          </div>
+          <p className="text-sm text-muted-foreground ml-10">
             Detected cost, token, and request anomalies — newest first
           </p>
         </div>
