@@ -164,13 +164,57 @@ const CreateArchitectureSchema = z.object({
   category: z.string().optional(),
 });
 
+/** Set private browser cache header (no CDN caching — data is user-scoped via RLS). */
+function setCachePrivate(res: Response, maxAgeSeconds: number) {
+  res.set("Cache-Control", `private, max-age=${maxAgeSeconds}, stale-while-revalidate=${maxAgeSeconds * 2}`);
+}
+
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
+
+  // ─── Dashboard aggregation ──────────────────────────────────────────────────
+  // Single endpoint replaces direct Supabase RPC from client.
+  // Runs storage reads in parallel → first-paint latency reduced.
+
+  app.get("/api/dashboard", async (req, res) => {
+    try {
+      const orgId   = getOrgId(req);
+      const storage = createStorageForRequest(req);
+      const [projects, architectures, runs, integrations] = await Promise.all([
+        storage.listProjects(orgId),
+        storage.listArchitectureProfiles(orgId),
+        storage.listRuns(orgId),
+        storage.listIntegrations(orgId),
+      ]);
+
+      const recentProjects = [...projects]
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+        .slice(0, 5)
+        .map((p) => ({ id: p.id, name: p.name, status: p.status, updatedAt: p.updatedAt }));
+
+      const recentRuns = [...runs]
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+        .slice(0, 5)
+        .map((r) => ({ id: r.id, status: r.status, createdAt: r.createdAt }));
+
+      setCachePrivate(res, 30);
+      return res.json({
+        orgName: "AI Builder Platform",
+        projectCount: projects.length,
+        activeRunCount: runs.filter((r) => r.status === "running").length,
+        architectureCount: architectures.length,
+        configuredIntegrationCount: integrations.filter((i) => i.status === "active").length,
+        recentProjects,
+        recentRuns,
+      });
+    } catch (err) { handleError(res, err); }
+  });
 
   // ─── Projects ───────────────────────────────────────────────────────────────
 
   app.get("/api/projects", async (req, res) => {
     try {
       const projects = await createStorageForRequest(req).listProjects(getOrgId(req));
+      setCachePrivate(res, 10);
       res.json(projects);
     } catch (err) { handleError(res, err); }
   });
@@ -213,6 +257,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/architectures", async (req, res) => {
     try {
       const profiles = await createStorageForRequest(req).listArchitectureProfiles(getOrgId(req));
+      setCachePrivate(res, 10);
       res.json(profiles);
     } catch (err) { handleError(res, err); }
   });
@@ -301,6 +346,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         projectId: req.query.projectId as string | undefined,
       };
       const runs = await createStorageForRequest(req).listRuns(getOrgId(req), filters);
+      setCachePrivate(res, 5);
       res.json(runs);
     } catch (err) { handleError(res, err); }
   });

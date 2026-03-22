@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { supabase } from "@/lib/supabase";
+import { apiRequest } from "@/lib/queryClient";
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { FolderKanban, PlayCircle, Cpu, Plug, Plus, ArrowRight, Building2, Zap } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -72,11 +73,8 @@ function SkeletonRows({ count = 3 }: { count?: number }) {
 export default function Dashboard() {
   const { data, isLoading } = useQuery<BootstrapData>({
     queryKey: ["dashboard-summary"],
-    queryFn: async () => {
-      const { data, error } = await supabase.rpc("get_dashboard_summary");
-      if (error) throw new Error(error.message);
-      return data as BootstrapData;
-    },
+    queryFn: () => apiRequest("GET", "/api/dashboard").then((r) => r.json()),
+    ...QUERY_POLICY.dashboard,
   });
 
   return (

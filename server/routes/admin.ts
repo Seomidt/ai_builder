@@ -52,6 +52,7 @@ export function registerAdminRoutes(app: Express): void {
   app.get("/api/admin/integrations/status", (_req: Request, res: Response) => {
     try {
       const report = getPlatformIntegrationsStatus();
+      res.set("Cache-Control", "private, max-age=60, stale-while-revalidate=120");
       res.json(report);
     } catch (err: unknown) {
       adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
