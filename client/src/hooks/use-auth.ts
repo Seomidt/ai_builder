@@ -101,17 +101,19 @@ export function useAuth() {
     return () => subscription.unsubscribe();
   }, [queryClient]);
 
-  // Background backend validation — starts as soon as we know we have a token.
-  // Does NOT block render. Returns org + role for the full user object.
+  // Background backend validation — starts IMMEDIATELY (not gated on getSession).
+  // fetchSession() calls getSessionToken() internally; if there is no token it
+  // returns {status:401, user:null} without hitting the network. Starting the
+  // query unconditionally means the Vercel serverless function begins warming up
+  // ~0 ms after app init instead of after the getSession() Promise resolves.
+  // On a cold-start backend this overlap can save several seconds.
   const { data, isLoading: queryLoading } = useQuery<SessionResult>({
     queryKey: ["/api/auth/session"],
     queryFn: fetchSession,
     retry: false,
     staleTime: 30_000,
     refetchOnWindowFocus: true,
-    // Start immediately if local session detected; also runs if no local session
-    // so we can confirm 401 quickly.
-    enabled: hasLocalSession !== null,
+    enabled: true,
   });
 
   const backendStatus = data?.status ?? null;

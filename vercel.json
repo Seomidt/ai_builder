@@ -2,6 +2,12 @@
   "buildCommand": "npm run build",
   "installCommand": "npm install",
   "outputDirectory": "dist/public",
+  "crons": [
+    {
+      "path": "/api/admin/platform/deploy-health",
+      "schedule": "*/5 * * * *"
+    }
+  ],
   "functions": {
     "api/index.js": {
       "memory": 1024,

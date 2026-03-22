@@ -77,6 +77,7 @@ export function registerAdminRoutes(app: Express): void {
   });
 
   app.get("/api/admin/platform/deploy-health", async (_req: Request, res: Response) => {
+    const t0 = Date.now();
     const checks: Record<string, { ok: boolean; detail?: string }> = {};
 
     checks.SUPABASE_URL = {
@@ -132,10 +133,16 @@ export function registerAdminRoutes(app: Express): void {
       checks.SUPABASE_AUTH = { ok: false, detail: e instanceof Error ? e.message : "unknown error" };
     }
 
+    const elapsed = Date.now() - t0;
     const allOk = Object.values(checks).every((c) => c.ok);
+    // Server-Timing header: visible in browser DevTools → Network → Timing.
+    // Use this to measure cold (first hit after inactivity) vs warm response time.
+    res.set("Server-Timing", `total;dur=${elapsed}`);
+    res.set("Cache-Control", "no-store");
     res.status(allOk ? 200 : 503).json({
       status: allOk ? "healthy" : "degraded",
       timestamp: new Date().toISOString(),
+      responseMs: elapsed,
       checks,
     });
   });
