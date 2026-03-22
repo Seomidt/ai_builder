@@ -115,7 +115,7 @@ export function Sidebar() {
   function SectionLabel({ label }: { label: string }) {
     return (
       <div className="pt-3 pb-1">
-        <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/40">
+        <p className="px-3 text-[10px] font-semibold uppercase tracking-wider text-sidebar-foreground/60">
           {label}
         </p>
       </div>
@@ -222,7 +222,7 @@ export function Sidebar() {
             <p className="text-xs font-medium text-sidebar-foreground truncate" data-testid="text-sidebar-email">
               {displayEmail}
             </p>
-            <p className="text-xs text-sidebar-foreground/40 truncate" data-testid="text-sidebar-org">
+            <p className="text-xs text-sidebar-foreground/70 truncate" data-testid="text-sidebar-org">
               {displayOrg}
             </p>
           </div>
@@ -230,7 +230,7 @@ export function Sidebar() {
             onClick={handleLogout}
             title="Log ud"
             data-testid="button-logout"
-            className="shrink-0 p-1 rounded text-sidebar-foreground/40 hover:text-destructive hover:bg-destructive/10 transition-colors"
+            className="shrink-0 p-1 rounded text-sidebar-foreground/65 hover:text-destructive hover:bg-destructive/10 transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" />
           </button>
