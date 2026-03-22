@@ -16,12 +16,11 @@
  *   - Hostname is NOT trusted for authorization
  */
 
-import { useState, useEffect } from "react";
+import { useEffect } from "react";
 import { Switch, Route, useLocation } from "wouter";
 import {
-  ArrowRight, Shield, Zap, BarChart3, Users,
-  Database, DollarSign, Bot, Mail, CheckCircle, ChevronRight,
-  Cpu, Lock, TrendingUp
+  ArrowRight, BarChart3, CheckCircle2, Github, Linkedin,
+  Lock, PlayCircle, Plus, Shield, Twitter, Zap,
 } from "lucide-react";
 import { getTenantLoginUrl, redirectAuthToTenantApp } from "@/lib/runtime/urls";
 
@@ -32,469 +31,428 @@ function AuthRedirect() {
     redirectAuthToTenantApp(location);
   }, [location]);
   return (
-    <div className="flex items-center justify-center h-screen bg-background">
+    <div className="flex items-center justify-center h-screen bg-[#0A0F1C]">
       <div className="text-center space-y-2">
-        <div className="h-5 w-5 rounded-full border-2 border-primary border-t-transparent animate-spin mx-auto" />
-        <p className="text-sm text-muted-foreground">Redirecting to login…</p>
+        <div className="h-5 w-5 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin mx-auto" />
+        <p className="text-sm text-slate-400">Redirecting to login…</p>
       </div>
     </div>
   );
 }
 
-// ─── Brand Logo ───────────────────────────────────────────────────────────────
-
-function Logo({ size = "md" }: { size?: "sm" | "md" | "lg" }) {
-  const dim = size === "lg" ? 40 : size === "sm" ? 26 : 32;
-  return (
-    <img
-      src="/brand/icon.png"
-      alt="BlissOps"
-      width={dim}
-      height={dim}
-      style={{ objectFit: "contain" }}
-    />
-  );
-}
-
-// ─── Feature Card ─────────────────────────────────────────────────────────────
-
-interface FeatureCardProps {
-  icon: React.ComponentType<{ className?: string }>;
-  title: string;
-  description: string;
-  accent?: "cyan" | "gold";
-}
-
-function FeatureCard({ icon: Icon, title, description, accent = "cyan" }: FeatureCardProps) {
-  const isCyan = accent === "cyan";
-  return (
-    <div
-      className="group relative rounded-2xl p-6 space-y-4 transition-all duration-200 hover:-translate-y-1"
-      style={{
-        background: "rgba(255,255,255,0.025)",
-        border: "1px solid rgba(255,255,255,0.07)",
-      }}
-      onMouseEnter={(e) => {
-        (e.currentTarget as HTMLDivElement).style.borderColor = isCyan ? "rgba(34,211,238,0.20)" : "rgba(245,158,11,0.20)";
-        (e.currentTarget as HTMLDivElement).style.boxShadow = isCyan ? "0 8px 32px rgba(34,211,238,0.07)" : "0 8px 32px rgba(245,158,11,0.07)";
-      }}
-      onMouseLeave={(e) => {
-        (e.currentTarget as HTMLDivElement).style.borderColor = "rgba(255,255,255,0.07)";
-        (e.currentTarget as HTMLDivElement).style.boxShadow = "none";
-      }}
-    >
-      <div
-        className="flex items-center justify-center w-11 h-11 rounded-xl shrink-0 transition-all duration-200"
-        style={{ background: isCyan ? "rgba(34,211,238,0.10)" : "rgba(245,158,11,0.10)" }}
-      >
-        <Icon className={`w-5 h-5 ${isCyan ? "text-primary" : "text-secondary"}`} />
-      </div>
-      <div className="space-y-2">
-        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-        <p className="text-sm text-muted-foreground leading-relaxed">{description}</p>
-      </div>
-    </div>
-  );
-}
-
-// ─── Waitlist Section ─────────────────────────────────────────────────────────
-
-function WaitlistSection() {
-  const [email, setEmail]       = useState("");
-  const [submitted, setSubmitted] = useState(false);
-  const [loading, setLoading]   = useState(false);
-  const [error, setError]       = useState<string | null>(null);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!email.trim()) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch("/api/waitlist", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: email.trim(), source: "marketing" }),
-      });
-      if (res.ok || res.status === 200) {
-        setSubmitted(true);
-      } else {
-        const data = await res.json().catch(() => ({}));
-        setError(data.error ?? "Der skete en fejl. Prøv igen.");
-      }
-    } catch {
-      setError("Ingen forbindelse. Prøv igen.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  return (
-    <section id="early-access" className="py-28 px-6">
-      <div className="max-w-2xl mx-auto text-center space-y-8">
-        <div
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold"
-          style={{ background: "rgba(34,211,238,0.10)", border: "1px solid rgba(34,211,238,0.20)", color: "#22D3EE" }}
-        >
-          <Zap className="w-3 h-3" />
-          Early Access — Limited spots
-        </div>
-
-        <h2 className="text-3xl md:text-4xl font-bold text-foreground leading-tight">
-          Get early access to BlissOps
-        </h2>
-        <p className="text-muted-foreground text-lg leading-relaxed">
-          Join the waitlist to be among the first to build AI-powered workflows on your own data —
-          with full control over cost, access and execution.
-        </p>
-
-        {submitted ? (
-          <div
-            className="inline-flex items-center gap-3 px-6 py-4 rounded-2xl font-medium text-primary"
-            style={{ background: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.20)" }}
-          >
-            <CheckCircle className="w-5 h-5" />
-            You're on the list — we'll be in touch.
-          </div>
-        ) : (
-          <div className="space-y-3 max-w-md mx-auto">
-            <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-3">
-              <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="your@email.com"
-                required
-                data-testid="input-waitlist-email"
-                className="flex-1 px-4 py-3 text-sm rounded-xl text-foreground placeholder:text-muted-foreground focus:outline-none transition-all"
-                style={{
-                  background: "rgba(255,255,255,0.05)",
-                  border: "1px solid rgba(255,255,255,0.10)",
-                }}
-                onFocus={(e) => { (e.target as HTMLInputElement).style.borderColor = "rgba(34,211,238,0.40)"; (e.target as HTMLInputElement).style.boxShadow = "0 0 0 3px rgba(34,211,238,0.08)"; }}
-                onBlur={(e) => { (e.target as HTMLInputElement).style.borderColor = "rgba(255,255,255,0.10)"; (e.target as HTMLInputElement).style.boxShadow = "none"; }}
-              />
-              <button
-                type="submit"
-                disabled={loading}
-                data-testid="button-waitlist-submit"
-                className="inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-semibold rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-60 transition-colors whitespace-nowrap"
-                style={{ boxShadow: "0 0 20px rgba(34,211,238,0.25)" }}
-              >
-                {loading ? (
-                  <span className="h-4 w-4 rounded-full border-2 border-primary-foreground border-t-transparent animate-spin" />
-                ) : (
-                  <>Join waitlist <ArrowRight className="w-3.5 h-3.5" /></>
-                )}
-              </button>
-            </form>
-            {error && (
-              <p className="text-sm text-red-400 text-center" data-testid="text-waitlist-error">{error}</p>
-            )}
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-// ─── Landing Page ─────────────────────────────────────────────────────────────
-
-function MarketingLanding() {
+function MarketingHome() {
   const loginUrl = getTenantLoginUrl();
 
-  const FEATURES = [
-    {
-      icon: Zap,
-      title: "AI Workflows",
-      description: "Design and execute AI workflows with built-in retry safety, cost control and full execution history.",
-      accent: "cyan" as const,
-    },
-    {
-      icon: Bot,
-      title: "AI Agents (Experts)",
-      description: "Create domain-specific AI experts powered by your own knowledge base and business logic.",
-      accent: "cyan" as const,
-    },
-    {
-      icon: Database,
-      title: "Knowledge & Retrieval",
-      description: "Upload documents, build knowledge bases with embeddings, and enable intelligent retrieval.",
-      accent: "cyan" as const,
-    },
-    {
-      icon: DollarSign,
-      title: "Monetization & Billing",
-      description: "Track usage, enforce cost limits and monetize AI with built-in pricing and wallet infrastructure.",
-      accent: "gold" as const,
-    },
-    {
-      icon: Shield,
-      title: "Governance & Security",
-      description: "Role-based access, audit logs, anomaly detection and tenant isolation — out of the box.",
-      accent: "gold" as const,
-    },
-    {
-      icon: Users,
-      title: "Multi-tenant Platform",
-      description: "Run multiple organizations with strict isolation, centralized control and per-tenant billing.",
-      accent: "gold" as const,
-    },
-  ];
-
-  const TRUST_POINTS = [
-    { icon: Lock,      label: "Full data sovereignty"      },
-    { icon: TrendingUp, label: "Built-in cost governance"   },
-    { icon: Cpu,       label: "No infrastructure to manage" },
-  ];
-
-  const HOW_IT_WORKS = [
-    { step: "01", title: "Connect your data", desc: "Upload documents, connect integrations, define your knowledge base." },
-    { step: "02", title: "Build your workflows", desc: "Design AI workflows using a visual builder with built-in execution safety." },
-    { step: "03", title: "Deploy and govern", desc: "Run at scale with full control over cost, access and performance." },
-  ];
-
   return (
-    <div className="min-h-screen bg-background flex flex-col overflow-x-hidden">
+    <div className="min-h-screen bg-[#0A0F1C] text-slate-200 font-sans selection:bg-cyan-500/30 overflow-x-hidden">
 
-      {/* ── Navigation ── */}
-      <header className="sticky top-0 z-50" style={{ borderBottom: "1px solid rgba(255,255,255,0.08)", background: "hsl(218 28% 15% / 0.92)", backdropFilter: "blur(14px)" }}>
-        <div className="max-w-[1200px] mx-auto px-6 h-16 flex items-center justify-between">
-
-          {/* Logo */}
-          <a href="/" className="flex items-center gap-2.5 group" aria-label="BlissOps home">
-            <Logo size="md" />
-            <span className="text-sm font-bold text-foreground tracking-wide">
-              Bliss<span className="text-primary">Ops</span>
+      {/* NAVBAR */}
+      <nav className="fixed top-0 w-full z-50 border-b border-white/5 bg-[#0A0F1C]/80 backdrop-blur-md">
+        <div className="max-w-[1280px] mx-auto px-6 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <img src="/brand/icon.png" alt="BlissOps" className="h-8 w-8 object-contain" />
+            <span className="text-white font-bold text-xl tracking-tight">BlissOps</span>
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-500 border border-amber-500/20">
+              BETA
             </span>
-          </a>
-
-          {/* Nav links */}
-          <nav className="hidden md:flex items-center gap-8 text-sm text-muted-foreground">
-            <a href="#features"     className="hover:text-foreground transition-colors">Features</a>
-            <a href="#how-it-works" className="hover:text-foreground transition-colors">How it works</a>
-            <a href="#early-access" className="hover:text-foreground transition-colors">Early access</a>
-            <a href="#contact"      className="hover:text-foreground transition-colors">Contact</a>
-          </nav>
-
-          {/* CTA */}
-          <a
-            href={loginUrl}
-            className="hidden sm:inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold rounded-lg bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-            data-testid="link-marketing-login"
-            style={{ boxShadow: "0 0 16px rgba(34,211,238,0.20)" }}
-          >
-            Log in
-            <ArrowRight className="w-3.5 h-3.5" />
-          </a>
-        </div>
-      </header>
-
-      {/* ── Hero ── */}
-      <section className="relative overflow-hidden">
-        {/* Background radial glows */}
-        <div aria-hidden className="pointer-events-none absolute inset-0" style={{
-          background: "radial-gradient(ellipse 80% 70% at 50% -5%, rgba(34,211,238,0.10) 0%, transparent 65%)",
-        }} />
-        <div aria-hidden className="pointer-events-none absolute inset-0" style={{
-          background: "radial-gradient(ellipse 50% 40% at 85% 90%, rgba(245,158,11,0.05) 0%, transparent 55%)",
-        }} />
-
-        <div className="relative max-w-[1200px] mx-auto px-6 pt-24 pb-24 text-center">
-
-          {/* Hero logo */}
-          <div className="flex justify-center mb-8">
-            <img
-              src="/brand/logo-full.png"
-              alt="BlissOps"
-              className="w-72 h-auto object-contain"
-              style={{ filter: "drop-shadow(0 0 40px rgba(34,211,238,0.30))" }}
-            />
           </div>
 
-          {/* Badge */}
-          <div
-            className="inline-flex items-center gap-2 px-4 py-2 rounded-full text-xs font-semibold mb-8"
-            style={{ background: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.18)", color: "#22D3EE" }}
-          >
-            <Zap className="w-3 h-3" />
-            AI Platform — Early Access
+          <div className="hidden md:flex items-center gap-8">
+            <a href="#features" className="text-sm font-medium text-slate-400 hover:text-white transition-colors">Platform</a>
+            <a href="#" className="text-sm font-medium text-slate-400 hover:text-white transition-colors">Priser</a>
+            <a href="#" className="text-sm font-medium text-slate-400 hover:text-white transition-colors">Om os</a>
           </div>
 
-          {/* H1 */}
-          <h1 className="text-4xl sm:text-5xl lg:text-[60px] font-bold text-foreground leading-[1.08] tracking-tight mb-7 max-w-4xl mx-auto">
-            Build, run{" "}
-            <span style={{ color: "#22D3EE", textShadow: "0 0 40px rgba(34,211,238,0.30)" }}>and monetize</span>
-            {" "}intelligent AI workflows
-          </h1>
-
-          {/* Sub */}
-          <p className="text-lg md:text-xl text-muted-foreground max-w-2xl mx-auto leading-relaxed mb-10">
-            Enterprise AI platform for building powerful workflows on your own data —
-            with full governance, cost control and built-in monetization infrastructure.
-          </p>
-
-          {/* Trust points */}
-          <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-3 mb-12">
-            {TRUST_POINTS.map(({ icon: Icon, label }) => (
-              <div key={label} className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Icon className="w-3.5 h-3.5 text-primary flex-shrink-0" />
-                {label}
-              </div>
-            ))}
-          </div>
-
-          {/* CTAs */}
-          <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+          <div className="flex items-center gap-4">
             <a
-              href="#early-access"
-              className="inline-flex items-center gap-2 px-7 py-3.5 text-sm font-bold rounded-xl bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
-              data-testid="link-marketing-cta-primary"
-              style={{ boxShadow: "0 0 24px rgba(34,211,238,0.30)" }}
+              href={loginUrl}
+              className="hidden sm:block text-sm font-medium text-slate-300 hover:text-white transition-colors"
             >
-              Request early access
-              <ArrowRight className="w-4 h-4" />
+              Log ind
             </a>
             <a
-              href="#features"
-              className="inline-flex items-center gap-2 px-7 py-3.5 text-sm font-semibold rounded-xl text-foreground transition-all hover:-translate-y-0.5"
-              data-testid="link-marketing-cta-secondary"
-              style={{ border: "1px solid rgba(255,255,255,0.10)", background: "rgba(255,255,255,0.03)" }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(34,211,238,0.25)"; }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,255,255,0.10)"; }}
+              href={loginUrl}
+              className="text-sm font-medium text-white px-5 py-2 rounded-full bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 transition-all shadow-[0_0_15px_rgba(34,211,238,0.3)] hover:shadow-[0_0_25px_rgba(34,211,238,0.5)] flex items-center gap-2 group"
             >
-              See how it works
-              <ChevronRight className="w-4 h-4" />
+              Start gratis
+              <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
             </a>
           </div>
         </div>
-      </section>
+      </nav>
 
-      {/* ── How it works ── */}
-      <section id="how-it-works" className="py-24 px-6" style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
-        <div className="max-w-[1200px] mx-auto">
-          <div className="text-center mb-16">
-            <p className="text-xs font-semibold uppercase tracking-widest text-primary mb-3">How it works</p>
-            <h2 className="text-2xl md:text-3xl font-bold text-foreground mb-4">
-              From data to production in three steps
-            </h2>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            {HOW_IT_WORKS.map(({ step, title, desc }) => (
-              <div key={step} className="relative pl-14">
-                <span
-                  className="absolute left-0 top-0 text-4xl font-black tabular-nums leading-none"
-                  style={{ color: "rgba(34,211,238,0.12)", fontVariantNumeric: "tabular-nums" }}
-                >
-                  {step}
-                </span>
-                <h3 className="text-base font-semibold text-foreground mb-2">{title}</h3>
-                <p className="text-sm text-muted-foreground leading-relaxed">{desc}</p>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
+      {/* HERO */}
+      <main className="pt-32 pb-20 px-6 max-w-[1280px] mx-auto min-h-[90vh] flex items-center">
+        <div className="grid grid-cols-1 lg:grid-cols-[55%_45%] gap-16 items-center w-full">
 
-      {/* ── Features ── */}
-      <section id="features" className="py-24 px-6" style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
-        <div className="max-w-[1200px] mx-auto">
-          <div className="text-center mb-16">
-            <p className="text-xs font-semibold uppercase tracking-widest text-primary mb-3">Platform capabilities</p>
-            <h2 className="text-2xl md:text-3xl font-bold text-foreground mb-4">
-              Everything your organization needs
-            </h2>
-            <p className="text-muted-foreground text-lg max-w-xl mx-auto">
-              One platform to build, govern and scale AI across your entire organization.
+          {/* Left */}
+          <div className="flex flex-col items-start relative z-10">
+            <div className="absolute -top-32 -left-32 w-96 h-96 bg-cyan-500/20 rounded-full blur-[120px] pointer-events-none" />
+
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 text-xs font-semibold mb-8 backdrop-blur-sm">
+              <span className="text-amber-400">✦</span> Ny: AI Workflow Builder
+            </div>
+
+            <h1 className="text-5xl sm:text-6xl lg:text-7xl font-black text-white leading-[1.1] tracking-tight mb-4">
+              Automatiser din virksomhed med
+              <br />
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 via-cyan-300 to-blue-500">
+                næste generations AI
+              </span>
+            </h1>
+
+            <p className="text-lg sm:text-xl text-slate-400 max-w-xl mb-10 leading-relaxed font-light">
+              Byg komplekse enterprise workflows på minutter. Forbind dine systemer, træn din AI, og lad BlissOps håndtere driften.
             </p>
-          </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {FEATURES.map((f) => (
-              <FeatureCard key={f.title} icon={f.icon} title={f.title} description={f.description} accent={f.accent} />
-            ))}
-          </div>
-        </div>
-      </section>
-
-      {/* ── Core promise ── */}
-      <section className="py-16 px-6">
-        <div className="max-w-[1200px] mx-auto">
-          <div
-            className="relative rounded-3xl overflow-hidden px-10 py-16 text-center"
-            style={{
-              background: "linear-gradient(135deg, rgba(34,211,238,0.06) 0%, rgba(255,255,255,0.01) 50%, rgba(245,158,11,0.04) 100%)",
-              border: "1px solid rgba(34,211,238,0.12)",
-            }}
-          >
-            <div aria-hidden className="absolute inset-0 pointer-events-none" style={{ background: "radial-gradient(ellipse 60% 60% at 50% 50%, rgba(34,211,238,0.05) 0%, transparent 70%)" }} />
-            <div className="relative">
-              <BarChart3 className="w-8 h-8 text-primary/50 mx-auto mb-6" />
-              <blockquote className="text-xl md:text-2xl font-semibold text-foreground max-w-3xl mx-auto leading-snug">
-                "Build, run and monetize AI — on your own data — with full control over cost, access and execution."
-              </blockquote>
-              <p className="mt-6 text-sm text-muted-foreground font-medium">BlissOps core promise</p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Waitlist / Early access ── */}
-      <WaitlistSection />
-
-      {/* ── Contact ── */}
-      <section id="contact" className="py-16 px-6" style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}>
-        <div className="max-w-[1200px] mx-auto text-center space-y-6">
-          <p className="text-xs font-semibold uppercase tracking-widest text-primary">Contact</p>
-          <h2 className="text-2xl font-bold text-foreground">Talk to us</h2>
-          <p className="text-muted-foreground max-w-md mx-auto">
-            For questions, enterprise pilots, partnerships or early access requests — reach out directly.
-          </p>
-          <a
-            href="mailto:support@blissops.com"
-            data-testid="link-contact-email"
-            className="inline-flex items-center gap-2.5 px-6 py-3 rounded-xl text-sm font-medium text-foreground transition-all hover:-translate-y-0.5"
-            style={{ border: "1px solid rgba(255,255,255,0.10)", background: "rgba(255,255,255,0.03)" }}
-            onMouseEnter={(e) => { (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(34,211,238,0.25)"; }}
-            onMouseLeave={(e) => { (e.currentTarget as HTMLAnchorElement).style.borderColor = "rgba(255,255,255,0.10)"; }}
-          >
-            <Mail className="w-4 h-4 text-primary" />
-            support@blissops.com
-          </a>
-        </div>
-      </section>
-
-      {/* ── Footer ── */}
-      <footer style={{ borderTop: "1px solid rgba(255,255,255,0.08)", background: "hsl(218 28% 13% / 0.80)" }}>
-        <div className="max-w-[1200px] mx-auto px-6 py-8">
-          <div className="flex flex-col md:flex-row items-center justify-between gap-6">
-
-            {/* Brand */}
-            <div className="flex items-center gap-2.5">
-              <Logo size="sm" />
-              <span className="text-sm font-bold text-foreground">Bliss<span className="text-primary">Ops</span></span>
-              <span className="text-xs text-muted-foreground/60">— AI Platform</span>
-            </div>
-
-            {/* Links */}
-            <nav className="flex items-center gap-6 text-xs text-muted-foreground flex-wrap justify-center">
-              <a href="#features"     className="hover:text-foreground transition-colors">Features</a>
-              <a href="#early-access" className="hover:text-foreground transition-colors">Early access</a>
-              <a href="#"             className="hover:text-foreground transition-colors">Terms</a>
-              <a href="#"             className="hover:text-foreground transition-colors">Privacy</a>
+            <div className="flex flex-col sm:flex-row items-center gap-4 mb-16 w-full sm:w-auto">
               <a
-                href="mailto:support@blissops.com"
-                className="hover:text-foreground transition-colors"
-                data-testid="link-footer-email"
+                href={loginUrl}
+                className="w-full sm:w-auto px-8 py-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-lg transition-all hover:-translate-y-0.5 hover:shadow-[0_10px_30px_rgba(34,211,238,0.3)] flex items-center justify-center gap-2"
               >
-                support@blissops.com
+                Prøv gratis <Zap className="w-5 h-5" />
               </a>
-            </nav>
+              <a
+                href="#features"
+                className="w-full sm:w-auto px-8 py-4 rounded-xl border border-white/10 hover:border-white/20 bg-white/5 hover:bg-white/10 text-white font-semibold text-lg transition-all flex items-center justify-center gap-2"
+              >
+                Book demo
+              </a>
+            </div>
 
-            {/* Copyright */}
-            <p className="text-xs text-muted-foreground/50">
-              © {new Date().getFullYear()} BlissOps
+            <div className="w-full pt-8 border-t border-white/10">
+              <p className="text-sm text-slate-500 font-medium mb-4 uppercase tracking-wider">Betroet af enterprise ledere</p>
+              <div className="flex items-center gap-6 sm:gap-10 text-slate-400 font-bold text-lg sm:text-xl grayscale opacity-70">
+                <span>Novo Nordisk</span>
+                <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
+                <span>Maersk</span>
+                <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
+                <span>DSB</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Right — Dashboard mockup */}
+          <div className="relative w-full h-full min-h-[500px] hidden lg:block">
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[120%] h-[120%] bg-gradient-to-tr from-cyan-500/20 to-blue-600/20 blur-[100px] rounded-full z-0" />
+            <div
+              className="absolute right-0 top-1/2 -translate-y-1/2 w-[500px] bg-[#0F1629] border border-white/10 rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.6)] z-10 overflow-hidden"
+              style={{ transform: "perspective(1200px) rotateY(-8deg) rotateX(4deg)" }}
+            >
+              <div className="flex items-center px-4 py-3 border-b border-white/5 bg-[#161F33]">
+                <div className="flex gap-1.5 mr-4">
+                  <div className="w-3 h-3 rounded-full bg-slate-700/50" />
+                  <div className="w-3 h-3 rounded-full bg-slate-700/50" />
+                  <div className="w-3 h-3 rounded-full bg-slate-700/50" />
+                </div>
+                <div className="flex-1 text-center font-mono text-xs text-slate-500">app.blissops.com/dashboard</div>
+              </div>
+
+              <div className="p-6">
+                <div className="flex items-center justify-between mb-8">
+                  <h3 className="text-white font-semibold text-lg flex items-center gap-2">
+                    AI Runs — Live
+                    <span className="relative flex h-2.5 w-2.5 ml-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-green-500" />
+                    </span>
+                  </h3>
+                  <button className="text-xs bg-white/5 border border-white/10 px-3 py-1.5 rounded-md text-slate-300">
+                    View All
+                  </button>
+                </div>
+
+                <div className="space-y-3 mb-8">
+                  {[
+                    { icon: <CheckCircle2 className="w-5 h-5" />, color: "green", name: "Customer Support Triage", id: "bls_8f92a", ago: "2m ago", status: "COMPLETED", time: "1.2s" },
+                    { icon: <PlayCircle className="w-5 h-5 animate-pulse" />, color: "cyan", name: "Invoice Data Extraction", id: "bls_4a19x", ago: "Just now", status: "RUNNING", time: "..." },
+                  ].map((run, i) => (
+                    <div key={i} className="bg-[#1A233A] border border-white/5 rounded-xl p-4 flex items-center justify-between hover:border-cyan-500/30 transition-colors">
+                      <div className="flex items-center gap-4">
+                        <div className={`w-10 h-10 rounded-lg bg-${run.color}-500/10 flex items-center justify-center text-${run.color}-400`}>
+                          {run.icon}
+                        </div>
+                        <div>
+                          <div className="text-slate-200 font-medium text-sm">{run.name}</div>
+                          <div className="text-slate-500 text-xs mt-0.5">ID: {run.id} · {run.ago}</div>
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-${run.color}-500/10 text-${run.color}-400 border border-${run.color}-500/20`}>
+                          {run.status}
+                        </div>
+                        <div className="text-slate-500 text-xs mt-1">{run.time}</div>
+                      </div>
+                    </div>
+                  ))}
+                  <div className="bg-[#1A233A] border border-white/5 rounded-xl p-4 flex items-center justify-between opacity-60">
+                    <div className="flex items-center gap-4">
+                      <div className="w-10 h-10 rounded-lg bg-slate-700/30 flex items-center justify-center">
+                        <span className="w-2 h-2 bg-slate-500 rounded-full" />
+                      </div>
+                      <div>
+                        <div className="text-slate-400 font-medium text-sm">Weekly Report Gen</div>
+                        <div className="text-slate-600 text-xs mt-0.5">Scheduled</div>
+                      </div>
+                    </div>
+                    <div className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-400 border border-slate-700">
+                      QUEUED
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-[#1A233A] border border-white/5 rounded-xl p-4 h-32 flex flex-col justify-end gap-1 relative overflow-hidden">
+                  <div className="absolute top-4 left-4 flex items-center gap-2">
+                    <BarChart3 className="w-4 h-4 text-slate-400" />
+                    <span className="text-xs font-medium text-slate-400">Throughput (last 1h)</span>
+                  </div>
+                  <div className="flex items-end gap-2 h-16 mt-auto px-2">
+                    {[30, 45, 25, 60, 40, 75, 50, 85, 45, 95].map((height, i) => (
+                      <div key={i} className="flex-1 bg-cyan-500/20 hover:bg-cyan-400/40 transition-colors rounded-t-sm relative" style={{ height: `${height}%` }}>
+                        <div className="absolute top-0 left-0 w-full h-0.5 bg-cyan-400" />
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="absolute top-20 right-20 w-16 h-16 bg-gradient-to-br from-amber-500/20 to-orange-600/20 rounded-xl border border-amber-500/30 backdrop-blur-md flex items-center justify-center -rotate-12 animate-pulse">
+              <Zap className="w-6 h-6 text-amber-400" />
+            </div>
+          </div>
+        </div>
+      </main>
+
+      {/* STATS ROW */}
+      <section className="border-y border-white/5 bg-[#0F1629]">
+        <div className="max-w-[1280px] mx-auto px-6 py-12">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-8">
+            {[
+              { num: "10K+", label: "Workflows Executed" },
+              { num: "99.9%", label: "Uptime SLA" },
+              { num: "200+", label: "Enterprise Clients" },
+              { num: "4.9★", label: "Average Rating" },
+            ].map((stat, i) => (
+              <div key={i} className="flex flex-col items-center justify-center text-center">
+                <div className="text-4xl md:text-5xl font-black text-cyan-400 mb-2 tracking-tight drop-shadow-[0_0_10px_rgba(34,211,238,0.2)]">
+                  {stat.num}
+                </div>
+                <div className="text-sm font-medium text-slate-500 uppercase tracking-widest">{stat.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* FEATURES */}
+      <section id="features" className="py-32 relative">
+        <div className="max-w-[1000px] mx-auto px-6 relative z-10 space-y-32">
+
+          <div className="grid md:grid-cols-2 gap-16 items-center">
+            <div>
+              <div className="w-12 h-12 rounded-xl bg-cyan-500/10 flex items-center justify-center mb-6 border border-cyan-500/20">
+                <Zap className="w-6 h-6 text-cyan-400" />
+              </div>
+              <h2 className="text-3xl font-bold text-white mb-4">Visuel AI Builder</h2>
+              <p className="text-slate-400 leading-relaxed mb-6">
+                Design komplekse processer uden at skrive kode. Vores drag-and-drop interface lader dig bygge, teste og deploye AI workflows på minutter frem for måneder.
+              </p>
+              <ul className="space-y-3">
+                {["No-code interface", "Real-time testing", "Version control"].map((item, i) => (
+                  <li key={i} className="flex items-center gap-3 text-slate-300 text-sm font-medium">
+                    <CheckCircle2 className="w-4 h-4 text-cyan-500" /> {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="relative">
+              <div className="absolute inset-0 bg-gradient-to-tr from-cyan-500/10 to-transparent blur-2xl rounded-full" />
+              <div className="relative aspect-square rounded-2xl border border-white/10 bg-[#161F33] overflow-hidden p-6 shadow-2xl">
+                <div className="absolute top-1/4 left-1/4 w-1/2 h-12 bg-[#1A233A] border border-white/10 rounded-lg flex items-center justify-center gap-2 shadow-lg">
+                  <div className="w-2 h-2 rounded-full bg-cyan-400" />
+                  <span className="text-xs font-mono text-slate-300">Trigger: Email</span>
+                </div>
+                <div className="absolute top-1/2 left-1/4 w-px h-16 bg-cyan-500/30" />
+                <div className="absolute top-[60%] left-[10%] w-[80%] h-16 bg-gradient-to-r from-cyan-500 to-blue-600 rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-cyan-500/20">
+                  <Zap className="w-4 h-4 text-white" />
+                  <span className="text-sm font-bold text-white">LLM Processing</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-16 items-center">
+            <div className="order-2 md:order-1 relative">
+              <div className="absolute inset-0 bg-gradient-to-tr from-amber-500/10 to-transparent blur-2xl rounded-full" />
+              <div className="relative aspect-square rounded-2xl border border-white/10 bg-[#161F33] overflow-hidden p-6 shadow-2xl flex items-center justify-center">
+                <div className="grid grid-cols-2 gap-4 w-full h-full p-4">
+                  <div className="bg-[#1A233A] rounded-xl border border-white/5 flex items-center justify-center">
+                    <img src="/brand/icon.png" alt="BlissOps" className="w-8 h-8 opacity-50" />
+                  </div>
+                  <div className="bg-[#1A233A] rounded-xl border border-white/5 flex items-center justify-center">
+                    <Github className="w-8 h-8 text-slate-500" />
+                  </div>
+                  <div className="bg-[#1A233A] rounded-xl border border-white/5 flex items-center justify-center">
+                    <div className="text-2xl font-bold text-slate-500">API</div>
+                  </div>
+                  <div className="bg-[#1A233A] rounded-xl border border-white/5 flex items-center justify-center">
+                    <div className="text-slate-500 font-bold">SQL</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="order-1 md:order-2">
+              <div className="w-12 h-12 rounded-xl bg-amber-500/10 flex items-center justify-center mb-6 border border-amber-500/20">
+                <Plus className="w-6 h-6 text-amber-500" />
+              </div>
+              <h2 className="text-3xl font-bold text-white mb-4">Ubegrænsede Integrationer</h2>
+              <p className="text-slate-400 leading-relaxed mb-6">
+                Forbind BlissOps til hele din tech stack. Med over 100 native integrationer og understøttelse af custom APIs, er der ingen grænser for hvad du kan automatisere.
+              </p>
+              <ul className="space-y-3">
+                {["REST & GraphQL", "OAuth 2.0 support", "Custom webhooks"].map((item, i) => (
+                  <li key={i} className="flex items-center gap-3 text-slate-300 text-sm font-medium">
+                    <CheckCircle2 className="w-4 h-4 text-amber-500" /> {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-16 items-center">
+            <div>
+              <div className="w-12 h-12 rounded-xl bg-blue-500/10 flex items-center justify-center mb-6 border border-blue-500/20">
+                <BarChart3 className="w-6 h-6 text-blue-400" />
+              </div>
+              <h2 className="text-3xl font-bold text-white mb-4">Avanceret Analytics</h2>
+              <p className="text-slate-400 leading-relaxed mb-6">
+                Få fuld indsigt i dine AI operationer. Monitorer performance, omkostninger og throughput i realtid, og identificer flaskehalse før de opstår.
+              </p>
+              <ul className="space-y-3">
+                {["Real-time dashboards", "Cost tracking", "Custom alerts"].map((item, i) => (
+                  <li key={i} className="flex items-center gap-3 text-slate-300 text-sm font-medium">
+                    <CheckCircle2 className="w-4 h-4 text-blue-500" /> {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="relative">
+              <div className="absolute inset-0 bg-gradient-to-tr from-blue-500/10 to-transparent blur-2xl rounded-full" />
+              <div className="relative aspect-[4/3] rounded-2xl border border-white/10 bg-[#161F33] overflow-hidden shadow-2xl p-6 flex flex-col justify-end gap-2">
+                <div className="flex items-end gap-2 h-full w-full">
+                  {[20, 30, 25, 40, 35, 60, 50, 80, 70, 95].map((h, i) => (
+                    <div key={i} className="flex-1 bg-blue-500/20 rounded-t-sm relative" style={{ height: `${h}%` }}>
+                      <div className="absolute top-0 left-0 w-full h-1 bg-blue-400 rounded-t-sm" />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-16 items-center">
+            <div className="order-2 md:order-1 relative">
+              <div className="absolute inset-0 bg-gradient-to-tr from-emerald-500/10 to-transparent blur-2xl rounded-full" />
+              <div className="relative aspect-square rounded-2xl border border-white/10 bg-[#161F33] overflow-hidden p-6 shadow-2xl flex items-center justify-center">
+                <Shield className="w-32 h-32 text-emerald-500/20" />
+                <Lock className="w-12 h-12 text-emerald-400 absolute" />
+              </div>
+            </div>
+            <div className="order-1 md:order-2">
+              <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center mb-6 border border-emerald-500/20">
+                <Shield className="w-6 h-6 text-emerald-500" />
+              </div>
+              <h2 className="text-3xl font-bold text-white mb-4">Enterprise Sikkerhed</h2>
+              <p className="text-slate-400 leading-relaxed mb-6">
+                Designet med sikkerhed som førsteprioritet. Vi overholder de strengeste compliance krav, så du trygt kan håndtere følsom data i dine workflows.
+              </p>
+              <ul className="space-y-3">
+                {["SOC2 Type II", "End-to-end encryption", "RBAC & SSO"].map((item, i) => (
+                  <li key={i} className="flex items-center gap-3 text-slate-300 text-sm font-medium">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500" /> {item}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      {/* CTA SECTION */}
+      <section className="py-24 relative overflow-hidden">
+        <div className="absolute inset-0 bg-cyan-900/20" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-cyan-500/10 blur-[100px] rounded-full" />
+        <div className="max-w-[800px] mx-auto px-6 relative z-10 text-center">
+          <h2 className="text-4xl md:text-5xl font-black text-white mb-6">
+            Klar til at transformere din virksomhed?
+          </h2>
+          <p className="text-xl text-slate-300 mb-10 font-light">
+            Join hundredevis af enterprise teams der allerede bruger BlissOps.
+          </p>
+          <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+            <a
+              href={loginUrl}
+              className="w-full sm:w-auto px-10 py-4 rounded-xl bg-cyan-500 hover:bg-cyan-400 text-slate-950 font-bold text-lg transition-all shadow-lg hover:shadow-cyan-500/30"
+            >
+              Start gratis i dag
+            </a>
+            <a
+              href="#"
+              className="w-full sm:w-auto px-10 py-4 rounded-xl bg-[#161F33] hover:bg-[#1A233A] text-white font-semibold text-lg border border-white/10 transition-all"
+            >
+              Kontakt salg
+            </a>
+          </div>
+        </div>
+      </section>
+
+      {/* FOOTER */}
+      <footer className="border-t border-white/10 bg-[#0A0F1C] pt-16 pb-8">
+        <div className="max-w-[1280px] mx-auto px-6 grid grid-cols-1 md:grid-cols-3 gap-12 mb-12">
+          <div className="space-y-6">
+            <img src="/brand/logo-full.png" alt="BlissOps" className="h-8 object-contain opacity-90" />
+            <p className="text-slate-400 text-sm leading-relaxed max-w-sm">
+              AI-Builder Platform for enterprises. Automatiser komplekse processer sikkert og skalerbart.
             </p>
+          </div>
+
+          <div className="grid grid-cols-2 gap-8">
+            <div>
+              <h4 className="text-white font-semibold mb-4">Platform</h4>
+              <ul className="space-y-2 text-sm text-slate-400">
+                <li><a href="#features" className="hover:text-cyan-400 transition-colors">Features</a></li>
+                <li><a href="#" className="hover:text-cyan-400 transition-colors">Integrationer</a></li>
+                <li><a href="#" className="hover:text-cyan-400 transition-colors">Priser</a></li>
+                <li><a href="#" className="hover:text-cyan-400 transition-colors">Changelog</a></li>
+              </ul>
+            </div>
+            <div>
+              <h4 className="text-white font-semibold mb-4">Virksomhed</h4>
+              <ul className="space-y-2 text-sm text-slate-400">
+                <li><a href="#" className="hover:text-cyan-400 transition-colors">Om os</a></li>
+                <li><a href="#" className="hover:text-cyan-400 transition-colors">Karriere</a></li>
+                <li><a href="#" className="hover:text-cyan-400 transition-colors">Kontakt</a></li>
+                <li><a href="#" className="hover:text-cyan-400 transition-colors">Blog</a></li>
+              </ul>
+            </div>
+          </div>
+
+          <div className="flex flex-col items-start md:items-end justify-between">
+            <div className="flex items-center gap-4">
+              <a href="#" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-all">
+                <Twitter className="w-5 h-5" />
+              </a>
+              <a href="#" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-all">
+                <Github className="w-5 h-5" />
+              </a>
+              <a href="#" className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-all">
+                <Linkedin className="w-5 h-5" />
+              </a>
+            </div>
+            <div className="text-slate-500 text-sm mt-8 md:mt-0">
+              © {new Date().getFullYear()} BlissOps. Alle rettigheder forbeholdt.
+            </div>
           </div>
         </div>
       </footer>
@@ -502,13 +460,11 @@ function MarketingLanding() {
   );
 }
 
-// ─── App Router ───────────────────────────────────────────────────────────────
-
 export function MarketingApp() {
   return (
     <Switch>
-      <Route path="/auth/:rest*" component={AuthRedirect} />
-      <Route component={MarketingLanding} />
+      <Route path="/auth/*" component={AuthRedirect} />
+      <Route component={MarketingHome} />
     </Switch>
   );
 }
