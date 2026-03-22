@@ -6474,3 +6474,26 @@ export const insertAnalyticsDailyRollupSchema = createInsertSchema(analyticsDail
 });
 export type InsertAnalyticsDailyRollup = z.infer<typeof insertAnalyticsDailyRollupSchema>;
 export type AnalyticsDailyRollup = typeof analyticsDailyRollups.$inferSelect;
+
+// ─── Waitlist ──────────────────────────────────────────────────────────────────
+
+export const waitlistSignups = pgTable(
+  "waitlist_signups",
+  {
+    id:        text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    email:     text("email").notNull(),
+    source:    text("source").notNull().default("marketing"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ws_email_uq").on(t.email),
+    index("ws_created_idx").on(t.createdAt),
+  ],
+);
+
+export const insertWaitlistSignupSchema = createInsertSchema(waitlistSignups).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertWaitlistSignup = z.infer<typeof insertWaitlistSignupSchema>;
+export type WaitlistSignup = typeof waitlistSignups.$inferSelect;

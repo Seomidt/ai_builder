@@ -71,16 +71,30 @@ function WaitlistSection() {
   const [email, setEmail] = useState("");
   const [submitted, setSubmitted] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email.trim()) return;
     setLoading(true);
-    setTimeout(() => {
-      console.log("[BlissOps waitlist]", email.trim());
-      setSubmitted(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/waitlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: email.trim(), source: "marketing" }),
+      });
+      if (res.ok || res.status === 200) {
+        setSubmitted(true);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        setError(data.error ?? "Der skete en fejl. Prøv igen.");
+      }
+    } catch {
+      setError("Ingen forbindelse. Prøv igen.");
+    } finally {
       setLoading(false);
-    }, 600);
+    }
   };
 
   return (
@@ -104,7 +118,8 @@ function WaitlistSection() {
             You're on the list — we'll be in touch.
           </div>
         ) : (
-          <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-3 max-w-md mx-auto">
+          <div className="space-y-3 max-w-md mx-auto">
+            <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-3">
             <input
               type="email"
               value={email}
@@ -127,6 +142,10 @@ function WaitlistSection() {
               )}
             </button>
           </form>
+          {error && (
+            <p className="text-sm text-red-500 text-center" data-testid="text-waitlist-error">{error}</p>
+          )}
+          </div>
         )}
       </div>
     </section>

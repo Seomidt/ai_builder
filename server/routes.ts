@@ -1037,6 +1037,60 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.use("/api/analytics", analyticsRouter);
   app.use("/api/admin/analytics", adminAnalyticsRouter);
 
+  // ─── Waitlist (public, no auth) ──────────────────────────────────────────────
+  app.post("/api/waitlist", async (req: Request, res: Response) => {
+    try {
+      const { db }                 = await import("./db");
+      const { waitlistSignups }    = await import("@shared/schema");
+      const { eq }                 = await import("drizzle-orm");
+      const { z }                  = await import("zod");
+
+      const schema = z.object({
+        email:  z.string().email(),
+        source: z.string().optional().default("marketing"),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(422).json({ error: "Ugyldig e-mailadresse" });
+      }
+      const { email, source } = parsed.data;
+
+      // Upsert — ignore duplicate silently
+      const existing = await db.select().from(waitlistSignups).where(eq(waitlistSignups.email, email)).limit(1);
+      if (existing.length > 0) {
+        return res.status(200).json({ status: "already_registered" });
+      }
+
+      await db.insert(waitlistSignups).values({ email, source });
+      console.log(`[waitlist] New signup: ${email} (source=${source})`);
+      return res.status(201).json({ status: "registered" });
+    } catch (err) {
+      console.error("[waitlist] Error:", err);
+      return res.status(500).json({ error: "Der skete en fejl. Prøv igen." });
+    }
+  });
+
+  // ─── Waitlist admin (platform admin only) ────────────────────────────────────
+  app.get("/api/admin/waitlist", async (req: Request, res: Response) => {
+    try {
+      const secret = req.headers["x-internal-secret"];
+      const PLATFORM_ADMIN_EMAILS = ["seomidt@gmail.com"];
+      const userEmail = (req as any).user?.email ?? "";
+      const isAdmin   = PLATFORM_ADMIN_EMAILS.includes(userEmail) || secret === process.env.INTERNAL_API_SECRET;
+      if (!isAdmin) return res.status(403).json({ error: "Forbidden" });
+
+      const { db }              = await import("./db");
+      const { waitlistSignups } = await import("@shared/schema");
+      const { desc }            = await import("drizzle-orm");
+
+      const rows = await db.select().from(waitlistSignups).orderBy(desc(waitlistSignups.createdAt));
+      return res.json({ count: rows.length, signups: rows });
+    } catch (err) {
+      console.error("[waitlist-admin] Error:", err);
+      return res.status(500).json({ error: "Server error" });
+    }
+  });
+
   return httpServer;
 }
 
