@@ -9,7 +9,7 @@
     }
   ],
   "functions": {
-    "api/auth.mjs":         { "memory": 128, "maxDuration": 10 },
+    "api/auth.js":          { "memory": 256, "maxDuration": 10 },
     "api/dashboard.js":     { "memory": 256, "maxDuration": 15 },
     "api/projects.js":      { "memory": 256, "maxDuration": 15 },
     "api/architectures.js": { "memory": 256, "maxDuration": 15 },
