@@ -111,8 +111,10 @@ export function useAuth() {
     queryKey: ["/api/auth/session"],
     queryFn: fetchSession,
     retry: false,
-    staleTime: 30_000,
+    staleTime: 60_000,
+    gcTime: 120_000,
     refetchOnWindowFocus: true,
+    refetchInterval: false,
     enabled: true,
   });
 

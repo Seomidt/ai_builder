@@ -4,7 +4,8 @@ import { rm, readFile } from "fs/promises";
 
 // ── Serverless handler entries ────────────────────────────────────────────────
 const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
-  { name: "auth",          entry: "api/_src/auth.ts",          out: "api/auth.js"          },
+  // auth is built separately as ESM edge runtime — see below
+
   { name: "dashboard",     entry: "api/_src/dashboard.ts",     out: "api/dashboard.js"     },
   { name: "projects",      entry: "api/_src/projects.ts",      out: "api/projects.js"      },
   { name: "architectures", entry: "api/_src/architectures.ts", out: "api/architectures.js" },
@@ -16,6 +17,11 @@ const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
   { name: "waitlist",      entry: "api/_src/waitlist.ts",      out: "api/waitlist.js"      },
   { name: "tenant",        entry: "api/_src/tenant.ts",        out: "api/tenant.js"        },
   { name: "admin",         entry: "api/_src/admin.ts",         out: "api/admin.js"         },
+];
+
+// ── Edge function entries (ESM, Web Crypto, no Node built-ins) ────────────────
+const EDGE_HANDLERS: Array<{ name: string; entry: string; out: string }> = [
+  { name: "auth (edge)", entry: "api/_src/auth-edge.ts", out: "api/auth.mjs" },
 ];
 
 const allowlist = [
@@ -126,6 +132,27 @@ async function buildAll() {
       logLevel:    "info",
       banner:      { js: `// @vercel-bundled [${h.name}] — esbuild pre-compiled, do not edit\n` },
       footer:      { js: cjsCompatFooter },
+    });
+  }
+
+  // ── Edge functions — ESM, Web Crypto API, no Node built-ins ─────────────
+  // auth.mjs uses Vercel Edge Runtime: no cold start, global CDN distribution.
+  // Format must be ESM (not CJS); platform "browser" avoids Node shims.
+  for (const h of EDGE_HANDLERS) {
+    console.log(`building Vercel edge function: ${h.name} → ${h.out}`);
+    await esbuild({
+      entryPoints: [h.entry],
+      platform:    "browser",
+      bundle:      true,
+      format:      "esm",
+      outfile:     h.out,
+      tsconfig:    "tsconfig.json",
+      define:      { "process.env.NODE_ENV": '"production"' },
+      minifySyntax:      true,
+      minifyWhitespace:  true,
+      minifyIdentifiers: false,
+      logLevel:    "info",
+      banner:      { js: `// @vercel-edge [${h.name}] — esbuild pre-compiled, do not edit\n` },
     });
   }
 

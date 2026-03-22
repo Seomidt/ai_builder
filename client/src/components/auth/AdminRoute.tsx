@@ -17,11 +17,34 @@
 import { Redirect, Link } from "wouter";
 import { ShieldAlert, ArrowLeft } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
+import { Skeleton } from "@/components/ui/skeleton";
 
 function AdminSpinner() {
   return (
     <div className="flex items-center justify-center flex-1 h-full" data-testid="admin-route-loading">
       <div className="h-6 w-6 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+    </div>
+  );
+}
+
+// Lightweight skeleton shell shown while edge auth resolves (<200ms).
+// Renders the page structure immediately so layout shift is minimal.
+function AdminSkeleton() {
+  return (
+    <div className="flex-1 p-6 md:p-8 space-y-6" data-testid="admin-route-skeleton">
+      <div className="space-y-2">
+        <Skeleton className="h-7 w-48" />
+        <Skeleton className="h-4 w-72" />
+      </div>
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {Array.from({ length: 4 }).map((_, i) => (
+          <Skeleton key={i} className="h-[78px] rounded-xl" />
+        ))}
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Skeleton className="h-48 rounded-xl" />
+        <Skeleton className="h-48 rounded-xl" />
+      </div>
     </div>
   );
 }
@@ -81,11 +104,11 @@ export function AdminRoute({ children }: AdminRouteProps) {
     return <Redirect to="/auth/login" />;
   }
 
-  // Phase 2: authenticated but backend session not yet returned role
-  // user is null while /api/auth/session is in-flight (~200-500ms)
-  // Do NOT mount ops content or start queries before role is confirmed
+  // Phase 2: authenticated but backend session not yet returned role.
+  // With edge runtime auth, this resolves in <200ms. Show a lightweight
+  // skeleton shell so the page structure is visible immediately.
   if (!user) {
-    return <AdminSpinner />;
+    return <AdminSkeleton />;
   }
 
   // Phase 3: backend role confirmed — check platform_admin
