@@ -482,14 +482,14 @@ async function run(): Promise<void> {
     assert(Array.isArray(budgetsData.errors),                     "API: budgets errors array"); // 137
 
     const periodsResp = await fetch(`${BASE}/api/admin/governance/period-bounds?periodType=invalid`, { headers: internalHeaders });
-    assert(periodsResp.status === 400,                            "API: invalid periodType → 400"); // 138
+    assert(periodsResp.status === 422,                            "API: invalid periodType → 422"); // 138
 
     const classifyBadResp = await fetch(`${BASE}/api/admin/governance/classify-budget`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...internalHeaders },
       body: JSON.stringify({ budgetUsdCents: 0 }),
     });
-    assert(classifyBadResp.status === 400,                        "API: classify invalid body → 400"); // 139
+    assert(classifyBadResp.status === 422,                        "API: classify invalid body → 422"); // 139
 
     // Snapshot for a test org (no-op if no billing data)
     const snapResp = await fetch(`${BASE}/api/admin/governance/snapshots/${testOrgId}`, {

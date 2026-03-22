@@ -168,13 +168,33 @@ async function run(): Promise<void> {
     await client.query(`CREATE INDEX aae16_org_type_idx ON ai_anomaly_events (organization_id, anomaly_type);`);
     console.log("  ✅ ai_anomaly_events OK");
 
-    // ── 5. RLS ────────────────────────────────────────────────────────────────
-    console.log("\n[5/5] Enabling RLS …");
+    // ── 5. gov_anomaly_events ─────────────────────────────────────────────────
+    // Used by AI-ops context-assembler and ops-summary (Phase 3+).
+    // Created here to ensure it exists before the server queries it.
+    console.log("\n[5/6] Creating gov_anomaly_events …");
+    await client.query(`DROP TABLE IF EXISTS gov_anomaly_events CASCADE;`);
+    await client.query(`
+      CREATE TABLE gov_anomaly_events (
+        id                  TEXT        PRIMARY KEY DEFAULT gen_random_uuid()::text,
+        tenant_id           TEXT        NOT NULL,
+        event_type          TEXT        NOT NULL,
+        usage_spike_percent NUMERIC(8,2),
+        metadata            JSONB,
+        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    await client.query(`CREATE INDEX gae_tenant_created_idx ON gov_anomaly_events (tenant_id, created_at);`);
+    await client.query(`CREATE INDEX gae_tenant_type_idx    ON gov_anomaly_events (tenant_id, event_type);`);
+    console.log("  ✅ gov_anomaly_events OK");
+
+    // ── 6. RLS ────────────────────────────────────────────────────────────────
+    console.log("\n[6/6] Enabling RLS …");
     const rlsTables = [
       "tenant_ai_budgets",
       "tenant_ai_usage_snapshots",
       "ai_usage_alerts",
       "ai_anomaly_events",
+      "gov_anomaly_events",
     ];
     for (const t of rlsTables) {
       await client.query(`ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY;`);
