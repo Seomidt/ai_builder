@@ -23,7 +23,7 @@ function BlissOpsLogo({ size = "md" }: { size?: "sm" | "md" }) {
       alt="BlissOps"
       width={px}
       height={px}
-      style={{ borderRadius: 6, objectFit: "cover" }}
+      style={{ mixBlendMode: "screen", objectFit: "contain" }}
     />
   );
 }

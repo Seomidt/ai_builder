@@ -51,7 +51,7 @@ function Logo({ size = "md" }: { size?: "sm" | "md" | "lg" }) {
       alt="BlissOps"
       width={dim}
       height={dim}
-      style={{ borderRadius: 7, objectFit: "cover" }}
+      style={{ mixBlendMode: "screen", objectFit: "contain" }}
     />
   );
 }
@@ -307,8 +307,8 @@ function MarketingLanding() {
             <img
               src="/brand/logo-full.jpeg"
               alt="BlissOps"
-              className="w-64 h-auto object-contain rounded-2xl"
-              style={{ filter: "drop-shadow(0 0 32px rgba(34,211,238,0.25))" }}
+              className="w-72 h-auto object-contain"
+              style={{ mixBlendMode: "screen", filter: "drop-shadow(0 0 40px rgba(34,211,238,0.30))" }}
             />
           </div>
 

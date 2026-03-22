@@ -85,7 +85,8 @@ export default function AuthLogin() {
           <img
             src="/brand/logo-full.jpeg"
             alt="BlissOps"
-            className="w-56 h-auto object-contain rounded-2xl"
+            className="w-56 h-auto object-contain"
+            style={{ mixBlendMode: "screen" }}
           />
           <p className="mt-3 text-sm text-muted-foreground">AI Platform — Log ind for at fortsætte</p>
         </div>
