@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { TenantNav } from "@/components/tenant/TenantNav";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { friendlyError } from "@/lib/friendlyError";
 
 interface TenantSettings {
   tenant: {
@@ -59,7 +60,7 @@ export default function TenantSettings() {
       queryClient.invalidateQueries({ queryKey: ["/api/tenant/settings"] });
       toast({ title: "Settings saved", description: "Configuration updated successfully" });
     },
-    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+    onError: (err: Error) => toast({ title: "Error", description: friendlyError(err), variant: "destructive" }),
   });
 
   const set = (field: keyof typeof form, value: string | number) =>

@@ -8,6 +8,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { TenantNav } from "@/components/tenant/TenantNav";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { friendlyError } from "@/lib/friendlyError";
 import type { AiRun } from "@shared/schema";
 
 interface AiRunsPage {
@@ -42,7 +43,7 @@ export default function TenantAi() {
       queryClient.invalidateQueries({ queryKey: ["/api/tenant/ai/runs"] });
       toast({ title: "AI run started", description: "New run is queued" });
     },
-    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+    onError: (err: Error) => toast({ title: "Error", description: friendlyError(err), variant: "destructive" }),
   });
 
   const nextPage = () => {

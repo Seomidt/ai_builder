@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { friendlyError } from "@/lib/friendlyError";
 
 interface Alert {
   id: string;
@@ -68,7 +69,7 @@ export default function OpsAi() {
       queryClient.invalidateQueries({ queryKey: ["/api/admin/governance/alerts"] });
       toast({ title: "Budget check complete", description: "Alerts refreshed" });
     },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => toast({ title: "Error", description: friendlyError(e), variant: "destructive" }),
   });
 
   return (

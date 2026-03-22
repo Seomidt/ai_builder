@@ -14,6 +14,7 @@
 import { runsRepository } from "../repositories/runs.repository";
 import { architecturesRepository } from "../repositories/architectures.repository";
 import { getAgent, DEFAULT_PIPELINE } from "../lib/agents/registry";
+import { NotFoundError, ConflictError, ValidationError } from "../lib/errors";
 import type { RunContext } from "../lib/agents/types";
 import type { AiArtifact, AiStep } from "@shared/schema";
 
@@ -30,13 +31,13 @@ export const runExecutorService = {
   async executeRun(runId: string, organizationId: string): Promise<ExecuteRunResult> {
     // ── Load run ────────────────────────────────────────────────────────────
     const run = await runsRepository.getById(runId, organizationId);
-    if (!run) throw new Error(`Run not found: ${runId}`);
+    if (!run) throw new NotFoundError("Run not found.");
 
     if (run.status === "running") {
-      throw new Error(`Run ${runId} is already running`);
+      throw new ConflictError("CONFLICT", "This run is already in progress.");
     }
     if (run.status === "completed" || run.status === "failed" || run.status === "cancelled") {
-      throw new Error(`Run ${runId} has already finished with status: ${run.status}`);
+      throw new ValidationError("VALIDATION_ERROR", `Run has already finished with status: ${run.status}`);
     }
 
     // ── Mark run as running ─────────────────────────────────────────────────

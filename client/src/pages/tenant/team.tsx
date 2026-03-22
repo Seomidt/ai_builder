@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { TenantNav } from "@/components/tenant/TenantNav";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { friendlyError } from "@/lib/friendlyError";
 
 interface TeamResponse {
   members: {
@@ -48,7 +49,7 @@ export default function TenantTeam() {
       setShowInvite(false);
       setEmail("");
     },
-    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
+    onError: (err: Error) => toast({ title: "Error", description: friendlyError(err), variant: "destructive" }),
   });
 
   const nextPage = () => {

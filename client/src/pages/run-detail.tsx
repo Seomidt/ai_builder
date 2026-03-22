@@ -12,6 +12,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { friendlyError } from "@/lib/friendlyError";
 import { useState } from "react";
 import type { AiRun, AiStep, AiArtifact } from "@shared/schema";
 import { QUERY_POLICY } from "@/lib/query-policy";
@@ -198,7 +199,7 @@ export default function RunDetail() {
       toast({ title: "Pipeline started", description: "Agents are running…" });
     },
     onError: (err: Error) => {
-      toast({ title: "Execution failed", description: err.message, variant: "destructive" });
+      toast({ title: "Execution failed", description: friendlyError(err), variant: "destructive" });
     },
   });
 

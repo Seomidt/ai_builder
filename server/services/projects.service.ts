@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { projectsRepository } from "../repositories/projects.repository";
+import { NotFoundError, ConflictError } from "../lib/errors";
 import type { Project } from "@shared/schema";
 
 export const createProjectSchema = z.object({
@@ -26,25 +27,39 @@ export const projectsService = {
 
   async getById(id: string, organizationId: string): Promise<Project> {
     const project = await projectsRepository.getById(id, organizationId);
-    if (!project) throw new Error(`Project not found: ${id}`);
+    if (!project) throw new NotFoundError("Project not found.");
     return project;
   },
 
   async create(input: CreateProjectInput): Promise<Project> {
     const data = createProjectSchema.parse(input);
-    return projectsRepository.create({ ...data, status: "active" });
+    try {
+      return await projectsRepository.create({ ...data, status: "active" });
+    } catch (err: unknown) {
+      if ((err as { code?: string })?.code === "23505") {
+        throw new ConflictError("DUPLICATE_SLUG", "A project with this slug already exists in your organization. Choose a different slug.");
+      }
+      throw err;
+    }
   },
 
   async update(id: string, organizationId: string, input: UpdateProjectInput): Promise<Project> {
     const data = updateProjectSchema.parse(input);
-    const updated = await projectsRepository.update(id, organizationId, data);
-    if (!updated) throw new Error(`Project not found: ${id}`);
-    return updated;
+    try {
+      const updated = await projectsRepository.update(id, organizationId, data);
+      if (!updated) throw new NotFoundError("Project not found.");
+      return updated;
+    } catch (err: unknown) {
+      if ((err as { code?: string })?.code === "23505") {
+        throw new ConflictError("DUPLICATE_SLUG", "A project with this slug already exists in your organization. Choose a different slug.");
+      }
+      throw err;
+    }
   },
 
   async archive(id: string, organizationId: string): Promise<Project> {
     const archived = await projectsRepository.archive(id, organizationId);
-    if (!archived) throw new Error(`Project not found: ${id}`);
+    if (!archived) throw new NotFoundError("Project not found.");
     return archived;
   },
 };

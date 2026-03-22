@@ -10,6 +10,7 @@ import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { QUERY_POLICY } from "@/lib/query-policy";
+import { friendlyError } from "@/lib/friendlyError";
 import { cn } from "@/lib/utils";
 
 interface AlertRow {
@@ -67,13 +68,13 @@ export default function GovernanceAlerts() {
   const acknowledgeMutation = useMutation({
     mutationFn: (alertId: string) => apiRequest("PATCH", `/api/admin/governance/alerts/${alertId}/acknowledge`, {}),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["/api/admin/governance/alerts"] }); toast({ title: "Alert acknowledged" }); },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => toast({ title: "Error", description: friendlyError(e), variant: "destructive" }),
   });
 
   const resolveMutation = useMutation({
     mutationFn: (alertId: string) => apiRequest("PATCH", `/api/admin/governance/alerts/${alertId}/resolve`, {}),
     onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["/api/admin/governance/alerts"] }); toast({ title: "Alert resolved" }); },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => toast({ title: "Error", description: friendlyError(e), variant: "destructive" }),
   });
 
   const all = data?.data ?? [];

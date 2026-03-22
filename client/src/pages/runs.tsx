@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { friendlyError } from "@/lib/friendlyError";
 import { QUERY_POLICY } from "@/lib/query-policy";
 import { invalidate } from "@/lib/invalidations";
 import { usePagePerf } from "@/lib/perf";
@@ -104,7 +105,7 @@ export default function Runs() {
       navigate(`/runs/${run.id}`);
     },
     onError: (err: Error) => {
-      toast({ title: "Could not create run", description: err.message, variant: "destructive" });
+      toast({ title: "Could not create run", description: friendlyError(err), variant: "destructive" });
     },
   });
 

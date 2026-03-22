@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { runsRepository } from "../repositories/runs.repository";
+import { NotFoundError } from "../lib/errors";
 import type { AiRun, AiStep, AiArtifact, AiToolCall, AiApproval } from "@shared/schema";
 
 export const createRunSchema = z.object({
@@ -86,7 +87,7 @@ export const runsService = {
 
   async getById(id: string, organizationId: string) {
     const run = await runsRepository.getById(id, organizationId);
-    if (!run) throw new Error(`Run not found: ${id}`);
+    if (!run) throw new NotFoundError("Run not found.");
     const [steps, artifacts, toolCalls, approvals] = await Promise.all([
       runsRepository.listSteps(id),
       runsRepository.listArtifacts(id),
@@ -104,7 +105,7 @@ export const runsService = {
   async updateStatus(id: string, organizationId: string, input: UpdateRunStatusInput): Promise<AiRun> {
     const { status } = updateRunStatusSchema.parse(input);
     const updated = await runsRepository.updateStatus(id, organizationId, status);
-    if (!updated) throw new Error(`Run not found: ${id}`);
+    if (!updated) throw new NotFoundError("Run not found.");
     return updated;
   },
 
@@ -131,7 +132,7 @@ export const runsService = {
   async resolveApproval(id: string, input: ResolveApprovalInput): Promise<AiApproval> {
     const data = resolveApprovalSchema.parse(input);
     const updated = await runsRepository.resolveApproval(id, data);
-    if (!updated) throw new Error(`Approval not found: ${id}`);
+    if (!updated) throw new NotFoundError("Approval not found.");
     return updated;
   },
 };

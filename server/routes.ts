@@ -475,16 +475,19 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/config/status", async (req: Request, res: Response) => {
     try {
       if (!checkAdminRole(req, res)) return;
-      // Return only boolean connection flags — never expose env values or identifiers
+      // Delegate to canonical module — never compute env checks here
+      const { getPlatformIntegrationsStatus } = await import("./lib/integrations/platform-integrations-status");
+      const report = getPlatformIntegrationsStatus();
+      const byKey = Object.fromEntries(report.providers.map((p) => [p.key, p.configured]));
       res.json({
-        database: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
-        supabase: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
-        github: !!process.env.GITHUB_TOKEN,
-        openai: !!process.env.OPENAI_API_KEY,
-        anthropic: !!process.env.ANTHROPIC_API_KEY,
-        gemini: !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY),
-        stripe: !!process.env.STRIPE_SECRET_KEY,
-        cloudflare: !!process.env.CF_API_TOKEN,
+        database: byKey.supabase ?? false,
+        supabase: byKey.supabase ?? false,
+        github: byKey.github ?? false,
+        openai: byKey.openai ?? false,
+        anthropic: byKey.anthropic ?? false,
+        gemini: byKey.gemini ?? false,
+        stripe: byKey.stripe ?? false,
+        cloudflare: byKey.cloudflare ?? false,
       });
     } catch (err) {
       handleError(res, err, (req as any).requestId ?? null);

@@ -14,6 +14,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { apiRequest, ApiError } from "@/lib/queryClient";
+import { friendlyError } from "@/lib/friendlyError";
 import { useToast } from "@/hooks/use-toast";
 import { QUERY_POLICY } from "@/lib/query-policy";
 import { invalidate } from "@/lib/invalidations";
@@ -119,7 +120,7 @@ export default function Projects() {
         code === "CONFLICT"       ? "Conflict" :
         code === "VALIDATION_ERROR" ? "Validation error" :
         "Could not create project";
-      toast({ title, description: e.message, variant: "destructive" });
+      toast({ title, description: friendlyError(e), variant: "destructive" });
     },
   });
 
@@ -131,7 +132,7 @@ export default function Projects() {
       invalidate.afterProjectMutation();
       toast({ title: "Project archived" });
     },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
+    onError: (e: Error) => toast({ title: "Error", description: friendlyError(e), variant: "destructive" }),
   });
 
   return (

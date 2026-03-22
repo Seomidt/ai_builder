@@ -9,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Button } from "@/components/ui/button";
 import { queryClient } from "@/lib/queryClient";
 import { useAuth } from "@/hooks/use-auth";
+import { friendlyError } from "@/lib/friendlyError";
 
 interface OpsSummary {
   healthStatus: "healthy" | "degraded" | "critical" | "unknown";
@@ -148,7 +149,7 @@ export default function OpsDashboard() {
           <CardContent className="pt-4 flex items-center gap-2">
             <AlertTriangle className="w-4 h-4 text-destructive" />
             <p className="text-sm text-destructive">
-              Ops summary unavailable — {error instanceof Error ? error.message : "unknown error"}
+              Ops summary unavailable — {friendlyError(error)}
             </p>
           </CardContent>
         </Card>

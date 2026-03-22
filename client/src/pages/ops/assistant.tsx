@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
+import { friendlyError } from "@/lib/friendlyError";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -127,7 +128,14 @@ export default function OpsAssistant() {
     },
     onSuccess: (result) => {
       if (result.error) {
-        setQueryError(result.error);
+        // Sanitize server-side error strings — never render raw provider text
+        const raw = result.error as string;
+        const isProviderErr = /api.?key|unauthorized|401|openai|anthropic|gemini/i.test(raw);
+        setQueryError(
+          isProviderErr
+            ? "AI provider is not configured. Set the required API key in platform secrets."
+            : (raw.length < 300 ? raw : "Operations query failed. Please try again."),
+        );
         setQueryResult(null);
       } else {
         setQueryResult(result.data);
@@ -135,7 +143,7 @@ export default function OpsAssistant() {
       }
     },
     onError: (err: Error) => {
-      setQueryError(err.message);
+      setQueryError(friendlyError(err));
       setQueryResult(null);
     },
   });

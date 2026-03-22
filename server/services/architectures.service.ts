@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { architecturesRepository } from "../repositories/architectures.repository";
+import { NotFoundError, ConflictError } from "../lib/errors";
 import type {
   ArchitectureProfile,
   ArchitectureVersion,
@@ -25,11 +26,9 @@ export const updateProfileSchema = z.object({
 export const createVersionSchema = z.object({
   architectureProfileId: z.string().min(1),
   versionNumber: z.string().min(1).max(20),
-  // GitHub versioning metadata
-  versionLabel: z.string().max(100).optional(),    // e.g. "Initial Release"
-  description: z.string().optional(),             // what this version introduces
-  changelog: z.string().optional(),               // markdown changelog for commit body
-  // Pipeline
+  versionLabel: z.string().max(100).optional(),
+  description: z.string().optional(),
+  changelog: z.string().optional(),
   workflowKey: z.string().max(100).optional(),
   config: z.record(z.unknown()).optional(),
 });
@@ -57,6 +56,10 @@ export type CreateVersionInput = z.infer<typeof createVersionSchema>;
 export type UpsertAgentConfigInput = z.infer<typeof upsertAgentConfigSchema>;
 export type UpsertCapabilityConfigInput = z.infer<typeof upsertCapabilityConfigSchema>;
 
+function isDuplicateSlug(err: unknown): boolean {
+  return (err as { code?: string })?.code === "23505";
+}
+
 export const architecturesService = {
   async listProfiles(organizationId: string): Promise<ArchitectureProfile[]> {
     return architecturesRepository.listActiveProfiles(organizationId);
@@ -64,26 +67,40 @@ export const architecturesService = {
 
   async getProfileById(id: string, organizationId: string) {
     const profile = await architecturesRepository.getProfileById(id, organizationId);
-    if (!profile) throw new Error(`Architecture profile not found: ${id}`);
+    if (!profile) throw new NotFoundError("Architecture profile not found.");
     const versions = await architecturesRepository.listVersions(id);
     return { ...profile, versions };
   },
 
   async createProfile(input: CreateProfileInput): Promise<ArchitectureProfile> {
     const data = createProfileSchema.parse(input);
-    return architecturesRepository.createProfile({ ...data, status: "active" });
+    try {
+      return await architecturesRepository.createProfile({ ...data, status: "active" });
+    } catch (err: unknown) {
+      if (isDuplicateSlug(err)) {
+        throw new ConflictError("DUPLICATE_SLUG", "An architecture with this slug already exists in your organization. Choose a different slug.");
+      }
+      throw err;
+    }
   },
 
   async updateProfile(id: string, organizationId: string, input: UpdateProfileInput): Promise<ArchitectureProfile> {
     const data = updateProfileSchema.parse(input);
-    const updated = await architecturesRepository.updateProfile(id, organizationId, data);
-    if (!updated) throw new Error(`Architecture profile not found: ${id}`);
-    return updated;
+    try {
+      const updated = await architecturesRepository.updateProfile(id, organizationId, data);
+      if (!updated) throw new NotFoundError("Architecture profile not found.");
+      return updated;
+    } catch (err: unknown) {
+      if (isDuplicateSlug(err)) {
+        throw new ConflictError("DUPLICATE_SLUG", "An architecture with this slug already exists in your organization. Choose a different slug.");
+      }
+      throw err;
+    }
   },
 
   async archiveProfile(id: string, organizationId: string): Promise<ArchitectureProfile> {
     const archived = await architecturesRepository.archiveProfile(id, organizationId);
-    if (!archived) throw new Error(`Architecture profile not found: ${id}`);
+    if (!archived) throw new NotFoundError("Architecture profile not found.");
     return archived;
   },
 
@@ -94,9 +111,9 @@ export const architecturesService = {
 
   async publishVersion(versionId: string, profileId: string, organizationId: string): Promise<ArchitectureVersion> {
     const profile = await architecturesRepository.getProfileById(profileId, organizationId);
-    if (!profile) throw new Error(`Architecture profile not found: ${profileId}`);
+    if (!profile) throw new NotFoundError("Architecture profile not found.");
     const version = await architecturesRepository.publishVersion(versionId, profileId);
-    if (!version) throw new Error(`Architecture version not found: ${versionId}`);
+    if (!version) throw new NotFoundError("Architecture version not found.");
     return version;
   },
 
@@ -112,7 +129,7 @@ export const architecturesService = {
 
   async getVersionDetails(versionId: string) {
     const version = await architecturesRepository.getVersionById(versionId);
-    if (!version) throw new Error(`Architecture version not found: ${versionId}`);
+    if (!version) throw new NotFoundError("Architecture version not found.");
     const [agentConfigs, capabilityConfigs] = await Promise.all([
       architecturesRepository.listAgentConfigs(versionId),
       architecturesRepository.listCapabilityConfigs(versionId),
