@@ -19,16 +19,6 @@ const schema = z.object({
 });
 type FormValues = z.infer<typeof schema>;
 
-function BlissOpsLogo() {
-  return (
-    <svg width="36" height="36" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="32" height="32" rx="9" fill="rgba(34,211,238,0.12)" />
-      <path d="M6 16 C6 11 9.5 8 13.5 8 C17.5 8 20 11.5 16 16 C20 20.5 17.5 24 13.5 24 C9.5 24 6 21 6 16 Z" stroke="#22D3EE" strokeWidth="2" fill="none" strokeLinecap="round"/>
-      <path d="M16 16 C20 11.5 22.5 8 18.5 8" stroke="#22D3EE" strokeWidth="2" fill="none" strokeLinecap="round" opacity="0.3"/>
-      <path d="M16 16 C20 20.5 22.5 24 18.5 24" stroke="#F59E0B" strokeWidth="2" fill="none" strokeLinecap="round"/>
-    </svg>
-  );
-}
 
 export default function AuthLogin() {
   const [authError, setAuthError] = useState<string | null>(null);
@@ -92,11 +82,12 @@ export default function AuthLogin() {
 
         {/* Logo + Brand */}
         <div className="flex flex-col items-center mb-8 text-center">
-          <BlissOpsLogo />
-          <h1 className="mt-4 text-xl font-bold text-foreground tracking-tight">
-            Bliss<span style={{ color: "#22D3EE" }}>Ops</span>
-          </h1>
-          <p className="mt-1.5 text-sm text-muted-foreground">AI Platform — Log ind for at fortsætte</p>
+          <img
+            src="/brand/logo-full.jpeg"
+            alt="BlissOps"
+            className="w-56 h-auto object-contain rounded-2xl"
+          />
+          <p className="mt-3 text-sm text-muted-foreground">AI Platform — Log ind for at fortsætte</p>
         </div>
 
         {/* Card */}
