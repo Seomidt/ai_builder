@@ -101,8 +101,8 @@ export function AdminSidebar() {
               ? "bg-amber-500/10 text-amber-400 border-amber-500"
               : "bg-destructive/10 text-destructive border-destructive"
             : isGov
-            ? "text-amber-500/80 hover:text-amber-400 hover:bg-white/5 border-transparent"
-            : "text-sidebar-foreground/80 hover:text-sidebar-foreground hover:bg-white/5 border-transparent",
+            ? "text-amber-400/70 hover:text-amber-400 hover:bg-white/5 border-transparent"
+            : "text-slate-300 hover:text-white hover:bg-white/5 border-transparent",
         )}
       >
         <Icon
@@ -111,8 +111,8 @@ export function AdminSidebar() {
             active
               ? isGov ? "text-amber-400" : "text-destructive"
               : isGov
-              ? "text-amber-500/70"
-              : "text-sidebar-foreground/60",
+              ? "text-amber-400/60"
+              : "text-slate-400",
           )}
         />
         <span className="flex-1">{label}</span>
@@ -121,7 +121,7 @@ export function AdminSidebar() {
   }
 
   return (
-    <aside className="flex flex-col w-60 shrink-0 h-screen border-r border-sidebar-border overflow-hidden" style={{ backgroundColor: "hsl(218 30% 10%)" }}>
+    <aside className="flex flex-col w-60 shrink-0 h-screen border-r border-white/10 overflow-hidden" style={{ backgroundColor: "hsl(218 30% 10%)" }}>
 
       {/* Brand */}
       <div className="px-4 py-4 border-b border-white/5 flex flex-col gap-1 shrink-0">
@@ -161,7 +161,7 @@ export function AdminSidebar() {
         {/* ADMIN GROUP */}
         <div className="mb-3">
           <div className="px-4 py-1.5 mb-1">
-            <span className="text-[10px] font-bold text-sidebar-foreground/50 uppercase tracking-widest">
+            <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
               Admin
             </span>
           </div>
@@ -198,7 +198,7 @@ export function AdminSidebar() {
             {initials}
           </div>
           <p
-            className="text-xs font-medium text-sidebar-foreground truncate flex-1"
+            className="text-xs font-medium text-slate-200 truncate flex-1"
             data-testid="text-admin-sidebar-email"
           >
             {displayEmail}
@@ -207,14 +207,14 @@ export function AdminSidebar() {
             onClick={handleLogout}
             title="Log ud"
             data-testid="button-admin-logout"
-            className="shrink-0 p-1.5 rounded-md text-sidebar-foreground/60 hover:text-destructive hover:bg-destructive/10 transition-colors"
+            className="shrink-0 p-1.5 rounded-md text-slate-400 hover:text-destructive hover:bg-destructive/10 transition-colors"
           >
             <LogOut className="w-3.5 h-3.5" />
           </button>
         </div>
         <a
           href={getTenantAppUrl()}
-          className="flex items-center gap-1.5 text-xs text-sidebar-foreground/65 hover:text-sidebar-foreground transition-colors"
+          className="flex items-center gap-1.5 text-xs text-slate-400 hover:text-white transition-colors"
           data-testid="link-switch-to-tenant"
         >
           <Cpu className="w-3 h-3" />
