@@ -93,30 +93,30 @@
   --elevate-1: rgba(255,255,255, .04);
   --elevate-2: rgba(255,255,255, .09);
 
-  /* Mørk navy baggrund */
-  --background: 220 35% 9%;
-  --foreground: 220 15% 90%;
-  --border: 220 20% 18%;
+  /* Mørk navy baggrund — klart læselig blågrå */
+  --background: 218 25% 22%;
+  --foreground: 210 12% 93%;
+  --border: 218 16% 32%;
 
-  /* Kort med let glassmorfisme */
-  --card: 220 30% 13%;
-  --card-foreground: 220 15% 90%;
-  --card-border: 220 20% 20%;
+  /* Kort — lettere end baggrund */
+  --card: 218 22% 26%;
+  --card-foreground: 210 12% 93%;
+  --card-border: 218 16% 34%;
 
-  /* Sidebar mørkere end baggrund */
-  --sidebar: 220 35% 7%;
-  --sidebar-foreground: 210 20% 95%;
-  --sidebar-border: 220 20% 22%;
-  --sidebar-primary: 175 75% 48%;
-  --sidebar-primary-foreground: 220 35% 5%;
-  --sidebar-accent: 220 25% 18%;
-  --sidebar-accent-foreground: 210 20% 95%;
-  --sidebar-ring: 175 75% 48%;
+  /* Sidebar — mørkere end baggrund */
+  --sidebar: 218 28% 15%;
+  --sidebar-foreground: 210 12% 95%;
+  --sidebar-border: 218 16% 28%;
+  --sidebar-primary: 175 70% 48%;
+  --sidebar-primary-foreground: 218 30% 8%;
+  --sidebar-accent: 218 22% 22%;
+  --sidebar-accent-foreground: 210 12% 95%;
+  --sidebar-ring: 175 70% 48%;
 
   /* Popovers */
-  --popover: 220 30% 12%;
-  --popover-foreground: 220 15% 90%;
-  --popover-border: 220 20% 20%;
+  --popover: 218 24% 20%;
+  --popover-foreground: 210 12% 93%;
+  --popover-border: 218 16% 32%;
 
   /* Teal/cyan primær accent */
   --primary: 175 75% 42%;
@@ -127,20 +127,20 @@
   --secondary-foreground: 42 90% 8%;
 
   /* Muted */
-  --muted: 220 25% 16%;
-  --muted-foreground: 220 15% 50%;
+  --muted: 218 20% 25%;
+  --muted-foreground: 218 12% 65%;
 
   /* Accent */
-  --accent: 175 40% 15%;
-  --accent-foreground: 175 75% 65%;
+  --accent: 175 35% 22%;
+  --accent-foreground: 175 70% 72%;
 
   /* Destructive */
   --destructive: 0 72% 51%;
   --destructive-foreground: 0 0% 100%;
 
   /* Input borders */
-  --input: 220 20% 22%;
-  --ring: 175 75% 42%;
+  --input: 218 18% 30%;
+  --ring: 175 70% 48%;
 
   /* Charts */
   --chart-1: 175 75% 42%;
@@ -183,8 +183,8 @@
 @layer base {
   .dark body {
     background-image:
-      radial-gradient(ellipse 100% 60% at 50% -20%, rgba(34, 211, 238, 0.055) 0%, transparent 65%),
-      radial-gradient(ellipse 60% 40% at 85% 80%, rgba(245, 158, 11, 0.03) 0%, transparent 55%);
+      radial-gradient(ellipse 100% 60% at 50% -20%, rgba(34, 211, 238, 0.06) 0%, transparent 65%),
+      radial-gradient(ellipse 60% 40% at 85% 80%, rgba(245, 158, 11, 0.035) 0%, transparent 55%);
     background-attachment: fixed;
   }
 }
@@ -247,16 +247,16 @@
   /* Sidebar gradient utility */
   .sidebar-gradient {
     background: linear-gradient(180deg,
-      hsl(220 35% 7%) 0%,
-      hsl(220 38% 6%) 60%,
-      hsl(220 40% 5%) 100%
+      hsl(218 28% 15%) 0%,
+      hsl(218 28% 14%) 60%,
+      hsl(218 28% 13%) 100%
     );
   }
   .sidebar-gradient-admin {
     background: linear-gradient(180deg,
-      hsl(220 40% 6%) 0%,
-      hsl(220 42% 5%) 60%,
-      hsl(220 45% 4%) 100%
+      hsl(218 30% 13%) 0%,
+      hsl(218 30% 12%) 60%,
+      hsl(218 30% 11%) 100%
     );
   }
 
