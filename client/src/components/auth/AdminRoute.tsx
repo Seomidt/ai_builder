@@ -84,19 +84,23 @@ interface AdminRouteProps {
 }
 
 export function AdminRoute({ children }: AdminRouteProps) {
-  const { isLoading, user } = useAuth();
+  const { isLoading, isAuthed, user } = useAuth();
 
-  // Wait for backend session to resolve — avoids premature redirect on cold start
+  // Wait for localStorage + backend session before deciding
   if (isLoading) {
     return <AdminSkeleton />;
   }
 
-  // Backend resolved: no valid user → redirect to login
-  if (!user) {
+  // isAuthed = false only on explicit 401/403 (not on network errors)
+  if (!isAuthed) {
     return <Redirect to="/auth/login" />;
   }
 
-  // Backend confirmed role — check platform_admin
+  // Backend confirmed role — wait for user object if still null
+  if (!user) {
+    return <AdminSkeleton />;
+  }
+
   if (user.role !== "platform_admin") {
     return <OpsAccessDenied />;
   }

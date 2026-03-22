@@ -1,14 +1,17 @@
 /**
- * ProtectedRoute — Client-side auth guard (safe, no early redirects)
+ * ProtectedRoute — Client-side auth guard
  *
- * Behavior:
- *   isLoading (localStorage + backend in-flight) → skeleton spinner
- *   user !== null (backend confirmed)            → render children
- *   user === null (backend returned 401/403)     → redirect to login
+ * Loading states (isLoading in useAuth):
+ *   - localStorage not checked yet              → spinner
+ *   - local session exists + backend in-flight  → spinner (no premature redirect)
  *
- * CRITICAL: never redirect before backend session resolves.
- * Redirecting based on optimistic local state caused login loops when the
- * backend (cold-start or transient error) returned 401 for valid sessions.
+ * After loading:
+ *   - isAuthed = false (backend returned 401/403) → redirect to /auth/login
+ *   - isAuthed = true  (backend returned 200)     → render children
+ *   - isAuthed = true  (network error, status 0)  → render optimistically (retry on focus)
+ *
+ * KEY: isAuthed already encodes the 401/403 signal from the backend.
+ * Using !isAuthed (not !user) means network errors don't cause false logouts.
  */
 
 import { Redirect } from "wouter";
@@ -50,10 +53,10 @@ function LockdownScreen() {
 }
 
 export function ProtectedRoute({ children }: ProtectedRouteProps) {
-  const { isLoading, isLockdown, user, isAuthed } = useAuth();
+  const { isLoading, isLockdown, isAuthed } = useAuth();
 
-  // Wait for both localStorage check AND backend session to resolve.
-  // This prevents redirecting to login on cold-start 401s or transient errors.
+  // Wait for localStorage + backend session before deciding.
+  // useAuth's isLoading is true until both are resolved.
   if (isLoading) {
     return <BootSpinner />;
   }
@@ -62,13 +65,9 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
     return <LockdownScreen />;
   }
 
-  // Fast path: no local session at all — skip waiting for backend
-  if (!isAuthed && !user) {
-    return <Redirect to="/auth/login" />;
-  }
-
-  // Backend confirmed: no valid user (401 after backend responded)
-  if (!user) {
+  // isAuthed = false only when backend explicitly returned 401 or 403.
+  // Network errors (status 0) keep isAuthed = true so we render optimistically.
+  if (!isAuthed) {
     return <Redirect to="/auth/login" />;
   }
 
