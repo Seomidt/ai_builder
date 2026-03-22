@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { db } from "../db";
 import { sql } from "drizzle-orm";
+import { getPlatformIntegrationsStatus } from "../lib/integrations/platform-integrations-status";
 
 import { runAiOpsQuery } from "../lib/ai-ops/orchestrator";
 import { generateWeeklyDigest } from "../lib/ai-ops/digest";
@@ -45,6 +46,16 @@ export function registerAdminRoutes(app: Express): void {
 
   app.get("/api/admin/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  // ── Platform Integrations Status ──────────────────────────────────────────
+  app.get("/api/admin/integrations/status", (_req: Request, res: Response) => {
+    try {
+      const report = getPlatformIntegrationsStatus();
+      res.json(report);
+    } catch (err: unknown) {
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
+    }
   });
 
   // ── Ops Summary — consolidated critical-path read model (no AI call) ───────

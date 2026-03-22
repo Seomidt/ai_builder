@@ -1,288 +1,305 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { CheckCircle, Circle, Settings, AlertCircle } from "lucide-react";
-import { SiGithub, SiOpenai, SiVercel, SiSupabase, SiCloudflare } from "react-icons/si";
-import { Card, CardContent } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
+/**
+ * Platform Integrations Dashboard — Admin Surface
+ *
+ * Shows real configuration status for all platform integrations.
+ * Data comes from /api/admin/integrations/status (server-side env checks).
+ * Secrets are NEVER exposed — only boolean status and env var NAMES.
+ */
+
+import { useQuery } from "@tanstack/react-query";
+import {
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
+  Box,
+  RefreshCw,
+  Mail,
+  Webhook,
+} from "lucide-react";
+import {
+  SiOpenai,
+  SiAnthropic,
+  SiGooglegemini,
+  SiGithub,
+  SiStripe,
+  SiSupabase,
+  SiVercel,
+  SiCloudflare,
+} from "react-icons/si";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription } from "@/components/ui/dialog";
-import { useState, useEffect } from "react";
-import { apiRequest } from "@/lib/queryClient";
-import { useToast } from "@/hooks/use-toast";
 import { QUERY_POLICY } from "@/lib/query-policy";
-import { invalidate } from "@/lib/invalidations";
-import { usePagePerf } from "@/lib/perf";
-import { useAuth } from "@/hooks/use-auth";
-import type { Integration } from "@shared/schema";
 
-type Provider = Integration["provider"];
+// ── Types ─────────────────────────────────────────────────────────────────────
 
-interface IntegrationRow {
-  id: string;
-  provider: Provider;
-  status: string;
-  createdAt: string;
-}
+type ProviderStatus = "healthy" | "warning" | "missing" | "stub";
+type ProviderCategory = "ai" | "platform" | "infra";
 
-interface ConfigStatus {
-  supabase: { url: string | null; connected: boolean };
-  github: { connected: boolean; owner: string | null; repo: string | null };
-  openai: { connected: boolean };
-}
-
-const PROVIDER_META: Record<Provider, {
+interface IntegrationStatus {
+  key: string;
   label: string;
-  description: string;
-  icon: React.ElementType;
-  iconColor: string;
-  phase: "V1" | "V2" | "V3";
-}> = {
-  github: {
-    label: "GitHub",
-    description: "Source of truth for generated code. Required for branch creation, file writes and PR operations.",
-    icon: SiGithub,
-    iconColor: "text-white",
-    phase: "V1",
-  },
-  openai: {
-    label: "OpenAI",
-    description: "Primary AI provider abstracted behind a provider interface. Set OPENAI_API_KEY server-side.",
-    icon: SiOpenai,
-    iconColor: "text-green-400",
-    phase: "V1",
-  },
-  supabase: {
-    label: "Supabase",
-    description: "Platform auth and database foundation. Already wired as the identity and DB layer.",
-    icon: SiSupabase,
-    iconColor: "text-emerald-400",
-    phase: "V1",
-  },
-  vercel: {
-    label: "Vercel",
-    description: "Deployment target for builder app and generated projects. Full integration planned for V2.",
-    icon: SiVercel,
-    iconColor: "text-white",
-    phase: "V2",
-  },
-  cloudflare: {
-    label: "Cloudflare",
-    description: "DNS and edge layer. Planned as future runtime for V3.",
-    icon: SiCloudflare,
-    iconColor: "text-orange-400",
-    phase: "V3",
-  },
+  category: ProviderCategory;
+  configured: boolean;
+  status: ProviderStatus;
+  message: string;
+  requiredEnvVars: string[];
+  missingEnvVars: string[];
+  docsHint?: string;
+}
+
+interface PlatformIntegrationsReport {
+  providers: IntegrationStatus[];
+  summary: {
+    total: number;
+    healthy: number;
+    missing: number;
+    warning: number;
+    stub: number;
+  };
+  generatedAt: string;
+}
+
+// ── Icon map ──────────────────────────────────────────────────────────────────
+
+const PROVIDER_ICON: Record<string, { icon: React.ElementType; color: string }> = {
+  openai:     { icon: SiOpenai,      color: "text-green-400" },
+  anthropic:  { icon: SiAnthropic,   color: "text-orange-300" },
+  gemini:     { icon: SiGooglegemini,color: "text-blue-400" },
+  supabase:   { icon: SiSupabase,    color: "text-emerald-400" },
+  github:     { icon: SiGithub,      color: "text-slate-200" },
+  stripe:     { icon: SiStripe,      color: "text-violet-400" },
+  vercel:     { icon: SiVercel,      color: "text-white" },
+  cloudflare: { icon: SiCloudflare,  color: "text-orange-400" },
+  email:      { icon: Mail,          color: "text-sky-400" },
+  webhooks:   { icon: Webhook,       color: "text-cyan-400" },
 };
 
-function getPhaseColor(phase: string) {
-  if (phase === "V1") return "text-primary border-primary/25 bg-primary/8";
-  if (phase === "V2") return "text-secondary border-secondary/25 bg-secondary/8";
-  return "text-muted-foreground border-border bg-muted/30";
-}
+const CATEGORY_LABEL: Record<ProviderCategory, string> = {
+  ai:       "AI Providers",
+  platform: "Platform",
+  infra:    "Infrastructure",
+};
 
-function IntegrationCard({
-  integration,
-  configStatus,
-  onConfigure,
-}: {
-  integration: IntegrationRow;
-  configStatus?: ConfigStatus;
-  onConfigure: (provider: Provider) => void;
-}) {
-  const meta = PROVIDER_META[integration.provider];
-  if (!meta) return null;
-  const Icon = meta.icon;
+// ── Status helpers ────────────────────────────────────────────────────────────
 
-  let isActive = integration.status === "active";
-  let envStatus: string | null = null;
-
-  if (integration.provider === "github" && configStatus) {
-    isActive = configStatus.github.connected;
-    if (configStatus.github.owner) envStatus = `${configStatus.github.owner}/${configStatus.github.repo || "…"}`;
+function StatusBadge({ status }: { status: ProviderStatus }) {
+  if (status === "healthy") {
+    return (
+      <Badge variant="outline" className="text-green-400 border-green-500/30 bg-green-500/10 text-xs">
+        <CheckCircle2 className="w-3 h-3 mr-1" />
+        Connected
+      </Badge>
+    );
   }
-  if (integration.provider === "openai" && configStatus) {
-    isActive = configStatus.openai.connected;
+  if (status === "missing") {
+    return (
+      <Badge variant="outline" className="text-red-400 border-red-500/30 bg-red-500/10 text-xs">
+        <XCircle className="w-3 h-3 mr-1" />
+        Missing
+      </Badge>
+    );
   }
-  if (integration.provider === "supabase" && configStatus) {
-    isActive = configStatus.supabase.connected;
-    envStatus = configStatus.supabase.url;
+  if (status === "warning") {
+    return (
+      <Badge variant="outline" className="text-amber-400 border-amber-500/30 bg-amber-500/10 text-xs">
+        <AlertTriangle className="w-3 h-3 mr-1" />
+        Warning
+      </Badge>
+    );
   }
-
   return (
-    <Card
-      data-testid={`integration-card-${integration.provider}`}
-      className="bg-card border-card-border hover:border-primary/20 transition-colors"
-    >
-      <CardContent className="pt-5 pb-5">
-        <div className="flex items-start gap-4">
-          <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-muted/50 shrink-0">
-            <Icon className={`w-5 h-5 ${meta.iconColor}`} />
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 mb-1">
-              <p className="text-sm font-semibold text-card-foreground">{meta.label}</p>
-              {isActive ? (
-                <CheckCircle className="w-3.5 h-3.5 text-green-400" />
-              ) : (
-                <Circle className="w-3.5 h-3.5 text-muted-foreground/30" />
-              )}
-              <Badge variant="outline" className={`text-xs border ${getPhaseColor(meta.phase)}`}>
-                {meta.phase}
-              </Badge>
-            </div>
-            <p className="text-xs text-muted-foreground line-clamp-2">{meta.description}</p>
-            {envStatus && (
-              <p className="text-xs font-mono text-muted-foreground/60 mt-1 truncate">{envStatus}</p>
-            )}
-            <div className="flex items-center justify-between mt-3">
-              <Badge
-                variant="outline"
-                className={`text-xs border capitalize ${
-                  isActive
-                    ? "text-green-400 border-green-500/30 bg-green-500/10"
-                    : "text-muted-foreground/60 border-border"
-                }`}
-              >
-                {isActive ? "Connected" : "Not configured"}
-              </Badge>
-              {meta.phase === "V1" && integration.provider !== "supabase" && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="h-7 text-xs"
-                  onClick={() => onConfigure(integration.provider)}
-                  data-testid={`btn-configure-${integration.provider}`}
-                >
-                  <Settings className="w-3 h-3 mr-1" />
-                  {isActive ? "Reconfigure" : "Configure"}
-                </Button>
-              )}
-            </div>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
+    <Badge variant="outline" className="text-slate-400 border-slate-600/50 bg-slate-500/10 text-xs">
+      <Box className="w-3 h-3 mr-1" />
+      Not implemented
+    </Badge>
   );
 }
 
-export default function Integrations() {
-  const [configProvider, setConfigProvider] = useState<Provider | null>(null);
-  const { toast } = useToast();
-  const perf = usePagePerf("integrations");
-  const { user } = useAuth();
-  const isPlatformAdmin = user?.role === "platform_admin";
+// ── Integration card ──────────────────────────────────────────────────────────
 
-  const { data: integrations = [], isLoading } = useQuery<IntegrationRow[]>({
-    queryKey: ["integrations"],
-    queryFn: () => apiRequest("GET", "/api/integrations").then((r) => r.json()),
-    ...QUERY_POLICY.staticList,
-    enabled: isPlatformAdmin,
-  });
-
-  useEffect(() => {
-    if (integrations.length > 0 || !isLoading) perf.record(integrations.length);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [integrations.length, isLoading]);
-
-  const { data: configStatus } = useQuery<ConfigStatus>({
-    queryKey: ["/api/config/status"],
-    ...QUERY_POLICY.staticList,
-    enabled: isPlatformAdmin,
-  });
-
-  const enableMutation = useMutation({
-    mutationFn: async (provider: Provider) => {
-      await apiRequest("POST", "/api/integrations", { provider, status: "active" });
-    },
-    onSuccess: () => {
-      invalidate.afterIntegrationMutation();
-      setConfigProvider(null);
-      toast({ title: "Integration marked as configured" });
-    },
-    onError: (e: Error) => toast({ title: "Error", description: e.message, variant: "destructive" }),
-  });
-
-  const configMeta = configProvider ? PROVIDER_META[configProvider] : null;
+function IntegrationCard({ provider }: { provider: IntegrationStatus }) {
+  const meta = PROVIDER_ICON[provider.key];
+  const Icon = meta?.icon ?? Box;
+  const iconColor = meta?.color ?? "text-slate-400";
 
   return (
-    <div className="p-6 space-y-5 max-w-4xl">
-      <div>
-        <h1 className="text-xl font-semibold text-foreground">Integrations</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">
-          Connect external services. Provider secrets are always server-side only.
-        </p>
+    <div
+      data-testid={`integration-card-${provider.key}`}
+      className="flex items-start gap-4 p-4 rounded-xl border border-white/8 bg-card/50 hover:border-white/15 transition-colors"
+    >
+      <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-muted/50 shrink-0">
+        <Icon className={`w-5 h-5 ${iconColor}`} />
       </div>
 
-      {!configStatus?.github.connected && (
-        <div className="flex items-start gap-3 rounded-md border border-secondary/25 bg-secondary/8 p-3">
-          <AlertCircle className="w-4 h-4 text-secondary shrink-0 mt-0.5" />
-          <p className="text-xs text-secondary">
-            GitHub token not detected. Set <code className="font-mono bg-muted px-1 rounded">GITHUB_TOKEN</code> in your environment to enable code generation and PR tools.
+      <div className="flex-1 min-w-0">
+        <div className="flex flex-wrap items-center gap-2 mb-1">
+          <span className="text-sm font-semibold text-foreground">{provider.label}</span>
+          <StatusBadge status={provider.status} />
+        </div>
+
+        <p className="text-xs text-muted-foreground mb-2 leading-relaxed">
+          {provider.message}
+        </p>
+
+        {provider.missingEnvVars.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-1">
+            {provider.missingEnvVars.map((v) => (
+              <code
+                key={v}
+                className="text-[10px] font-mono bg-red-500/10 border border-red-500/20 text-red-400 px-1.5 py-0.5 rounded"
+              >
+                {v}
+              </code>
+            ))}
+          </div>
+        )}
+
+        {provider.docsHint && provider.status !== "healthy" && (
+          <p className="text-[10px] text-muted-foreground/60 mt-1">{provider.docsHint}</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Summary bar ───────────────────────────────────────────────────────────────
+
+function SummaryBar({ summary }: { summary: PlatformIntegrationsReport["summary"] }) {
+  return (
+    <div className="flex flex-wrap gap-3">
+      <div className="flex items-center gap-1.5 text-sm">
+        <CheckCircle2 className="w-4 h-4 text-green-400" />
+        <span className="text-foreground font-medium">{summary.healthy}</span>
+        <span className="text-muted-foreground">connected</span>
+      </div>
+      {summary.missing > 0 && (
+        <div className="flex items-center gap-1.5 text-sm">
+          <XCircle className="w-4 h-4 text-red-400" />
+          <span className="text-foreground font-medium">{summary.missing}</span>
+          <span className="text-muted-foreground">missing</span>
+        </div>
+      )}
+      {summary.warning > 0 && (
+        <div className="flex items-center gap-1.5 text-sm">
+          <AlertTriangle className="w-4 h-4 text-amber-400" />
+          <span className="text-foreground font-medium">{summary.warning}</span>
+          <span className="text-muted-foreground">warning</span>
+        </div>
+      )}
+      {summary.stub > 0 && (
+        <div className="flex items-center gap-1.5 text-sm">
+          <Box className="w-4 h-4 text-slate-500" />
+          <span className="text-foreground font-medium">{summary.stub}</span>
+          <span className="text-muted-foreground">not implemented</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Main page ─────────────────────────────────────────────────────────────────
+
+export default function Integrations() {
+  const { data, isLoading, error, refetch, isFetching } = useQuery<PlatformIntegrationsReport>({
+    queryKey: ["/api/admin/integrations/status"],
+    ...QUERY_POLICY.staticList,
+  });
+
+  const grouped = data
+    ? (["ai", "platform", "infra"] as ProviderCategory[]).map((cat) => ({
+        category: cat,
+        label: CATEGORY_LABEL[cat],
+        providers: data.providers.filter((p) => p.category === cat),
+      })).filter((g) => g.providers.length > 0)
+    : [];
+
+  return (
+    <div className="p-4 sm:p-6 space-y-6 max-w-4xl">
+
+      {/* Header */}
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-semibold text-foreground">Integrations</h1>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            Platform provider status. Secrets are server-side only — never exposed to the browser.
+          </p>
+        </div>
+        <button
+          onClick={() => refetch()}
+          disabled={isFetching}
+          data-testid="button-refresh-integrations"
+          className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0 mt-1"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${isFetching ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
+      </div>
+
+      {/* Error state */}
+      {error && (
+        <div className="flex items-center gap-3 rounded-lg border border-red-500/25 bg-red-500/10 p-3">
+          <XCircle className="w-4 h-4 text-red-400 shrink-0" />
+          <p className="text-sm text-red-400">
+            Could not load integrations status. Check server connectivity.
           </p>
         </div>
       )}
 
-      {isLoading ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-36" />)}
-        </div>
-      ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          {integrations.map((integration) => (
-            <IntegrationCard
-              key={integration.provider}
-              integration={integration}
-              configStatus={configStatus}
-              onConfigure={(p) => setConfigProvider(p)}
-            />
+      {/* Loading */}
+      {isLoading && (
+        <div className="space-y-6">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="space-y-3">
+              <Skeleton className="h-4 w-24" />
+              <div className="space-y-2">
+                {[1, 2, 3].map((j) => <Skeleton key={j} className="h-20 w-full rounded-xl" />)}
+              </div>
+            </div>
           ))}
         </div>
       )}
 
-      <Dialog open={!!configProvider} onOpenChange={() => setConfigProvider(null)}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>Configure {configMeta?.label}</DialogTitle>
-            <DialogDescription>
-              Secrets are stored as environment variables server-side only — never in the database or exposed to the browser.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="py-2 space-y-3">
-            <div className="rounded-md bg-muted/40 border border-border p-3 text-xs text-muted-foreground space-y-1.5">
-              {configProvider === "github" && (
-                <>
-                  <p className="font-medium text-foreground mb-2">Required environment variables:</p>
-                  <p className="font-mono">GITHUB_TOKEN=ghp_xxxx</p>
-                  <p className="font-mono text-muted-foreground/60">GITHUB_OWNER=your-org  <span className="text-muted-foreground/40"># optional</span></p>
-                  <p className="font-mono text-muted-foreground/60">GITHUB_REPO=your-repo  <span className="text-muted-foreground/40"># optional</span></p>
-                  <p className="mt-2 text-muted-foreground/70">
-                    The GITHUB_TOKEN is already set in Replit Secrets. Click "Mark as configured" to register this integration.
-                  </p>
-                </>
-              )}
-              {configProvider === "openai" && (
-                <>
-                  <p className="font-medium text-foreground mb-2">Required environment variables:</p>
-                  <p className="font-mono">OPENAI_API_KEY=sk-xxxx</p>
-                  <p className="mt-2 text-muted-foreground/70">
-                    Set OPENAI_API_KEY in Replit Secrets, then click "Mark as configured".
-                  </p>
-                </>
-              )}
-            </div>
+      {/* Summary + providers */}
+      {data && (
+        <>
+          {/* Summary bar */}
+          <div className="rounded-xl border border-white/8 bg-card/30 p-4">
+            <SummaryBar summary={data.summary} />
+            <p className="text-[10px] text-muted-foreground/50 mt-2">
+              Last checked: {new Date(data.generatedAt).toLocaleTimeString()}
+            </p>
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfigProvider(null)}>Cancel</Button>
-            <Button
-              onClick={() => configProvider && enableMutation.mutate(configProvider)}
-              disabled={enableMutation.isPending}
-              data-testid={`btn-confirm-configure-${configProvider}`}
-            >
-              {enableMutation.isPending ? "Saving…" : "Mark as Configured"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+
+          {/* Warning for missing critical providers */}
+          {data.providers.filter((p) => p.status === "missing" && ["openai", "supabase", "github"].includes(p.key)).length > 0 && (
+            <div className="flex items-start gap-3 rounded-lg border border-amber-500/25 bg-amber-500/8 p-3">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <p className="text-xs text-amber-300">
+                One or more critical providers are not configured. Platform features may be degraded.
+                Set the missing environment variables in your secrets manager.
+              </p>
+            </div>
+          )}
+
+          {/* Grouped provider sections */}
+          {grouped.map(({ category, label, providers }) => (
+            <div key={category} className="space-y-3">
+              <div className="flex items-center gap-2">
+                <h2 className="text-xs font-bold uppercase tracking-widest text-muted-foreground">{label}</h2>
+                <div className="flex-1 h-px bg-white/5" />
+                <span className="text-xs text-muted-foreground/50">
+                  {providers.filter((p) => p.status === "healthy").length}/{providers.length} connected
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {providers.map((provider) => (
+                  <IntegrationCard key={provider.key} provider={provider} />
+                ))}
+              </div>
+            </div>
+          ))}
+        </>
+      )}
     </div>
   );
 }

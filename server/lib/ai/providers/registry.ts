@@ -15,6 +15,7 @@
 import type { AiProviderKey } from "../config";
 import type { AiProvider } from "./provider";
 import { OpenAiProvider } from "./openai-provider";
+import { ValidationError } from "../../errors";
 
 const ACTIVE_PROVIDERS: Partial<Record<AiProviderKey, AiProvider>> = {
   openai: new OpenAiProvider(),
@@ -32,9 +33,10 @@ const ACTIVE_PROVIDERS: Partial<Record<AiProviderKey, AiProvider>> = {
 export function getProvider(key: AiProviderKey): AiProvider {
   const provider = ACTIVE_PROVIDERS[key];
   if (!provider) {
-    throw new Error(
-      `AI provider '${key}' is not yet implemented. ` +
-        `Available providers: ${Object.keys(ACTIVE_PROVIDERS).join(", ")}`,
+    throw new ValidationError(
+      "PROVIDER_NOT_CONFIGURED",
+      `AI provider '${key}' is not configured. ` +
+        `Active providers: ${Object.keys(ACTIVE_PROVIDERS).join(", ")}`,
     );
   }
   return provider;

@@ -481,6 +481,10 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         supabase: !!(process.env.SUPABASE_URL && process.env.SUPABASE_ANON_KEY),
         github: !!process.env.GITHUB_TOKEN,
         openai: !!process.env.OPENAI_API_KEY,
+        anthropic: !!process.env.ANTHROPIC_API_KEY,
+        gemini: !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY),
+        stripe: !!process.env.STRIPE_SECRET_KEY,
+        cloudflare: !!process.env.CF_API_TOKEN,
       });
     } catch (err) {
       handleError(res, err, (req as any).requestId ?? null);

@@ -83,7 +83,9 @@ export class ValidationError extends AppError {
     errorCode:
       | "VALIDATION_ERROR"
       | "TENANT_CONTEXT_MISSING"
-      | "TENANT_MEMBERSHIP_NOT_FOUND" = "VALIDATION_ERROR",
+      | "TENANT_MEMBERSHIP_NOT_FOUND"
+      | "PROVIDER_NOT_CONFIGURED"
+      | "FEATURE_NOT_AVAILABLE" = "VALIDATION_ERROR",
     message = "Validation failed.",
   ) {
     super(422, errorCode, message);
