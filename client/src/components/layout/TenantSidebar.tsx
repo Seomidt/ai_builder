@@ -19,11 +19,11 @@ function BlissOpsLogo({ size = "md" }: { size?: "sm" | "md" }) {
   const px = size === "sm" ? 22 : 28;
   return (
     <img
-      src="/brand/icon.jpeg"
+      src="/brand/icon.png"
       alt="BlissOps"
       width={px}
       height={px}
-      style={{ mixBlendMode: "screen", objectFit: "contain" }}
+      style={{ objectFit: "contain" }}
     />
   );
 }

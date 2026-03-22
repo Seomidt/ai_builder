@@ -47,11 +47,11 @@ function Logo({ size = "md" }: { size?: "sm" | "md" | "lg" }) {
   const dim = size === "lg" ? 40 : size === "sm" ? 26 : 32;
   return (
     <img
-      src="/brand/icon.jpeg"
+      src="/brand/icon.png"
       alt="BlissOps"
       width={dim}
       height={dim}
-      style={{ mixBlendMode: "screen", objectFit: "contain" }}
+      style={{ objectFit: "contain" }}
     />
   );
 }
@@ -305,10 +305,10 @@ function MarketingLanding() {
           {/* Hero logo */}
           <div className="flex justify-center mb-8">
             <img
-              src="/brand/logo-full.jpeg"
+              src="/brand/logo-full.png"
               alt="BlissOps"
               className="w-72 h-auto object-contain"
-              style={{ mixBlendMode: "screen", filter: "drop-shadow(0 0 40px rgba(34,211,238,0.30))" }}
+              style={{ filter: "drop-shadow(0 0 40px rgba(34,211,238,0.30))" }}
             />
           </div>
 

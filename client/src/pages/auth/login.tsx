@@ -83,10 +83,9 @@ export default function AuthLogin() {
         {/* Logo + Brand */}
         <div className="flex flex-col items-center mb-8 text-center">
           <img
-            src="/brand/logo-full.jpeg"
+            src="/brand/logo-full.png"
             alt="BlissOps"
             className="w-56 h-auto object-contain"
-            style={{ mixBlendMode: "screen" }}
           />
           <p className="mt-3 text-sm text-muted-foreground">AI Platform — Log ind for at fortsætte</p>
         </div>
