@@ -1,3 +1,4 @@
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { useQuery } from "@tanstack/react-query";
 import { HardDrive, FileText, CheckCircle, AlertTriangle, Upload } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,6 +37,7 @@ function formatBytes(bytes?: number) {
 export default function OpsStorage() {
   const { data, isLoading } = useQuery<StorageResponse | StorageFile[]>({
     queryKey: ["/api/storage"],
+    ...QUERY_POLICY.opsSnapshot,
   });
 
   const files: StorageFile[] = Array.isArray(data) ? data : (data?.files ?? []);

@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { DatabaseBackup, CheckCircle, AlertTriangle, Server, RefreshCw } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -20,7 +21,7 @@ function statusColor(ok: boolean) {
 export default function OpsRecovery() {
   const { data, isLoading } = useQuery<DeployHealth>({
     queryKey: ["/api/admin/platform/deploy-health"],
-    refetchInterval: 60_000,
+    ...QUERY_POLICY.opsSnapshot,
   });
 
   const checks = Object.entries(data?.checks ?? {});

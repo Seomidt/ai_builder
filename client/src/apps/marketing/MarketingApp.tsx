@@ -48,7 +48,7 @@ function MarketingHome() {
     <div className="min-h-screen bg-[#0A0F1C] text-slate-200 font-sans selection:bg-cyan-500/30 overflow-x-hidden">
 
       {/* NAVBAR */}
-      <nav className="fixed top-0 w-full z-50 border-b border-white/5 bg-[#0A0F1C]/80 backdrop-blur-md">
+      <nav className="fixed top-0 w-full z-50 border-b border-white/5 bg-[#0A0F1C]/90 backdrop-blur-sm">
         <div className="max-w-[1280px] mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <BrandMark size={32} />
@@ -88,9 +88,9 @@ function MarketingHome() {
 
           {/* Left */}
           <div className="flex flex-col items-start relative z-10">
-            <div className="absolute -top-32 -left-32 w-96 h-96 bg-cyan-500/20 rounded-full blur-[120px] pointer-events-none" />
+            <div className="absolute -top-32 -left-32 w-96 h-96 rounded-full pointer-events-none" style={{ background: "radial-gradient(circle, rgba(34,211,238,0.18) 0%, transparent 70%)" }} />
 
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 text-xs font-semibold mb-8 backdrop-blur-sm">
+            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/20 text-cyan-400 text-xs font-semibold mb-8">
               <span className="text-amber-400">✦</span> Ny: AI Workflow Builder
             </div>
 
@@ -135,7 +135,7 @@ function MarketingHome() {
 
           {/* Right — Dashboard mockup */}
           <div className="relative w-full h-full min-h-[500px] hidden lg:block">
-            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[120%] h-[120%] bg-gradient-to-tr from-cyan-500/20 to-blue-600/20 blur-[100px] rounded-full z-0" />
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[120%] h-[120%] rounded-full z-0" style={{ background: "radial-gradient(ellipse at center, rgba(34,211,238,0.15) 0%, rgba(37,99,235,0.12) 50%, transparent 75%)" }} />
             <div
               className="absolute right-0 top-1/2 -translate-y-1/2 w-[500px] bg-[#0F1629] border border-white/10 rounded-2xl shadow-[0_20px_60px_rgba(0,0,0,0.6)] z-10 overflow-hidden"
               style={{ transform: "perspective(1200px) rotateY(-8deg) rotateX(4deg)" }}
@@ -218,7 +218,7 @@ function MarketingHome() {
               </div>
             </div>
 
-            <div className="absolute top-20 right-20 w-16 h-16 bg-gradient-to-br from-amber-500/20 to-orange-600/20 rounded-xl border border-amber-500/30 backdrop-blur-md flex items-center justify-center -rotate-12 animate-pulse">
+            <div className="absolute top-20 right-20 w-16 h-16 bg-gradient-to-br from-amber-500/20 to-orange-600/20 rounded-xl border border-amber-500/30 flex items-center justify-center -rotate-12 animate-pulse">
               <Zap className="w-6 h-6 text-amber-400" />
             </div>
           </div>
@@ -383,7 +383,7 @@ function MarketingHome() {
       {/* CTA SECTION */}
       <section className="py-24 relative overflow-hidden">
         <div className="absolute inset-0 bg-cyan-900/20" />
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-cyan-500/10 blur-[100px] rounded-full" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] rounded-full" style={{ background: "radial-gradient(circle, rgba(34,211,238,0.12) 0%, transparent 65%)" }} />
         <div className="max-w-[800px] mx-auto px-6 relative z-10 text-center">
           <h2 className="text-4xl md:text-5xl font-black text-white mb-6">
             Klar til at transformere din virksomhed?

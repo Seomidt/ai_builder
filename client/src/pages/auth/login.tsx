@@ -77,12 +77,12 @@ export default function AuthLogin() {
       >
         {/* Ambient glows */}
         <div
-          className="absolute -top-32 -right-32 w-96 h-96 rounded-full blur-[128px] opacity-30 pointer-events-none"
-          style={{ background: "radial-gradient(circle, #22D3EE 0%, transparent 70%)" }}
+          className="absolute -top-32 -right-32 w-96 h-96 rounded-full pointer-events-none"
+          style={{ background: "radial-gradient(circle, rgba(34,211,238,0.22) 0%, transparent 70%)" }}
         />
         <div
-          className="absolute -bottom-32 -left-32 w-96 h-96 rounded-full blur-[128px] opacity-20 pointer-events-none"
-          style={{ background: "radial-gradient(circle, #F59E0B 0%, transparent 70%)" }}
+          className="absolute -bottom-32 -left-32 w-96 h-96 rounded-full pointer-events-none"
+          style={{ background: "radial-gradient(circle, rgba(245,158,11,0.16) 0%, transparent 70%)" }}
         />
 
         {/* Grid overlay */}

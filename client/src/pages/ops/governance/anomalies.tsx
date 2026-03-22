@@ -55,7 +55,7 @@ export default function GovernanceAnomalies() {
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<AnomaliesResponse>({
     queryKey: ["/api/admin/governance/anomalies"],
-    ...QUERY_POLICY.staticList,
+    ...QUERY_POLICY.opsSnapshot,
     enabled: isPlatformAdmin,
     retry: false,
   });

@@ -1,3 +1,4 @@
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { useQuery } from "@tanstack/react-query";
 import { CreditCard, FileText, Package, DollarSign } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -30,9 +31,11 @@ function invoiceStatusColor(s?: string) {
 export default function OpsBilling() {
   const { data: plans, isLoading: plansLoading } = useQuery<Plan[]>({
     queryKey: ["/api/admin/plans"],
+    ...QUERY_POLICY.opsSnapshot,
   });
   const { data: invoices, isLoading: invoicesLoading } = useQuery<Invoice[]>({
     queryKey: ["/api/admin/invoices"],
+    ...QUERY_POLICY.opsSnapshot,
   });
 
   const planList: Plan[] = Array.isArray(plans) ? plans : [];

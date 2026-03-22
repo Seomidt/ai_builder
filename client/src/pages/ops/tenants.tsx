@@ -1,3 +1,4 @@
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { useQuery } from "@tanstack/react-query";
 import { Users, Building2, Search, Shield } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -27,6 +28,7 @@ export default function OpsTenants() {
   const [search, setSearch] = useState("");
   const { data, isLoading } = useQuery<{ tenants?: Tenant[]; total?: number }>({
     queryKey: ["/api/admin/tenants"],
+    ...QUERY_POLICY.opsSnapshot,
   });
 
   const tenants: Tenant[] = Array.isArray(data) ? data : (data?.tenants ?? []);

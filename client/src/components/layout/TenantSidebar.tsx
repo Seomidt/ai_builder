@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard,
@@ -39,13 +39,13 @@ export function TenantSidebar() {
   const isPlatformAdmin = user?.role === "platform_admin";
   const isTenantPath   = location.startsWith("/tenant");
 
-  const navItems = [
+  const navItems = useMemo(() => [
     { href: "/",              label: t("nav.dashboard"),                icon: LayoutDashboard },
     { href: "/projects",      label: t("nav.projects"),                 icon: FolderKanban    },
     { href: "/architectures", label: t("nav.architectures"),            icon: Cpu             },
     { href: "/runs",          label: t("nav.runs"),                     icon: PlayCircle      },
     { href: "/tenant",        label: t("nav.workspace") ?? "Workspace", icon: Building2       },
-  ];
+  ], [t]);
 
   function isActive(href: string): boolean {
     if (href === "/") return location === "/" && !isTenantPath;

@@ -70,6 +70,18 @@ export const QUERY_POLICY = {
     retry: false,
     refetchOnWindowFocus: false,
   },
+  /**
+   * E. Ops / admin snapshot pages — billing, tenants, storage, security, governance.
+   * Read-once per session; refreshed manually or after mutation.
+   * No polling. Longer stale window to avoid redundant admin reads.
+   */
+  opsSnapshot: {
+    staleTime: 5 * 60_000,
+    gcTime: 10 * 60_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchInterval: false as const,
+  },
 } as const;
 
 /** Stable limit sizes per category */

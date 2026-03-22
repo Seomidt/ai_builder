@@ -40,7 +40,7 @@ export default function GovernanceRunaway() {
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<RunawayResponse>({
     queryKey: ["/api/admin/governance/runaway-status"],
-    ...QUERY_POLICY.staticList,
+    ...QUERY_POLICY.opsSnapshot,
     enabled: isPlatformAdmin,
     retry: false,
   });

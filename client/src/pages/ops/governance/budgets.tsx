@@ -53,7 +53,7 @@ export default function GovernanceBudgets() {
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<BudgetsResponse>({
     queryKey: ["/api/admin/governance/budgets"],
-    ...QUERY_POLICY.staticList,
+    ...QUERY_POLICY.opsSnapshot,
     enabled: isPlatformAdmin,
     retry: false,
   });

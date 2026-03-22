@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { Shield, AlertTriangle, CheckCircle, Eye, Lock } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -37,9 +38,11 @@ function severityColor(s?: string) {
 export default function OpsSecurity() {
   const { data: health, isLoading: healthLoading } = useQuery<SecurityHealth>({
     queryKey: ["/api/admin/security/health"],
+    ...QUERY_POLICY.opsSnapshot,
   });
   const { data: eventsData, isLoading: eventsLoading } = useQuery<SecurityEventsResponse>({
     queryKey: ["/api/admin/security/events/recent"],
+    ...QUERY_POLICY.opsSnapshot,
   });
 
   const events: SecurityEvent[] = Array.isArray(eventsData)

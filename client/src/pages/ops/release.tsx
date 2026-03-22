@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { Rocket, CheckCircle, AlertTriangle, RefreshCw, Globe } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +13,7 @@ interface DeployHealth {
 export default function OpsRelease() {
   const { data, isLoading, refetch, isFetching } = useQuery<DeployHealth>({
     queryKey: ["/api/admin/platform/deploy-health"],
-    refetchInterval: 120_000,
+    ...QUERY_POLICY.opsSnapshot,
   });
 
   const checks = Object.entries(data?.checks ?? {});

@@ -1,3 +1,4 @@
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import {
   BrainCircuit, AlertTriangle, CheckCircle, DollarSign,
@@ -52,12 +53,15 @@ export default function OpsAi() {
 
   const { data: alerts, isLoading: alertsLoading } = useQuery<{ alerts?: Alert[] } | Alert[]>({
     queryKey: ["/api/admin/governance/alerts"],
+    ...QUERY_POLICY.opsSnapshot,
   });
   const { data: budgets, isLoading: budgetsLoading } = useQuery<{ results?: BudgetResult[] } | BudgetResult[]>({
     queryKey: ["/api/admin/governance/budgets"],
+    ...QUERY_POLICY.opsSnapshot,
   });
   const { data: audit, isLoading: auditLoading } = useQuery<AiOpsAudit>({
     queryKey: ["/api/admin/ai-ops/audit"],
+    ...QUERY_POLICY.opsSnapshot,
   });
 
   const alertList: Alert[] = Array.isArray(alerts) ? alerts : (alerts?.alerts ?? []);

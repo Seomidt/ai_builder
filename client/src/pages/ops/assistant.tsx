@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { apiRequest } from "@/lib/queryClient";
 import { friendlyError } from "@/lib/friendlyError";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -114,6 +115,7 @@ export default function OpsAssistant() {
 
   const { data: digestData, isLoading: digestLoading, refetch: refetchDigest } = useQuery<{ data: DigestData }>({
     queryKey: ["/api/admin/ai-ops/weekly-digest"],
+    ...QUERY_POLICY.opsSnapshot,
   });
 
   const queryMutation = useMutation({

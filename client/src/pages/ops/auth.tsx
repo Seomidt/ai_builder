@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { QUERY_POLICY } from "@/lib/query-policy";
 import { Lock, CheckCircle, AlertTriangle, Eye, Shield, UserCheck } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -29,9 +30,11 @@ function isAuthEvent(e: SecurityEvent) {
 export default function OpsAuthSecurity() {
   const { data: health, isLoading: healthLoading } = useQuery<SecurityHealth>({
     queryKey: ["/api/admin/security/health"],
+    ...QUERY_POLICY.opsSnapshot,
   });
   const { data: eventsRaw, isLoading: eventsLoading } = useQuery<{ events?: SecurityEvent[] } | SecurityEvent[]>({
     queryKey: ["/api/admin/security/events/recent"],
+    ...QUERY_POLICY.opsSnapshot,
   });
 
   const allEvents: SecurityEvent[] = Array.isArray(eventsRaw) ? eventsRaw : (eventsRaw?.events ?? []);

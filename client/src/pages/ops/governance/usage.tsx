@@ -49,7 +49,7 @@ export default function GovernanceUsage() {
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<SnapshotsResponse>({
     queryKey: ["/api/admin/governance/snapshots-list"],
-    ...QUERY_POLICY.staticList,
+    ...QUERY_POLICY.opsSnapshot,
     enabled: isPlatformAdmin,
     retry: false,
   });

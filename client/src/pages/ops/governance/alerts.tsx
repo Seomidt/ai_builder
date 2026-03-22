@@ -60,7 +60,7 @@ export default function GovernanceAlerts() {
 
   const { data, isLoading, error, refetch, isFetching } = useQuery<AlertsResponse>({
     queryKey: ["/api/admin/governance/alerts"],
-    ...QUERY_POLICY.staticList,
+    ...QUERY_POLICY.opsSnapshot,
     enabled: isPlatformAdmin,
     retry: false,
   });
