@@ -17,6 +17,7 @@ import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
 import { useAuth } from "@/hooks/use-auth";
 import { signOut } from "@/lib/supabase";
 import { getAdminAppUrl, getPostLogoutUrl } from "@/lib/runtime/urls";
+import { BrandMark } from "@/components/brand/BrandMark";
 
 export function TenantSidebar() {
   const [location] = useLocation();
@@ -68,9 +69,7 @@ export function TenantSidebar() {
           <Menu size={20} />
         </button>
         <div className="flex items-center gap-2 ml-3">
-          <div className="w-7 h-7 rounded-lg overflow-hidden shrink-0">
-            <img src="/brand/icon.png" alt="BlissOps" className="w-full h-full object-cover" />
-          </div>
+          <BrandMark size={28} />
           <span className="text-sm font-semibold text-white tracking-tight">BlissOps</span>
         </div>
       </div>
@@ -99,9 +98,7 @@ export function TenantSidebar() {
         >
           {/* Brand icon */}
           <div className="py-4 shrink-0">
-            <div className="w-8 h-8 rounded-lg overflow-hidden">
-              <img src="/brand/icon.png" alt="BlissOps" className="w-full h-full object-cover" />
-            </div>
+            <BrandMark size={32} />
           </div>
 
           {/* Nav icons — scrollable */}

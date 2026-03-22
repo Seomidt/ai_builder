@@ -23,6 +23,7 @@ import {
   Lock, PlayCircle, Plus, Shield, Twitter, Zap,
 } from "lucide-react";
 import { getTenantLoginUrl, redirectAuthToTenantApp } from "@/lib/runtime/urls";
+import { BrandMark } from "@/components/brand/BrandMark";
 
 /** Intercept /auth/* on marketing host and send to tenant app */
 function AuthRedirect() {
@@ -50,7 +51,7 @@ function MarketingHome() {
       <nav className="fixed top-0 w-full z-50 border-b border-white/5 bg-[#0A0F1C]/80 backdrop-blur-md">
         <div className="max-w-[1280px] mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <img src="/brand/icon.png" alt="BlissOps" className="h-8 w-8 object-contain" />
+            <BrandMark size={32} />
             <span className="text-white font-bold text-xl tracking-tight">BlissOps</span>
             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-500 border border-amber-500/20">
               BETA
@@ -288,7 +289,7 @@ function MarketingHome() {
               <div className="relative aspect-square rounded-2xl border border-white/10 bg-[#161F33] overflow-hidden p-6 shadow-2xl flex items-center justify-center">
                 <div className="grid grid-cols-2 gap-4 w-full h-full p-4">
                   <div className="bg-[#1A233A] rounded-xl border border-white/5 flex items-center justify-center">
-                    <img src="/brand/icon.png" alt="BlissOps" className="w-8 h-8 opacity-50" />
+                    <BrandMark size={32} className="opacity-50" />
                   </div>
                   <div className="bg-[#1A233A] rounded-xl border border-white/5 flex items-center justify-center">
                     <Github className="w-8 h-8 text-slate-500" />

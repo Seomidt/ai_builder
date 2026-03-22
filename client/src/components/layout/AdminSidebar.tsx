@@ -31,6 +31,7 @@ import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
 import { useAuth } from "@/hooks/use-auth";
 import { signOut } from "@/lib/supabase";
 import { getTenantAppUrl, getPostLogoutUrl } from "@/lib/runtime/urls";
+import { BrandMark } from "@/components/brand/BrandMark";
 
 const opsItems = [
   { href: "/ops",           label: "Ops Console",   icon: ShieldAlert    },
@@ -144,9 +145,7 @@ export function AdminSidebar() {
           <Menu className="w-5 h-5" />
         </button>
         <div className="flex items-center gap-2 ml-3">
-          <div className="bg-destructive rounded-md p-1 flex items-center justify-center shrink-0">
-            <ShieldAlert className="w-3.5 h-3.5 text-white" />
-          </div>
+          <BrandMark size={28} />
           <span className="text-sm font-semibold text-white tracking-tight">BlissOps</span>
           <span className="text-destructive font-medium text-xs">Ops</span>
         </div>

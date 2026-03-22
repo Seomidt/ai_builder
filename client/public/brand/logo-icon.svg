@@ -1,10 +1,12 @@
-<svg width="64" height="64" viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <defs>
-    <linearGradient id="g1" x1="0" y1="0" x2="512" y2="512">
-      <stop stop-color="#22D3EE"/>
-      <stop offset="1" stop-color="#F59E0B"/>
-    </linearGradient>
-  </defs>
-  <circle cx="256" cy="256" r="180" stroke="url(#g1)" stroke-width="80" fill="none"/>
-  <circle cx="380" cy="256" r="180" stroke="url(#g1)" stroke-width="80" fill="none"/>
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="64" height="64" rx="14" fill="#0c1524"/>
+  <rect x="1" y="1" width="62" height="62" rx="13" stroke="#22D3EE" stroke-opacity="0.22" fill="none"/>
+  <!-- Connection lines -->
+  <line x1="32" y1="14" x2="17" y2="42" stroke="#22D3EE" stroke-opacity="0.35" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="32" y1="14" x2="47" y2="42" stroke="#22D3EE" stroke-opacity="0.35" stroke-width="2.5" stroke-linecap="round"/>
+  <line x1="17" y1="42" x2="47" y2="42" stroke="#F59E0B" stroke-opacity="0.4" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Nodes -->
+  <circle cx="32" cy="14" r="5" fill="#22D3EE"/>
+  <circle cx="17" cy="42" r="4.5" fill="#22D3EE" fill-opacity="0.7"/>
+  <circle cx="47" cy="42" r="4.5" fill="#F59E0B"/>
 </svg>
