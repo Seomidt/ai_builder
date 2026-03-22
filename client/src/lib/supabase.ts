@@ -53,7 +53,7 @@ const cookieStorage = {
       `${encodeURIComponent(key)}=${encodeURIComponent(value)}`,
       "path=/",
       "max-age=604800",
-      "samesite=lax",
+      isHttps ? "samesite=none" : "samesite=lax",
     ];
     if (cookieDomain) parts.push(`domain=${cookieDomain}`);
     if (isHttps) parts.push("secure");

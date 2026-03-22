@@ -19,15 +19,7 @@ import { ShieldAlert, ArrowLeft } from "lucide-react";
 import { useAuth } from "@/hooks/use-auth";
 import { Skeleton } from "@/components/ui/skeleton";
 
-function AdminSpinner() {
-  return (
-    <div className="flex items-center justify-center flex-1 h-full" data-testid="admin-route-loading">
-      <div className="h-6 w-6 rounded-full border-2 border-primary border-t-transparent animate-spin" />
-    </div>
-  );
-}
-
-// Lightweight skeleton shell shown while edge auth resolves (<200ms).
+// Lightweight skeleton shell shown while backend session resolves.
 // Renders the page structure immediately so layout shift is minimal.
 function AdminSkeleton() {
   return (
@@ -92,30 +84,22 @@ interface AdminRouteProps {
 }
 
 export function AdminRoute({ children }: AdminRouteProps) {
-  const { isLoading, isAuthed, user } = useAuth();
+  const { isLoading, user } = useAuth();
 
-  // Phase 1: localStorage check (< 5ms) — show spinner
+  // Wait for backend session to resolve — avoids premature redirect on cold start
   if (isLoading) {
-    return <AdminSpinner />;
-  }
-
-  // Not authenticated at all — redirect to login
-  if (!isAuthed) {
-    return <Redirect to="/auth/login" />;
-  }
-
-  // Phase 2: authenticated but backend session not yet returned role.
-  // With edge runtime auth, this resolves in <200ms. Show a lightweight
-  // skeleton shell so the page structure is visible immediately.
-  if (!user) {
     return <AdminSkeleton />;
   }
 
-  // Phase 3: backend role confirmed — check platform_admin
+  // Backend resolved: no valid user → redirect to login
+  if (!user) {
+    return <Redirect to="/auth/login" />;
+  }
+
+  // Backend confirmed role — check platform_admin
   if (user.role !== "platform_admin") {
     return <OpsAccessDenied />;
   }
 
-  // Confirmed platform_admin — render ops content
   return <>{children}</>;
 }

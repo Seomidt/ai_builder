@@ -1,15 +1,14 @@
 /**
- * ProtectedRoute — Client-side auth guard (optimistic)
+ * ProtectedRoute — Client-side auth guard (safe, no early redirects)
  *
  * Behavior:
- *   isLoading (< 5ms localStorage read) → minimal spinner
- *   hasLocalSession = true              → render children immediately (optimistic)
- *   backend returns 401/403             → redirect / lockdown (after async check)
- *   no local session                    → redirect to /auth/login instantly
+ *   isLoading (localStorage + backend in-flight) → skeleton spinner
+ *   user !== null (backend confirmed)            → render children
+ *   user === null (backend returned 401/403)     → redirect to login
  *
- * Backend enforcement remains the primary security layer.
- * Frontend renders optimistically using local Supabase session to eliminate
- * the "checking session" delay on refresh.
+ * CRITICAL: never redirect before backend session resolves.
+ * Redirecting based on optimistic local state caused login loops when the
+ * backend (cold-start or transient error) returned 401 for valid sessions.
  */
 
 import { Redirect } from "wouter";
@@ -51,9 +50,10 @@ function LockdownScreen() {
 }
 
 export function ProtectedRoute({ children }: ProtectedRouteProps) {
-  const { isLoading, isAuthed, isLockdown } = useAuth();
+  const { isLoading, isLockdown, user, isAuthed } = useAuth();
 
-  // Only shown for < 5ms while getSession() reads from localStorage
+  // Wait for both localStorage check AND backend session to resolve.
+  // This prevents redirecting to login on cold-start 401s or transient errors.
   if (isLoading) {
     return <BootSpinner />;
   }
@@ -62,14 +62,15 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
     return <LockdownScreen />;
   }
 
-  // No local session — redirect immediately without waiting for backend
-  if (!isAuthed) {
+  // Fast path: no local session at all — skip waiting for backend
+  if (!isAuthed && !user) {
     return <Redirect to="/auth/login" />;
   }
 
-  // Local session confirmed — render immediately.
-  // Backend validation runs in background via useAuth's useQuery.
-  // If backend returns 401 (expired token), isAuthed transitions to false
-  // and this component re-renders with the redirect.
+  // Backend confirmed: no valid user (401 after backend responded)
+  if (!user) {
+    return <Redirect to="/auth/login" />;
+  }
+
   return <>{children}</>;
 }

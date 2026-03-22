@@ -1,15 +1,15 @@
 /**
- * useAuth — Optimistic session hook
+ * useAuth — Session hook with safe loading semantics
  *
- * FLOW (non-blocking):
- *   1. Read session from supabase.auth.getSession() — localStorage read, ~1ms
- *   2. If local session exists → isAuthed = true IMMEDIATELY (no network wait)
- *   3. /api/auth/session runs in background to confirm + fetch org/role
- *   4. If backend returns 401 → force redirect (token expired / revoked)
+ * FLOW:
+ *   1. Read local session from cookie storage via getSession() — ~5ms
+ *   2. While backend /api/auth/session is in-flight → isLoading = true (show skeleton)
+ *   3. Backend responds → user object set, loading cleared
+ *   4. Backend returns 401 → user = null → ProtectedRoute redirects to login
  *
- * This makes refresh instant: the shell renders using the local session
- * while backend validation runs async. Security is preserved — any invalid
- * token is caught and redirected once backend responds.
+ * KEY SAFETY RULE: never redirect to login until the backend session query
+ * has fully resolved. This prevents false logout loops during cold starts or
+ * transient network errors.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -57,10 +57,9 @@ async function fetchSession(): Promise<SessionResult> {
 export function useAuth() {
   const queryClient = useQueryClient();
 
-  // Optimistic: read local session immediately (localStorage, ~1ms)
-  // null  = not checked yet
-  // false = checked, no session
-  // true  = checked, session exists
+  // null  = haven't checked yet
+  // false = no local session
+  // true  = local session exists
   const [hasLocalSession, setHasLocalSession] = useState<boolean | null>(null);
   const bootstrapped = useRef(false);
 
@@ -73,7 +72,6 @@ export function useAuth() {
     });
   }, []);
 
-  // Subscribe to auth state changes (sign-in, sign-out, token refresh)
   useEffect(() => {
     const {
       data: { subscription },
@@ -81,19 +79,10 @@ export function useAuth() {
       setHasLocalSession(session !== null);
 
       if (event === "SIGNED_OUT") {
-        // Hard clear: remove all cached tenant/user data so the next user
-        // cannot see a previous user's dashboard, projects, runs etc.
         queryClient.clear();
       } else if (event === "SIGNED_IN") {
-        // A new sign-in (NOT initial page-load session detection which uses
-        // INITIAL_SESSION). Clear any stale data that may belong to a previous
-        // user context. This fires synchronously *before* signInWithPassword()
-        // resolves in login.tsx — so the prefetchQuery that follows lands into
-        // the now-empty cache, giving a clean cache hit on dashboard mount.
         queryClient.clear();
       } else {
-        // TOKEN_REFRESHED, USER_UPDATED, INITIAL_SESSION, PASSWORD_RECOVERY:
-        // only re-validate the session query; don't disturb other cached data.
         queryClient.invalidateQueries({ queryKey: ["/api/auth/session"] });
       }
     });
@@ -101,12 +90,6 @@ export function useAuth() {
     return () => subscription.unsubscribe();
   }, [queryClient]);
 
-  // Background backend validation — starts IMMEDIATELY (not gated on getSession).
-  // fetchSession() calls getSessionToken() internally; if there is no token it
-  // returns {status:401, user:null} without hitting the network. Starting the
-  // query unconditionally means the Vercel serverless function begins warming up
-  // ~0 ms after app init instead of after the getSession() Promise resolves.
-  // On a cold-start backend this overlap can save several seconds.
   const { data, isLoading: queryLoading } = useQuery<SessionResult>({
     queryKey: ["/api/auth/session"],
     queryFn: fetchSession,
@@ -120,13 +103,19 @@ export function useAuth() {
 
   const backendStatus = data?.status ?? null;
 
-  // Loading = haven't read localStorage yet (< 5ms in practice)
-  const isLoading = hasLocalSession === null;
+  // Loading = localStorage not checked yet OR local session exists and backend
+  // hasn't responded yet (first fetch, no cache). This prevents redirecting to
+  // login before we know what the backend thinks of the session.
+  //
+  // If hasLocalSession = false: stop loading immediately — redirect at once.
+  // If hasLocalSession = true and queryLoading: wait for backend before deciding.
+  // If stale cache exists (queryLoading = false): use cached result immediately.
+  const isLoading =
+    hasLocalSession === null ||
+    (hasLocalSession === true && queryLoading);
 
-  // Optimistic auth: trust local session until backend says otherwise
-  // - hasLocalSession = true AND backend hasn't returned 401/403 yet → authed
-  // - hasLocalSession = false → not authed (localStorage is definitive for this)
-  // - backend returns 401 → override optimistic (token expired)
+  // Secondary optimistic check: trust local session while backend is still
+  // responding, but honour explicit 401/403 rejections.
   const isAuthed =
     hasLocalSession === true &&
     backendStatus !== 401 &&
@@ -134,7 +123,6 @@ export function useAuth() {
 
   const isLockdown = backendStatus === 403;
 
-  // Prefer backend-verified user object; fall back to null while loading
   const user = data?.user ?? null;
 
   return {
