@@ -110,3 +110,15 @@ tenant_member_permissions / tenant_member_departments → RBAC
 - **Multimedia:** `ffprobe` + `ffmpeg` (v6.1.2)
 - **Edge:** Cloudflare (WAF, rate limiting, SSL, DNS)
 - **Deploy:** Vercel (`seomidt-ai_builder`, prj_EBwBBKHXZoCqe2l7eznsojGaSmtV) → blissops.com
+
+## AI Expert Edit Flow + Versioning (Phase 2)
+
+### Changes
+- **expert_versions** table: id, expert_id, organization_id, version_number, status (draft|live|archived), config_json, created_at, created_by
+- **architecture_profiles**: added `draft_version_id` column
+- **Model selection removed**: tenants no longer choose provider/model/temperature/tokens — platform-managed only
+- **Expert detail page**: `/ai-eksperter/:id` — 6 tabs: Overblik, Instruktioner, Regler, Datakilder, Test, Historik
+- **Draft/live versioning**: PATCH writes to draft version, POST /promote sets draft→live, archives old live
+- **Test engine**: supports `version: "draft"|"live"` — loads from snapshot, falls back to live fields
+- **Prompt builder**: added `buildExpertPromptFromSnapshot()` + `buildVersionSnapshot()` for deterministic snapshot-based prompts
+- **Routes added**: POST /promote, POST /unarchive, GET /versions, PUT /rules/:ruleId, upgraded /test
