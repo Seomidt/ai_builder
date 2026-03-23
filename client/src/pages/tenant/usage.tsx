@@ -22,9 +22,9 @@ interface UsageSummary {
 }
 
 const PERIODS = [
-  { label: "7 days",  value: "7d"  },
-  { label: "30 days", value: "30d" },
-  { label: "90 days", value: "90d" },
+  { label: "7 dage",  value: "7d"  },
+  { label: "30 dage", value: "30d" },
+  { label: "90 dage", value: "90d" },
 ];
 
 function UsageCard({ label, value, unit, icon: Icon, testId }: {
@@ -84,9 +84,9 @@ export default function TenantUsage() {
               >
                 <BarChart2 className="w-4 h-4 text-primary" />
               </div>
-              <h1 className="text-xl font-bold text-foreground tracking-tight">Usage Monitoring</h1>
+              <h1 className="text-xl font-bold text-foreground tracking-tight">Brug & Forbrug</h1>
             </div>
-            <p className="text-sm text-muted-foreground ml-10">Token consumption, costs, and trends</p>
+            <p className="text-sm text-muted-foreground ml-10">Token-forbrug, omkostninger og tendenser</p>
           </div>
           <div className="flex items-center gap-1" data-testid="period-selector">
             {PERIODS.map((p) => (
@@ -110,10 +110,10 @@ export default function TenantUsage() {
             Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24" />)
           ) : (
             <>
-              <UsageCard label="API Requests"    value={data?.summary.requests   ?? 0} icon={Zap}       testId="requests" />
-              <UsageCard label="Tokens In"       value={data?.summary.tokensIn   ?? 0} icon={Cpu}       testId="tokens-in" />
-              <UsageCard label="Tokens Out"      value={data?.summary.tokensOut  ?? 0} icon={TrendingUp} testId="tokens-out" />
-              <UsageCard label="Total Cost (USD)" value={data?.summary.costUsd    ?? 0} icon={DollarSign} unit="$" testId="cost" />
+              <UsageCard label="API-forespørgsler" value={data?.summary.requests   ?? 0} icon={Zap}       testId="requests" />
+              <UsageCard label="Tokens ind"       value={data?.summary.tokensIn   ?? 0} icon={Cpu}       testId="tokens-in" />
+              <UsageCard label="Tokens ud"        value={data?.summary.tokensOut  ?? 0} icon={TrendingUp} testId="tokens-out" />
+              <UsageCard label="Samlet omkostning" value={data?.summary.costUsd   ?? 0} icon={DollarSign} unit="$" testId="cost" />
             </>
           )}
         </div>
@@ -121,7 +121,7 @@ export default function TenantUsage() {
         {/* Daily Trends */}
         <Card className="bg-card border-card-border">
           <CardHeader className="pb-3">
-            <CardTitle className="text-sm font-medium">Daily Trends — {period}</CardTitle>
+            <CardTitle className="text-sm font-medium">Daglige tendenser — {period}</CardTitle>
           </CardHeader>
           <CardContent>
             {isLoading ? (

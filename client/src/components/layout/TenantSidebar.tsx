@@ -12,6 +12,8 @@ import {
   ShieldAlert,
   Menu,
   X,
+  BarChart2,
+  Settings,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
@@ -26,13 +28,15 @@ const NAV_ITEMS = [
   { href: "/regler",       label: "Regler",         icon: Scale           },
   { href: "/koerseler",    label: "Kørseler",       icon: PlayCircle      },
   { href: "/team",         label: "Team",           icon: Users2          },
+  { href: "/brug",         label: "Brug & Forbrug", icon: BarChart2       },
+  { href: "/indstillinger",label: "Indstillinger",  icon: Settings        },
   { href: "/workspace",    label: "Workspace",      icon: Building2       },
 ] as const;
 
 type NavHref = (typeof NAV_ITEMS)[number]["href"];
 
 const WORKSPACE_PREFIXES: NavHref[] = ["/workspace"];
-const CORE_HREFS: NavHref[] = ["/", "/ai-eksperter", "/viden-data", "/regler", "/koerseler", "/team"];
+const CORE_HREFS: NavHref[] = ["/", "/ai-eksperter", "/viden-data", "/regler", "/koerseler", "/team", "/brug", "/indstillinger"];
 
 export function TenantSidebar() {
   const [location] = useLocation();
