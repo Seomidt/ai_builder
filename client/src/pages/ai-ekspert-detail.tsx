@@ -456,8 +456,7 @@ function TabRegler({ expertId }: { expertId: string }) {
 
   const { data: rules, isLoading } = useQuery<RuleRow[]>({
     queryKey: ["/api/experts", expertId, "rules"],
-    queryFn: () => apiRequest("GET", `/api/experts/${expertId}/rules`),
-    ...QUERY_POLICY.medium,
+    ...QUERY_POLICY.staticList,
   });
 
   const addMutation = useMutation({
@@ -713,8 +712,7 @@ function TabDatakilder({ expertId }: { expertId: string }) {
 
   const { data: sources, isLoading } = useQuery<SourceRow[]>({
     queryKey: ["/api/experts", expertId, "sources"],
-    queryFn: () => apiRequest("GET", `/api/experts/${expertId}/sources`),
-    ...QUERY_POLICY.medium,
+    ...QUERY_POLICY.staticList,
   });
 
   const form = useForm<SourceFormValues>({
@@ -751,9 +749,10 @@ function TabDatakilder({ expertId }: { expertId: string }) {
   const analyzeAuthenticity = async (sourceId: string) => {
     setAnalyzingId(sourceId);
     try {
-      const result = await apiRequest<AuthenticityResult>(
+      const res = await apiRequest(
         "POST", `/api/experts/${expertId}/sources/${sourceId}/analyze-authenticity`
       );
+      const result = await res.json() as AuthenticityResult;
       setAuthenticityResults((prev) => ({ ...prev, [sourceId]: result }));
       toast({
         title: result.has_risk ? "Risikosignaler fundet" : "Kildeanalyse gennemført",
@@ -894,10 +893,11 @@ function TabTest({ expertId, expert }: { expertId: string; expert: ExpertDetail 
     setIsRunning(true);
     setTestResult(null);
     try {
-      const result = await apiRequest<TestResult>("POST", `/api/experts/${expertId}/test`, {
+      const res = await apiRequest("POST", `/api/experts/${expertId}/test`, {
         prompt,
         version: testVersion,
       });
+      const result = await res.json() as TestResult;
       setTestResult(result);
     } catch (err) {
       toast({
@@ -1055,8 +1055,7 @@ function TabTest({ expertId, expert }: { expertId: string; expert: ExpertDetail 
 function TabHistorik({ expertId }: { expertId: string }) {
   const { data: versions, isLoading } = useQuery<VersionRow[]>({
     queryKey: ["/api/experts", expertId, "versions"],
-    queryFn: () => apiRequest("GET", `/api/experts/${expertId}/versions`),
-    ...QUERY_POLICY.medium,
+    ...QUERY_POLICY.staticList,
   });
 
   return (
@@ -1196,9 +1195,8 @@ export default function AiEkspertDetail() {
 
   const { data: expert, isLoading, error } = useQuery<ExpertDetail>({
     queryKey: ["/api/experts", expertId],
-    queryFn:  () => apiRequest("GET", `/api/experts/${expertId}`),
     enabled:  !!expertId,
-    ...QUERY_POLICY.medium,
+    ...QUERY_POLICY.staticList,
   });
 
   if (isLoading) {

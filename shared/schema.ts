@@ -249,6 +249,9 @@ export const architectureProfiles = pgTable(
     // ── Versioning ────────────────────────────────────────────────────────────
     draftVersionId:    text("draft_version_id"),      // current draft (unpromoted)
     // currentVersionId already exists above (live version)
+    // ── AI Chat Routing ───────────────────────────────────────────────────────
+    enabledForChat:    boolean("enabled_for_chat").notNull().default(true),
+    routingHints:      jsonb("routing_hints"),         // { keywords: string[], domain: string }
     // ─────────────────────────────────────────────────────────────────────────
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -6660,3 +6663,43 @@ export const expertVersions = pgTable(
 export const insertExpertVersionSchema = createInsertSchema(expertVersions).omit({ id: true, createdAt: true });
 export type InsertExpertVersion = z.infer<typeof insertExpertVersionSchema>;
 export type ExpertVersion = typeof expertVersions.$inferSelect;
+
+// ─── AI Chat ─────────────────────────────────────────────────────────────────
+// Lightweight conversation scaffolding — stateless single-turn works without
+// persisting but tables are here so multi-turn can be added without refactor.
+
+export const chatConversations = pgTable(
+  "chat_conversations",
+  {
+    id:                 text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId:     text("organization_id").notNull(),
+    createdBy:          text("created_by").notNull(),
+    title:              text("title"),
+    selectedExpertId:   text("selected_expert_id"),
+    createdAt:          timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt:          timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("chat_convs_org_idx").on(t.organizationId),
+    index("chat_convs_org_created_idx").on(t.organizationId, t.createdAt),
+  ],
+);
+export type ChatConversation = typeof chatConversations.$inferSelect;
+
+export const chatMessages = pgTable(
+  "chat_messages",
+  {
+    id:             text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    conversationId: text("conversation_id").notNull().references(() => chatConversations.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id").notNull(),
+    role:           text("role").notNull(),    // "user" | "assistant"
+    messageText:    text("message_text").notNull(),
+    expertId:       text("expert_id"),        // which expert answered (assistant messages)
+    metadata:       jsonb("metadata"),        // { used_sources, used_rules, warnings, latency_ms, confidence_band }
+    createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("chat_msgs_conv_idx").on(t.conversationId),
+    index("chat_msgs_org_conv_idx").on(t.organizationId, t.conversationId, t.createdAt),
+  ],
+);
