@@ -206,37 +206,28 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   const token = (req.headers.authorization ?? "").slice(7);
 
-  // ── Step 1: Hent aktive eksperter med service role (bypasser RLS) ──────────
-  // org_id er altid fra authenticate — aldrig fra request payload.
+  // ── Step 1: Hent tilgængelige eksperter via bruger-JWT + RLS ──────────────
+  // RLS-politik "members_can_read_experts" på architecture_profiles bruger
+  // SECURITY DEFINER-funktionen chat_user_org_id() til at slå membership op
+  // og returnerer kun eksperter i brugerens organisation.
+  // org_id valideres fra authenticate() — aldrig fra request payload.
   let experts: Expert[];
   try {
-    const svcHeaders = {
-      apikey:         SUPABASE_SVC,
-      Authorization:  `Bearer ${SUPABASE_SVC}`,
-      "Content-Type": "application/json",
-    };
-    const qs = new URLSearchParams({
-      organization_id:  `eq.${orgId}`,
+    const rows = await dbList("architecture_profiles", token, {
       status:           "neq.archived",
       enabled_for_chat: "eq.true",
       select:           "id,name,category,description,routing_hints,enabled_for_chat,status",
-    }).toString();
-    const expertRes = await fetch(`${SUPABASE_URL}/rest/v1/architecture_profiles?${qs}`, {
-      headers: svcHeaders,
     });
-    if (!expertRes.ok) {
-      const txt = await expertRes.text();
-      throw new Error(`${expertRes.status}: ${txt}`);
-    }
-    experts = (await expertRes.json()) as Expert[];
+    experts = rows as unknown as Expert[];
   } catch (e) {
     console.error("[chat] expert fetch failed:", (e as Error).message);
-    return err(res, 500, "EXPERT_FETCH_FAILED", "Kunne ikke hente eksperter: " + (e as Error).message);
+    return err(res, 500, "EXPERT_FETCH_FAILED", "Kunne ikke hente eksperter");
   }
 
   if (!experts.length) {
+    console.error(`[chat] NO_EXPERTS_AVAILABLE for org=${orgId}`);
     return err(res, 422, "NO_EXPERTS_AVAILABLE",
-      "Ingen AI-eksperter er tilgængelige. Aktivér mindst én ekspert til chat i indstillingerne.");
+      "Ingen AI-eksperter er tilgængelige for din organisation.");
   }
 
   // ── Step 2: Vælg ekspert ──────────────────────────────────────────────────
