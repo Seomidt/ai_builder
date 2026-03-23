@@ -478,14 +478,11 @@ export default function AiChatPage() {
         }
       }
 
-      // ── Step B: Byg besked-tekst (filnavne som display) ────────────────────
-      let fullMessage = payload.text;
-      if (payload.attachments.length > 0) {
-        const fileList = payload.attachments.map(a =>
-          `[${a.type === "document" ? "Dokument" : a.type === "image" ? "Billede" : "Video"}: ${a.file.name}]`
-        ).join(", ");
-        fullMessage = `${fullMessage}\n\nVedhæftede filer: ${fileList}`;
-      }
+      // ── Step B: Byg besked-tekst ───────────────────────────────────────────
+      // Vi inkluderer IKKE fil-label-tekst ("Vedhæftede filer: [Dokument: ...]")
+      // da det trigger modellens "kan ikke tilgå filer"-svar.
+      // Serveren renser den alligevel — men vi sender den heller ikke.
+      const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";
 
       // ── Step C: Send til /api/chat med dokument-kontekst ───────────────────
       const res = await apiRequest("POST", "/api/chat", {
@@ -522,6 +519,8 @@ export default function AiChatPage() {
         ? "AI-eksperten kunne ikke svare i øjeblikket. Prøv igen om lidt."
         : code === "UNAUTHENTICATED"
         ? "Du er ikke logget ind. Genindlæs siden og log ind igen."
+        : code === "DOCUMENT_UNREADABLE"
+        ? serverMsg || "Dokumentet kunne ikke læses. Upload PDF eller tekstfil (.txt, .csv)."
         : serverMsg || "Der opstod en fejl. Prøv igen.";
       setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", text: msg, timestamp: new Date(), isError: true }]);
       toast({ title: "Chat fejl", description: msg, variant: "destructive" });

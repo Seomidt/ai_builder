@@ -63,7 +63,9 @@ function scoreExpert(expert: Expert, message: string): number {
 
 // ── OpenAI call ───────────────────────────────────────────────────────────────
 
-async function callOpenAI(systemPrompt: string, userMessage: string): Promise<{
+type OAIMessage = { role: "system" | "user" | "assistant"; content: string };
+
+async function callOpenAI(messages: OAIMessage[]): Promise<{
   text:             string;
   latencyMs:        number;
   promptTokens:     number;
@@ -76,13 +78,10 @@ async function callOpenAI(systemPrompt: string, userMessage: string): Promise<{
     method:  "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: JSON.stringify({
-      model:       "gpt-4o-mini",
-      max_tokens:  1500,
+      model:       "gpt-4o",
+      max_tokens:  2000,
       temperature: 0.2,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user",   content: userMessage  },
-      ],
+      messages,
     }),
   });
 
@@ -256,44 +255,90 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const routingExplanation =
     `Valgt baseret på match med ekspertens kompetenceområde (${expert.category ?? expert.name}).`;
 
-  // ── Step 3: Byg dokument-kontekst ────────────────────────────────────────
-  const docCtx = (body.document_context ?? []).filter(d => d.status === "ok" && d.extracted_text);
-  const failedDocs = (body.document_context ?? []).filter(d => d.status !== "ok");
+  // ── Step 3: Validér + byg dokument-kontekst ──────────────────────────────
+  const rawDocCtx  = body.document_context ?? [];
+  const docCtx     = rawDocCtx.filter(d => d.status === "ok" && d.extracted_text?.trim());
+  const failedDocs = rawDocCtx.filter(d => d.status !== "ok");
+  const hasDocIntent = rawDocCtx.length > 0; // brugeren sendte dokument-intent
 
-  let documentBlock = "";
+  // TASK 4 — debug log ALTID
+  console.log(`[chat] message_len=${message.length} doc_ctx_raw=${rawDocCtx.length} doc_ctx_ok=${docCtx.length}`);
   if (docCtx.length > 0) {
-    const blocks = docCtx.map(d =>
-      `--- DOKUMENT: ${d.filename} (${d.char_count} tegn) ---\n${d.extracted_text}\n--- SLUT DOKUMENT ---`
-    ).join("\n\n");
-    documentBlock = `\n\nBrugeren har vedhæftet følgende dokument(er) til analyse:\n\n${blocks}`;
-    console.log(`[chat] document_context: ${docCtx.length} doc(s) injected, ${docCtx.reduce((s,d) => s+d.char_count, 0)} chars total`);
+    const totalChars = docCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0);
+    console.log(`[chat] total_doc_chars=${totalChars} first200="${docCtx[0].extracted_text.slice(0, 200).replace(/\n/g, " ")}"`);
   }
   if (failedDocs.length > 0) {
-    console.warn(`[chat] ${failedDocs.length} doc(s) failed extraction:`, failedDocs.map(d => `${d.filename}: ${d.message}`));
+    console.warn(`[chat] failed_docs:`, failedDocs.map(d => `${d.filename}:${d.status}:${d.message}`).join(", "));
   }
 
-  // ── Step 4: System-prompt ─────────────────────────────────────────────────
-  const systemPrompt = [
+  // TASK 1 — hard validering: afvis hvis dokument lovet men intet indhold
+  if (hasDocIntent && docCtx.length === 0) {
+    const reason = failedDocs.map(d => d.message).filter(Boolean).join("; ")
+      || "Ingen tekst kunne udtrækkes fra dokumentet";
+    console.error(`[chat] DOCUMENT_UNREADABLE: ${reason}`);
+    return err(res, 422, "DOCUMENT_UNREADABLE",
+      failedDocs[0]?.status === "unsupported"
+        ? `Filtype ikke understøttet. Upload PDF eller en tekstfil (.txt, .csv).`
+        : `Dokumentet kunne ikke læses: ${reason}`);
+  }
+
+  // ── Step 4: System-prompt (TASK 3 — hard instructions) ───────────────────
+  const systemLines = [
     `Du er en AI-ekspert ved navn ${expert.name}.`,
-    expert.category ? `Dit kompetenceområde er: ${expert.category}.` : "",
-    expert.description ? `Om dig: ${expert.description}` : "",
+    expert.category   ? `Dit kompetenceområde er: ${expert.category}.`   : "",
+    expert.description ? `Om dig: ${expert.description}`                  : "",
     "Svar altid på dansk med klare, præcise og hjælpsomme svar.",
     "Basér dine svar på virksomhedens data, politikker og regler.",
     "Angiv tydeligt hvis du er i tvivl om noget.",
-    docCtx.length > 0
-      ? "Et eller flere dokumenter er vedhæftet. Analysér dem specifikt — henvis til konkrete detaljer, klausuler eller oplysninger fra dokumentteksten i dit svar. Giv ALDRIG generiske råd når du har adgang til det faktiske dokument."
-      : "",
-  ].filter(Boolean).join("\n");
+  ];
 
-  // Bruger-besked med dokument-kontekst injiceret
-  const userMessageWithContext = docCtx.length > 0
-    ? `${message}${documentBlock}`
-    : message;
+  if (docCtx.length > 0) {
+    systemLines.push(
+      "",
+      "=== KRITISK INSTRUKTION — DOKUMENTANALYSE ===",
+      "Du har ALTID adgang til det fulde dokumentindhold nedenfor i bruger-beskeden.",
+      "Du MÅ ALDRIG sige at du ikke kan åbne, tilgå eller læse vedhæftede filer.",
+      "Du SKAL analysere dokumentets faktiske indhold direkte.",
+      "Du SKAL referere til konkrete sætninger, klausuler, tal og navne fra dokumentet.",
+      "Du MÅ ALDRIG give generiske råd eller tjeklister i stedet for faktisk analyse.",
+      "Dokumentindholdet starter med '=== DOKUMENTINDHOLD START ===' i bruger-beskeden.",
+      "=== SLUT KRITISK INSTRUKTION ===",
+    );
+  }
 
-  // ── Step 5: Kald OpenAI ───────────────────────────────────────────────────
+  const systemPrompt = systemLines.filter(s => s !== undefined).join("\n");
+
+  // ── Step 5: Byg messages-array (TASK 2 — force document into user message) ─
+  const messages: OAIMessage[] = [{ role: "system", content: systemPrompt }];
+
+  if (docCtx.length > 0) {
+    // Dokument-indhold som separat user-besked FØR spørgsmålet
+    const docBlock = docCtx.map(d =>
+      `FILNAVN: ${d.filename}\nTEGN: ${d.extracted_text.length}\n\n${d.extracted_text}`
+    ).join("\n\n---\n\n");
+
+    messages.push({
+      role:    "user",
+      content: `=== DOKUMENTINDHOLD START ===\n\n${docBlock}\n\n=== DOKUMENTINDHOLD SLUT ===\n\nOvenstående er det fulde ekstraherede indhold fra de uploadede dokumenter. Brug dette som grundlag for din analyse.`,
+    });
+    messages.push({
+      role:    "assistant",
+      content: "Jeg har læst og forstår dokumentindholdet. Jeg er klar til at analysere det specifikt baseret på den faktiske tekst.",
+    });
+  }
+
+  // Selve bruger-spørgsmålet (UDEN fil-navne-tekst — det forvirrer modellen)
+  const cleanMessage = message.replace(/\n\nVedhæftede filer:.*$/s, "").trim();
+  messages.push({ role: "user", content: cleanMessage });
+
+  // TASK 4 — log endelig prompt-størrelse
+  const totalPromptChars = messages.reduce((s, m) => s + m.content.length, 0);
+  console.log(`[chat] final_prompt_chars=${totalPromptChars} messages=${messages.length} model=gpt-4o`);
+
+  // ── Step 6: Kald OpenAI ───────────────────────────────────────────────────
   let aiResult: Awaited<ReturnType<typeof callOpenAI>>;
   try {
-    aiResult = await callOpenAI(systemPrompt, userMessageWithContext);
+    aiResult = await callOpenAI(messages);
   } catch (e) {
     console.error("[chat] OpenAI call failed:", (e as Error).message);
     return err(res, 502, "AI_EXECUTION_FAILED",

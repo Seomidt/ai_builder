@@ -69,9 +69,10 @@ async function extractFromBuffer(
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== "POST") return err(res, 405, "METHOD_NOT_ALLOWED", "Kun POST");
 
-  // Auth check (same as chat)
-  const _user = await authenticate(req);
-  if (!_user) return err(res, 401, "UNAUTHENTICATED", "Ikke godkendt");
+  // Auth check — authenticate returnerer { status, user }
+  const auth = await authenticate(req);
+  if (auth.status === "lockdown") return err(res, 403, "LOCKDOWN", "Platform er i lockdown");
+  if (auth.status !== "ok")       return err(res, 401, "UNAUTHENTICATED", "Login krævet");
 
   const contentType = (req.headers["content-type"] ?? "");
   if (!contentType.includes("multipart/form-data")) {
