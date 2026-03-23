@@ -17,6 +17,7 @@ const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
   { name: "tenant",        entry: "api/_src/tenant.ts",        out: "api/tenant.js"        },
   { name: "admin",         entry: "api/_src/admin.ts",         out: "api/admin.js"         },
   { name: "chat",          entry: "api/_src/chat.ts",          out: "api/chat.js"          },
+  { name: "extract",       entry: "api/_src/extract.ts",       out: "api/extract.js"       },
 ];
 
 

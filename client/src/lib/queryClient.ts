@@ -61,6 +61,22 @@ export async function apiRequest(
   return res;
 }
 
+export async function apiRequestForm(
+  method: string,
+  url: string,
+  form: FormData,
+): Promise<Response> {
+  const headers = await bearerHeaders();
+  const res = await fetch(url, {
+    method,
+    headers,
+    body: form,
+    credentials: "include",
+  });
+  await throwIfResNotOk(res);
+  return res;
+}
+
 type UnauthorizedBehavior = "returnNull" | "throw";
 export const getQueryFn: <T>(options: {
   on401: UnauthorizedBehavior;

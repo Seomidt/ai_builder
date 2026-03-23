@@ -19,9 +19,19 @@ interface Expert {
   status:        string;
 }
 
+interface DocumentContext {
+  filename:       string;
+  mime_type:      string;
+  char_count:     number;
+  extracted_text: string;
+  status:         "ok" | "unsupported" | "error";
+  message?:       string;
+}
+
 interface ChatRequest {
-  message:          string;
-  conversation_id?: string | null;
+  message:           string;
+  conversation_id?:  string | null;
+  document_context?: DocumentContext[];
   context?: {
     preferred_expert_id?: string | null;
     document_ids?:        string[];
@@ -246,7 +256,23 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const routingExplanation =
     `Valgt baseret på match med ekspertens kompetenceområde (${expert.category ?? expert.name}).`;
 
-  // ── Step 3: System-prompt ─────────────────────────────────────────────────
+  // ── Step 3: Byg dokument-kontekst ────────────────────────────────────────
+  const docCtx = (body.document_context ?? []).filter(d => d.status === "ok" && d.extracted_text);
+  const failedDocs = (body.document_context ?? []).filter(d => d.status !== "ok");
+
+  let documentBlock = "";
+  if (docCtx.length > 0) {
+    const blocks = docCtx.map(d =>
+      `--- DOKUMENT: ${d.filename} (${d.char_count} tegn) ---\n${d.extracted_text}\n--- SLUT DOKUMENT ---`
+    ).join("\n\n");
+    documentBlock = `\n\nBrugeren har vedhæftet følgende dokument(er) til analyse:\n\n${blocks}`;
+    console.log(`[chat] document_context: ${docCtx.length} doc(s) injected, ${docCtx.reduce((s,d) => s+d.char_count, 0)} chars total`);
+  }
+  if (failedDocs.length > 0) {
+    console.warn(`[chat] ${failedDocs.length} doc(s) failed extraction:`, failedDocs.map(d => `${d.filename}: ${d.message}`));
+  }
+
+  // ── Step 4: System-prompt ─────────────────────────────────────────────────
   const systemPrompt = [
     `Du er en AI-ekspert ved navn ${expert.name}.`,
     expert.category ? `Dit kompetenceområde er: ${expert.category}.` : "",
@@ -254,12 +280,20 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     "Svar altid på dansk med klare, præcise og hjælpsomme svar.",
     "Basér dine svar på virksomhedens data, politikker og regler.",
     "Angiv tydeligt hvis du er i tvivl om noget.",
+    docCtx.length > 0
+      ? "Et eller flere dokumenter er vedhæftet. Analysér dem specifikt — henvis til konkrete detaljer, klausuler eller oplysninger fra dokumentteksten i dit svar. Giv ALDRIG generiske råd når du har adgang til det faktiske dokument."
+      : "",
   ].filter(Boolean).join("\n");
 
-  // ── Step 4: Kald OpenAI ───────────────────────────────────────────────────
+  // Bruger-besked med dokument-kontekst injiceret
+  const userMessageWithContext = docCtx.length > 0
+    ? `${message}${documentBlock}`
+    : message;
+
+  // ── Step 5: Kald OpenAI ───────────────────────────────────────────────────
   let aiResult: Awaited<ReturnType<typeof callOpenAI>>;
   try {
-    aiResult = await callOpenAI(systemPrompt, message);
+    aiResult = await callOpenAI(systemPrompt, userMessageWithContext);
   } catch (e) {
     console.error("[chat] OpenAI call failed:", (e as Error).message);
     return err(res, 502, "AI_EXECUTION_FAILED",
