@@ -1095,13 +1095,97 @@ Generate names and content in ${langNote}.`;
     } catch (err) { handleError(res, err); }
   });
 
+  // ─── Document Extraction (dev + prod parity with Vercel /api/extract) ────────
+
+  app.post("/api/extract", async (req: Request, res: Response) => {
+    try {
+      const contentType = req.headers["content-type"] ?? "";
+      if (!contentType.includes("multipart/form-data")) {
+        return res.status(400).json({ error_code: "INVALID_CONTENT_TYPE", message: "Forventet multipart/form-data" });
+      }
+
+      const Busboy  = (await import("busboy")).default;
+      const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string }>;
+
+      const bb = Busboy({ headers: req.headers as Record<string, string>, limits: { fileSize: 26 * 1024 * 1024 } });
+      const results: Array<{ filename: string; mime_type: string; char_count: number; extracted_text: string; status: string; message?: string }> = [];
+      const pending: Promise<void>[] = [];
+
+      bb.on("file", (fieldname: string, stream: NodeJS.ReadableStream, info: { filename: string; mimeType: string }) => {
+        const { filename, mimeType } = info;
+        const chunks: Buffer[] = [];
+
+        stream.on("data", (chunk: Buffer) => chunks.push(chunk));
+
+        const p = new Promise<void>((resFile) => {
+          stream.on("end", async () => {
+            const buf = Buffer.concat(chunks);
+            if (!buf.length) {
+              results.push({ filename, mime_type: mimeType, char_count: 0, extracted_text: "", status: "error", message: "Tom fil" });
+              return resFile();
+            }
+
+            try {
+              let text = "";
+              if (mimeType.startsWith("text/") || ["application/json","application/xml"].includes(mimeType)) {
+                text = buf.toString("utf-8").slice(0, 80_000);
+              } else if (mimeType === "application/pdf" || filename.toLowerCase().endsWith(".pdf")) {
+                const parsed = await pdfParse(buf);
+                text = (parsed.text ?? "").trim().slice(0, 80_000);
+                if (!text) {
+                  results.push({ filename, mime_type: mimeType, char_count: 0, extracted_text: "", status: "error", message: "PDF indeholder ingen læsbar tekst" });
+                  return resFile();
+                }
+              } else {
+                results.push({ filename, mime_type: mimeType, char_count: 0, extracted_text: "", status: "unsupported", message: `Filtype '${mimeType}' understøttes ikke` });
+                return resFile();
+              }
+              console.log(`[extract] ${filename}: ${text.length} chars extracted`);
+              results.push({ filename, mime_type: mimeType, char_count: text.length, extracted_text: text, status: "ok" });
+            } catch (e) {
+              results.push({ filename, mime_type: mimeType, char_count: 0, extracted_text: "", status: "error", message: (e as Error).message });
+            }
+            resFile();
+          });
+          stream.on("error", (e: Error) => {
+            results.push({ filename, mime_type: mimeType, char_count: 0, extracted_text: "", status: "error", message: e.message });
+            resFile();
+          });
+        });
+        pending.push(p);
+      });
+
+      bb.on("finish", async () => {
+        await Promise.all(pending);
+        res.json({ results });
+      });
+
+      bb.on("error", (e: Error) => {
+        console.error("[extract] busboy error:", e.message);
+        res.status(500).json({ error_code: "PARSE_ERROR", message: "Fil-parsing fejlede" });
+      });
+
+      req.pipe(bb as any);
+    } catch (err) { handleError(res, err); }
+  });
+
   // ─── AI Chat ──────────────────────────────────────────────────────────────────
 
   app.post("/api/chat", async (req: Request, res: Response) => {
     try {
+      const documentContextSchema = z.object({
+        filename:       z.string(),
+        mime_type:      z.string(),
+        char_count:     z.number(),
+        extracted_text: z.string(),
+        status:         z.enum(["ok", "unsupported", "error"]),
+        message:        z.string().optional(),
+      });
+
       const body = z.object({
-        message:         z.string().min(1, "Besked er påkrævet").max(4000),
-        conversation_id: z.string().optional().nullable(),
+        message:          z.string().min(1, "Besked er påkrævet").max(4000),
+        conversation_id:  z.string().optional().nullable(),
+        document_context: z.array(documentContextSchema).optional().default([]),
         context: z.object({
           document_ids:        z.array(z.string()).optional().default([]),
           preferred_expert_id: z.string().optional().nullable(),
@@ -1154,12 +1238,13 @@ Generate names and content in ${langNote}.`;
       const { runChatMessage } = await import("./services/chat-runner");
 
       const result = await runChatMessage({
-        message:        body.message,
-        expert:         selectedExpert,
-        organizationId: orgId,
+        message:         body.message,
+        expert:          selectedExpert,
+        organizationId:  orgId,
         userId,
-        conversationId: body.conversation_id ?? null,
+        conversationId:  body.conversation_id ?? null,
         routingExplanation,
+        documentContext: body.document_context ?? [],
       });
 
       return res.json({

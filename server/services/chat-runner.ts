@@ -37,6 +37,15 @@ export interface ChatRunResult {
   routingExplanation: string;
 }
 
+interface DocumentContextItem {
+  filename:       string;
+  mime_type:      string;
+  char_count:     number;
+  extracted_text: string;
+  status:         "ok" | "unsupported" | "error";
+  message?:       string;
+}
+
 export async function runChatMessage(params: {
   message: string;
   expert: AccessibleExpert;
@@ -44,9 +53,32 @@ export async function runChatMessage(params: {
   userId: string;
   conversationId?: string | null;
   routingExplanation: string;
+  documentContext?: DocumentContextItem[];
 }): Promise<ChatRunResult> {
   const { message, expert, organizationId, userId, routingExplanation } = params;
   const startMs = Date.now();
+
+  // ── Document context validation + injection ────────────────────────────────
+  const rawDocCtx  = params.documentContext ?? [];
+  const docCtx     = rawDocCtx.filter(d => d.status === "ok" && d.extracted_text?.trim());
+  const failedDocs = rawDocCtx.filter(d => d.status !== "ok");
+
+  // TASK 4 — debug log ALTID
+  console.log(`[chat-runner] message_len=${message.length} doc_ctx_raw=${rawDocCtx.length} doc_ctx_ok=${docCtx.length}`);
+  if (docCtx.length > 0) {
+    const totalChars = docCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0);
+    console.log(`[chat-runner] total_doc_chars=${totalChars} first200="${docCtx[0].extracted_text.slice(0, 200).replace(/\n/g, " ")}"`);
+  }
+  if (failedDocs.length > 0) {
+    console.warn(`[chat-runner] failed_docs:`, failedDocs.map(d => `${d.filename}:${d.status}:${d.message}`).join(", "));
+  }
+
+  // TASK 5 — hard assertion
+  if (rawDocCtx.length > 0 && docCtx.length === 0) {
+    const reason = failedDocs.map(d => d.message).filter(Boolean).join("; ")
+      || "Ingen tekst kunne udtrækkes";
+    throw Object.assign(new Error(reason), { errorCode: "DOCUMENT_UNREADABLE" });
+  }
 
   // ── 1. Load full expert record ─────────────────────────────────────────────
   const [fullExpert] = await db
@@ -93,14 +125,55 @@ export async function runChatMessage(params: {
     builtPrompt = await buildFromLive(fullExpert, organizationId, buildExpertPrompt);
   }
 
-  // ── 3. Run AI + retrieval in parallel (exactly as test endpoint does) ──────
+  // ── 3. Byg det endelige user-input (dokument-kontekst INJICERET) ───────────
+  let finalUserInput = message;
+  let finalSystemPrompt = builtPrompt.systemPrompt;
+
+  if (docCtx.length > 0) {
+    // TASK 6 — hard system-prompt-tilføjelse: forbyd "kan ikke tilgå filer"
+    const docSystemAddition = [
+      "",
+      "=== KRITISK INSTRUKTION — DOKUMENTANALYSE ===",
+      "Du har ALTID adgang til det fulde dokumentindhold nedenfor i bruger-inputtet.",
+      "Du MÅ ALDRIG sige at du ikke kan åbne, tilgå eller læse vedhæftede filer.",
+      "Du SKAL analysere dokumentets faktiske indhold direkte.",
+      "Du SKAL referere til konkrete sætninger, klausuler, tal og navne fra dokumentet.",
+      "Hvis det efterspurgte ikke er i dokumentet, skal du sige: 'Det fremgår ikke af det uploadede dokument.'",
+      "Du MÅ ALDRIG give generiske råd eller tjeklister i stedet for faktisk dokumentanalyse.",
+      "=== SLUT KRITISK INSTRUKTION ===",
+    ].join("\n");
+
+    finalSystemPrompt = builtPrompt.systemPrompt + docSystemAddition;
+
+    // TASK 2 — force document content direkte ind i user-input
+    const docBlock = docCtx.map(d =>
+      `=== DOKUMENTINDHOLD START: ${d.filename} (${d.extracted_text.length} tegn) ===\n\n${d.extracted_text}\n\n=== DOKUMENTINDHOLD SLUT: ${d.filename} ===`
+    ).join("\n\n");
+
+    finalUserInput = `${message}\n\n${docBlock}`;
+
+    const totalChars = docCtx.reduce((s, d) => s + d.extracted_text.length, 0);
+    console.log(`[chat-runner] PAYLOAD_READY: userInput_len=${finalUserInput.length} doc_chars=${totalChars} systemPrompt_len=${finalSystemPrompt.length}`);
+  }
+
+  // TASK 5 — hard assertion FØR model-kald
+  if (docCtx.length > 0) {
+    if (!finalUserInput.includes("=== DOKUMENTINDHOLD START:")) {
+      throw Object.assign(
+        new Error("DOCUMENT_CONTEXT_NOT_INJECTED: Document text not found in final payload"),
+        { errorCode: "DOCUMENT_CONTEXT_NOT_INJECTED" },
+      );
+    }
+  }
+
+  // ── 3. Run AI + retrieval i parallel ─────────────────────────────────────
   const { runAiCall } = await import("../lib/ai/runner");
   const { runRetrieval } = await import("../lib/retrieval/retrieval-orchestrator");
 
   const [aiResult, retrievalResult] = await Promise.all([
     runAiCall(
       { feature: "ai-chat", tenantId: organizationId, userId },
-      { systemPrompt: builtPrompt.systemPrompt, userInput: message },
+      { systemPrompt: finalSystemPrompt, userInput: finalUserInput },
     ),
     runRetrieval({ tenantId: organizationId, queryText: message, strategy: "hybrid", topK: 5 }).catch(
       () => null,
