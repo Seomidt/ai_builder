@@ -487,12 +487,17 @@ export default function AiChatPage() {
       }]);
     },
     onError: (err: any) => {
-      const raw = err?.message ?? "";
-      const msg = raw.includes("NO_EXPERTS_AVAILABLE")
-        ? "Ingen AI-eksperter er opsat for din organisation endnu."
-        : raw.includes("NO_RELEVANT_EXPERT")
+      const code = err?.errorCode ?? err?.code ?? "";
+      const serverMsg = err?.message ?? "";
+      const msg = code === "NO_EXPERTS_AVAILABLE" || serverMsg.includes("NO_EXPERTS_AVAILABLE")
+        ? "Ingen AI-eksperter er tilgængelige. Aktivér mindst én ekspert til chat i indstillingerne."
+        : code === "NO_RELEVANT_EXPERT" || serverMsg.includes("NO_RELEVANT_EXPERT")
         ? "Ingen relevant ekspert fundet. Prøv at omformulere dit spørgsmål."
-        : "Der opstod en fejl ved behandling af din besked. Prøv igen.";
+        : code === "AI_EXECUTION_FAILED"
+        ? "AI-eksperten kunne ikke svare i øjeblikket. Prøv igen om lidt."
+        : code === "UNAUTHENTICATED"
+        ? "Du er ikke logget ind. Genindlæs siden og log ind igen."
+        : serverMsg || "Der opstod en fejl. Prøv igen.";
       setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", text: msg, timestamp: new Date(), isError: true }]);
       toast({ title: "Chat fejl", description: msg, variant: "destructive" });
     },
