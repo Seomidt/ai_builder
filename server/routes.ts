@@ -167,16 +167,19 @@ const CreateArchitectureSchema = z.object({
 });
 
 const CreateSpecialistRuleSchema = z.object({
-  type: z.enum(["decision", "threshold", "required_evidence", "source_restriction"]),
-  name: z.string().min(1),
-  description: z.string().optional(),
-  config: z.record(z.unknown()).optional(),
+  type:             z.enum(["decision", "threshold", "required_evidence", "source_restriction", "escalation"]),
+  name:             z.string().min(1),
+  description:      z.string().optional(),
+  priority:         z.number().int().min(1).max(999).default(100),
+  enforcementLevel: z.enum(["hard", "soft"]).default("soft"),
+  config:           z.record(z.unknown()).optional(),
 });
 
 const CreateSpecialistSourceSchema = z.object({
-  sourceName: z.string().min(1),
-  sourceType: z.enum(["document", "policy", "legal", "rule", "image"]).default("document"),
-  projectId: z.string().optional(),
+  sourceName:    z.string().min(1),
+  sourceType:    z.enum(["document", "policy", "legal", "rulebook", "image", "other"]).default("document"),
+  projectId:     z.string().optional(),
+  dataSourceId:  z.string().optional(),
 });
 
 /** Set private browser cache header (no CDN caching — data is user-scoped via RLS). */
@@ -352,80 +355,143 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err) { handleError(res, err); }
   });
 
-  // ─── AI Expert — AI Assist ────────────────────────────────────────────────
-  // POST /api/experts/ai-suggest — improve expert description with AI
-  app.post("/api/experts/ai-suggest", async (req, res) => {
+  // ════════════════════════════════════════════════════════════════════════════
+  // /api/experts — Primary AI Expert API surface
+  // Old /api/architectures routes remain for backward compatibility.
+  // All new product UI/contracts use /api/experts.
+  // ════════════════════════════════════════════════════════════════════════════
+
+  // ─── CRUD ────────────────────────────────────────────────────────────────────
+
+  app.get("/api/experts", async (req, res) => {
     try {
-      const { rawDescription } = z.object({ rawDescription: z.string().min(1) }).parse(req.body);
-      const { runAiCall } = await import("./lib/ai/runner");
-      const result = await runAiCall(
-        { feature: "expert-suggest", tenantId: getOrgId(req), userId: getUserId(req) },
-        {
-          systemPrompt: `Du er en AI assistent der hjælper med at konfigurere AI eksperter til en B2B platform.
-Brugeren beskriver en AI ekspert de ønsker at bygge. Du skal returnere et JSON-objekt med disse felter:
-- improvedTitle: string (et præcist, professionelt navn til eksperten)
-- improvedDescription: string (klar, handlingsorienteret beskrivelse på dansk, max 3 sætninger)
-- responsibilities: string[] (3-5 konkrete ansvarsområder)
-- suggestedRuleThemes: string[] (2-4 regelkategorier der giver mening for denne ekspert)
-- suggestedDataTypes: string[] (2-4 datatyper brugeren bør uploade)
-Svar KUN med valid JSON. Ingen forklaring.`,
-          userInput: rawDescription,
-        },
-      );
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(result.content.replace(/```json\n?|\n?```/g, "").trim());
-      } catch {
-        return res.status(422).json({ error: "AI svarede i ugyldigt format. Prøv igen." });
-      }
-      res.json(parsed);
+      const profiles = await createStorageForRequest(req).listArchitectureProfiles(getOrgId(req));
+      setCachePrivate(res, 10);
+      res.json(profiles);
     } catch (err) { handleError(res, err); }
   });
 
-  // ─── AI Expert — Specialist Rules ────────────────────────────────────────────
-  app.get("/api/architectures/:id/rules", async (req, res) => {
+  // Staged creation: expert → (rules) → (sources) handled by client after getting id
+  app.post("/api/experts", async (req, res) => {
     try {
-      const { db }   = await import("./db");
-      const { specialistRules } = await import("../shared/schema");
+      const body = CreateArchitectureSchema.parse(req.body);
+      const profile = await createStorageForRequest(req).createArchitectureProfile({
+        ...body,
+        organizationId: getOrgId(req),
+      });
+      res.status(201).json(profile);
+    } catch (err) { handleError(res, err); }
+  });
+
+  app.get("/api/experts/:id", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { architectureProfiles } = await import("../shared/schema");
       const { eq, and } = await import("drizzle-orm");
-      const orgId    = getOrgId(req);
+      const orgId = getOrgId(req);
+      const [expert] = await db
+        .select()
+        .from(architectureProfiles)
+        .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)));
+      if (!expert) return res.status(404).json({ error: "Expert not found" });
+      setCachePrivate(res, 10);
+      res.json(expert);
+    } catch (err) { handleError(res, err); }
+  });
+
+  app.patch("/api/experts/:id", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { architectureProfiles } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const orgId = getOrgId(req);
+      const UpdateExpertSchema = z.object({
+        name:            z.string().min(1).optional(),
+        description:     z.string().optional(),
+        goal:            z.string().optional(),
+        instructions:    z.string().optional(),
+        outputStyle:     z.string().optional(),
+        language:        z.string().optional(),
+        departmentId:    z.string().optional(),
+        modelProvider:   z.string().optional(),
+        modelName:       z.string().optional(),
+        temperature:     z.number().min(0).max(1).optional(),
+        maxOutputTokens: z.number().int().min(256).max(4096).optional(),
+      });
+      const body = UpdateExpertSchema.parse(req.body);
+      const [updated] = await db
+        .update(architectureProfiles)
+        .set({ ...body, updatedAt: new Date() })
+        .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)))
+        .returning();
+      if (!updated) return res.status(404).json({ error: "Expert not found" });
+      res.json(updated);
+    } catch (err) { handleError(res, err); }
+  });
+
+  app.post("/api/experts/:id/archive", async (req, res) => {
+    try {
+      const profile = await createStorageForRequest(req).archiveArchitectureProfile(req.params.id, getOrgId(req));
+      res.json(profile);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // ─── Rules ───────────────────────────────────────────────────────────────────
+
+  app.get("/api/experts/:id/rules", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { specialistRules } = await import("../shared/schema");
+      const { eq, and, asc } = await import("drizzle-orm");
+      const orgId = getOrgId(req);
       const rows = await db
         .select()
         .from(specialistRules)
-        .where(and(eq(specialistRules.expertId, req.params.id), eq(specialistRules.organizationId, orgId)));
+        .where(and(eq(specialistRules.expertId, req.params.id), eq(specialistRules.organizationId, orgId)))
+        .orderBy(asc(specialistRules.priority));
       setCachePrivate(res, 10);
       res.json(rows);
     } catch (err) { handleError(res, err); }
   });
 
-  app.post("/api/architectures/:id/rules", async (req, res) => {
+  app.post("/api/experts/:id/rules", async (req, res) => {
     try {
-      const body  = CreateSpecialistRuleSchema.parse(req.body);
+      const body = CreateSpecialistRuleSchema.parse(req.body);
       const { db } = await import("./db");
       const { specialistRules } = await import("../shared/schema");
       const orgId = getOrgId(req);
       const [row] = await db
         .insert(specialistRules)
-        .values({ ...body, expertId: req.params.id, organizationId: orgId, config: body.config ?? null })
+        .values({
+          ...body,
+          expertId:       req.params.id,
+          organizationId: orgId,
+          config:         body.config ?? null,
+        })
         .returning();
       res.status(201).json(row);
     } catch (err) { handleError(res, err); }
   });
 
-  app.delete("/api/architectures/:id/rules/:ruleId", async (req, res) => {
+  app.delete("/api/experts/:id/rules/:ruleId", async (req, res) => {
     try {
       const { db } = await import("./db");
       const { specialistRules } = await import("../shared/schema");
       const { eq, and } = await import("drizzle-orm");
       await db
         .delete(specialistRules)
-        .where(and(eq(specialistRules.id, req.params.ruleId), eq(specialistRules.expertId, req.params.id)));
+        .where(and(
+          eq(specialistRules.id, req.params.ruleId),
+          eq(specialistRules.expertId, req.params.id),
+          eq(specialistRules.organizationId, getOrgId(req)),
+        ));
       res.json({ ok: true });
     } catch (err) { handleError(res, err); }
   });
 
-  // ─── AI Expert — Specialist Sources ──────────────────────────────────────────
-  app.get("/api/architectures/:id/sources", async (req, res) => {
+  // ─── Sources ─────────────────────────────────────────────────────────────────
+
+  app.get("/api/experts/:id/sources", async (req, res) => {
     try {
       const { db } = await import("./db");
       const { specialistSources } = await import("../shared/schema");
@@ -440,13 +506,13 @@ Svar KUN med valid JSON. Ingen forklaring.`,
     } catch (err) { handleError(res, err); }
   });
 
-  app.post("/api/architectures/:id/sources", async (req, res) => {
+  app.post("/api/experts/:id/sources", async (req, res) => {
     try {
-      const body   = CreateSpecialistSourceSchema.parse(req.body);
+      const body = CreateSpecialistSourceSchema.parse(req.body);
       const { db } = await import("./db");
       const { specialistSources } = await import("../shared/schema");
-      const orgId  = getOrgId(req);
-      const [row]  = await db
+      const orgId = getOrgId(req);
+      const [row] = await db
         .insert(specialistSources)
         .values({ ...body, expertId: req.params.id, organizationId: orgId })
         .returning();
@@ -454,17 +520,252 @@ Svar KUN med valid JSON. Ingen forklaring.`,
     } catch (err) { handleError(res, err); }
   });
 
-  app.delete("/api/architectures/:id/sources/:sourceId", async (req, res) => {
+  app.patch("/api/experts/:id/sources/:sourceId", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { specialistSources } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const body = z.object({
+        status:          z.enum(["pending","processed","failed","linked"]).optional(),
+        processingNotes: z.string().optional(),
+        chunksCount:     z.number().int().optional(),
+      }).parse(req.body);
+      const [updated] = await db
+        .update(specialistSources)
+        .set({ ...body, updatedAt: new Date() })
+        .where(and(
+          eq(specialistSources.id, req.params.sourceId),
+          eq(specialistSources.expertId, req.params.id),
+          eq(specialistSources.organizationId, getOrgId(req)),
+        ))
+        .returning();
+      res.json(updated);
+    } catch (err) { handleError(res, err); }
+  });
+
+  app.delete("/api/experts/:id/sources/:sourceId", async (req, res) => {
     try {
       const { db } = await import("./db");
       const { specialistSources } = await import("../shared/schema");
       const { eq, and } = await import("drizzle-orm");
       await db
         .delete(specialistSources)
-        .where(and(eq(specialistSources.id, req.params.sourceId), eq(specialistSources.expertId, req.params.id)));
+        .where(and(
+          eq(specialistSources.id, req.params.sourceId),
+          eq(specialistSources.expertId, req.params.id),
+          eq(specialistSources.organizationId, getOrgId(req)),
+        ));
       res.json({ ok: true });
     } catch (err) { handleError(res, err); }
   });
+
+  // ─── AI Assist — structured validated output ──────────────────────────────────
+
+  app.post("/api/experts/ai-suggest", async (req, res) => {
+    try {
+      const body = z.object({
+        rawDescription: z.string().min(1),
+        industry:       z.string().optional(),
+        department:     z.string().optional(),
+        language:       z.string().optional().default("da"),
+      }).parse(req.body);
+
+      const { runAiCall } = await import("./lib/ai/runner");
+      const langNote = body.language === "en" ? "English" : "danish";
+
+      const systemPrompt = `You are an AI configuration assistant for a multi-tenant B2B AI specialist platform.
+The user describes an AI expert they want to build. Return ONLY valid JSON with this exact schema:
+{
+  "suggested_name": "string — precise professional name",
+  "improved_description": "string — clear purpose-driven description, max 2 sentences",
+  "goal": "string — one sentence: what this expert achieves",
+  "instructions": "string — 3-6 sentence system instruction block for the expert",
+  "suggested_output_style": "concise | formal | advisory",
+  "suggested_rules": [
+    {
+      "type": "decision | threshold | required_evidence | source_restriction | escalation",
+      "name": "string",
+      "description": "string",
+      "priority": 100,
+      "enforcement_level": "hard | soft"
+    }
+  ],
+  "suggested_source_types": ["document | policy | legal | rulebook | image | other"],
+  "warnings": []
+}
+Respond only in JSON. No markdown fences. No explanation.
+Generate names and content in ${langNote}.`;
+
+      const userInput = [
+        body.rawDescription,
+        body.industry   ? `Industry: ${body.industry}`   : "",
+        body.department ? `Department: ${body.department}` : "",
+      ].filter(Boolean).join("\n");
+
+      const result = await runAiCall(
+        { feature: "expert-suggest", tenantId: getOrgId(req), userId: getUserId(req) },
+        { systemPrompt, userInput },
+      );
+
+      // ── Strict output validation ──────────────────────────────────────────────
+      const AiSuggestionSchema = z.object({
+        suggested_name:        z.string().min(1),
+        improved_description:  z.string(),
+        goal:                  z.string(),
+        instructions:          z.string(),
+        suggested_output_style: z.enum(["concise","formal","advisory"]).catch("advisory"),
+        suggested_rules: z.array(z.object({
+          type:             z.string(),
+          name:             z.string(),
+          description:      z.string(),
+          priority:         z.number().int().catch(100),
+          enforcement_level: z.enum(["hard","soft"]).catch("soft"),
+        })).default([]),
+        suggested_source_types: z.array(z.string()).default([]),
+        warnings:               z.array(z.string()).default([]),
+      });
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(result.content.replace(/```json\n?|\n?```/g, "").trim());
+      } catch {
+        return res.status(422).json({ error: "AI output could not be parsed. Please try again." });
+      }
+
+      const validated = AiSuggestionSchema.safeParse(parsed);
+      if (!validated.success) {
+        return res.status(422).json({ error: "AI output did not match expected schema. Please try again." });
+      }
+
+      res.json(validated.data);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // ─── Test Engine — POST /api/experts/:id/test ─────────────────────────────────
+
+  app.post("/api/experts/:id/test", async (req, res) => {
+    try {
+      const body = z.object({
+        prompt:     z.string().min(1),
+        sourceIds:  z.array(z.string()).optional().default([]),
+        ruleIds:    z.array(z.string()).optional().default([]),
+      }).parse(req.body);
+
+      const startMs = Date.now();
+      const orgId   = getOrgId(req);
+      const userId  = getUserId(req);
+
+      // 1. Load expert — tenant-scoped
+      const { db } = await import("./db");
+      const { architectureProfiles, specialistRules, specialistSources } = await import("../shared/schema");
+      const { eq, and, inArray } = await import("drizzle-orm");
+
+      const [expert] = await db
+        .select()
+        .from(architectureProfiles)
+        .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)));
+
+      if (!expert) return res.status(404).json({ error: "Expert not found or access denied." });
+      if (expert.status !== "active") return res.status(400).json({ error: "Expert is not active." });
+
+      // 2. Load rules
+      const rulesQuery = db
+        .select()
+        .from(specialistRules)
+        .where(and(
+          eq(specialistRules.expertId, req.params.id),
+          eq(specialistRules.organizationId, orgId),
+        ));
+      const allRules = await rulesQuery;
+      const activeRules = body.ruleIds.length > 0
+        ? allRules.filter((r) => body.ruleIds.includes(r.id))
+        : allRules;
+
+      // 3. Load sources
+      const allSources = await db
+        .select()
+        .from(specialistSources)
+        .where(and(
+          eq(specialistSources.expertId, req.params.id),
+          eq(specialistSources.organizationId, orgId),
+        ));
+      const activeSources = body.sourceIds.length > 0
+        ? allSources.filter((s) => body.sourceIds.includes(s.id))
+        : allSources;
+
+      // 4. Build expert prompt via centralized builder
+      const { buildExpertPrompt } = await import("./lib/ai/expert-prompt-builder");
+
+      const builtPrompt = buildExpertPrompt(
+        {
+          name:            expert.name,
+          goal:            expert.goal ?? null,
+          instructions:    expert.instructions ?? null,
+          outputStyle:     expert.outputStyle ?? null,
+          language:        expert.language ?? "da",
+          modelProvider:   expert.modelProvider ?? "openai",
+          modelName:       expert.modelName ?? "gpt-4o",
+          temperature:     expert.temperature ?? 0.3,
+          maxOutputTokens: expert.maxOutputTokens ?? 2048,
+        },
+        activeRules.map((r) => ({
+          id:               r.id,
+          type:             r.type,
+          name:             r.name,
+          description:      r.description ?? null,
+          priority:         r.priority,
+          enforcementLevel: r.enforcementLevel,
+        })),
+        activeSources.map((s) => ({
+          id:         s.id,
+          sourceName: s.sourceName,
+          sourceType: s.sourceType,
+          status:     s.status,
+        })),
+      );
+
+      // 5. Execute AI call
+      const { runAiCall } = await import("./lib/ai/runner");
+
+      const aiResult = await runAiCall(
+        {
+          feature:  "expert-test",
+          tenantId: orgId,
+          userId,
+          model:    builtPrompt.modelName,
+        },
+        {
+          systemPrompt: builtPrompt.systemPrompt,
+          userInput:    body.prompt,
+        },
+      );
+
+      const latencyMs = Date.now() - startMs;
+
+      // 6. Return structured response (no raw provider error leak)
+      res.json({
+        output:        aiResult.content,
+        used_rules:    builtPrompt.usedRules.map((r) => ({
+          id:   r.id,
+          name: r.name,
+          type: r.type,
+          enforcement_level: r.enforcementLevel,
+        })),
+        used_sources:  builtPrompt.usedSources.map((s) => ({
+          id:          s.id,
+          name:        s.sourceName,
+          source_type: s.sourceType,
+          status:      s.status,
+        })),
+        warnings:      [],
+        latency_ms:    latencyMs,
+        model_provider: builtPrompt.modelProvider,
+        model_name:    builtPrompt.modelName,
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // ─── Backward-compat aliases (keep old /api/architectures routes above) ───────
 
   // ─── Runs (lifecycle) ───────────────────────────────────────────────────────
 
