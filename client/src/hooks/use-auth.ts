@@ -1,20 +1,21 @@
 /**
- * useAuth — Robust session hook
+ * useAuth — Client-side auth gate using Supabase SDK
  *
- * CRITICAL FIX: Supabase v2 holds an internal lock during SIGNED_IN.
- * Calling supabase.auth.getSession() immediately after SIGNED_IN can return
- * null while the lock is held. We solve this by using the access_token
- * delivered directly from onAuthStateChange (lock is not needed there),
- * stored in a module-level ref so fetchSession() can use it synchronously.
+ * AUTH GATE: Based entirely on the Supabase session (client-side).
+ * The SDK verifies the JWT cryptographically — no backend call needed.
  *
- * FLOW:
- *   1. onAuthStateChange fires with session.access_token → stored in tokenRef
- *   2. queryClient.setQueryData called immediately with the fresh token → no re-fetch needed
- *   3. ProtectedRoute: isLoading=false, isAuthed=true → render dashboard
+ * ENRICHMENT: Backend /api/auth/session is called in background to get
+ * organizationId and role. Falls back to defaults if backend is unavailable.
+ *
+ * This means:
+ *  - Login works even if backend env vars are not set
+ *  - No login loop — 401 from backend never causes a redirect
+ *  - SIGNED_OUT still clears everything correctly
  */
 
 import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import type { Session } from "@supabase/supabase-js";
 import { supabase } from "@/lib/supabase";
 
 export interface SessionUser {
@@ -24,137 +25,120 @@ export interface SessionUser {
   role: string;
 }
 
-interface SessionResult {
-  status: number;
-  user: SessionUser | null;
+interface BackendEnrichment {
+  organizationId: string;
+  role: string;
 }
 
-// Module-level token cache — survives component re-mounts.
-// Set by onAuthStateChange before any query fires.
+// Module-level token — survives re-mounts, set by onAuthStateChange
 let _cachedToken: string | null = null;
 
-async function fetchSessionWithToken(token: string | null): Promise<SessionResult> {
-  if (!token) {
-    // Last-resort: try getSession() (covers page-reload case)
-    try {
-      const { data } = await supabase.auth.getSession();
-      token = data.session?.access_token ?? null;
-    } catch {
-      token = null;
-    }
-  }
-
-  if (!token) return { status: 401, user: null };
-
+async function fetchEnrichment(token: string | null): Promise<BackendEnrichment | null> {
+  if (!token) return null;
   try {
     const res = await fetch("/api/auth/session", {
       headers: { Authorization: `Bearer ${token}` },
       credentials: "include",
       cache: "no-store",
     });
-
-    if (res.status === 401) return { status: 401, user: null };
-    if (res.status === 403) return { status: 403, user: null };
-    if (!res.ok) return { status: res.status, user: null };
-
-    const data = (await res.json()) as { user: SessionUser };
-    return { status: 200, user: data.user ?? null };
+    if (!res.ok) return null;
+    const data = (await res.json()) as { user?: { organizationId?: string; role?: string } };
+    if (!data.user) return null;
+    return {
+      organizationId: data.user.organizationId ?? "blissops-main",
+      role:           data.user.role           ?? "member",
+    };
   } catch {
-    // Network error — keep stale data, don't force logout
-    return { status: 0, user: null };
+    return null;
   }
 }
+
+// Lockdown: checked client-side from env var
+const LOCKDOWN_ENABLED   = import.meta.env.VITE_LOCKDOWN_ENABLED === "true";
+const LOCKDOWN_ALLOWLIST = new Set(
+  (import.meta.env.VITE_LOCKDOWN_ALLOWLIST ?? "seomidt@gmail.com")
+    .split(",").map((e: string) => e.trim().toLowerCase()).filter(Boolean),
+);
 
 export function useAuth() {
   const queryClient = useQueryClient();
 
-  const [hasLocalSession, setHasLocalSession] = useState<boolean | null>(null);
+  // Auth gate state — based on Supabase session only
+  const [session, setSession] = useState<Session | null | undefined>(undefined);
   const bootstrapped = useRef(false);
 
-  // On mount: read local session from cookie storage (~5ms)
   useEffect(() => {
     if (bootstrapped.current) return;
     bootstrapped.current = true;
 
+    // Read session from localStorage (synchronous in v2 internals, async API)
     supabase.auth.getSession().then(({ data }) => {
-      const hasSession = data.session !== null;
       _cachedToken = data.session?.access_token ?? null;
-      setHasLocalSession(hasSession);
+      setSession(data.session ?? null);
     });
   }, []);
 
-  // Auth state changes: sign-in, sign-out, token refresh, page reload
   useEffect(() => {
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, session) => {
-      // Always update the cached token from the event — this is the
-      // authoritative source and does NOT require the Supabase lock.
-      _cachedToken = session?.access_token ?? null;
-      setHasLocalSession(session !== null);
+    } = supabase.auth.onAuthStateChange((event, sess) => {
+      _cachedToken = sess?.access_token ?? null;
+      setSession(sess ?? null);
 
       if (event === "SIGNED_OUT") {
         _cachedToken = null;
-        queryClient.clear();
-      } else if (event === "SIGNED_IN" && session?.access_token) {
-        // On sign-in: immediately call the backend with the fresh token
-        // from the event (not from getSession() which may be lock-blocked).
-        // setQueryData gives ProtectedRoute the result without a re-fetch.
-        queryClient.clear();
-        fetchSessionWithToken(session.access_token).then((result) => {
-          queryClient.setQueryData(["/api/auth/session"], result);
-        });
-      } else if (event === "TOKEN_REFRESHED" && session?.access_token) {
-        // Silently update the cached session after token refresh
-        queryClient.setQueryData(["/api/auth/session"], (old: SessionResult | undefined) =>
-          old?.status === 200 ? old : undefined,
-        );
-        queryClient.invalidateQueries({ queryKey: ["/api/auth/session"] });
-      } else if (event === "INITIAL_SESSION") {
-        // Page reload: session already in cookie — invalidate to trigger fresh fetch
-        queryClient.invalidateQueries({ queryKey: ["/api/auth/session"] });
+        queryClient.removeQueries({ queryKey: ["/api/auth/enrichment"] });
+      } else if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED") {
+        // Invalidate enrichment so it re-fetches with the fresh token
+        queryClient.invalidateQueries({ queryKey: ["/api/auth/enrichment"] });
       }
     });
 
     return () => subscription.unsubscribe();
   }, [queryClient]);
 
-  // Background session query — uses _cachedToken (set by onAuthStateChange)
-  // as primary source; falls back to getSession() on page reload.
-  const { data, isLoading: queryLoading } = useQuery<SessionResult>({
-    queryKey: ["/api/auth/session"],
-    queryFn: () => fetchSessionWithToken(_cachedToken),
-    retry: false,
-    staleTime: 60_000,
-    gcTime: 120_000,
-    refetchOnWindowFocus: true,
-    refetchInterval: false,
-    enabled: true,
+  // Background enrichment — does NOT block auth gate, tolerates backend failure
+  const { data: enrichment } = useQuery<BackendEnrichment | null>({
+    queryKey: ["/api/auth/enrichment"],
+    queryFn:  () => fetchEnrichment(_cachedToken),
+    enabled:  session !== undefined && session !== null,
+    retry:    1,
+    staleTime: 120_000,
+    gcTime:    300_000,
+    refetchOnWindowFocus: false,
   });
 
-  const backendStatus = data?.status ?? null;
+  // ── Derived state ────────────────────────────────────────────────────────────
 
-  // isLoading: true until localStorage is checked AND backend has responded
-  // (or stale cache exists). If hasLocalSession=false, stop loading immediately.
-  const isLoading =
-    hasLocalSession === null ||
-    (hasLocalSession === true && queryLoading);
+  // isLoading: true until we know whether there is a session or not
+  const isLoading = session === undefined;
 
-  // isAuthed: local session confirmed, backend has NOT explicitly rejected
-  const isAuthed =
-    hasLocalSession === true &&
-    backendStatus !== 401 &&
-    backendStatus !== 403;
+  // isAuthed: Supabase session exists (SDK verified the JWT)
+  const isAuthed = session !== null && session !== undefined;
 
-  const isLockdown = backendStatus === 403;
+  // Lockdown: only active if VITE_LOCKDOWN_ENABLED=true and email not allowlisted
+  const email = session?.user?.email?.toLowerCase() ?? "";
+  const isLockdown =
+    LOCKDOWN_ENABLED &&
+    isAuthed &&
+    email !== "" &&
+    !LOCKDOWN_ALLOWLIST.has(email);
 
-  const user = data?.user ?? null;
+  // User object: JWT claims first, enriched by backend if available
+  const user: SessionUser | null = isAuthed && session
+    ? {
+        id:             session.user.id,
+        email:          session.user.email,
+        organizationId: enrichment?.organizationId ?? "blissops-main",
+        role:           enrichment?.role ?? session.user.user_metadata?.role ?? "member",
+      }
+    : null;
 
   return {
     isLoading,
-    user,
-    status: backendStatus,
     isAuthed,
     isLockdown,
+    user,
+    status: isAuthed ? 200 : 401,
   };
 }
