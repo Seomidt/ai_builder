@@ -1095,6 +1095,153 @@ Generate names and content in ${langNote}.`;
     } catch (err) { handleError(res, err); }
   });
 
+  // ─── AI Chat ──────────────────────────────────────────────────────────────────
+
+  app.post("/api/chat", async (req: Request, res: Response) => {
+    try {
+      const body = z.object({
+        message:         z.string().min(1, "Besked er påkrævet").max(4000),
+        conversation_id: z.string().optional().nullable(),
+        context: z.object({
+          document_ids:        z.array(z.string()).optional().default([]),
+          preferred_expert_id: z.string().optional().nullable(),
+        }).optional().default({}),
+      }).parse(req.body);
+
+      const orgId  = getOrgId(req);
+      const userId = getUserId(req);
+
+      const {
+        listAccessibleExpertsForUser,
+        scoreExpertsForMessage,
+        selectBestExpert,
+        verifyExpertAccess,
+      } = await import("./services/chat-routing");
+
+      // 1. List all experts this user can access
+      const accessible = await listAccessibleExpertsForUser({ organizationId: orgId });
+
+      if (accessible.length === 0) {
+        return res.status(422).json({
+          error_code: "NO_EXPERTS_AVAILABLE",
+          message: "Ingen AI-eksperter er tilgængelige for din organisation.",
+        });
+      }
+
+      // 2. Verify preferred expert hint (client hint — never trusted blindly)
+      let selectedExpert = null;
+      const hint = body.context?.preferred_expert_id;
+      if (hint) {
+        selectedExpert = await verifyExpertAccess({ expertId: hint, organizationId: orgId });
+      }
+
+      // 3. Score and route if no verified hint
+      let routingExplanation = "Ekspert valgt via brugerpræference.";
+      if (!selectedExpert) {
+        const scored = scoreExpertsForMessage(accessible, body.message);
+        const routing = selectBestExpert(scored);
+        if (!routing) {
+          return res.status(422).json({
+            error_code: "NO_RELEVANT_EXPERT",
+            message: "Ingen relevant ekspert fundet til din forespørgsel.",
+          });
+        }
+        selectedExpert = routing.expert;
+        routingExplanation = routing.explanation;
+      }
+
+      // 4. Execute via chat-runner (reuses existing orchestration)
+      const { runChatMessage } = await import("./services/chat-runner");
+
+      const result = await runChatMessage({
+        message:        body.message,
+        expert:         selectedExpert,
+        organizationId: orgId,
+        userId,
+        conversationId: body.conversation_id ?? null,
+        routingExplanation,
+      });
+
+      return res.json({
+        answer:          result.answer,
+        conversation_id: result.conversationId,
+        expert: {
+          id:       result.expert.id,
+          name:     result.expert.name,
+          category: result.expert.category,
+        },
+        used_sources:       result.usedSources,
+        used_rules:         result.usedRules,
+        warnings:           result.warnings,
+        latency_ms:         result.latencyMs,
+        confidence_band:    result.confidenceBand,
+        needs_manual_review: result.needsManualReview,
+        routing_explanation: result.routingExplanation,
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // GET /api/chat/conversations — list conversations for current user
+  app.get("/api/chat/conversations", async (req: Request, res: Response) => {
+    try {
+      const orgId  = getOrgId(req);
+      const userId = getUserId(req);
+      const { db: dbInst } = await import("./db");
+      const { chatConversations } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const rows = await dbInst
+        .select()
+        .from(chatConversations)
+        .where(
+          and(
+            eq(chatConversations.organizationId, orgId),
+            eq(chatConversations.createdBy, userId),
+          ),
+        )
+        .orderBy(chatConversations.createdAt);
+
+      return res.json({ conversations: rows });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // GET /api/chat/conversations/:id/messages
+  app.get("/api/chat/conversations/:id/messages", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { db: dbInst } = await import("./db");
+      const { chatMessages, chatConversations } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      // Verify conversation belongs to this org (tenant isolation)
+      const [conv] = await dbInst
+        .select({ id: chatConversations.id })
+        .from(chatConversations)
+        .where(
+          and(
+            eq(chatConversations.id, req.params.id),
+            eq(chatConversations.organizationId, orgId),
+          ),
+        )
+        .limit(1);
+
+      if (!conv) return res.status(404).json({ error: "Samtale ikke fundet." });
+
+      const msgs = await dbInst
+        .select()
+        .from(chatMessages)
+        .where(
+          and(
+            eq(chatMessages.conversationId, req.params.id),
+            eq(chatMessages.organizationId, orgId),
+          ),
+        )
+        .orderBy(chatMessages.createdAt);
+
+      return res.json({ messages: msgs });
+    } catch (err) { handleError(res, err); }
+  });
+
   // ─── Backward-compat aliases (keep old /api/architectures routes above) ───────
 
   // ─── Runs (lifecycle) ───────────────────────────────────────────────────────

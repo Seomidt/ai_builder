@@ -40,6 +40,9 @@ const WorkspaceIntegrations = lazy(() => import("@/pages/tenant/integrations"));
 const WorkspaceSettings     = lazy(() => import("@/pages/tenant/settings"));
 const WorkspaceAudit        = lazy(() => import("@/pages/tenant/audit"));
 
+// ── Lazy: AI Chat ─────────────────────────────────────────────────────────────
+const AiChat = lazy(() => import("@/pages/ai-chat"));
+
 // ── Lazy: onboarding ─────────────────────────────────────────────────────────
 const Onboarding = lazy(() => import("@/pages/onboarding"));
 
@@ -82,6 +85,9 @@ export function TenantApp() {
             <Route path="/koerseler"    component={Runs} />
             <Route path="/koerseler/:id" component={RunDetail} />
             <Route path="/team"         component={Team} />
+
+            {/* ── AI Chat ──────────────────────────────────────────────── */}
+            <Route path="/ai-chat"      component={AiChat} />
 
             {/* ── Direct top-level shortcuts for nav items ─────────────── */}
             <Route path="/brug"         component={WorkspaceUsage} />

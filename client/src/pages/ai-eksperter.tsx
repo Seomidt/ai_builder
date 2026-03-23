@@ -663,8 +663,10 @@ function Step5({ expertId, expertName, sources, rules }: {
   const [testResult, setTestResult]   = useState<TestResult | null>(null);
 
   const testMutation = useMutation({
-    mutationFn: (prompt: string) =>
-      apiRequest<TestResult>("POST", `/api/experts/${expertId}/test`, { prompt }),
+    mutationFn: async (prompt: string) => {
+      const res = await apiRequest("POST", `/api/experts/${expertId}/test`, { prompt });
+      return res.json() as Promise<TestResult>;
+    },
     onSuccess: (data) => setTestResult(data),
     onError:   (err: ApiError | Error) =>
       toast({ title: "Test fejl", description: friendlyError(err), variant: "destructive" }),
@@ -784,8 +786,10 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
 
   // ── AI Suggest ──────────────────────────────────────────────────────────────
   const aiSuggestMutation = useMutation({
-    mutationFn: (p: { rawDescription: string; department?: string; language?: string }) =>
-      apiRequest<AiSuggestion>("POST", "/api/experts/ai-suggest", p),
+    mutationFn: async (p: { rawDescription: string; department?: string; language?: string }) => {
+      const res = await apiRequest("POST", "/api/experts/ai-suggest", p);
+      return res.json() as Promise<AiSuggestion>;
+    },
     onSuccess: (data) => setSuggestion(data),
     onError:   (err: ApiError | Error) =>
       toast({ title: "AI fejl", description: friendlyError(err), variant: "destructive" }),
@@ -814,7 +818,7 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
     setTransitioning(true);
     try {
       // 1. Create expert — slug and language resolved server-side
-      const profile = await apiRequest<ExpertRow>("POST", "/api/experts", {
+      const profileRes = await apiRequest("POST", "/api/experts", {
         name:         values.name,
         description:  values.description || undefined,
         goal:         values.goal || undefined,
@@ -823,6 +827,7 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
         departmentId: values.departmentId === "none" ? undefined : values.departmentId || undefined,
         category:     undefined,
       });
+      const profile = await profileRes.json() as ExpertRow;
 
       // 2. Attach rules (sequential, safe)
       for (const r of rules) {
@@ -835,7 +840,7 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
       }
 
       setCreatedId(profile.id);
-      invalidate(["/api/experts"]);
+      invalidate.afterArchMutation();
       setStep(5);
     } catch (err) {
       toast({ title: "Fejl ved oprettelse", description: friendlyError(err as ApiError | Error), variant: "destructive" });
@@ -975,17 +980,17 @@ export default function AiEksperter() {
 
   const { data: experts, isLoading } = useQuery<ExpertRow[]>({
     queryKey: ["/api/experts"],
-    ...QUERY_POLICY.list,
+    ...QUERY_POLICY.staticList,
   });
 
   const { data: depts = [] } = useQuery<DeptRow[]>({
     queryKey: ["/api/tenant/departments"],
-    ...QUERY_POLICY.list,
+    ...QUERY_POLICY.staticList,
   });
 
   const archiveMutation = useMutation({
     mutationFn: (id: string) => apiRequest("POST", `/api/experts/${id}/archive`, {}),
-    onSuccess:  () => { toast({ title: "Ekspert arkiveret" }); invalidate(["/api/experts"]); },
+    onSuccess:  () => { toast({ title: "Ekspert arkiveret" }); invalidate.afterArchMutation(); },
     onError:    (err: ApiError | Error) =>
       toast({ title: "Fejl", description: friendlyError(err), variant: "destructive" }),
   });
@@ -1064,7 +1069,7 @@ export default function AiEksperter() {
         open={showCreate}
         onClose={() => setShowCreate(false)}
         depts={depts}
-        onCreated={() => invalidate(["/api/experts"])}
+        onCreated={() => invalidate.afterArchMutation()}
       />
     </div>
   );
