@@ -30,6 +30,16 @@ Alt i tenant-produktet kredser om AI Eksperter.
 - **iPhone-bruger**: Kan ikke paste tekst i Replit shell fra iPhone — giv altid korte, trin-for-trin shell-kommandoer der kan skrives manuelt, én ad gangen
 - **GitHub**: Remote URL bruger `$GITHUB_PERSONAL_ACCESS_TOKEN` — repo: `github.com/Seomidt/ai_builder`
 
+## ⚠️ Infrastruktur-regel (KRITISK)
+
+**Replit er KUN en editor/build-miljø. Al produktion kører på:**
+- **Supabase** — eneste database. Brug `SUPABASE_DB_POOL_URL` (med SSL) til direkte SQL eller `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` til REST API. Brug ALDRIG `DATABASE_URL` (Replits lokale Postgres).
+- **Vercel** — eneste deploy-platform. Backend kører som serverless functions i `api/_src/*.ts` → kompileres til `api/*.js`. Express-routes i `server/routes.ts` bruges KUN lokalt til dev.
+- **OpenAI** — AI-kald via `OPENAI_API_KEY`.
+- **Cloudflare** — CDN, DNS, R2 storage.
+
+**DB-migrationer:** Kør ALTID mod Supabase via `SUPABASE_DB_POOL_URL` med `ssl: { rejectUnauthorized: false }`. Aldrig mod `DATABASE_URL`.
+
 ## System Architecture
 
 React 19 frontend + Express.js backend. Supabase Postgres med Drizzle ORM.
