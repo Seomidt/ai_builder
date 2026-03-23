@@ -162,6 +162,21 @@ const CreateArchitectureSchema = z.object({
   slug: z.string().min(1, "slug is required").regex(/^[a-z0-9-]+$/, "slug must be lowercase letters, numbers, and hyphens only"),
   description: z.string().optional(),
   category: z.string().optional(),
+  departmentId: z.string().optional(),
+  language: z.string().optional().default("da"),
+});
+
+const CreateSpecialistRuleSchema = z.object({
+  type: z.enum(["decision", "threshold", "required_evidence", "source_restriction"]),
+  name: z.string().min(1),
+  description: z.string().optional(),
+  config: z.record(z.unknown()).optional(),
+});
+
+const CreateSpecialistSourceSchema = z.object({
+  sourceName: z.string().min(1),
+  sourceType: z.enum(["document", "policy", "legal", "rule", "image"]).default("document"),
+  projectId: z.string().optional(),
 });
 
 /** Set private browser cache header (no CDN caching — data is user-scoped via RLS). */
@@ -334,6 +349,120 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         ),
       );
       res.json(configs);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // ─── AI Expert — AI Assist ────────────────────────────────────────────────
+  // POST /api/experts/ai-suggest — improve expert description with AI
+  app.post("/api/experts/ai-suggest", async (req, res) => {
+    try {
+      const { rawDescription } = z.object({ rawDescription: z.string().min(1) }).parse(req.body);
+      const { runAiCall } = await import("./lib/ai/runner");
+      const result = await runAiCall(
+        { feature: "expert-suggest", tenantId: getOrgId(req), userId: getUserId(req) },
+        {
+          systemPrompt: `Du er en AI assistent der hjælper med at konfigurere AI eksperter til en B2B platform.
+Brugeren beskriver en AI ekspert de ønsker at bygge. Du skal returnere et JSON-objekt med disse felter:
+- improvedTitle: string (et præcist, professionelt navn til eksperten)
+- improvedDescription: string (klar, handlingsorienteret beskrivelse på dansk, max 3 sætninger)
+- responsibilities: string[] (3-5 konkrete ansvarsområder)
+- suggestedRuleThemes: string[] (2-4 regelkategorier der giver mening for denne ekspert)
+- suggestedDataTypes: string[] (2-4 datatyper brugeren bør uploade)
+Svar KUN med valid JSON. Ingen forklaring.`,
+          userInput: rawDescription,
+        },
+      );
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(result.content.replace(/```json\n?|\n?```/g, "").trim());
+      } catch {
+        return res.status(422).json({ error: "AI svarede i ugyldigt format. Prøv igen." });
+      }
+      res.json(parsed);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // ─── AI Expert — Specialist Rules ────────────────────────────────────────────
+  app.get("/api/architectures/:id/rules", async (req, res) => {
+    try {
+      const { db }   = await import("./db");
+      const { specialistRules } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const orgId    = getOrgId(req);
+      const rows = await db
+        .select()
+        .from(specialistRules)
+        .where(and(eq(specialistRules.expertId, req.params.id), eq(specialistRules.organizationId, orgId)));
+      setCachePrivate(res, 10);
+      res.json(rows);
+    } catch (err) { handleError(res, err); }
+  });
+
+  app.post("/api/architectures/:id/rules", async (req, res) => {
+    try {
+      const body  = CreateSpecialistRuleSchema.parse(req.body);
+      const { db } = await import("./db");
+      const { specialistRules } = await import("../shared/schema");
+      const orgId = getOrgId(req);
+      const [row] = await db
+        .insert(specialistRules)
+        .values({ ...body, expertId: req.params.id, organizationId: orgId, config: body.config ?? null })
+        .returning();
+      res.status(201).json(row);
+    } catch (err) { handleError(res, err); }
+  });
+
+  app.delete("/api/architectures/:id/rules/:ruleId", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { specialistRules } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      await db
+        .delete(specialistRules)
+        .where(and(eq(specialistRules.id, req.params.ruleId), eq(specialistRules.expertId, req.params.id)));
+      res.json({ ok: true });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // ─── AI Expert — Specialist Sources ──────────────────────────────────────────
+  app.get("/api/architectures/:id/sources", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { specialistSources } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const orgId = getOrgId(req);
+      const rows = await db
+        .select()
+        .from(specialistSources)
+        .where(and(eq(specialistSources.expertId, req.params.id), eq(specialistSources.organizationId, orgId)));
+      setCachePrivate(res, 10);
+      res.json(rows);
+    } catch (err) { handleError(res, err); }
+  });
+
+  app.post("/api/architectures/:id/sources", async (req, res) => {
+    try {
+      const body   = CreateSpecialistSourceSchema.parse(req.body);
+      const { db } = await import("./db");
+      const { specialistSources } = await import("../shared/schema");
+      const orgId  = getOrgId(req);
+      const [row]  = await db
+        .insert(specialistSources)
+        .values({ ...body, expertId: req.params.id, organizationId: orgId })
+        .returning();
+      res.status(201).json(row);
+    } catch (err) { handleError(res, err); }
+  });
+
+  app.delete("/api/architectures/:id/sources/:sourceId", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { specialistSources } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      await db
+        .delete(specialistSources)
+        .where(and(eq(specialistSources.id, req.params.sourceId), eq(specialistSources.expertId, req.params.id)));
+      res.json({ ok: true });
     } catch (err) { handleError(res, err); }
   });
 
