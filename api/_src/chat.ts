@@ -298,14 +298,17 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const failedDocs = rawDocCtx.filter(d => d.status !== "ok");
   const hasDocIntent = rawDocCtx.length > 0; // brugeren sendte dokument-intent
 
-  // TASK 4 — debug log ALTID
-  console.log(`[chat] message_len=${message.length} doc_ctx_raw=${rawDocCtx.length} doc_ctx_ok=${docCtx.length}`);
+  // ── DIAGNOSTIC TRACE ─────────────────────────────────────────────────────
+  console.log("RUNTIME_FILE: api/_src/chat.ts → api/chat.js (Vercel)");
+  console.log("DOC_CTX_RAW:", rawDocCtx.length, "statuses:", rawDocCtx.map(d => d.status).join(",") || "none");
+  console.log("DOC_CTX_LENGTH:", docCtx.length);
   if (docCtx.length > 0) {
     const totalChars = docCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0);
-    console.log(`[chat] total_doc_chars=${totalChars} first200="${docCtx[0].extracted_text.slice(0, 200).replace(/\n/g, " ")}"`);
+    console.log("EXTRACTED_TEXT_LENGTH:", totalChars);
+    console.log("EXTRACTED_TEXT_FIRST200:", docCtx[0].extracted_text.slice(0, 200).replace(/\n/g, " "));
   }
   if (failedDocs.length > 0) {
-    console.warn(`[chat] failed_docs:`, failedDocs.map(d => `${d.filename}:${d.status}:${d.message}`).join(", "));
+    console.log("FAILED_DOCS:", failedDocs.map(d => `${d.filename}:${d.status}:${d.message}`).join(", "));
   }
 
   // TASK 1 — hard validering: afvis hvis dokument lovet men intet indhold
@@ -387,6 +390,18 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       "- INGEN andre formater end ovenstående JSON er tilladt",
     ].join("\n");
 
+    const docMessages = [
+      { role: "system", content: docSystemPrompt },
+      { role: "user",   content: `DOKUMENT:\n\n${docText}\n\nSPØRGSMÅL: ${message}` },
+    ];
+    console.log("FINAL_PAYLOAD:", JSON.stringify({
+      model: "gpt-4o", temperature: 0.0, response_format: "json_object",
+      messages: [
+        { role: "system", content: docSystemPrompt.slice(0, 100) + "..." },
+        { role: "user",   content: `DOKUMENT (${docText.length} chars)... SPØRGSMÅL: ${message}` },
+      ],
+    }));
+
     const t0 = Date.now();
     const docRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -396,10 +411,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         temperature: 0.0,
         max_tokens: 600,
         response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: docSystemPrompt },
-          { role: "user",   content: `DOKUMENT:\n\n${docText}\n\nSPØRGSMÅL: ${message}` },
-        ],
+        messages: docMessages,
       }),
     });
     aiLatencyMs = Date.now() - t0;
@@ -418,7 +430,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     aiComplTokens  = docData.usage?.completion_tokens ?? 0;
 
     const rawJson = docData.choices[0]?.message?.content ?? "{}";
-    console.log(`[chat] DOC_MODE raw_json="${rawJson.slice(0,300)}"`);
+    console.log("RAW_MODEL_OUTPUT:", rawJson);
 
     let parsed: { found: boolean; quote?: string; answer?: string };
     try {
