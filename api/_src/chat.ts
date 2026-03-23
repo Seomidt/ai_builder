@@ -105,10 +105,47 @@ async function callOpenAI(messages: OAIMessage[]): Promise<{
 
 // ── Confidence ────────────────────────────────────────────────────────────────
 
-function deriveConfidence(answer: string, warnings: string[]): "high" | "medium" | "low" {
+function deriveConfidence(answer: string, warnings: string[], extractedText?: string): "high" | "medium" | "low" {
   if (warnings.length > 0) return "low";
+
+  const notFoundPhrases = ["kan ikke finde", "fremgår ikke", "ikke i det uploadede"];
+  if (notFoundPhrases.some(p => answer.toLowerCase().includes(p))) return "low";
+
+  if (extractedText) {
+    // Dokument-mode: confidence baseret på overlap med dokument
+    const answerWords = answer.toLowerCase().replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4);
+    const docWords    = new Set(extractedText.toLowerCase().replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4));
+    const matchingWords = answerWords.filter(w => docWords.has(w));
+    const overlapRatio  = answerWords.length > 0 ? matchingWords.length / answerWords.length : 0;
+    if (overlapRatio >= 0.4) return "high";
+    if (overlapRatio >= 0.2) return "medium";
+    return "low";
+  }
+
   const hedges = ["ikke sikker", "ved ikke", "begrænset", "muligvis", "kan ikke garantere"];
   return hedges.some(h => answer.toLowerCase().includes(h)) ? "medium" : "high";
+}
+
+// ── Grounding validation ───────────────────────────────────────────────────────
+
+function validateGrounding(answer: string, extractedText: string): string {
+  if (!answer) return answer;
+
+  const notFoundPhrases = ["kan ikke finde", "fremgår ikke", "ikke i det uploadede", "ikke nævnt", "ikke specificeret"];
+  if (notFoundPhrases.some(p => answer.toLowerCase().includes(p))) return answer;
+
+  const answerWords   = answer.toLowerCase().replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4);
+  const docWords      = new Set(extractedText.toLowerCase().replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4));
+  const matchingWords = answerWords.filter(w => docWords.has(w));
+  const overlapRatio  = answerWords.length > 0 ? matchingWords.length / answerWords.length : 0;
+
+  console.log(`[chat] GROUNDING: overlap=${(overlapRatio * 100).toFixed(0)}% matching=${matchingWords.length}/${answerWords.length}`);
+
+  if (overlapRatio < 0.15 && answerWords.length > 10) {
+    console.warn(`[chat] GROUNDING_FAILED: generisk svar erstattes med safe response`);
+    return "Jeg kan ikke finde det sikkert i det uploadede dokument.";
+  }
+  return answer;
 }
 
 // ── Persist (non-fatal) ───────────────────────────────────────────────────────
@@ -282,31 +319,39 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         : `Dokumentet kunne ikke læses: ${reason}`);
   }
 
-  // ── Step 4: System-prompt (TASK 3 — hard instructions) ───────────────────
-  const systemLines = [
-    `Du er en AI-ekspert ved navn ${expert.name}.`,
-    expert.category   ? `Dit kompetenceområde er: ${expert.category}.`   : "",
-    expert.description ? `Om dig: ${expert.description}`                  : "",
-    "Svar altid på dansk med klare, præcise og hjælpsomme svar.",
-    "Basér dine svar på virksomhedens data, politikker og regler.",
-    "Angiv tydeligt hvis du er i tvivl om noget.",
-  ];
+  // ── Step 4: System-prompt ─────────────────────────────────────────────────
+  // Dokument-mode: ERSTAT expert-prompt med STRICT document-only prompt.
+  // Normal mode: brug expert-prompt som sædvanlig.
+  let systemPrompt: string;
 
   if (docCtx.length > 0) {
-    systemLines.push(
-      "",
-      "=== KRITISK INSTRUKTION — DOKUMENTANALYSE ===",
-      "Du har ALTID adgang til det fulde dokumentindhold nedenfor i bruger-beskeden.",
-      "Du MÅ ALDRIG sige at du ikke kan åbne, tilgå eller læse vedhæftede filer.",
-      "Du SKAL analysere dokumentets faktiske indhold direkte.",
-      "Du SKAL referere til konkrete sætninger, klausuler, tal og navne fra dokumentet.",
-      "Du MÅ ALDRIG give generiske råd eller tjeklister i stedet for faktisk analyse.",
-      "Dokumentindholdet starter med '=== DOKUMENTINDHOLD START ===' i bruger-beskeden.",
-      "=== SLUT KRITISK INSTRUKTION ===",
-    );
+    systemPrompt = [
+      `Du er en AI-ekspert ved navn ${expert.name}.`,
+      `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
+      ``,
+      `=== ABSOLUT BINDENDE REGLER FOR DOKUMENTANALYSE ===`,
+      `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
+      `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
+      `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
+      `REGEL 4: Hvis svaret IKKE fremgår af dokumentet, siger du præcist: "Jeg kan ikke finde det i det uploadede dokument."`,
+      `REGEL 5: Hvis svaret fremgår af dokumentet, citerer du den relevante sætning direkte.`,
+      `REGEL 6: Du MÅ ALDRIG give generiske forklaringer eller bred kontekst, medmindre det fremgår af dokumentet.`,
+      `REGEL 7: Dit svar skal starte med den direkte konklusion, ikke med en forklaring.`,
+      `REGEL 8: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
+      `=== SLUT REGLER ===`,
+      ``,
+      `Svar altid på dansk.`,
+    ].join("\n");
+  } else {
+    systemPrompt = [
+      `Du er en AI-ekspert ved navn ${expert.name}.`,
+      expert.category   ? `Dit kompetenceområde er: ${expert.category}.`   : "",
+      expert.description ? `Om dig: ${expert.description}`                  : "",
+      "Svar altid på dansk med klare, præcise og hjælpsomme svar.",
+      "Basér dine svar på virksomhedens data, politikker og regler.",
+      "Angiv tydeligt hvis du er i tvivl om noget.",
+    ].filter(Boolean).join("\n");
   }
-
-  const systemPrompt = systemLines.filter(s => s !== undefined).join("\n");
 
   // ── Step 5: Byg messages-array (TASK 2 — force document into user message) ─
   const messages: OAIMessage[] = [{ role: "system", content: systemPrompt }];
@@ -349,10 +394,18 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     return err(res, 502, "AI_EMPTY_RESPONSE", "AI-eksperten returnerede et tomt svar.");
   }
 
+  // ── Step 5.5: Grounding-validering (dokument-mode) ────────────────────────
+  let finalAnswer = aiResult.text;
+  const combinedDocText = docCtx.map(d => d.extracted_text).join(" ");
+  if (docCtx.length > 0) {
+    finalAnswer = validateGrounding(aiResult.text, combinedDocText);
+    console.log(`[chat] GROUNDED_ANSWER_LEN=${finalAnswer.length}`);
+  }
+
   // ── Step 5: Vurder svar ───────────────────────────────────────────────────
   const warnings: string[] = [];
-  if (aiResult.text.length < 20) warnings.push("Svaret er meget kort — der kan mangle information.");
-  const confidence  = deriveConfidence(aiResult.text, warnings);
+  if (finalAnswer.length < 20) warnings.push("Svaret er meget kort — der kan mangle information.");
+  const confidence  = deriveConfidence(finalAnswer, warnings, docCtx.length > 0 ? combinedDocText : undefined);
   const needsManual = confidence === "low";
 
   // ── Step 6: Gem i DB (non-fatal) ──────────────────────────────────────────
@@ -363,7 +416,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       userId,
       expertId:         expert.id,
       userMessage:      message,
-      answer:           aiResult.text,
+      answer:           finalAnswer,
       existingConvId:   body.conversation_id ?? null,
       latencyMs:        aiResult.latencyMs,
       confidence,
@@ -377,7 +430,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   // ── Step 7: Returner svar ─────────────────────────────────────────────────
   return json(res, {
-    answer:              aiResult.text,
+    answer:              finalAnswer,
     conversation_id:     conversationId,
     expert:              { id: expert.id, name: expert.name, category: expert.category ?? null },
     used_sources:        [],
