@@ -236,6 +236,17 @@ export const architectureProfiles = pgTable(
     currentVersionId: varchar("current_version_id"), // FK set after versions table
     departmentId: text("department_id"),             // optional dept association
     language: text("language").default("da"),        // expert output language
+    // ── AI Behavior ───────────────────────────────────────────────────────────
+    instructions:      text("instructions"),          // system-level expert instructions
+    goal:              text("goal"),                  // short purpose statement
+    outputStyle:       text("output_style"),          // concise | formal | advisory
+    escalationPolicy:  jsonb("escalation_policy"),   // structured escalation config
+    // ── Model / Runtime Config ────────────────────────────────────────────────
+    modelProvider:     text("model_provider").default("openai"),
+    modelName:         text("model_name").default("gpt-4o"),
+    temperature:       real("temperature").default(0.3),
+    maxOutputTokens:   integer("max_output_tokens").default(2048),
+    // ─────────────────────────────────────────────────────────────────────────
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
@@ -6576,13 +6587,15 @@ export const specialistRules = pgTable(
     id:             text("id").primaryKey().default(sql`gen_random_uuid()::text`),
     organizationId: text("organization_id").notNull(),
     expertId:       text("expert_id").notNull().references(() => architectureProfiles.id, { onDelete: "cascade" }),
-    type:           text("type").notNull(),      // decision | threshold | required_evidence | source_restriction
-    name:           text("name").notNull(),
-    description:    text("description"),
-    config:         jsonb("config"),             // structured rule payload
-    status:         text("status").notNull().default("active"),
-    createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt:      timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+    type:             text("type").notNull(),    // decision | threshold | required_evidence | source_restriction | escalation
+    name:             text("name").notNull(),
+    description:      text("description"),
+    priority:         integer("priority").notNull().default(100),        // lower = higher priority
+    enforcementLevel: text("enforcement_level").notNull().default("soft"), // hard | soft
+    config:           jsonb("config"),           // structured rule payload
+    status:           text("status").notNull().default("active"),
+    createdAt:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt:        timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("specialist_rules_expert_idx").on(t.expertId),
@@ -6601,11 +6614,15 @@ export const specialistSources = pgTable(
     id:             text("id").primaryKey().default(sql`gen_random_uuid()::text`),
     organizationId: text("organization_id").notNull(),
     expertId:       text("expert_id").notNull().references(() => architectureProfiles.id, { onDelete: "cascade" }),
-    projectId:      text("project_id"),          // optional link to projects table
-    sourceName:     text("source_name").notNull(),
-    sourceType:     text("source_type").notNull().default("document"), // document | policy | legal | rule | image
-    status:         text("status").notNull().default("linked"),        // linked | ingesting | ready | error
-    linkedAt:       timestamp("linked_at", { withTimezone: true }).notNull().defaultNow(),
+    projectId:        text("project_id"),          // optional link to projects table
+    dataSourceId:     text("data_source_id"),       // optional external data source ref
+    sourceName:       text("source_name").notNull(),
+    sourceType:       text("source_type").notNull().default("document"), // document | policy | legal | rulebook | image | other
+    status:           text("status").notNull().default("pending"),       // pending | processed | failed | linked
+    processingNotes:  text("processing_notes"),
+    chunksCount:      integer("chunks_count"),       // future-ready for embeddings
+    linkedAt:         timestamp("linked_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt:        timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
     index("specialist_sources_expert_idx").on(t.expertId),
