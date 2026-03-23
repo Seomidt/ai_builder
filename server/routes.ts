@@ -992,11 +992,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         .where(and(...conditions))
         .limit(limit + 1);
 
-      const hasMore   = rows.length > limit;
-      const members   = hasMore ? rows.slice(0, limit) : rows;
+      const hasMore    = rows.length > limit;
+      const members    = hasMore ? rows.slice(0, limit) : rows;
       const nextCursor = hasMore ? members[members.length - 1].id : null;
 
-      return res.json({ members, nextCursor, total: members.length });
+      return res.json({
+        members,
+        pagination: { hasMore, nextCursor, limit },
+        retrievedAt: new Date().toISOString(),
+      });
     } catch (err) {
       handleError(res, err);
     }
@@ -1023,6 +1027,177 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       });
       if (error) return res.status(400).json({ error_code: "INVITE_FAILED", message: error.message });
       return res.json({ ok: true, email, role: memberRole });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // ─── /api/tenant/departments — CRUD ──────────────────────────────────────────
+
+  // GET /api/tenant/departments — list all departments for the org
+  app.get("/api/tenant/departments", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { db } = await import("./db");
+      const { tenantDepartments } = await import("@shared/schema");
+      const { eq, asc } = await import("drizzle-orm");
+
+      const rows = await db
+        .select()
+        .from(tenantDepartments)
+        .where(eq(tenantDepartments.tenantId, orgId))
+        .orderBy(asc(tenantDepartments.name));
+
+      return res.json({ departments: rows });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // POST /api/tenant/departments — create a department
+  app.post("/api/tenant/departments", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { z } = await import("zod");
+      const schema = z.object({
+        name:        z.string().min(1).max(120),
+        slug:        z.string().min(1).max(80).regex(/^[a-z0-9-]+$/),
+        description: z.string().max(500).optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(422).json({ error_code: "VALIDATION_ERROR", message: "Invalid department data", details: parsed.error.issues });
+      }
+      const { name, slug, description } = parsed.data;
+
+      const { db } = await import("./db");
+      const { tenantDepartments } = await import("@shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const existing = await db
+        .select({ id: tenantDepartments.id })
+        .from(tenantDepartments)
+        .where(and(eq(tenantDepartments.tenantId, orgId), eq(tenantDepartments.slug, slug)))
+        .limit(1);
+      if (existing.length > 0) {
+        return res.status(409).json({ error_code: "SLUG_CONFLICT", message: "Department with this slug already exists" });
+      }
+
+      const [row] = await db
+        .insert(tenantDepartments)
+        .values({ tenantId: orgId, name, slug, description: description ?? null })
+        .returning();
+
+      return res.status(201).json({ department: row });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // DELETE /api/tenant/departments/:id — remove a department
+  app.delete("/api/tenant/departments/:id", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { id } = req.params;
+      const { db } = await import("./db");
+      const { tenantDepartments } = await import("@shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      await db
+        .delete(tenantDepartments)
+        .where(and(eq(tenantDepartments.id, id), eq(tenantDepartments.tenantId, orgId)));
+
+      return res.json({ ok: true });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // ─── /api/tenant/permissions — member permissions ────────────────────────────
+
+  // GET /api/tenant/permissions/:userId — get permissions for a member
+  app.get("/api/tenant/permissions/:userId", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { userId } = req.params;
+      const { db } = await import("./db");
+      const { tenantMemberPermissions } = await import("@shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const rows = await db
+        .select()
+        .from(tenantMemberPermissions)
+        .where(and(eq(tenantMemberPermissions.tenantId, orgId), eq(tenantMemberPermissions.userId, userId)))
+        .limit(1);
+
+      if (rows.length === 0) {
+        return res.json({
+          tenantId: orgId, userId, tenantRole: "member",
+          canAccessAllDepartments: false, allowedDepartmentIds: [],
+          allowedSectionKeys: [], canAccessAllExperts: true, allowedExpertIds: [],
+        });
+      }
+      return res.json(rows[0]);
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  // PUT /api/tenant/permissions/:userId — upsert permissions for a member
+  app.put("/api/tenant/permissions/:userId", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { userId } = req.params;
+      const { z } = await import("zod");
+      const schema = z.object({
+        tenantRole:              z.string().optional(),
+        canAccessAllDepartments: z.boolean().optional(),
+        allowedDepartmentIds:    z.array(z.string()).optional(),
+        allowedSectionKeys:      z.array(z.string()).optional(),
+        canAccessAllExperts:     z.boolean().optional(),
+        allowedExpertIds:        z.array(z.string()).optional(),
+      });
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(422).json({ error_code: "VALIDATION_ERROR", message: "Invalid permission data" });
+      }
+
+      const { db } = await import("./db");
+      const { tenantMemberPermissions } = await import("@shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const existing = await db
+        .select({ id: tenantMemberPermissions.id })
+        .from(tenantMemberPermissions)
+        .where(and(eq(tenantMemberPermissions.tenantId, orgId), eq(tenantMemberPermissions.userId, userId)))
+        .limit(1);
+
+      const values: Record<string, unknown> = {
+        tenantId: orgId, userId, updatedAt: new Date(),
+        ...parsed.data,
+      };
+
+      let row;
+      if (existing.length === 0) {
+        const insertRow = {
+          tenantId:                orgId,
+          userId,
+          tenantRole:              parsed.data.tenantRole              ?? "member",
+          canAccessAllDepartments: parsed.data.canAccessAllDepartments ?? false,
+          allowedDepartmentIds:    parsed.data.allowedDepartmentIds    ?? [],
+          allowedSectionKeys:      parsed.data.allowedSectionKeys      ?? [],
+          canAccessAllExperts:     parsed.data.canAccessAllExperts      ?? true,
+          allowedExpertIds:        parsed.data.allowedExpertIds         ?? [],
+        };
+        [row] = await db.insert(tenantMemberPermissions).values(insertRow).returning();
+      } else {
+        [row] = await db.update(tenantMemberPermissions)
+          .set({ ...parsed.data, updatedAt: new Date() })
+          .where(and(eq(tenantMemberPermissions.tenantId, orgId), eq(tenantMemberPermissions.userId, userId)))
+          .returning();
+      }
+
+      return res.json(row);
     } catch (err) {
       handleError(res, err);
     }

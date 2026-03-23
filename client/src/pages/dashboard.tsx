@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { QUERY_POLICY } from "@/lib/query-policy";
-import { FolderKanban, PlayCircle, Cpu, Plug, Plus, ArrowRight, Building2, Zap } from "lucide-react";
+import { Brain, BookOpen, PlayCircle, Plug, Plus, ArrowRight, Building2, Zap } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -107,23 +107,23 @@ export default function Dashboard() {
         ) : (
           <>
             <StatCard
-              label="Total Projects"
+              label="Datakilder"
               value={data?.projectCount ?? 0}
-              icon={FolderKanban}
+              icon={BookOpen}
               accentClass="bg-primary/12 text-primary"
               barClass="bg-primary"
             />
             <StatCard
-              label="Active Runs"
+              label="Aktive kørseler"
               value={data?.activeRunCount ?? 0}
               icon={PlayCircle}
               accentClass="bg-green-500/12 text-green-400"
               barClass="bg-green-500"
             />
             <StatCard
-              label="Architectures"
+              label="AI Eksperter"
               value={data?.architectureCount ?? 0}
-              icon={Cpu}
+              icon={Brain}
               accentClass="bg-secondary/12 text-secondary"
               barClass="bg-secondary"
             />
@@ -141,19 +141,19 @@ export default function Dashboard() {
       {/* Recent lists */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
-        {/* Recent Projects */}
+        {/* Seneste datakilder */}
         <Card className="bg-card border-card-border">
           <CardHeader className="flex flex-row items-center justify-between pb-3 pt-5">
             <CardTitle className="text-sm font-semibold text-card-foreground flex items-center gap-2">
-              <FolderKanban className="w-3.5 h-3.5 text-primary" />
-              Recent Projects
+              <BookOpen className="w-3.5 h-3.5 text-primary" />
+              Seneste datakilder
             </CardTitle>
             <Link
-              href="/projects"
+              href="/viden-data"
               className="flex items-center gap-1 text-xs text-primary hover:opacity-80 transition-opacity font-medium"
               data-testid="link-all-projects"
             >
-              View all <ArrowRight className="w-3 h-3" />
+              Se alle <ArrowRight className="w-3 h-3" />
             </Link>
           </CardHeader>
           <CardContent className="space-y-1.5 pb-5">
@@ -161,17 +161,17 @@ export default function Dashboard() {
               <SkeletonRows count={3} />
             ) : !data?.recentProjects?.length ? (
               <div className="text-center py-8">
-                <FolderKanban className="w-8 h-8 text-muted-foreground/20 mx-auto mb-2" />
-                <p className="text-sm text-muted-foreground">No projects yet</p>
-                <Link href="/projects">
+                <BookOpen className="w-8 h-8 text-muted-foreground/20 mx-auto mb-2" />
+                <p className="text-sm text-muted-foreground">Ingen datakilder endnu</p>
+                <Link href="/viden-data">
                   <Button size="sm" variant="outline" className="mt-3" data-testid="btn-create-first-project">
-                    <Plus className="w-3 h-3 mr-1" /> Create project
+                    <Plus className="w-3 h-3 mr-1" /> Tilføj datakilde
                   </Button>
                 </Link>
               </div>
             ) : (
               data.recentProjects.map((p) => (
-                <Link key={p.id} href={`/projects/${p.id}`}>
+                <Link key={p.id} href={`/viden-data`}>
                   <div
                     data-testid={`project-row-${p.id}`}
                     className="flex items-center justify-between py-2.5 px-3 rounded-lg bg-muted/30 hover:bg-muted/60 border border-transparent hover:border-border/50 transition-all duration-150 cursor-pointer"
@@ -200,14 +200,14 @@ export default function Dashboard() {
           <CardHeader className="flex flex-row items-center justify-between pb-3 pt-5">
             <CardTitle className="text-sm font-semibold text-card-foreground flex items-center gap-2">
               <PlayCircle className="w-3.5 h-3.5 text-primary" />
-              Recent Runs
+              Seneste kørseler
             </CardTitle>
             <Link
-              href="/runs"
+              href="/koerseler"
               className="flex items-center gap-1 text-xs text-primary hover:opacity-80 transition-opacity font-medium"
               data-testid="link-all-runs"
             >
-              View all <ArrowRight className="w-3 h-3" />
+              Se alle <ArrowRight className="w-3 h-3" />
             </Link>
           </CardHeader>
           <CardContent className="space-y-1.5 pb-5">
@@ -249,22 +249,22 @@ export default function Dashboard() {
       {/* Quick Actions */}
       <Card className="bg-card border-card-border">
         <CardHeader className="pb-3 pt-5">
-          <CardTitle className="text-sm font-semibold text-card-foreground">Quick Actions</CardTitle>
+          <CardTitle className="text-sm font-semibold text-card-foreground">Hurtig adgang</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-wrap gap-2 pb-5">
-          <Link href="/projects">
+          <Link href="/viden-data">
             <Button size="sm" data-testid="btn-new-project">
-              <Plus className="w-3.5 h-3.5" /> New Project
+              <Plus className="w-3.5 h-3.5 mr-1" /> Tilføj datakilde
             </Button>
           </Link>
-          <Link href="/architectures">
+          <Link href="/ai-eksperter">
             <Button size="sm" variant="outline" data-testid="btn-new-architecture">
-              <Plus className="w-3.5 h-3.5" /> New Architecture
+              <Plus className="w-3.5 h-3.5 mr-1" /> Opret AI ekspert
             </Button>
           </Link>
-          <Link href="/runs">
+          <Link href="/koerseler">
             <Button size="sm" variant="outline" data-testid="btn-new-run">
-              <Plus className="w-3.5 h-3.5" /> New Run
+              <PlayCircle className="w-3.5 h-3.5 mr-1" /> Se kørseler
             </Button>
           </Link>
         </CardContent>

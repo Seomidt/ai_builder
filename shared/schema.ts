@@ -6497,3 +6497,71 @@ export const insertWaitlistSignupSchema = createInsertSchema(waitlistSignups).om
 });
 export type InsertWaitlistSignup = z.infer<typeof insertWaitlistSignupSchema>;
 export type WaitlistSignup = typeof waitlistSignups.$inferSelect;
+
+// ─── 7. Tenant RBAC extensions ────────────────────────────────────────────────
+
+// 7.1 Departments
+export const tenantDepartments = pgTable(
+  "tenant_departments",
+  {
+    id:           text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId:     text("tenant_id").notNull(),
+    name:         text("name").notNull(),
+    slug:         text("slug").notNull(),
+    description:  text("description"),
+    createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt:    timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tdept_tenant_idx").on(t.tenantId),
+    uniqueIndex("tdept_tenant_slug_idx").on(t.tenantId, t.slug),
+  ],
+);
+export const insertTenantDepartmentSchema = createInsertSchema(tenantDepartments).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTenantDepartment = z.infer<typeof insertTenantDepartmentSchema>;
+export type TenantDepartment = typeof tenantDepartments.$inferSelect;
+
+// 7.2 Member permissions (one row per org user — extends tenant_memberships)
+export const tenantMemberPermissions = pgTable(
+  "tenant_member_permissions",
+  {
+    id:                      text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId:                text("tenant_id").notNull(),
+    userId:                  text("user_id").notNull(),
+    tenantRole:              text("tenant_role").notNull().default("member"),
+    canAccessAllDepartments: boolean("can_access_all_departments").notNull().default(false),
+    allowedDepartmentIds:    text("allowed_department_ids").array().notNull().default([]),
+    allowedSectionKeys:      text("allowed_section_keys").array().notNull().default([]),
+    canAccessAllExperts:     boolean("can_access_all_experts").notNull().default(true),
+    allowedExpertIds:        text("allowed_expert_ids").array().notNull().default([]),
+    createdAt:               timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt:               timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tmperms_tenant_idx").on(t.tenantId),
+    uniqueIndex("tmperms_tenant_user_idx").on(t.tenantId, t.userId),
+  ],
+);
+export const insertTenantMemberPermissionSchema = createInsertSchema(tenantMemberPermissions).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTenantMemberPermission = z.infer<typeof insertTenantMemberPermissionSchema>;
+export type TenantMemberPermission = typeof tenantMemberPermissions.$inferSelect;
+
+// 7.3 Member ↔ Department assignment (join table)
+export const tenantMemberDepartments = pgTable(
+  "tenant_member_departments",
+  {
+    id:           text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId:     text("tenant_id").notNull(),
+    userId:       text("user_id").notNull(),
+    departmentId: text("department_id").notNull().references(() => tenantDepartments.id, { onDelete: "cascade" }),
+    assignedAt:   timestamp("assigned_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("tmd_tenant_user_idx").on(t.tenantId, t.userId),
+    index("tmd_dept_idx").on(t.departmentId),
+    uniqueIndex("tmd_user_dept_idx").on(t.userId, t.departmentId),
+  ],
+);
+export const insertTenantMemberDepartmentSchema = createInsertSchema(tenantMemberDepartments).omit({ id: true, assignedAt: true });
+export type InsertTenantMemberDepartment = z.infer<typeof insertTenantMemberDepartmentSchema>;
+export type TenantMemberDepartment = typeof tenantMemberDepartments.$inferSelect;
