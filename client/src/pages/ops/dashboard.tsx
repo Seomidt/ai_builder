@@ -178,7 +178,7 @@ export default function OpsDashboard() {
         <SummaryCard
           label="Weekly Events"
           icon={TrendingUp}
-          value={isLoading ? "…" : (ops?.totalEventsLast7d.toLocaleString() ?? "—")}
+          value={isLoading ? "…" : (ops?.totalEventsLast7d?.toLocaleString() ?? "—")}
           color="bg-secondary/12 text-secondary"
           barColor="bg-secondary"
           testId="events"
@@ -187,7 +187,7 @@ export default function OpsDashboard() {
         <SummaryCard
           label="AI Cost (7d)"
           icon={DollarSign}
-          value={isLoading ? "…" : (ops ? `$${ops.aiCostUsd.toFixed(2)}` : "—")}
+          value={isLoading ? "…" : (ops ? `$${(ops.aiCostUsd ?? 0).toFixed(2)}` : "—")}
           color="bg-green-500/12 text-green-400"
           barColor="bg-green-400"
           testId="cost"
