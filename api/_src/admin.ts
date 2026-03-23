@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { authenticate } from "./_lib/auth";
 import { json, err, pathSegments, parseUrl, readBody } from "./_lib/response";
 import { dbList, dbGet, dbUpdate } from "./_lib/db";
+import { getPlatformHealth } from "./_lib/integrations-health";
 
 const _FB_URL  = "https://jneoimqidmkhikvusxak.supabase.co";
 const _FB_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpuZW9pbXFpZG1raGlrdnVzeGFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxMzcxNTgsImV4cCI6MjA4ODcxMzE1OH0.CPdFKA1jfs7OAfHCm49J7_gl3GrA2b7WLmbKWzhoY8M";
@@ -129,6 +130,20 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     // ── GET /api/admin/health ──────────────────────────────────────────────────
     if (segs[0] === "health" && method === "GET") {
       return json(res, { status: "ok", timestamp: new Date().toISOString() });
+    }
+
+    // ── GET /api/admin/integrations/health ────────────────────────────────────
+    if (segs[0] === "integrations" && segs[1] === "health" && method === "GET") {
+      const forceRefresh = u.searchParams.get("refresh") === "true";
+      const report = await getPlatformHealth(forceRefresh);
+      res.setHeader("Cache-Control", "private, max-age=30, stale-while-revalidate=60");
+      return json(res, report);
+    }
+
+    // ── POST /api/admin/integrations/health/invalidate ────────────────────────
+    if (segs[0] === "integrations" && segs[1] === "health" && segs[2] === "invalidate" && method === "POST") {
+      const report = await getPlatformHealth(true);
+      return json(res, report);
     }
 
     // ── GET /api/admin/integrations/status ────────────────────────────────────
