@@ -30,13 +30,21 @@ async function supabaseQuery(table: string, params: Record<string, string>): Pro
   return res.json() as Promise<unknown[]>;
 }
 
+// Hardcoded Supabase fallback — same values used in client auth.ts
+const SUPABASE_URL_FALLBACK = "https://jneoimqidmkhikvusxak.supabase.co";
+const SUPABASE_ANON_FALLBACK = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpuZW9pbXFpZG1raGlrdnVzeGFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxMzcxNTgsImV4cCI6MjA4ODcxMzE1OH0.CPdFKA1jfs7OAfHCm49J7_gl3GrA2b7WLmbKWzhoY8M";
+
 function getPlatformIntegrationStatus(): Record<string, { configured: boolean; env?: string }> {
+  const supabaseUrl  = (process.env.SUPABASE_URL  || "").trim() || SUPABASE_URL_FALLBACK;
+  const supabaseAnon = (process.env.SUPABASE_ANON_KEY || "").trim() || SUPABASE_ANON_FALLBACK;
   return {
-    openai:     { configured: !!process.env.OPENAI_API_KEY,         env: "OPENAI_API_KEY" },
-    supabase:   { configured: !!process.env.SUPABASE_URL,           env: "SUPABASE_URL" },
-    cloudflare: { configured: !!process.env.CF_R2_ACCOUNT_ID,       env: "CF_R2_ACCOUNT_ID" },
-    github:     { configured: !!process.env.GITHUB_TOKEN,           env: "GITHUB_TOKEN" },
-    vercel:     { configured: !!process.env.VERCEL_TOKEN,           env: "VERCEL_TOKEN" },
+    openai:     { configured: !!process.env.OPENAI_API_KEY?.trim(),          env: "OPENAI_API_KEY" },
+    anthropic:  { configured: !!process.env.ANTHROPIC_API_KEY?.trim(),       env: "ANTHROPIC_API_KEY" },
+    gemini:     { configured: !!process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim(), env: "GOOGLE_GENERATIVE_AI_API_KEY" },
+    supabase:   { configured: !!(supabaseUrl && supabaseAnon),               env: "SUPABASE_URL" },
+    github:     { configured: !!(process.env.GITHUB_TOKEN?.trim() || process.env.GITHUB_PERSONAL_ACCESS_TOKEN?.trim()), env: "GITHUB_TOKEN" },
+    cloudflare: { configured: !!(process.env.CF_R2_ACCOUNT_ID?.trim() || process.env.CF_API_TOKEN?.trim()), env: "CF_R2_ACCOUNT_ID" },
+    vercel:     { configured: !!process.env.VERCEL_TOKEN?.trim(),             env: "VERCEL_TOKEN" },
   };
 }
 
@@ -128,11 +136,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       const raw = getPlatformIntegrationStatus();
 
       const PROVIDER_META: Record<string, { label: string; category: "ai" | "platform" | "infra"; requiredEnvVars: string[]; docsHint?: string }> = {
-        openai:     { label: "OpenAI",     category: "ai",       requiredEnvVars: ["OPENAI_API_KEY"],    docsHint: "Set OPENAI_API_KEY in your secrets manager." },
-        supabase:   { label: "Supabase",   category: "platform", requiredEnvVars: ["SUPABASE_URL", "SUPABASE_ANON_KEY"], docsHint: "Set SUPABASE_URL and SUPABASE_ANON_KEY." },
-        cloudflare: { label: "Cloudflare", category: "infra",    requiredEnvVars: ["CF_R2_ACCOUNT_ID", "CF_R2_ACCESS_KEY_ID", "CF_R2_SECRET_ACCESS_KEY"], docsHint: "Set Cloudflare R2 credentials." },
-        github:     { label: "GitHub",     category: "platform", requiredEnvVars: ["GITHUB_TOKEN"],      docsHint: "Set GITHUB_TOKEN with repo access." },
-        vercel:     { label: "Vercel",     category: "infra",    requiredEnvVars: ["VERCEL_TOKEN"],       docsHint: "Set VERCEL_TOKEN from the Vercel dashboard." },
+        openai:     { label: "OpenAI",           category: "ai",       requiredEnvVars: ["OPENAI_API_KEY"],                docsHint: "Set OPENAI_API_KEY in your secrets manager." },
+        anthropic:  { label: "Anthropic (Claude)",category: "ai",       requiredEnvVars: ["ANTHROPIC_API_KEY"],             docsHint: "Set ANTHROPIC_API_KEY from console.anthropic.com." },
+        gemini:     { label: "Google Gemini",    category: "ai",       requiredEnvVars: ["GOOGLE_GENERATIVE_AI_API_KEY"],  docsHint: "Set GOOGLE_GENERATIVE_AI_API_KEY from Google AI Studio." },
+        supabase:   { label: "Supabase",         category: "platform", requiredEnvVars: ["SUPABASE_URL", "SUPABASE_ANON_KEY"], docsHint: "Set SUPABASE_URL and SUPABASE_ANON_KEY." },
+        github:     { label: "GitHub",           category: "platform", requiredEnvVars: ["GITHUB_TOKEN"],                  docsHint: "Set GITHUB_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN with repo access." },
+        cloudflare: { label: "Cloudflare R2",    category: "infra",    requiredEnvVars: ["CF_R2_ACCOUNT_ID", "CF_R2_ACCESS_KEY_ID", "CF_R2_SECRET_ACCESS_KEY"], docsHint: "Set Cloudflare R2 credentials." },
+        vercel:     { label: "Vercel",           category: "infra",    requiredEnvVars: ["VERCEL_TOKEN"],                  docsHint: "Set VERCEL_TOKEN from the Vercel dashboard." },
       };
 
       const providers = Object.entries(raw).map(([key, info]) => {
