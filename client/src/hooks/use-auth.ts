@@ -53,6 +53,12 @@ async function fetchEnrichment(token: string | null): Promise<BackendEnrichment 
   }
 }
 
+// Platform admins — email-based fallback when backend enrichment is unavailable
+const PLATFORM_ADMIN_EMAILS = new Set(
+  (import.meta.env.VITE_PLATFORM_ADMIN_EMAILS ?? "seomidt@gmail.com")
+    .split(",").map((e: string) => e.trim().toLowerCase()).filter(Boolean),
+);
+
 // Lockdown: checked client-side from env var
 const LOCKDOWN_ENABLED   = import.meta.env.VITE_LOCKDOWN_ENABLED === "true";
 const LOCKDOWN_ALLOWLIST = new Set(
@@ -124,13 +130,16 @@ export function useAuth() {
     email !== "" &&
     !LOCKDOWN_ALLOWLIST.has(email);
 
-  // User object: JWT claims first, enriched by backend if available
+  // User object: backend enrichment → Supabase metadata → email-based fallback
+  const isPlatformAdmin = PLATFORM_ADMIN_EMAILS.has(email);
   const user: SessionUser | null = isAuthed && session
     ? {
         id:             session.user.id,
         email:          session.user.email,
         organizationId: enrichment?.organizationId ?? "blissops-main",
-        role:           enrichment?.role ?? session.user.user_metadata?.role ?? "member",
+        role:           enrichment?.role
+                          ?? session.user.user_metadata?.role
+                          ?? (isPlatformAdmin ? "platform_admin" : "member"),
       }
     : null;
 
