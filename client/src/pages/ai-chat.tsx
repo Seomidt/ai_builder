@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, apiRequestForm } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -459,14 +459,39 @@ export default function AiChatPage() {
 
   const chatMutation = useMutation({
     mutationFn: async (payload: { text: string; attachments: AttachedFile[] }) => {
+      // ── Step A: Ekstraher dokumentindhold ──────────────────────────────────
+      // Dokumenter (PDF, TXT, CSV, m.fl.) uploades til /api/extract som multipart.
+      // Billedfiler sendes ikke til extract (ikke understøttet endnu).
+      let documentContext: any[] = [];
+      const docFiles = payload.attachments.filter(a => a.type === "document");
+
+      if (docFiles.length > 0) {
+        const form = new FormData();
+        docFiles.forEach(a => form.append("file", a.file, a.file.name));
+        try {
+          const extractRes = await apiRequestForm("POST", "/api/extract", form);
+          const extractData = await extractRes.json() as { results: any[] };
+          documentContext = extractData.results ?? [];
+        } catch (e) {
+          console.warn("[ai-chat] extract fejlede:", e);
+          // Non-fatal: fortsæt uden dokument-kontekst
+        }
+      }
+
+      // ── Step B: Byg besked-tekst (filnavne som display) ────────────────────
       let fullMessage = payload.text;
       if (payload.attachments.length > 0) {
-        const fileList = payload.attachments.map(a => `[${a.type === "document" ? "Dokument" : a.type === "image" ? "Billede" : "Video"}: ${a.file.name}]`).join(", ");
+        const fileList = payload.attachments.map(a =>
+          `[${a.type === "document" ? "Dokument" : a.type === "image" ? "Billede" : "Video"}: ${a.file.name}]`
+        ).join(", ");
         fullMessage = `${fullMessage}\n\nVedhæftede filer: ${fileList}`;
       }
+
+      // ── Step C: Send til /api/chat med dokument-kontekst ───────────────────
       const res = await apiRequest("POST", "/api/chat", {
         message: fullMessage,
         conversation_id: conversationId ?? null,
+        document_context: documentContext,
         context: {
           document_ids: [],
           preferred_expert_id: null,
