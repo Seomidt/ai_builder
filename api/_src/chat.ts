@@ -353,58 +353,114 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     ].filter(Boolean).join("\n");
   }
 
-  // ── Step 5: Byg messages-array (TASK 2 — force document into user message) ─
-  const messages: OAIMessage[] = [{ role: "system", content: systemPrompt }];
-
-  if (docCtx.length > 0) {
-    // Dokument-indhold som separat user-besked FØR spørgsmålet
-    const docBlock = docCtx.map(d =>
-      `FILNAVN: ${d.filename}\nTEGN: ${d.extracted_text.length}\n\n${d.extracted_text}`
-    ).join("\n\n---\n\n");
-
-    messages.push({
-      role:    "user",
-      content: `=== DOKUMENTINDHOLD START ===\n\n${docBlock}\n\n=== DOKUMENTINDHOLD SLUT ===\n\nOvenstående er det fulde ekstraherede indhold fra de uploadede dokumenter. Brug dette som grundlag for din analyse.`,
-    });
-    messages.push({
-      role:    "assistant",
-      content: "Jeg har læst og forstår dokumentindholdet. Jeg er klar til at analysere det specifikt baseret på den faktiske tekst.",
-    });
-  }
-
-  // Selve bruger-spørgsmålet (UDEN fil-navne-tekst — det forvirrer modellen)
-  const cleanMessage = message.replace(/\n\nVedhæftede filer:.*$/s, "").trim();
-  messages.push({ role: "user", content: cleanMessage });
-
-  // TASK 4 — log endelig prompt-størrelse
-  const totalPromptChars = messages.reduce((s, m) => s + m.content.length, 0);
-  console.log(`[chat] final_prompt_chars=${totalPromptChars} messages=${messages.length} model=gpt-4o`);
-
-  // ── Step 6: Kald OpenAI ───────────────────────────────────────────────────
-  let aiResult: Awaited<ReturnType<typeof callOpenAI>>;
-  try {
-    aiResult = await callOpenAI(messages);
-  } catch (e) {
-    console.error("[chat] OpenAI call failed:", (e as Error).message);
-    return err(res, 502, "AI_EXECUTION_FAILED",
-      "AI-eksperten kunne ikke svare i øjeblikket. Prøv igen om lidt.");
-  }
-
-  if (!aiResult.text) {
-    return err(res, 502, "AI_EMPTY_RESPONSE", "AI-eksperten returnerede et tomt svar.");
-  }
-
-  // ── Step 5.5: Grounding-validering (dokument-mode) ────────────────────────
-  let finalAnswer = aiResult.text;
-  const combinedDocText = docCtx.map(d => d.extracted_text).join(" ");
-  if (docCtx.length > 0) {
-    finalAnswer = validateGrounding(aiResult.text, combinedDocText);
-    console.log(`[chat] GROUNDED_ANSWER_LEN=${finalAnswer.length}`);
-  }
-
-  // ── Step 5: Vurder svar ───────────────────────────────────────────────────
+  // ── Step 5+6: Kald OpenAI ─────────────────────────────────────────────────
+  let finalAnswer: string;
+  let aiLatencyMs: number;
+  let aiPromptTokens   = 0;
+  let aiComplTokens    = 0;
   const warnings: string[] = [];
-  if (finalAnswer.length < 20) warnings.push("Svaret er meget kort — der kan mangle information.");
+
+  if (docCtx.length > 0) {
+    // ── DOKUMENT-MODE: Structured JSON output (100% grounded) ─────────────
+    // Modellen TVINGES via response_format:json_object til at returnere enten:
+    //   {"found":true,  "quote":"<exact excerpt>",      "answer":"<direct answer>"}
+    //   {"found":false, "answer":"Jeg kan ikke finde det i det uploadede dokument."}
+    // Ingen prompt-engineering kan slå dette — det er strukturelt håndhævet.
+
+    const docText = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
+    console.log(`[chat] DOC_MODE chars=${docText.length} first200="${docText.slice(0,200).replace(/\n/g," ")}"`);
+
+    const docSystemPrompt = [
+      "Du er et præcisionssystem der KUN besvarer spørgsmål ud fra det vedlagte dokument.",
+      "Du SKAL altid svare med valid JSON i ét af disse to formater:",
+      "",
+      'Format 1 — svar FUNDET i dokumentet:',
+      '{"found": true, "quote": "<ordret citat fra dokumentet der støtter svaret>", "answer": "<kort direkte svar>"}',
+      "",
+      'Format 2 — svar IKKE fundet i dokumentet:',
+      '{"found": false, "answer": "Jeg kan ikke finde det i det uploadede dokument."}',
+      "",
+      "REGLER:",
+      "- quote skal være ordret tekst fra dokumentet",
+      "- answer må IKKE bruge generel viden — kun dokumentet",
+      "- Svar ALTID på dansk",
+      "- INGEN andre formater end ovenstående JSON er tilladt",
+    ].join("\n");
+
+    const t0 = Date.now();
+    const docRes = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        temperature: 0.0,
+        max_tokens: 600,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: docSystemPrompt },
+          { role: "user",   content: `DOKUMENT:\n\n${docText}\n\nSPØRGSMÅL: ${message}` },
+        ],
+      }),
+    });
+    aiLatencyMs = Date.now() - t0;
+
+    if (!docRes.ok) {
+      const txt = await docRes.text().catch(() => docRes.statusText);
+      console.error(`[chat] DOC_MODE OpenAI error ${docRes.status}: ${txt}`);
+      return err(res, 502, "AI_EXECUTION_FAILED", "AI-eksperten kunne ikke svare i øjeblikket.");
+    }
+
+    const docData = await docRes.json() as {
+      choices: Array<{ message: { content: string } }>;
+      usage?: { prompt_tokens: number; completion_tokens: number };
+    };
+    aiPromptTokens = docData.usage?.prompt_tokens ?? 0;
+    aiComplTokens  = docData.usage?.completion_tokens ?? 0;
+
+    const rawJson = docData.choices[0]?.message?.content ?? "{}";
+    console.log(`[chat] DOC_MODE raw_json="${rawJson.slice(0,300)}"`);
+
+    let parsed: { found: boolean; quote?: string; answer?: string };
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch {
+      console.error("[chat] DOC_MODE JSON parse failed — using safe response");
+      parsed = { found: false, answer: "Jeg kan ikke finde det i det uploadede dokument." };
+    }
+
+    if (parsed.found && parsed.quote && parsed.answer) {
+      finalAnswer = `${parsed.answer}\n\n*Fra dokumentet: "${parsed.quote}"*`;
+      console.log(`[chat] DOC_MODE FOUND answer="${finalAnswer.slice(0,100)}"`);
+    } else {
+      finalAnswer = "Jeg kan ikke finde det i det uploadede dokument.";
+      console.log("[chat] DOC_MODE NOT_FOUND");
+    }
+  } else {
+    // ── NORMAL MODE: fri tekstbesvarelse ──────────────────────────────────
+    const cleanMessage = message.replace(/\n\nVedhæftede filer:.*$/s, "").trim();
+    const messages: OAIMessage[] = [
+      { role: "system", content: systemPrompt },
+      { role: "user",   content: cleanMessage },
+    ];
+    console.log(`[chat] NORMAL_MODE chars=${systemPrompt.length + cleanMessage.length}`);
+
+    let aiResult: Awaited<ReturnType<typeof callOpenAI>>;
+    try {
+      aiResult = await callOpenAI(messages);
+    } catch (e) {
+      console.error("[chat] OpenAI call failed:", (e as Error).message);
+      return err(res, 502, "AI_EXECUTION_FAILED", "AI-eksperten kunne ikke svare i øjeblikket.");
+    }
+    if (!aiResult.text) return err(res, 502, "AI_EMPTY_RESPONSE", "AI-eksperten returnerede et tomt svar.");
+    finalAnswer   = aiResult.text;
+    aiLatencyMs   = aiResult.latencyMs;
+    aiPromptTokens   = aiResult.promptTokens;
+    aiComplTokens    = aiResult.completionTokens;
+  }
+
+  // ── Vurder svar ───────────────────────────────────────────────────────────
+  if (finalAnswer.length < 5) warnings.push("Svaret er meget kort.");
+  const combinedDocText = docCtx.map(d => d.extracted_text).join(" ");
   const confidence  = deriveConfidence(finalAnswer, warnings, docCtx.length > 0 ? combinedDocText : undefined);
   const needsManual = confidence === "low";
 
@@ -418,10 +474,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       userMessage:      message,
       answer:           finalAnswer,
       existingConvId:   body.conversation_id ?? null,
-      latencyMs:        aiResult.latencyMs,
+      latencyMs:        aiLatencyMs,
       confidence,
-      promptTokens:     aiResult.promptTokens,
-      completionTokens: aiResult.completionTokens,
+      promptTokens:     aiPromptTokens,
+      completionTokens: aiComplTokens,
     });
   } catch (e) {
     // Persistence failure must NOT break the chat response
@@ -436,7 +492,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     used_sources:        [],
     used_rules:          [],
     warnings,
-    latency_ms:          aiResult.latencyMs,
+    latency_ms:          aiLatencyMs,
     confidence_band:     confidence,
     needs_manual_review: needsManual,
     routing_explanation: routingExplanation,
