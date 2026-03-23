@@ -3,6 +3,7 @@ import { z } from "zod";
 import { db } from "../db";
 import { sql } from "drizzle-orm";
 import { getPlatformIntegrationsStatus } from "../lib/integrations/platform-integrations-status";
+import { getPlatformHealth } from "../lib/integrations/integrations-health";
 
 import { runAiOpsQuery } from "../lib/ai-ops/orchestrator";
 import { generateWeeklyDigest } from "../lib/ai-ops/digest";
@@ -53,6 +54,27 @@ export function registerAdminRoutes(app: Express): void {
     try {
       const report = getPlatformIntegrationsStatus();
       res.set("Cache-Control", "private, max-age=60, stale-while-revalidate=120");
+      res.json(report);
+    } catch (err: unknown) {
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
+    }
+  });
+
+  // ── Enterprise Integrations Health (live API checks, 60s cache) ───────────
+  app.get("/api/admin/integrations/health", async (req: Request, res: Response) => {
+    const forceRefresh = req.query.refresh === "true";
+    try {
+      const report = await getPlatformHealth(forceRefresh);
+      res.set("Cache-Control", "private, max-age=30, stale-while-revalidate=60");
+      res.json(report);
+    } catch (err: unknown) {
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
+    }
+  });
+
+  app.post("/api/admin/integrations/health/invalidate", async (_req: Request, res: Response) => {
+    try {
+      const report = await getPlatformHealth(true);
       res.json(report);
     } catch (err: unknown) {
       adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
