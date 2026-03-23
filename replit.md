@@ -122,3 +122,35 @@ tenant_member_permissions / tenant_member_departments → RBAC
 - **Test engine**: supports `version: "draft"|"live"` — loads from snapshot, falls back to live fields
 - **Prompt builder**: added `buildExpertPromptFromSnapshot()` + `buildVersionSnapshot()` for deterministic snapshot-based prompts
 - **Routes added**: POST /promote, POST /unarchive, GET /versions, PUT /rules/:ruleId, upgraded /test
+
+## Productization Pass — Phase 3
+
+### Create Flow Cleanup (Part 2)
+- **Slug fjernet fra UI**: genereres server-side (`name` → URL-safe base + `Date.now().toString(36)`)
+- **Sprog fjernet fra UI**: hardcoded "da" server-side — aldrig eksponeret som tenant-valg
+- **Department conditional**: skjul hvis 0, auto-assign hvis 1, vis dropdown hvis >1
+- **AI-suggest**: fjernet `lang` parameter fra Step2 — altid platform-styret
+- **Server POST /api/experts**: `CreateArchitectureSchema` gør slug valgfrit
+
+### RAG Wiring (Part 4)
+- **Expert test parallel retrieval**: `runRetrieval()` kører parallelt med AI-kald via `Promise.all`
+- **Graceful fallback**: `.catch(() => null)` — test virker selvom retrieval er utilgængeligt
+- **Test svar**: `retrieved_chunks`, `retrieval_strategy`, `retrieval_latency_ms` returneres
+- **UI**: semantisk vs. metadata kildeskelnen, relevance score (%) og "Semantisk" badge
+
+### Content Authenticity (Part 7)
+- **`document_risk_scores` tabel oprettet** i DB via direkte SQL
+- **Route**: `POST /api/experts/:id/sources/:sourceId/analyze-authenticity`
+  - Heuristisk scoring (deterministic, ingen ML-dependency)
+  - Signals: `very_short_name`, `not_yet_processed`, `image_source_unverifiable`, `test_or_demo_name`, `ingestion_failed`
+  - Gem i `document_risk_scores` (append-only)
+- **UI**: ShieldCheck knap pr. kilde i Datakilder-fane → AuthenticityBadge (lav/medium/høj risiko)
+- **Produkt-navn**: "Kildeautenticitetssignaler"
+
+### Navigation & Routes (Part 5)
+- **TenantSidebar**: tilføjet `Brug & Forbrug` (/brug) og `Indstillinger` (/indstillinger)
+- **TenantApp.tsx**: `/brug` → WorkspaceUsage, `/indstillinger` → WorkspaceSettings
+
+### Dansk UX (Part 11)
+- `tenant/usage.tsx`: overskrift, periode-knapper, kort-labels → dansk
+- `tenant/settings.tsx`: overskrift, gem-knap, sektionsnavne → dansk
