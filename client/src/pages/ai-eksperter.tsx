@@ -106,13 +106,11 @@ interface TestResult {
 
 const step1Schema = z.object({
   name:         z.string().min(1, "Navn er påkrævet"),
-  slug:         z.string().min(1, "Slug er påkrævet").regex(/^[a-z0-9-]+$/, "Kun små bogstaver, tal og bindestreger"),
   description:  z.string().optional(),
   goal:         z.string().optional(),
   instructions: z.string().optional(),
   outputStyle:  z.string().optional(),
   departmentId: z.string().optional(),
-  language:     z.string().default("da"),
 });
 type Step1Values = z.infer<typeof step1Schema>;
 
@@ -134,14 +132,6 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
   image:    "Billede",
   other:    "Andet",
 };
-
-const LANGUAGE_OPTIONS = [
-  { value: "da", label: "Dansk" },
-  { value: "en", label: "Engelsk" },
-  { value: "de", label: "Tysk" },
-  { value: "sv", label: "Svensk" },
-  { value: "no", label: "Norsk" },
-];
 
 const OUTPUT_STYLE_OPTIONS = [
   { value: "advisory", label: "Rådgivende" },
@@ -299,19 +289,17 @@ function ExpertCard({ expert, depts, onArchive }: {
 // ─── Step 1: Grundoplysninger ──────────────────────────────────────────────────
 
 function Step1({ form, depts }: { form: ReturnType<typeof useForm<Step1Values>>; depts: DeptRow[] }) {
-  const watchedName = form.watch("name");
+  // Auto-assign department if exactly one exists
   useEffect(() => {
-    if (!watchedName) return;
-    const slug = watchedName.toLowerCase()
-      .replace(/[æ]/g, "ae").replace(/[ø]/g, "oe").replace(/[å]/g, "aa")
-      .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    form.setValue("slug", slug, { shouldValidate: false });
-  }, [watchedName]);
+    if (depts.length === 1) {
+      form.setValue("departmentId", depts[0].id, { shouldValidate: false });
+    }
+  }, [depts]);
 
   return (
     <div className="space-y-4">
       <p className="text-sm text-muted-foreground">
-        Angiv ekspertens grundlæggende identitet og AI-konfiguration.
+        Angiv ekspertens grundlæggende identitet og formål.
       </p>
       <FormField control={form.control} name="name" render={({ field }) => (
         <FormItem>
@@ -347,59 +335,46 @@ function Step1({ form, depts }: { form: ReturnType<typeof useForm<Step1Values>>;
           <p className="text-xs text-muted-foreground/60">Disse instruktioner gælder for alle ekspertens svar.</p>
         </FormItem>
       )} />
-      <div className="grid grid-cols-2 gap-3">
-        <FormField control={form.control} name="departmentId" render={({ field }) => (
+      <div className={depts.length > 1 ? "grid grid-cols-2 gap-3" : ""}>
+        {depts.length > 1 && (
+          <FormField control={form.control} name="departmentId" render={({ field }) => (
+            <FormItem>
+              <FormLabel>Afdeling</FormLabel>
+              <Select onValueChange={field.onChange} value={field.value ?? ""}>
+                <FormControl>
+                  <SelectTrigger data-testid="select-expert-department"><SelectValue placeholder="Vælg afdeling" /></SelectTrigger>
+                </FormControl>
+                <SelectContent>
+                  <SelectItem value="none">Ingen afdeling</SelectItem>
+                  {depts.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </FormItem>
+          )} />
+        )}
+        <FormField control={form.control} name="outputStyle" render={({ field }) => (
           <FormItem>
-            <FormLabel>Afdeling</FormLabel>
+            <FormLabel>Outputstil</FormLabel>
             <Select onValueChange={field.onChange} value={field.value ?? ""}>
               <FormControl>
-                <SelectTrigger data-testid="select-expert-department"><SelectValue placeholder="Vælg" /></SelectTrigger>
+                <SelectTrigger data-testid="select-expert-outputstyle"><SelectValue placeholder="Vælg" /></SelectTrigger>
               </FormControl>
               <SelectContent>
-                <SelectItem value="none">Ingen</SelectItem>
-                {depts.map((d) => <SelectItem key={d.id} value={d.id}>{d.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </FormItem>
-        )} />
-        <FormField control={form.control} name="language" render={({ field }) => (
-          <FormItem>
-            <FormLabel>Sprog</FormLabel>
-            <Select onValueChange={field.onChange} value={field.value}>
-              <FormControl>
-                <SelectTrigger data-testid="select-expert-language"><SelectValue /></SelectTrigger>
-              </FormControl>
-              <SelectContent>
-                {LANGUAGE_OPTIONS.map((l) => <SelectItem key={l.value} value={l.value}>{l.label}</SelectItem>)}
+                {OUTPUT_STYLE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
               </SelectContent>
             </Select>
           </FormItem>
         )} />
       </div>
-      <FormField control={form.control} name="outputStyle" render={({ field }) => (
-        <FormItem>
-          <FormLabel>Outputstil</FormLabel>
-          <Select onValueChange={field.onChange} value={field.value ?? ""}>
-            <FormControl>
-              <SelectTrigger data-testid="select-expert-outputstyle"><SelectValue placeholder="Vælg" /></SelectTrigger>
-            </FormControl>
-            <SelectContent>
-              {OUTPUT_STYLE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
-            </SelectContent>
-          </Select>
-        </FormItem>
-      )} />
+      {depts.length === 1 && (
+        <p className="text-xs text-muted-foreground/50" data-testid="text-dept-auto-assigned">
+          Afdeling: <span className="font-medium text-muted-foreground">{depts[0].name}</span> (automatisk tilknyttet)
+        </p>
+      )}
       <div className="rounded-lg border border-border/30 bg-muted/10 px-3.5 py-2.5 flex items-center gap-2">
         <Brain className="w-3.5 h-3.5 text-primary/50 shrink-0" />
-        <p className="text-xs text-muted-foreground/60">AI runtime styres automatisk af BlissOps — ingen modelvalg nødvendigt.</p>
+        <p className="text-xs text-muted-foreground/60">AI runtime styres automatisk af BlissOps — sprog og model bestemmes ud fra din organisations indstillinger.</p>
       </div>
-      <FormField control={form.control} name="slug" render={({ field }) => (
-        <FormItem>
-          <FormLabel>Slug (auto-genereret)</FormLabel>
-          <FormControl><Input className="font-mono text-sm" data-testid="input-expert-slug" {...field} /></FormControl>
-          <FormMessage />
-        </FormItem>
-      )} />
     </div>
   );
 }
@@ -408,14 +383,13 @@ function Step1({ form, depts }: { form: ReturnType<typeof useForm<Step1Values>>;
 
 function Step2({ suggestion, onSuggest, onAccept, isLoading, form }: {
   suggestion:  AiSuggestion | null;
-  onSuggest:   (raw: string, dept?: string, lang?: string) => void;
+  onSuggest:   (raw: string, dept?: string) => void;
   onAccept:    (s: AiSuggestion) => void;
   isLoading:   boolean;
   form:        ReturnType<typeof useForm<Step1Values>>;
 }) {
   const [raw, setRaw] = useState("");
   const dept = form.watch("departmentId");
-  const lang = form.watch("language");
 
   return (
     <div className="space-y-4">
@@ -433,7 +407,7 @@ function Step2({ suggestion, onSuggest, onAccept, isLoading, form }: {
         <Button
           type="button"
           variant="outline"
-          onClick={() => onSuggest(raw, dept || undefined, lang)}
+          onClick={() => onSuggest(raw, dept || undefined)}
           disabled={!raw.trim() || isLoading}
           className="w-full border-primary/30 text-primary hover:bg-primary/5"
           data-testid="button-ai-suggest"
@@ -797,8 +771,8 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
   const form = useForm<Step1Values>({
     resolver: zodResolver(step1Schema),
     defaultValues: {
-      name: "", slug: "", description: "", goal: "", instructions: "",
-      outputStyle: "advisory", departmentId: "", language: "da",
+      name: "", description: "", goal: "", instructions: "",
+      outputStyle: "advisory", departmentId: "",
     },
   });
 
@@ -823,10 +797,6 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
     form.setValue("description",  s.improved_description);
     form.setValue("instructions", s.instructions);
     if (s.suggested_output_style) form.setValue("outputStyle", s.suggested_output_style);
-    const slug = s.suggested_name.toLowerCase()
-      .replace(/[æ]/g, "ae").replace(/[ø]/g, "oe").replace(/[å]/g, "aa")
-      .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    form.setValue("slug", slug);
     // Pre-fill rules from suggestion
     const newRules = (s.suggested_rules ?? []).map((r) => ({
       type:            r.type as PendingRule["type"],
@@ -843,16 +813,14 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
   const handleCreateAndAdvance = async (values: Step1Values) => {
     setTransitioning(true);
     try {
-      // 1. Create expert (model/provider managed server-side)
+      // 1. Create expert — slug and language resolved server-side
       const profile = await apiRequest<ExpertRow>("POST", "/api/experts", {
         name:         values.name,
-        slug:         values.slug,
         description:  values.description || undefined,
         goal:         values.goal || undefined,
         instructions: values.instructions || undefined,
         outputStyle:  values.outputStyle === "advisory" ? undefined : values.outputStyle,
         departmentId: values.departmentId === "none" ? undefined : values.departmentId || undefined,
-        language:     values.language,
         category:     undefined,
       });
 
@@ -887,7 +855,7 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
 
   const handleNext = async () => {
     if (step === 1) {
-      const valid = await form.trigger(["name", "slug"]);
+      const valid = await form.trigger(["name"]);
       if (!valid) return;
       setStep(2);
     } else if (step === 2) {
@@ -921,10 +889,9 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
                 {step === 2 && (
                   <Step2
                     suggestion={suggestion}
-                    onSuggest={(raw, dept, lang) => aiSuggestMutation.mutate({
+                    onSuggest={(raw, dept) => aiSuggestMutation.mutate({
                       rawDescription: raw,
                       department: dept,
-                      language: lang,
                     })}
                     onAccept={handleAcceptSuggestion}
                     isLoading={aiSuggestMutation.isPending}

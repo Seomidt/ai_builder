@@ -158,12 +158,15 @@ const CreateProjectSchema = z.object({
 });
 
 const CreateArchitectureSchema = z.object({
-  name: z.string().min(1, "name is required"),
-  slug: z.string().min(1, "slug is required").regex(/^[a-z0-9-]+$/, "slug must be lowercase letters, numbers, and hyphens only"),
-  description: z.string().optional(),
-  category: z.string().optional(),
+  name:         z.string().min(1, "name is required"),
+  slug:         z.string().regex(/^[a-z0-9-]+$/, "slug must be lowercase letters, numbers, and hyphens only").optional(),
+  description:  z.string().optional(),
+  category:     z.string().optional(),
   departmentId: z.string().optional(),
-  language: z.string().optional().default("da"),
+  language:     z.string().optional().default("da"),
+  goal:         z.string().optional(),
+  instructions: z.string().optional(),
+  outputStyle:  z.string().optional(),
 });
 
 const CreateSpecialistRuleSchema = z.object({
@@ -482,9 +485,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/experts", async (req, res) => {
     try {
       const body = CreateArchitectureSchema.parse(req.body);
+      const orgId = getOrgId(req);
+
+      // Auto-generate slug server-side if not provided
+      let slug = body.slug;
+      if (!slug || !slug.trim()) {
+        const base = body.name.toLowerCase()
+          .replace(/æ/g, "ae").replace(/ø/g, "oe").replace(/å/g, "aa")
+          .replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "ekspert";
+        slug = `${base}-${Date.now().toString(36)}`;
+      }
+
+      // Language resolved server-side — never exposed as tenant choice
+      // Falls back to "da" (Danish) as platform default for Nordic market
+      const language = "da";
+
       const profile = await createStorageForRequest(req).createArchitectureProfile({
         ...body,
-        organizationId: getOrgId(req),
+        slug,
+        language,
+        organizationId: orgId,
       });
       res.status(201).json(profile);
     } catch (err) { handleError(res, err); }
@@ -810,6 +830,67 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err) { handleError(res, err); }
   });
 
+  // ─── Content Authenticity — Synthetic Content Risk Signals ──────────────────
+
+  app.post("/api/experts/:id/sources/:sourceId/analyze-authenticity", async (req, res) => {
+    try {
+      const { db }              = await import("./db");
+      const { specialistSources, documentRiskScores } = await import("../shared/schema");
+      const { eq, and }         = await import("drizzle-orm");
+      const orgId               = getOrgId(req);
+
+      const [source] = await db.select().from(specialistSources)
+        .where(and(
+          eq(specialistSources.id, req.params.sourceId),
+          eq(specialistSources.expertId, req.params.id),
+          eq(specialistSources.organizationId, orgId),
+        ));
+
+      if (!source) return res.status(404).json({ error: "Source not found" });
+
+      // Heuristic synthetic-content risk signals (deterministic, no ML dependency)
+      const signals: string[] = [];
+      const name = (source.sourceName ?? "").toLowerCase();
+      const type = source.sourceType ?? "document";
+
+      if (!source.sourceName || source.sourceName.length < 4) signals.push("very_short_name");
+      if (source.status === "pending") signals.push("not_yet_processed");
+      if (type === "image") signals.push("image_source_unverifiable");
+      if (name.includes("test") || name.includes("demo") || name.includes("sample")) signals.push("test_or_demo_name");
+      if (source.status === "failed") signals.push("ingestion_failed");
+
+      const hasRisk = signals.length >= 2;
+      const riskScore = Math.min(signals.length * 0.2, 0.9);
+      const riskLevel = riskScore >= 0.6 ? "high_risk" : riskScore >= 0.3 ? "medium_risk" : "low_risk";
+
+      // Store in document_risk_scores (append-only)
+      await db.insert(documentRiskScores).values({
+        tenantId:            orgId,
+        documentId:          source.id,
+        documentVersionId:   null,
+        riskLevel,
+        riskScore:           riskScore.toString(),
+        scoringVersion:      "heuristic-v1",
+        contributingSignals: { signals, sourceType: type, sourceName: source.sourceName },
+      });
+
+      return res.json({
+        source_id:          source.id,
+        source_name:        source.sourceName,
+        risk_score:         riskScore,
+        risk_level:         riskLevel,
+        signals,
+        confidence:         signals.length === 0 ? 0.9 : 0.6,
+        has_risk:           hasRisk,
+        checked_at:         new Date().toISOString(),
+        scoring_version:    "heuristic-v1",
+        notes:              signals.length === 0
+          ? "Ingen risikosignaler opdaget. Kilden fremstår autentisk."
+          : `${signals.length} signal(er) identificeret. Verificér kildens oprindelse.`,
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
   // ─── AI Assist — structured validated output ──────────────────────────────────
 
   app.post("/api/experts/ai-suggest", async (req, res) => {
@@ -955,25 +1036,57 @@ Generate names and content in ${langNote}.`;
         );
       }
 
-      // 3. Execute AI call via platform orchestration
+      // 3. RAG retrieval — parallel with AI call for latency efficiency
       const { runAiCall } = await import("./lib/ai/runner");
-      const aiResult = await runAiCall(
-        { feature: "expert-test", tenantId: orgId, userId, model: builtPrompt.modelName },
-        { systemPrompt: builtPrompt.systemPrompt, userInput: body.prompt },
-      );
+      const { runRetrieval } = await import("./lib/retrieval/retrieval-orchestrator");
+
+      const [aiResult, retrievalResult] = await Promise.all([
+        runAiCall(
+          { feature: "expert-test", tenantId: orgId, userId, model: builtPrompt.modelName },
+          { systemPrompt: builtPrompt.systemPrompt, userInput: body.prompt },
+        ),
+        runRetrieval({ tenantId: orgId, queryText: body.prompt, strategy: "hybrid", topK: 5 })
+          .catch(() => null),
+      ]);
 
       const latencyMs = Date.now() - startMs;
 
-      // 4. Return structured response — provider/model as read-only observability
+      // 4. Merge retrieval results into used_sources
+      const metadataSources = builtPrompt.usedSources.map((s) => ({
+        id: s.id, name: s.sourceName, source_type: s.sourceType, status: s.status,
+        retrieval_type: "metadata" as const,
+      }));
+
+      const retrievedSources = (retrievalResult?.results ?? []).map((r) => ({
+        id:             r.chunkId,
+        name:           `Hentet kilde (score: ${r.scoreCombined.toFixed(2)})`,
+        source_type:    "retrieved",
+        status:         "active",
+        retrieval_type: "semantic" as const,
+        relevance_score: r.scoreCombined,
+        rank_position:  r.rankPosition,
+      }));
+
+      const allSources = metadataSources.length > 0
+        ? metadataSources
+        : retrievedSources;
+
+      const warnings: string[] = [];
+      if (retrievalResult && !retrievalResult.success) {
+        warnings.push("Retrieval utilgængeligt — svar baseret på ekspertens regler og instruktioner.");
+      }
+
+      // 5. Return structured response — provider/model as read-only observability
       res.json({
         output:      aiResult.content,
         used_rules:  builtPrompt.usedRules.map((r) => ({
           id: r.id, name: r.name, type: r.type, enforcement_level: r.enforcementLevel,
         })),
-        used_sources: builtPrompt.usedSources.map((s) => ({
-          id: s.id, name: s.sourceName, source_type: s.sourceType, status: s.status,
-        })),
-        warnings:       [],
+        used_sources:    allSources,
+        retrieved_chunks: retrievedSources.length,
+        retrieval_strategy: retrievalResult?.strategy ?? null,
+        retrieval_latency_ms: retrievalResult?.latencyMs ?? null,
+        warnings,
         latency_ms:     latencyMs,
         version_tested: body.version,
         provider:       builtPrompt.modelProvider,

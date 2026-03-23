@@ -83,6 +83,10 @@ export function TenantApp() {
             <Route path="/koerseler/:id" component={RunDetail} />
             <Route path="/team"         component={Team} />
 
+            {/* ── Direct top-level shortcuts for nav items ─────────────── */}
+            <Route path="/brug"         component={WorkspaceUsage} />
+            <Route path="/indstillinger" component={WorkspaceSettings} />
+
             {/* ── Workspace surface (/workspace/*) ─────────────────────── */}
             <Route path="/workspace"              component={WorkspaceDashboard} />
             <Route path="/workspace/data"         component={WorkspaceData} />

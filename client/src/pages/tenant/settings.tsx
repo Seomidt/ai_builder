@@ -79,9 +79,9 @@ export default function TenantSettings() {
               >
                 <Settings className="w-4 h-4 text-primary" />
               </div>
-              <h1 className="text-xl font-bold text-foreground tracking-tight">Settings</h1>
+              <h1 className="text-xl font-bold text-foreground tracking-tight">Indstillinger</h1>
             </div>
-            <p className="text-sm text-muted-foreground ml-10">Tenant and AI configuration</p>
+            <p className="text-sm text-muted-foreground ml-10">Organisations- og AI-konfiguration</p>
           </div>
           <Button
             size="sm" className="gap-1.5"
@@ -90,7 +90,7 @@ export default function TenantSettings() {
             data-testid="button-save-settings"
           >
             <Save className="w-4 h-4" />
-            {saveMutation.isPending ? "Saving…" : "Save Changes"}
+            {saveMutation.isPending ? "Gemmer…" : "Gem ændringer"}
           </Button>
         </div>
 
@@ -105,11 +105,11 @@ export default function TenantSettings() {
             <Card className="bg-card border-card-border">
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium flex items-center gap-2">
-                  <Globe className="w-4 h-4 text-primary" /> Locale
+                  <Globe className="w-4 h-4 text-primary" /> Sprog & Region
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <SettingRow label="Language" icon={Globe}>
+                <SettingRow label="Standardsprog" icon={Globe}>
                   <Select value={form.defaultLanguage} onValueChange={(v) => set("defaultLanguage", v)}>
                     <SelectTrigger data-testid="select-language"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -117,7 +117,7 @@ export default function TenantSettings() {
                     </SelectContent>
                   </Select>
                 </SettingRow>
-                <SettingRow label="Currency" icon={DollarSign}>
+                <SettingRow label="Valuta" icon={DollarSign}>
                   <Select value={form.currency} onValueChange={(v) => set("currency", v)}>
                     <SelectTrigger data-testid="select-currency"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -125,7 +125,7 @@ export default function TenantSettings() {
                     </SelectContent>
                   </Select>
                 </SettingRow>
-                <SettingRow label="Timezone" icon={Clock}>
+                <SettingRow label="Tidszone" icon={Clock}>
                   <Select value={form.timezone} onValueChange={(v) => set("timezone", v)}>
                     <SelectTrigger data-testid="select-timezone"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -136,15 +136,15 @@ export default function TenantSettings() {
               </CardContent>
             </Card>
 
-            {/* AI Configuration */}
+            {/* AI-konfiguration */}
             <Card className="bg-card border-card-border">
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium flex items-center gap-2">
-                  <BrainCircuit className="w-4 h-4 text-primary" /> AI Configuration
+                  <BrainCircuit className="w-4 h-4 text-primary" /> AI-konfiguration
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <SettingRow label="Default Model" icon={BrainCircuit}>
+                <SettingRow label="Standardmodel" icon={BrainCircuit}>
                   <Select value={form.aiModel} onValueChange={(v) => set("aiModel", v)}>
                     <SelectTrigger data-testid="select-ai-model"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -152,7 +152,7 @@ export default function TenantSettings() {
                     </SelectContent>
                   </Select>
                 </SettingRow>
-                <SettingRow label="Max Tokens / Run" icon={BrainCircuit}>
+                <SettingRow label="Maks. tokens pr. kørsel" icon={BrainCircuit}>
                   <Input
                     type="number"
                     value={form.maxTokensPerRun}

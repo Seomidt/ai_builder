@@ -17,7 +17,7 @@ import { useRoute, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Brain, Shield, Scale, Database, PlayCircle, History,
-  Settings, Plus, Trash2, Edit2, CheckCircle2, Clock, AlertTriangle,
+  Settings, Plus, Trash2, Edit2, CheckCircle2, Clock, AlertTriangle, ShieldCheck, ShieldAlert,
   Loader2, Sparkles, X, ChevronDown, ChevronUp, Info,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -99,14 +99,17 @@ interface VersionRow {
 }
 
 interface TestResult {
-  output:          string;
-  used_rules:      Array<{ id: string; name: string; type: string; enforcement_level: string }>;
-  used_sources:    Array<{ id: string; name: string; source_type: string; status: string }>;
-  warnings:        string[];
-  latency_ms:      number;
-  version_tested?: string;
-  provider:        string;
-  model_name:      string;
+  output:              string;
+  used_rules:          Array<{ id: string; name: string; type: string; enforcement_level: string }>;
+  used_sources:        Array<{ id: string; name: string; source_type: string; status: string; retrieval_type?: string; relevance_score?: number }>;
+  warnings:            string[];
+  latency_ms:          number;
+  version_tested?:     string;
+  provider:            string;
+  model_name:          string;
+  retrieved_chunks?:   number;
+  retrieval_strategy?: string | null;
+  retrieval_latency_ms?: number | null;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -676,10 +679,37 @@ const sourceFormSchema = z.object({
 });
 type SourceFormValues = z.infer<typeof sourceFormSchema>;
 
+interface AuthenticityResult {
+  risk_score: number;
+  risk_level: "low_risk" | "medium_risk" | "high_risk" | "unknown";
+  signals: string[];
+  has_risk: boolean;
+  notes: string;
+  checked_at: string;
+}
+
+function AuthenticityBadge({ result }: { result: AuthenticityResult }) {
+  const config = {
+    low_risk:    { label: "Lav risiko",    cls: "text-green-400 border-green-500/30 bg-green-500/10", icon: ShieldCheck },
+    medium_risk: { label: "Medium risiko", cls: "text-amber-400 border-amber-500/30 bg-amber-500/10", icon: ShieldAlert },
+    high_risk:   { label: "Høj risiko",    cls: "text-red-400 border-red-500/30 bg-red-500/10",       icon: ShieldAlert },
+    unknown:     { label: "Ukendt",        cls: "text-muted-foreground",                               icon: Shield },
+  }[result.risk_level] ?? { label: "Ukendt", cls: "text-muted-foreground", icon: Shield };
+  const IconC = config.icon;
+  return (
+    <Badge variant="outline" className={`text-xs gap-1 ${config.cls}`} title={result.notes}>
+      <IconC className="w-3 h-3" />
+      {config.label}
+    </Badge>
+  );
+}
+
 function TabDatakilder({ expertId }: { expertId: string }) {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
+  const [authenticityResults, setAuthenticityResults] = useState<Record<string, AuthenticityResult>>({});
+  const [analyzingId, setAnalyzingId] = useState<string | null>(null);
 
   const { data: sources, isLoading } = useQuery<SourceRow[]>({
     queryKey: ["/api/experts", expertId, "sources"],
@@ -718,6 +748,25 @@ function TabDatakilder({ expertId }: { expertId: string }) {
       toast({ title: "Fejl", description: friendlyError(err), variant: "destructive" }),
   });
 
+  const analyzeAuthenticity = async (sourceId: string) => {
+    setAnalyzingId(sourceId);
+    try {
+      const result = await apiRequest<AuthenticityResult>(
+        "POST", `/api/experts/${expertId}/sources/${sourceId}/analyze-authenticity`
+      );
+      setAuthenticityResults((prev) => ({ ...prev, [sourceId]: result }));
+      toast({
+        title: result.has_risk ? "Risikosignaler fundet" : "Kildeanalyse gennemført",
+        description: result.notes,
+        variant: result.has_risk ? "destructive" : "default",
+      });
+    } catch (err) {
+      toast({ title: "Analysefejl", description: friendlyError(err as ApiError | Error), variant: "destructive" });
+    } finally {
+      setAnalyzingId(null);
+    }
+  };
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -739,6 +788,8 @@ function TabDatakilder({ expertId }: { expertId: string }) {
       <div className="space-y-2">
         {sources?.map((source) => {
           const lifecycle = STATUS_LIFECYCLE[source.status] ?? { label: source.status, color: "text-muted-foreground" };
+          const authResult = authenticityResults[source.id];
+          const isAnalyzing = analyzingId === source.id;
           return (
             <div key={source.id} data-testid={`source-row-${source.id}`}
               className="rounded-xl border border-border/30 bg-card p-3.5">
@@ -751,9 +802,21 @@ function TabDatakilder({ expertId }: { expertId: string }) {
                   </Badge>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  {authResult && <AuthenticityBadge result={authResult} />}
                   <Badge variant="outline" className={`text-xs ${lifecycle.color}`}>
                     {lifecycle.label}
                   </Badge>
+                  <Button
+                    variant="ghost" size="icon" className="h-6 w-6 text-primary/60 hover:text-primary"
+                    onClick={() => analyzeAuthenticity(source.id)}
+                    disabled={isAnalyzing}
+                    title="Analyser kildeautenticitet"
+                    data-testid={`analyze-source-${source.id}`}
+                  >
+                    {isAnalyzing
+                      ? <Loader2 className="w-3 h-3 animate-spin" />
+                      : <ShieldCheck className="w-3 h-3" />}
+                  </Button>
                   <Button variant="ghost" size="icon" className="h-6 w-6 text-destructive/70"
                     onClick={() => deleteMutation.mutate(source.id)} data-testid={`delete-source-${source.id}`}>
                     <Trash2 className="w-3 h-3" />
@@ -762,6 +825,11 @@ function TabDatakilder({ expertId }: { expertId: string }) {
               </div>
               {source.processingNotes && (
                 <p className="text-xs text-muted-foreground/50 mt-1.5">{source.processingNotes}</p>
+              )}
+              {authResult && authResult.signals.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-border/20">
+                  <p className="text-xs text-muted-foreground/60">{authResult.notes}</p>
+                </div>
               )}
             </div>
           );
@@ -943,12 +1011,27 @@ function TabTest({ expertId, expert }: { expertId: string; expert: ExpertDetail 
 
           {testResult.used_sources.length > 0 && (
             <div className="rounded-lg border border-border/40 bg-muted/5 p-3">
-              <p className="text-xs font-bold text-muted-foreground uppercase tracking-wide mb-2">Anvendte kilder</p>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-bold text-muted-foreground uppercase tracking-wide">Anvendte kilder</p>
+                {testResult.retrieved_chunks !== undefined && testResult.retrieved_chunks > 0 && (
+                  <span className="text-xs text-primary/60">
+                    {testResult.retrieved_chunks} semantisk hentede
+                    {testResult.retrieval_strategy && ` · ${testResult.retrieval_strategy}`}
+                    {testResult.retrieval_latency_ms && ` · ${testResult.retrieval_latency_ms}ms`}
+                  </span>
+                )}
+              </div>
               <div className="space-y-1">
                 {testResult.used_sources.map((s) => (
                   <div key={s.id} className="flex items-center gap-2 text-xs text-muted-foreground">
                     <Database className="w-3 h-3 shrink-0" />
-                    <span>{s.name}</span>
+                    <span className="flex-1">{s.name}</span>
+                    {s.retrieval_type === "semantic" && s.relevance_score !== undefined && (
+                      <span className="text-primary/50 font-mono">{(s.relevance_score * 100).toFixed(0)}%</span>
+                    )}
+                    {s.retrieval_type === "semantic" && (
+                      <Badge variant="outline" className="text-xs py-0 text-primary/50 border-primary/20">Semantisk</Badge>
+                    )}
                   </div>
                 ))}
               </div>
