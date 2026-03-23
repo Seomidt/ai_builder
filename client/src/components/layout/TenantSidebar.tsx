@@ -2,26 +2,40 @@ import { useState, useEffect, useMemo } from "react";
 import { Link, useLocation } from "wouter";
 import {
   LayoutDashboard,
-  FolderKanban,
-  Cpu,
+  BookOpen,
+  Brain,
+  Scale,
   PlayCircle,
   Building2,
+  Users2,
   LogOut,
   ShieldAlert,
   Menu,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useTranslations } from "@/hooks/use-translations";
-import { LocaleSwitcher } from "@/components/i18n/LocaleSwitcher";
 import { useAuth } from "@/hooks/use-auth";
 import { signOut } from "@/lib/supabase";
 import { getAdminAppUrl, getPostLogoutUrl } from "@/lib/runtime/urls";
 import { BrandMark } from "@/components/brand/BrandMark";
 
+const NAV_ITEMS = [
+  { href: "/",             label: "Oversigt",      icon: LayoutDashboard },
+  { href: "/ai-eksperter", label: "AI Eksperter",  icon: Brain           },
+  { href: "/viden-data",   label: "Viden & Data",  icon: BookOpen        },
+  { href: "/regler",       label: "Regler",         icon: Scale           },
+  { href: "/koerseler",    label: "Kørseler",       icon: PlayCircle      },
+  { href: "/team",         label: "Team",           icon: Users2          },
+  { href: "/workspace",    label: "Workspace",      icon: Building2       },
+] as const;
+
+type NavHref = (typeof NAV_ITEMS)[number]["href"];
+
+const WORKSPACE_PREFIXES: NavHref[] = ["/workspace"];
+const CORE_HREFS: NavHref[] = ["/", "/ai-eksperter", "/viden-data", "/regler", "/koerseler", "/team"];
+
 export function TenantSidebar() {
   const [location] = useLocation();
-  const { t } = useTranslations("common");
   const { user } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
 
@@ -37,20 +51,16 @@ export function TenantSidebar() {
   const initials       = user?.email ? user.email.slice(0, 2).toUpperCase() : "??";
   const displayEmail   = user?.email ?? "—";
   const isPlatformAdmin = user?.role === "platform_admin";
-  const isTenantPath   = location.startsWith("/tenant");
+  const isWorkspacePath = location.startsWith("/workspace") || location.startsWith("/tenant");
 
-  const navItems = useMemo(() => [
-    { href: "/",              label: t("nav.dashboard"),                icon: LayoutDashboard },
-    { href: "/projects",      label: t("nav.projects"),                 icon: FolderKanban    },
-    { href: "/architectures", label: t("nav.architectures"),            icon: Cpu             },
-    { href: "/runs",          label: t("nav.runs"),                     icon: PlayCircle      },
-    { href: "/tenant",        label: t("nav.workspace") ?? "Workspace", icon: Building2       },
-  ], [t]);
+  const navItems = useMemo(() => NAV_ITEMS, []);
 
-  function isActive(href: string): boolean {
-    if (href === "/") return location === "/" && !isTenantPath;
-    if (isTenantPath && ["/" , "/projects", "/architectures", "/runs"].includes(href)) return false;
-    return location.startsWith(href);
+  function isActive(href: NavHref): boolean {
+    if (href === "/") return location === "/" && !isWorkspacePath;
+    if (href === "/workspace") return isWorkspacePath;
+    // Core non-workspace paths: only match if NOT in workspace
+    if ((CORE_HREFS as string[]).includes(href) && isWorkspacePath) return false;
+    return location === href || location.startsWith(href + "/");
   }
 
   return (
@@ -91,7 +101,7 @@ export function TenantSidebar() {
         )}
         style={{ width: "256px", height: "100dvh" }}
       >
-        {/* ICON RAIL */}
+        {/* ── ICON RAIL ────────────────────────────────────────────────── */}
         <div
           className="w-14 flex flex-col items-center border-r border-white/5 shrink-0"
           style={{ backgroundColor: "hsl(218 32% 10%)", height: "100%" }}
@@ -101,23 +111,24 @@ export function TenantSidebar() {
             <BrandMark size={32} />
           </div>
 
-          {/* Nav icons — scrollable */}
-          <div className="flex-1 w-full flex flex-col gap-2 px-1.5 overflow-y-auto py-1">
-            {navItems.map(({ href, icon: Icon }) => {
+          {/* Nav icons */}
+          <div className="flex-1 w-full flex flex-col gap-1.5 px-1.5 overflow-y-auto py-1">
+            {navItems.map(({ href, label, icon: Icon }) => {
               const active = isActive(href);
               return (
                 <Link
                   key={href}
                   href={href}
                   data-testid={`icon-nav-${href.replace(/\//g, "-").replace(/^-/, "") || "dashboard"}`}
+                  title={label}
                   className={cn(
-                    "h-11 w-full flex items-center justify-center rounded-xl cursor-pointer transition-colors shrink-0",
+                    "h-10 w-full flex items-center justify-center rounded-xl cursor-pointer transition-colors shrink-0",
                     active
                       ? "bg-cyan-500/15 text-cyan-400"
                       : "text-slate-500 hover:text-slate-300 hover:bg-white/5",
                   )}
                 >
-                  <Icon size={20} strokeWidth={active ? 2.5 : 2} />
+                  <Icon size={19} strokeWidth={active ? 2.5 : 2} />
                 </Link>
               );
             })}
@@ -126,14 +137,15 @@ export function TenantSidebar() {
               <a
                 href={getAdminAppUrl()}
                 data-testid="icon-link-switch-to-admin"
-                className="h-11 w-full flex items-center justify-center text-slate-500 hover:text-destructive hover:bg-destructive/8 rounded-xl cursor-pointer transition-colors mt-2 shrink-0"
+                className="h-10 w-full flex items-center justify-center text-slate-500 hover:text-destructive hover:bg-destructive/8 rounded-xl cursor-pointer transition-colors mt-2 shrink-0"
+                title="Platform Ops"
               >
-                <ShieldAlert size={20} strokeWidth={2} />
+                <ShieldAlert size={19} strokeWidth={2} />
               </a>
             )}
           </div>
 
-          {/* Avatar + logout — always visible */}
+          {/* Avatar + logout */}
           <div className="flex flex-col items-center gap-3 py-4 shrink-0">
             <div
               className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-cyan-400"
@@ -153,15 +165,15 @@ export function TenantSidebar() {
           </div>
         </div>
 
-        {/* TEXT PANEL */}
+        {/* ── TEXT PANEL ───────────────────────────────────────────────── */}
         <div
           className="flex-1 flex flex-col min-w-0"
           style={{ backgroundColor: "hsl(218 28% 13%)", height: "100%" }}
         >
-          {/* Header — always visible */}
+          {/* Header */}
           <div className="flex items-center justify-between px-4 pt-4 pb-2 shrink-0">
             <span className="text-[10px] font-bold tracking-wider text-slate-500 uppercase">
-              Workspace
+              BlissOps
             </span>
             <button
               onClick={() => setMobileOpen(false)}
@@ -173,8 +185,8 @@ export function TenantSidebar() {
             </button>
           </div>
 
-          {/* Nav — scrollable */}
-          <nav className="flex-1 flex flex-col gap-1 px-3 overflow-y-auto py-1">
+          {/* Nav */}
+          <nav className="flex-1 flex flex-col gap-0.5 px-2 overflow-y-auto py-1">
             {navItems.map(({ href, label }) => {
               const active = isActive(href);
               return (
@@ -183,9 +195,9 @@ export function TenantSidebar() {
                   href={href}
                   data-testid={`nav-link-${href.replace(/\//g, "-").replace(/^-/, "") || "dashboard"}`}
                   className={cn(
-                    "h-11 flex items-center px-3 text-sm font-medium cursor-pointer transition-colors rounded-lg shrink-0",
+                    "h-10 flex items-center px-3 text-[13px] font-medium cursor-pointer transition-colors rounded-lg shrink-0 whitespace-nowrap",
                     active
-                      ? "text-cyan-400 font-bold"
+                      ? "bg-cyan-500/10 text-cyan-300 font-semibold"
                       : "text-slate-400 hover:text-slate-200 hover:bg-white/5",
                   )}
                 >
@@ -202,7 +214,7 @@ export function TenantSidebar() {
                 <a
                   href={getAdminAppUrl()}
                   data-testid="link-switch-to-admin"
-                  className="h-11 flex items-center px-3 text-sm font-medium text-slate-400 hover:text-destructive hover:bg-destructive/8 rounded-lg cursor-pointer transition-colors shrink-0"
+                  className="h-10 flex items-center px-3 text-[13px] font-medium text-slate-400 hover:text-destructive hover:bg-destructive/8 rounded-lg cursor-pointer transition-colors shrink-0"
                 >
                   Platform Ops
                 </a>
@@ -210,15 +222,14 @@ export function TenantSidebar() {
             )}
           </nav>
 
-          {/* Footer — always visible at bottom */}
-          <div className="px-4 pt-3 pb-4 border-t border-white/5 space-y-2 shrink-0">
+          {/* Footer */}
+          <div className="px-4 pt-3 pb-4 border-t border-white/5 shrink-0">
             <p
               className="text-xs text-slate-400 truncate"
               data-testid="text-sidebar-email"
             >
               {displayEmail}
             </p>
-            <LocaleSwitcher />
           </div>
         </div>
       </aside>

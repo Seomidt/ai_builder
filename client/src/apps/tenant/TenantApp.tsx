@@ -1,45 +1,53 @@
 /**
- * TenantApp — Tenant Product Surface
+ * TenantApp — AI Experts Platform — Tenant Product Surface
  *
  * Rendered exclusively on app.blissops.com (and localhost in dev).
  *
- * Contains:
- *   - TenantSidebar (tenant-only nav — ZERO admin links)
- *   - All tenant routes (/, /projects, /architectures, /runs, /tenant/*)
- *   - All routes wrapped with ProtectedRoute (session required)
+ * Navigation:
+ *   Oversigt · AI Eksperter · Viden & Data · Regler · Kørseler · Team · Workspace
  *
  * SECURITY:
- *   - Admin routes (/ops/*, /integrations, /settings) are NOT registered here
- *   - If a user navigates to /ops on app domain → 404 (NotFound)
- *   - Backend still enforces platform_admin on all /api/admin/* routes
- *   - Domain is UI routing ONLY — no auth trust from hostname
+ *   - Admin routes (/ops/*, /integrations) are NOT registered here
+ *   - Backend enforces platform_admin and tenant-scoped RBAC on all routes
+ *   - Domain routing is UI convenience only — no auth trust from hostname
  */
 
-import { lazy, Suspense } from "react";
-import { Switch, Route } from "wouter";
+import { lazy, Suspense, useEffect } from "react";
+import { Switch, Route, useLocation } from "wouter";
 import { TenantSidebar } from "@/components/layout/TenantSidebar";
 import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import NotFound from "@/pages/not-found";
 
-// ── Eagerly loaded: core tenant pages ─────────────────────────────────────────
-import Dashboard     from "@/pages/dashboard";
-import Projects      from "@/pages/projects";
-import Architectures from "@/pages/architectures";
-import Runs          from "@/pages/runs";
+// ── Eagerly loaded: core tenant product pages ──────────────────────────────────
+import Dashboard   from "@/pages/dashboard";
+import AiEksperter from "@/pages/ai-eksperter";
+import VidenData   from "@/pages/viden-data";
+import Regler      from "@/pages/regler";
+import Runs        from "@/pages/runs";
+import Team        from "@/pages/team";
 
-// ── Lazy: tenant detail ───────────────────────────────────────────────────────
+// ── Lazy: detail pages ────────────────────────────────────────────────────────
 const RunDetail = lazy(() => import("@/pages/run-detail"));
 
-// ── Lazy: tenant workspace surface ────────────────────────────────────────────
-const TenantDashboard    = lazy(() => import("@/pages/tenant/dashboard"));
-const TenantData         = lazy(() => import("@/pages/tenant/data"));
-const TenantAI           = lazy(() => import("@/pages/tenant/ai"));
-const TenantUsage        = lazy(() => import("@/pages/tenant/usage"));
-const TenantBilling      = lazy(() => import("@/pages/tenant/billing"));
-const TenantIntegrations = lazy(() => import("@/pages/tenant/integrations"));
-const TenantTeam         = lazy(() => import("@/pages/tenant/team"));
-const TenantSettings     = lazy(() => import("@/pages/tenant/settings"));
-const TenantAudit        = lazy(() => import("@/pages/tenant/audit"));
+// ── Lazy: workspace surface ───────────────────────────────────────────────────
+const WorkspaceDashboard    = lazy(() => import("@/pages/tenant/dashboard"));
+const WorkspaceData         = lazy(() => import("@/pages/tenant/data"));
+const WorkspaceAI           = lazy(() => import("@/pages/tenant/ai"));
+const WorkspaceUsage        = lazy(() => import("@/pages/tenant/usage"));
+const WorkspaceBilling      = lazy(() => import("@/pages/tenant/billing"));
+const WorkspaceIntegrations = lazy(() => import("@/pages/tenant/integrations"));
+const WorkspaceSettings     = lazy(() => import("@/pages/tenant/settings"));
+const WorkspaceAudit        = lazy(() => import("@/pages/tenant/audit"));
+
+// ── Lazy: onboarding ─────────────────────────────────────────────────────────
+const Onboarding = lazy(() => import("@/pages/onboarding"));
+
+// ── Redirect helper ───────────────────────────────────────────────────────────
+function Redirect({ to }: { to: string }) {
+  const [, setLocation] = useLocation();
+  useEffect(() => { setLocation(to); }, []);
+  return null;
+}
 
 function TenantLoader() {
   return (
@@ -64,23 +72,65 @@ export function TenantApp() {
       <TenantShell>
         <Suspense fallback={<TenantLoader />}>
           <Switch>
-            {/* Core tenant */}
-            <Route path="/"              component={Dashboard} />
-            <Route path="/projects"      component={Projects} />
-            <Route path="/architectures" component={Architectures} />
-            <Route path="/runs"          component={Runs} />
-            <Route path="/runs/:id"      component={RunDetail} />
+            {/* ── Core tenant product ──────────────────────────────────── */}
+            <Route path="/"             component={Dashboard} />
+            <Route path="/ai-eksperter" component={AiEksperter} />
+            <Route path="/viden-data"   component={VidenData} />
+            <Route path="/regler"       component={Regler} />
+            <Route path="/koerseler"    component={Runs} />
+            <Route path="/koerseler/:id" component={RunDetail} />
+            <Route path="/team"         component={Team} />
 
-            {/* Tenant workspace surface */}
-            <Route path="/tenant"              component={TenantDashboard} />
-            <Route path="/tenant/data"         component={TenantData} />
-            <Route path="/tenant/ai"           component={TenantAI} />
-            <Route path="/tenant/usage"        component={TenantUsage} />
-            <Route path="/tenant/billing"      component={TenantBilling} />
-            <Route path="/tenant/integrations" component={TenantIntegrations} />
-            <Route path="/tenant/team"         component={TenantTeam} />
-            <Route path="/tenant/settings"     component={TenantSettings} />
-            <Route path="/tenant/audit"        component={TenantAudit} />
+            {/* ── Workspace surface (/workspace/*) ─────────────────────── */}
+            <Route path="/workspace"              component={WorkspaceDashboard} />
+            <Route path="/workspace/data"         component={WorkspaceData} />
+            <Route path="/workspace/ai"           component={WorkspaceAI} />
+            <Route path="/workspace/usage"        component={WorkspaceUsage} />
+            <Route path="/workspace/billing"      component={WorkspaceBilling} />
+            <Route path="/workspace/integrations" component={WorkspaceIntegrations} />
+            <Route path="/workspace/settings"     component={WorkspaceSettings} />
+            <Route path="/workspace/audit"        component={WorkspaceAudit} />
+
+            {/* ── Onboarding ───────────────────────────────────────────── */}
+            <Route path="/onboarding" component={Onboarding} />
+
+            {/* ── Backward-compat redirects ────────────────────────────── */}
+            <Route path="/architectures">
+              <Redirect to="/ai-eksperter" />
+            </Route>
+            <Route path="/projects">
+              <Redirect to="/viden-data" />
+            </Route>
+            <Route path="/runs">
+              <Redirect to="/koerseler" />
+            </Route>
+            <Route path="/tenant/team">
+              <Redirect to="/team" />
+            </Route>
+            <Route path="/tenant">
+              <Redirect to="/workspace" />
+            </Route>
+            <Route path="/tenant/data">
+              <Redirect to="/workspace/data" />
+            </Route>
+            <Route path="/tenant/ai">
+              <Redirect to="/workspace/ai" />
+            </Route>
+            <Route path="/tenant/usage">
+              <Redirect to="/workspace/usage" />
+            </Route>
+            <Route path="/tenant/billing">
+              <Redirect to="/workspace/billing" />
+            </Route>
+            <Route path="/tenant/integrations">
+              <Redirect to="/workspace/integrations" />
+            </Route>
+            <Route path="/tenant/settings">
+              <Redirect to="/workspace/settings" />
+            </Route>
+            <Route path="/tenant/audit">
+              <Redirect to="/workspace/audit" />
+            </Route>
 
             {/* Admin/ops routes on tenant domain → not registered → 404 */}
             <Route component={NotFound} />

@@ -117,7 +117,7 @@ export default function Runs() {
             <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-green-500/12 shrink-0" style={{ boxShadow: "0 0 12px rgba(34,197,94,0.12)" }}>
               <PlayCircle className="w-4 h-4 text-green-400" />
             </div>
-            <h1 className="text-xl font-bold text-foreground tracking-tight">Runs</h1>
+            <h1 className="text-xl font-bold text-foreground tracking-tight" data-testid="text-page-title">Kørseler</h1>
           </div>
           <p className="text-sm text-muted-foreground ml-10">{runs.length} run{runs.length !== 1 ? "s" : ""}</p>
         </div>
