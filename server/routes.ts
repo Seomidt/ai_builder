@@ -356,10 +356,117 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   });
 
   // ════════════════════════════════════════════════════════════════════════════
-  // /api/experts — Primary AI Expert API surface
-  // Old /api/architectures routes remain for backward compatibility.
-  // All new product UI/contracts use /api/experts.
+  // /api/experts — Primary AI Expert API surface (versioned, tenant-safe)
+  // Model/provider selection is platform-managed only — not tenant-editable.
   // ════════════════════════════════════════════════════════════════════════════
+
+  // ─── Helpers ────────────────────────────────────────────────────────────────
+
+  async function loadExpert(expertId: string, orgId: string) {
+    const { db } = await import("./db");
+    const { architectureProfiles } = await import("../shared/schema");
+    const { eq, and } = await import("drizzle-orm");
+    const [expert] = await db
+      .select()
+      .from(architectureProfiles)
+      .where(and(eq(architectureProfiles.id, expertId), eq(architectureProfiles.organizationId, orgId)));
+    return expert ?? null;
+  }
+
+  async function loadVersion(versionId: string, orgId: string) {
+    const { db } = await import("./db");
+    const { expertVersions } = await import("../shared/schema");
+    const { eq, and } = await import("drizzle-orm");
+    const [version] = await db
+      .select()
+      .from(expertVersions)
+      .where(and(eq(expertVersions.id, versionId), eq(expertVersions.organizationId, orgId)));
+    return version ?? null;
+  }
+
+  async function buildAndUpsertDraft(expertId: string, orgId: string, userId: string | null) {
+    const { db } = await import("./db");
+    const { architectureProfiles, specialistRules, specialistSources, expertVersions } = await import("../shared/schema");
+    const { eq, and, asc, desc } = await import("drizzle-orm");
+    const { buildVersionSnapshot } = await import("./lib/ai/expert-prompt-builder");
+
+    const [expert] = await db.select().from(architectureProfiles)
+      .where(and(eq(architectureProfiles.id, expertId), eq(architectureProfiles.organizationId, orgId)));
+    if (!expert) throw new Error("Expert not found");
+
+    const rules = await db.select().from(specialistRules)
+      .where(and(eq(specialistRules.expertId, expertId), eq(specialistRules.organizationId, orgId)))
+      .orderBy(asc(specialistRules.priority));
+
+    const sources = await db.select().from(specialistSources)
+      .where(and(eq(specialistSources.expertId, expertId), eq(specialistSources.organizationId, orgId)));
+
+    const snapshot = buildVersionSnapshot({
+      expert: {
+        name:             expert.name,
+        description:      expert.description,
+        departmentId:     expert.departmentId,
+        language:         expert.language ?? "da",
+        instructions:     expert.instructions,
+        goal:             expert.goal,
+        outputStyle:      expert.outputStyle,
+        escalationPolicy: expert.escalationPolicy,
+      },
+      rules: rules.map((r) => ({
+        id:               r.id,
+        type:             r.type,
+        name:             r.name,
+        description:      r.description ?? null,
+        priority:         r.priority,
+        enforcementLevel: r.enforcementLevel,
+      })),
+      sources: sources.map((s) => ({
+        id:         s.id,
+        sourceName: s.sourceName,
+        sourceType: s.sourceType,
+        status:     s.status,
+      })),
+    });
+
+    if (expert.draftVersionId) {
+      // Update existing draft
+      const [updated] = await db
+        .update(expertVersions)
+        .set({ configJson: snapshot as any })
+        .where(and(eq(expertVersions.id, expert.draftVersionId), eq(expertVersions.organizationId, orgId)))
+        .returning();
+      return updated;
+    } else {
+      // Determine next version number
+      const [latest] = await db
+        .select()
+        .from(expertVersions)
+        .where(eq(expertVersions.expertId, expertId))
+        .orderBy(desc(expertVersions.versionNumber))
+        .limit(1);
+      const nextNum = (latest?.versionNumber ?? 0) + 1;
+
+      const [newDraft] = await db
+        .insert(expertVersions)
+        .values({
+          expertId:       expertId,
+          organizationId: orgId,
+          versionNumber:  nextNum,
+          status:         "draft",
+          configJson:     snapshot as any,
+          createdBy:      userId ?? undefined,
+        })
+        .returning();
+
+      // Link draft to expert
+      await db
+        .update(architectureProfiles)
+        .set({ draftVersionId: newDraft.id, updatedAt: new Date() })
+        .where(eq(architectureProfiles.id, expertId));
+
+      return newDraft;
+    }
+  }
 
   // ─── CRUD ────────────────────────────────────────────────────────────────────
 
@@ -371,7 +478,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err) { handleError(res, err); }
   });
 
-  // Staged creation: expert → (rules) → (sources) handled by client after getting id
+  // Staged creation: expert → rules → sources handled by client; wizard commits in steps
   app.post("/api/experts", async (req, res) => {
     try {
       const body = CreateArchitectureSchema.parse(req.body);
@@ -383,45 +490,103 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err) { handleError(res, err); }
   });
 
+  // GET /api/experts/:id — includes version state and resolved config
   app.get("/api/experts/:id", async (req, res) => {
     try {
-      const { db } = await import("./db");
-      const { architectureProfiles } = await import("../shared/schema");
-      const { eq, and } = await import("drizzle-orm");
-      const orgId = getOrgId(req);
-      const [expert] = await db
-        .select()
-        .from(architectureProfiles)
-        .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)));
+      const orgId  = getOrgId(req);
+      const expert = await loadExpert(req.params.id, orgId);
       if (!expert) return res.status(404).json({ error: "Expert not found" });
+
+      const { db } = await import("./db");
+      const { specialistRules, specialistSources } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const [rules, sources] = await Promise.all([
+        db.select().from(specialistRules)
+          .where(and(eq(specialistRules.expertId, expert.id), eq(specialistRules.organizationId, orgId))),
+        db.select().from(specialistSources)
+          .where(and(eq(specialistSources.expertId, expert.id), eq(specialistSources.organizationId, orgId))),
+      ]);
+
+      let liveConfig: unknown = null;
+      let draftConfig: unknown = null;
+
+      if (expert.currentVersionId) {
+        const v = await loadVersion(expert.currentVersionId, orgId);
+        liveConfig = v?.configJson ?? null;
+      }
+      if (expert.draftVersionId) {
+        const v = await loadVersion(expert.draftVersionId, orgId);
+        draftConfig = v?.configJson ?? null;
+      }
+
       setCachePrivate(res, 10);
-      res.json(expert);
+      res.json({
+        ...expert,
+        rule_count:   rules.length,
+        source_count: sources.length,
+        live_config:  liveConfig,
+        draft_config: draftConfig,
+      });
     } catch (err) { handleError(res, err); }
   });
 
+  // PATCH /api/experts/:id — tenant-editable fields only; writes to draft version
   app.patch("/api/experts/:id", async (req, res) => {
     try {
       const { db } = await import("./db");
       const { architectureProfiles } = await import("../shared/schema");
       const { eq, and } = await import("drizzle-orm");
-      const orgId = getOrgId(req);
+      const orgId  = getOrgId(req);
+      const userId = getUserId(req);
+
+      // Model/provider/temperature/tokens are NOT tenant-editable
       const UpdateExpertSchema = z.object({
-        name:            z.string().min(1).optional(),
-        description:     z.string().optional(),
-        goal:            z.string().optional(),
-        instructions:    z.string().optional(),
-        outputStyle:     z.string().optional(),
-        language:        z.string().optional(),
-        departmentId:    z.string().optional(),
-        modelProvider:   z.string().optional(),
-        modelName:       z.string().optional(),
-        temperature:     z.number().min(0).max(1).optional(),
-        maxOutputTokens: z.number().int().min(256).max(4096).optional(),
+        name:             z.string().min(1).optional(),
+        description:      z.string().optional(),
+        goal:             z.string().optional(),
+        instructions:     z.string().optional(),
+        outputStyle:      z.enum(["concise","formal","advisory"]).optional(),
+        language:         z.string().optional(),
+        departmentId:     z.string().optional(),
+        escalationPolicy: z.record(z.unknown()).optional(),
       });
       const body = UpdateExpertSchema.parse(req.body);
+
       const [updated] = await db
         .update(architectureProfiles)
         .set({ ...body, updatedAt: new Date() })
+        .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)))
+        .returning();
+      if (!updated) return res.status(404).json({ error: "Expert not found" });
+
+      // Async draft snapshot update (non-blocking; errors logged not thrown)
+      buildAndUpsertDraft(req.params.id, orgId, userId).catch((e) =>
+        console.error("[expert-patch] draft snapshot error:", e),
+      );
+
+      res.json(updated);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // POST /api/experts/:id/archive
+  app.post("/api/experts/:id/archive", async (req, res) => {
+    try {
+      const profile = await createStorageForRequest(req).archiveArchitectureProfile(req.params.id, getOrgId(req));
+      res.json(profile);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // POST /api/experts/:id/unarchive
+  app.post("/api/experts/:id/unarchive", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { architectureProfiles } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const orgId = getOrgId(req);
+      const [updated] = await db
+        .update(architectureProfiles)
+        .set({ status: "active", updatedAt: new Date() })
         .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)))
         .returning();
       if (!updated) return res.status(404).json({ error: "Expert not found" });
@@ -429,10 +594,67 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err) { handleError(res, err); }
   });
 
-  app.post("/api/experts/:id/archive", async (req, res) => {
+  // POST /api/experts/:id/promote — promote draft → live
+  app.post("/api/experts/:id/promote", async (req, res) => {
     try {
-      const profile = await createStorageForRequest(req).archiveArchitectureProfile(req.params.id, getOrgId(req));
-      res.json(profile);
+      const { db } = await import("./db");
+      const { architectureProfiles, expertVersions } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const orgId   = getOrgId(req);
+      const userId  = getUserId(req);
+      const expert  = await loadExpert(req.params.id, orgId);
+      if (!expert) return res.status(404).json({ error: "Expert not found" });
+
+      // Ensure a draft exists (create one if not yet materialized)
+      let draftVersionId = expert.draftVersionId;
+      if (!draftVersionId) {
+        const newDraft = await buildAndUpsertDraft(req.params.id, orgId, userId);
+        draftVersionId = newDraft.id;
+      }
+
+      // Archive previous live version
+      if (expert.currentVersionId) {
+        await db
+          .update(expertVersions)
+          .set({ status: "archived" })
+          .where(and(eq(expertVersions.id, expert.currentVersionId), eq(expertVersions.organizationId, orgId)));
+      }
+
+      // Promote draft → live
+      await db
+        .update(expertVersions)
+        .set({ status: "live" })
+        .where(and(eq(expertVersions.id, draftVersionId), eq(expertVersions.organizationId, orgId)));
+
+      // Update expert pointers
+      const [updatedExpert] = await db
+        .update(architectureProfiles)
+        .set({ currentVersionId: draftVersionId, draftVersionId: null, updatedAt: new Date() })
+        .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)))
+        .returning();
+
+      res.json({ expert: updatedExpert, promoted_version_id: draftVersionId });
+    } catch (err) { handleError(res, err); }
+  });
+
+  // GET /api/experts/:id/versions — version history
+  app.get("/api/experts/:id/versions", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { expertVersions } = await import("../shared/schema");
+      const { eq, and, desc } = await import("drizzle-orm");
+      const orgId = getOrgId(req);
+      const expert = await loadExpert(req.params.id, orgId);
+      if (!expert) return res.status(404).json({ error: "Expert not found" });
+
+      const versions = await db
+        .select()
+        .from(expertVersions)
+        .where(and(eq(expertVersions.expertId, req.params.id), eq(expertVersions.organizationId, orgId)))
+        .orderBy(desc(expertVersions.versionNumber));
+
+      setCachePrivate(res, 10);
+      res.json(versions);
     } catch (err) { handleError(res, err); }
   });
 
@@ -470,6 +692,35 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         })
         .returning();
       res.status(201).json(row);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // PUT /api/experts/:id/rules/:ruleId — update a rule
+  app.put("/api/experts/:id/rules/:ruleId", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { specialistRules } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const body = z.object({
+        type:             z.string().optional(),
+        name:             z.string().min(1).optional(),
+        description:      z.string().optional(),
+        priority:         z.number().int().min(1).max(999).optional(),
+        enforcementLevel: z.enum(["hard","soft"]).optional(),
+        config:           z.record(z.unknown()).optional(),
+      }).parse(req.body);
+
+      const [updated] = await db
+        .update(specialistRules)
+        .set({ ...body, updatedAt: new Date() })
+        .where(and(
+          eq(specialistRules.id, req.params.ruleId),
+          eq(specialistRules.expertId, req.params.id),
+          eq(specialistRules.organizationId, getOrgId(req)),
+        ))
+        .returning();
+      if (!updated) return res.status(404).json({ error: "Rule not found" });
+      res.json(updated);
     } catch (err) { handleError(res, err); }
   });
 
@@ -607,18 +858,17 @@ Generate names and content in ${langNote}.`;
         { systemPrompt, userInput },
       );
 
-      // ── Strict output validation ──────────────────────────────────────────────
       const AiSuggestionSchema = z.object({
-        suggested_name:        z.string().min(1),
-        improved_description:  z.string(),
-        goal:                  z.string(),
-        instructions:          z.string(),
+        suggested_name:         z.string().min(1),
+        improved_description:   z.string(),
+        goal:                   z.string(),
+        instructions:           z.string(),
         suggested_output_style: z.enum(["concise","formal","advisory"]).catch("advisory"),
         suggested_rules: z.array(z.object({
-          type:             z.string(),
-          name:             z.string(),
-          description:      z.string(),
-          priority:         z.number().int().catch(100),
+          type:              z.string(),
+          name:              z.string(),
+          description:       z.string(),
+          priority:          z.number().int().catch(100),
           enforcement_level: z.enum(["hard","soft"]).catch("soft"),
         })).default([]),
         suggested_source_types: z.array(z.string()).default([]),
@@ -641,14 +891,13 @@ Generate names and content in ${langNote}.`;
     } catch (err) { handleError(res, err); }
   });
 
-  // ─── Test Engine — POST /api/experts/:id/test ─────────────────────────────────
+  // ─── Test Engine — supports draft | live version ──────────────────────────────
 
   app.post("/api/experts/:id/test", async (req, res) => {
     try {
       const body = z.object({
-        prompt:     z.string().min(1),
-        sourceIds:  z.array(z.string()).optional().default([]),
-        ruleIds:    z.array(z.string()).optional().default([]),
+        prompt:  z.string().min(1),
+        version: z.enum(["draft","live"]).optional().default("live"),
       }).parse(req.body);
 
       const startMs = Date.now();
@@ -656,111 +905,79 @@ Generate names and content in ${langNote}.`;
       const userId  = getUserId(req);
 
       // 1. Load expert — tenant-scoped
-      const { db } = await import("./db");
-      const { architectureProfiles, specialistRules, specialistSources } = await import("../shared/schema");
-      const { eq, and, inArray } = await import("drizzle-orm");
-
-      const [expert] = await db
-        .select()
-        .from(architectureProfiles)
-        .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)));
-
+      const expert = await loadExpert(req.params.id, orgId);
       if (!expert) return res.status(404).json({ error: "Expert not found or access denied." });
-      if (expert.status !== "active") return res.status(400).json({ error: "Expert is not active." });
+      if (expert.status === "archived") return res.status(400).json({ error: "Expert is archived." });
 
-      // 2. Load rules
-      const rulesQuery = db
-        .select()
-        .from(specialistRules)
-        .where(and(
-          eq(specialistRules.expertId, req.params.id),
-          eq(specialistRules.organizationId, orgId),
-        ));
-      const allRules = await rulesQuery;
-      const activeRules = body.ruleIds.length > 0
-        ? allRules.filter((r) => body.ruleIds.includes(r.id))
-        : allRules;
+      // 2. Resolve version snapshot
+      const { buildExpertPromptFromSnapshot, buildExpertPrompt } = await import("./lib/ai/expert-prompt-builder");
+      let builtPrompt: Awaited<ReturnType<typeof buildExpertPromptFromSnapshot>>;
 
-      // 3. Load sources
-      const allSources = await db
-        .select()
-        .from(specialistSources)
-        .where(and(
-          eq(specialistSources.expertId, req.params.id),
-          eq(specialistSources.organizationId, orgId),
-        ));
-      const activeSources = body.sourceIds.length > 0
-        ? allSources.filter((s) => body.sourceIds.includes(s.id))
-        : allSources;
+      const targetVersionId = body.version === "draft" ? expert.draftVersionId : expert.currentVersionId;
 
-      // 4. Build expert prompt via centralized builder
-      const { buildExpertPrompt } = await import("./lib/ai/expert-prompt-builder");
+      if (targetVersionId) {
+        const version = await loadVersion(targetVersionId, orgId);
+        if (!version) return res.status(404).json({ error: `${body.version} version not found.` });
+        builtPrompt = buildExpertPromptFromSnapshot(version.configJson as any);
+      } else {
+        // Fallback: build directly from live expert fields + current rules/sources
+        const { db } = await import("./db");
+        const { specialistRules, specialistSources } = await import("../shared/schema");
+        const { eq, and } = await import("drizzle-orm");
 
-      const builtPrompt = buildExpertPrompt(
-        {
-          name:            expert.name,
-          goal:            expert.goal ?? null,
-          instructions:    expert.instructions ?? null,
-          outputStyle:     expert.outputStyle ?? null,
-          language:        expert.language ?? "da",
-          modelProvider:   expert.modelProvider ?? "openai",
-          modelName:       expert.modelName ?? "gpt-4o",
-          temperature:     expert.temperature ?? 0.3,
-          maxOutputTokens: expert.maxOutputTokens ?? 2048,
-        },
-        activeRules.map((r) => ({
-          id:               r.id,
-          type:             r.type,
-          name:             r.name,
-          description:      r.description ?? null,
-          priority:         r.priority,
-          enforcementLevel: r.enforcementLevel,
-        })),
-        activeSources.map((s) => ({
-          id:         s.id,
-          sourceName: s.sourceName,
-          sourceType: s.sourceType,
-          status:     s.status,
-        })),
-      );
+        const [allRules, allSources] = await Promise.all([
+          db.select().from(specialistRules)
+            .where(and(eq(specialistRules.expertId, req.params.id), eq(specialistRules.organizationId, orgId))),
+          db.select().from(specialistSources)
+            .where(and(eq(specialistSources.expertId, req.params.id), eq(specialistSources.organizationId, orgId))),
+        ]);
 
-      // 5. Execute AI call
+        builtPrompt = buildExpertPrompt(
+          {
+            name:            expert.name,
+            goal:            expert.goal ?? null,
+            instructions:    expert.instructions ?? null,
+            outputStyle:     expert.outputStyle ?? null,
+            language:        expert.language ?? "da",
+            modelProvider:   expert.modelProvider ?? "openai",
+            modelName:       expert.modelName ?? "gpt-4o",
+            temperature:     expert.temperature ?? 0.3,
+            maxOutputTokens: expert.maxOutputTokens ?? 2048,
+          },
+          allRules.map((r) => ({
+            id:               r.id, type: r.type, name: r.name,
+            description:      r.description ?? null,
+            priority:         r.priority, enforcementLevel: r.enforcementLevel,
+          })),
+          allSources.map((s) => ({
+            id: s.id, sourceName: s.sourceName, sourceType: s.sourceType, status: s.status,
+          })),
+        );
+      }
+
+      // 3. Execute AI call via platform orchestration
       const { runAiCall } = await import("./lib/ai/runner");
-
       const aiResult = await runAiCall(
-        {
-          feature:  "expert-test",
-          tenantId: orgId,
-          userId,
-          model:    builtPrompt.modelName,
-        },
-        {
-          systemPrompt: builtPrompt.systemPrompt,
-          userInput:    body.prompt,
-        },
+        { feature: "expert-test", tenantId: orgId, userId, model: builtPrompt.modelName },
+        { systemPrompt: builtPrompt.systemPrompt, userInput: body.prompt },
       );
 
       const latencyMs = Date.now() - startMs;
 
-      // 6. Return structured response (no raw provider error leak)
+      // 4. Return structured response — provider/model as read-only observability
       res.json({
-        output:        aiResult.content,
-        used_rules:    builtPrompt.usedRules.map((r) => ({
-          id:   r.id,
-          name: r.name,
-          type: r.type,
-          enforcement_level: r.enforcementLevel,
+        output:      aiResult.content,
+        used_rules:  builtPrompt.usedRules.map((r) => ({
+          id: r.id, name: r.name, type: r.type, enforcement_level: r.enforcementLevel,
         })),
-        used_sources:  builtPrompt.usedSources.map((s) => ({
-          id:          s.id,
-          name:        s.sourceName,
-          source_type: s.sourceType,
-          status:      s.status,
+        used_sources: builtPrompt.usedSources.map((s) => ({
+          id: s.id, name: s.sourceName, source_type: s.sourceType, status: s.status,
         })),
-        warnings:      [],
-        latency_ms:    latencyMs,
-        model_provider: builtPrompt.modelProvider,
-        model_name:    builtPrompt.modelName,
+        warnings:       [],
+        latency_ms:     latencyMs,
+        version_tested: body.version,
+        provider:       builtPrompt.modelProvider,
+        model_name:     builtPrompt.modelName,
       });
     } catch (err) { handleError(res, err); }
   });

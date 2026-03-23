@@ -8,10 +8,11 @@
 
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import {
   Plus, Brain, MoreHorizontal, Sparkles, ChevronRight, ChevronLeft,
   FileText, Scale, PlayCircle, CheckCircle2, Database, Loader2,
-  BookOpen, Wand2, X, AlertTriangle, Shield, Clock,
+  BookOpen, Wand2, X, AlertTriangle, Shield, Clock, ArrowRight,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -52,10 +53,8 @@ interface ExpertRow {
   outputStyle: string | null;
   departmentId: string | null;
   language: string | null;
-  modelProvider: string | null;
-  modelName: string | null;
-  temperature: number | null;
-  maxOutputTokens: number | null;
+  currentVersionId: string | null;
+  draftVersionId: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -93,30 +92,27 @@ interface AiSuggestion {
 }
 
 interface TestResult {
-  output:         string;
-  used_rules:     Array<{ id: string; name: string; type: string; enforcement_level: string }>;
-  used_sources:   Array<{ id: string; name: string; source_type: string; status: string }>;
-  warnings:       string[];
-  latency_ms:     number;
-  model_provider: string;
-  model_name:     string;
+  output:          string;
+  used_rules:      Array<{ id: string; name: string; type: string; enforcement_level: string }>;
+  used_sources:    Array<{ id: string; name: string; source_type: string; status: string }>;
+  warnings:        string[];
+  latency_ms:      number;
+  version_tested?: string;
+  provider:        string;
+  model_name:      string;
 }
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
 const step1Schema = z.object({
-  name:            z.string().min(1, "Navn er påkrævet"),
-  slug:            z.string().min(1, "Slug er påkrævet").regex(/^[a-z0-9-]+$/, "Kun små bogstaver, tal og bindestreger"),
-  description:     z.string().optional(),
-  goal:            z.string().optional(),
-  instructions:    z.string().optional(),
-  outputStyle:     z.string().optional(),
-  departmentId:    z.string().optional(),
-  language:        z.string().default("da"),
-  modelProvider:   z.string().default("openai"),
-  modelName:       z.string().default("gpt-4o"),
-  temperature:     z.number().min(0).max(1).default(0.3),
-  maxOutputTokens: z.number().int().min(256).max(4096).default(2048),
+  name:         z.string().min(1, "Navn er påkrævet"),
+  slug:         z.string().min(1, "Slug er påkrævet").regex(/^[a-z0-9-]+$/, "Kun små bogstaver, tal og bindestreger"),
+  description:  z.string().optional(),
+  goal:         z.string().optional(),
+  instructions: z.string().optional(),
+  outputStyle:  z.string().optional(),
+  departmentId: z.string().optional(),
+  language:     z.string().default("da"),
 });
 type Step1Values = z.infer<typeof step1Schema>;
 
@@ -151,12 +147,6 @@ const OUTPUT_STYLE_OPTIONS = [
   { value: "advisory", label: "Rådgivende" },
   { value: "formal",   label: "Formel" },
   { value: "concise",  label: "Præcis/kort" },
-];
-
-const MODEL_OPTIONS = [
-  { value: "gpt-4o",       label: "GPT-4o (anbefalet)" },
-  { value: "gpt-4o-mini",  label: "GPT-4o Mini (hurtig)" },
-  { value: "gpt-4-turbo",  label: "GPT-4 Turbo" },
 ];
 
 const EXPERT_EXAMPLES = [
@@ -218,11 +208,13 @@ function StepIndicator({ current, total }: { current: number; total: number }) {
 function ExpertCard({ expert, depts, onArchive }: {
   expert: ExpertRow; depts: DeptRow[]; onArchive: (id: string) => void;
 }) {
+  const [, navigate] = useLocation();
   const dept = depts.find((d) => d.id === expert.departmentId);
   return (
     <Card
       data-testid={`expert-card-${expert.id}`}
-      className="bg-card border-card-border hover:border-primary/30 transition-all duration-200 hover:-translate-y-0.5 relative overflow-hidden"
+      className="bg-card border-card-border hover:border-primary/30 transition-all duration-200 hover:-translate-y-0.5 relative overflow-hidden cursor-pointer"
+      onClick={() => navigate(`/ai-eksperter/${expert.id}`)}
     >
       <span className="absolute left-0 top-0 bottom-0 w-0.5 rounded-r-full bg-primary/40" />
       <CardContent className="pt-4 pb-4 pl-5">
@@ -238,7 +230,7 @@ function ExpertCard({ expert, depts, onArchive }: {
               )}
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 shrink-0" onClick={(e) => e.stopPropagation()}>
             <Badge variant="outline" className={`text-xs border ${
               expert.status === "active"
                 ? "text-green-400 border-green-500/30 bg-green-500/10"
@@ -246,6 +238,11 @@ function ExpertCard({ expert, depts, onArchive }: {
             }`}>
               {expert.status === "active" ? "Aktiv" : expert.status}
             </Badge>
+            {expert.draftVersionId && (
+              <Badge variant="outline" className="text-xs border-amber-500/30 text-amber-400 bg-amber-500/5">
+                Kladde
+              </Badge>
+            )}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="icon" className="h-6 w-6" data-testid={`expert-menu-${expert.id}`}>
@@ -253,6 +250,12 @@ function ExpertCard({ expert, depts, onArchive }: {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onClick={() => navigate(`/ai-eksperter/${expert.id}`)}
+                  data-testid={`edit-expert-${expert.id}`}
+                >
+                  Åbn ekspert
+                </DropdownMenuItem>
                 <DropdownMenuItem
                   className="text-destructive"
                   onClick={() => onArchive(expert.id)}
@@ -275,16 +278,19 @@ function ExpertCard({ expert, depts, onArchive }: {
               {dept.name}
             </Badge>
           )}
-          {expert.modelName && (
-            <Badge variant="outline" className="text-xs border-primary/20 text-primary/50">
-              {expert.modelName}
-            </Badge>
-          )}
+          <Badge variant="outline" className="text-xs border-muted/20 text-muted-foreground/40">
+            AI runtime styres af platformen
+          </Badge>
         </div>
 
-        <p className="text-xs text-muted-foreground/40 mt-2.5">
-          Opdateret {new Date(expert.updatedAt).toLocaleDateString("da-DK")}
-        </p>
+        <div className="flex items-center justify-between mt-2.5">
+          <p className="text-xs text-muted-foreground/40">
+            Opdateret {new Date(expert.updatedAt).toLocaleDateString("da-DK")}
+          </p>
+          <span className="text-xs text-primary/50 flex items-center gap-1">
+            Åbn <ArrowRight className="w-3 h-3" />
+          </span>
+        </div>
       </CardContent>
     </Card>
   );
@@ -370,33 +376,22 @@ function Step1({ form, depts }: { form: ReturnType<typeof useForm<Step1Values>>;
           </FormItem>
         )} />
       </div>
-      <div className="grid grid-cols-2 gap-3">
-        <FormField control={form.control} name="outputStyle" render={({ field }) => (
-          <FormItem>
-            <FormLabel>Outputstil</FormLabel>
-            <Select onValueChange={field.onChange} value={field.value ?? ""}>
-              <FormControl>
-                <SelectTrigger data-testid="select-expert-outputstyle"><SelectValue placeholder="Vælg" /></SelectTrigger>
-              </FormControl>
-              <SelectContent>
-                {OUTPUT_STYLE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </FormItem>
-        )} />
-        <FormField control={form.control} name="modelName" render={({ field }) => (
-          <FormItem>
-            <FormLabel>AI Model</FormLabel>
-            <Select onValueChange={field.onChange} value={field.value}>
-              <FormControl>
-                <SelectTrigger data-testid="select-expert-model"><SelectValue /></SelectTrigger>
-              </FormControl>
-              <SelectContent>
-                {MODEL_OPTIONS.map((m) => <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </FormItem>
-        )} />
+      <FormField control={form.control} name="outputStyle" render={({ field }) => (
+        <FormItem>
+          <FormLabel>Outputstil</FormLabel>
+          <Select onValueChange={field.onChange} value={field.value ?? ""}>
+            <FormControl>
+              <SelectTrigger data-testid="select-expert-outputstyle"><SelectValue placeholder="Vælg" /></SelectTrigger>
+            </FormControl>
+            <SelectContent>
+              {OUTPUT_STYLE_OPTIONS.map((o) => <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </FormItem>
+      )} />
+      <div className="rounded-lg border border-border/30 bg-muted/10 px-3.5 py-2.5 flex items-center gap-2">
+        <Brain className="w-3.5 h-3.5 text-primary/50 shrink-0" />
+        <p className="text-xs text-muted-foreground/60">AI runtime styres automatisk af BlissOps — ingen modelvalg nødvendigt.</p>
       </div>
       <FormField control={form.control} name="slug" render={({ field }) => (
         <FormItem>
@@ -757,7 +752,7 @@ function Step5({ expertId, expertName, sources, rules }: {
               </div>
               <div className="flex items-center gap-2 text-xs text-muted-foreground/50">
                 <Clock className="w-3 h-3" />
-                {testResult.latency_ms}ms · {testResult.model_name}
+                {testResult.latency_ms}ms · {testResult.model_name} · {testResult.provider}
               </div>
             </div>
             <p className="text-sm text-foreground whitespace-pre-wrap">{testResult.output}</p>
@@ -804,7 +799,6 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
     defaultValues: {
       name: "", slug: "", description: "", goal: "", instructions: "",
       outputStyle: "advisory", departmentId: "", language: "da",
-      modelProvider: "openai", modelName: "gpt-4o", temperature: 0.3, maxOutputTokens: 2048,
     },
   });
 
@@ -849,21 +843,17 @@ function CreateWizard({ open, onClose, depts, onCreated }: {
   const handleCreateAndAdvance = async (values: Step1Values) => {
     setTransitioning(true);
     try {
-      // 1. Create expert
+      // 1. Create expert (model/provider managed server-side)
       const profile = await apiRequest<ExpertRow>("POST", "/api/experts", {
-        name:            values.name,
-        slug:            values.slug,
-        description:     values.description || undefined,
-        goal:            values.goal || undefined,
-        instructions:    values.instructions || undefined,
-        outputStyle:     values.outputStyle === "advisory" ? undefined : values.outputStyle,
-        departmentId:    values.departmentId === "none" ? undefined : values.departmentId || undefined,
-        language:        values.language,
-        modelProvider:   values.modelProvider,
-        modelName:       values.modelName,
-        temperature:     values.temperature,
-        maxOutputTokens: values.maxOutputTokens,
-        category:        undefined,
+        name:         values.name,
+        slug:         values.slug,
+        description:  values.description || undefined,
+        goal:         values.goal || undefined,
+        instructions: values.instructions || undefined,
+        outputStyle:  values.outputStyle === "advisory" ? undefined : values.outputStyle,
+        departmentId: values.departmentId === "none" ? undefined : values.departmentId || undefined,
+        language:     values.language,
+        category:     undefined,
       });
 
       // 2. Attach rules (sequential, safe)

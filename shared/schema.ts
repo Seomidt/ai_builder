@@ -241,11 +241,14 @@ export const architectureProfiles = pgTable(
     goal:              text("goal"),                  // short purpose statement
     outputStyle:       text("output_style"),          // concise | formal | advisory
     escalationPolicy:  jsonb("escalation_policy"),   // structured escalation config
-    // ── Model / Runtime Config ────────────────────────────────────────────────
+    // ── Model / Runtime Config (server-side only, not tenant-editable) ────────
     modelProvider:     text("model_provider").default("openai"),
     modelName:         text("model_name").default("gpt-4o"),
     temperature:       real("temperature").default(0.3),
     maxOutputTokens:   integer("max_output_tokens").default(2048),
+    // ── Versioning ────────────────────────────────────────────────────────────
+    draftVersionId:    text("draft_version_id"),      // current draft (unpromoted)
+    // currentVersionId already exists above (live version)
     // ─────────────────────────────────────────────────────────────────────────
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -6632,3 +6635,28 @@ export const specialistSources = pgTable(
 export const insertSpecialistSourceSchema = createInsertSchema(specialistSources).omit({ id: true, linkedAt: true });
 export type InsertSpecialistSource = z.infer<typeof insertSpecialistSourceSchema>;
 export type SpecialistSource = typeof specialistSources.$inferSelect;
+
+// ─── Expert Versions ──────────────────────────────────────────────────────────
+// Immutable snapshots of AI Expert configuration at a point in time.
+// status: draft = editable/unpromoted | live = current active | archived = retired
+export const expertVersions = pgTable(
+  "expert_versions",
+  {
+    id:             text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    expertId:       text("expert_id").notNull().references(() => architectureProfiles.id, { onDelete: "cascade" }),
+    organizationId: text("organization_id").notNull(),
+    versionNumber:  integer("version_number").notNull().default(1),
+    status:         text("status").notNull().default("draft"),     // draft | live | archived
+    configJson:     jsonb("config_json").notNull().default(sql`'{}'::jsonb`),
+    createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    createdBy:      text("created_by"),                            // user id (nullable for system)
+  },
+  (t) => [
+    index("expert_versions_expert_idx").on(t.expertId),
+    index("expert_versions_org_idx").on(t.organizationId),
+    index("expert_versions_status_idx").on(t.expertId, t.status),
+  ],
+);
+export const insertExpertVersionSchema = createInsertSchema(expertVersions).omit({ id: true, createdAt: true });
+export type InsertExpertVersion = z.infer<typeof insertExpertVersionSchema>;
+export type ExpertVersion = typeof expertVersions.$inferSelect;
