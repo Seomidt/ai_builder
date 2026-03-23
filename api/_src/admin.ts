@@ -3,9 +3,11 @@ import { authenticate } from "./_lib/auth";
 import { json, err, pathSegments, parseUrl, readBody } from "./_lib/response";
 import { dbList, dbGet, dbUpdate } from "./_lib/db";
 
-const SUPABASE_URL     = process.env.SUPABASE_URL            ?? "";
-const SUPABASE_SERVICE = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
-const SUPABASE_ANON    = process.env.SUPABASE_ANON_KEY        ?? "";
+const _FB_URL  = "https://jneoimqidmkhikvusxak.supabase.co";
+const _FB_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpuZW9pbXFpZG1raGlrdnVzeGFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxMzcxNTgsImV4cCI6MjA4ODcxMzE1OH0.CPdFKA1jfs7OAfHCm49J7_gl3GrA2b7WLmbKWzhoY8M";
+const SUPABASE_URL     = (process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? _FB_URL).trim();
+const SUPABASE_SERVICE = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
+const SUPABASE_ANON    = (process.env.SUPABASE_ANON_KEY ?? process.env.VITE_SUPABASE_ANON_KEY ?? _FB_ANON).trim();
 
 function adminErr(res: Parameters<typeof err>[0], status: number, code: string, message: string): void {
   err(res, status, code, status === 500 ? "Internal server error" : message);

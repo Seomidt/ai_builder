@@ -1,13 +1,18 @@
 import { createHmac, timingSafeEqual } from "crypto";
+import { webcrypto } from "crypto";
 import type { IncomingMessage } from "http";
 
-// Trim all secrets — Vercel/env editors sometimes add trailing newlines/spaces
-const SUPABASE_JWT_SECRET   = (process.env.SUPABASE_JWT_SECRET   ?? "").trim();
-const SUPABASE_URL          = (process.env.SUPABASE_URL           ?? "").trim();
-const SUPABASE_SERVICE_KEY  = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
-// Anon key: always available (used by frontend too), safe to use as `apikey`
-const SUPABASE_ANON_KEY     = (process.env.SUPABASE_ANON_KEY     ?? "").trim();
-const INTERNAL_API_SECRET   = (process.env.INTERNAL_API_SECRET   ?? "").trim();
+// Public fallbacks — same values embedded in the frontend JS bundle.
+// Safe to hardcode: SUPABASE_URL is the project endpoint (not secret),
+// and the anon key is a publishable API key by design.
+const _FALLBACK_URL  = "https://jneoimqidmkhikvusxak.supabase.co";
+const _FALLBACK_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpuZW9pbXFpZG1raGlrdnVzeGFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxMzcxNTgsImV4cCI6MjA4ODcxMzE1OH0.CPdFKA1jfs7OAfHCm49J7_gl3GrA2b7WLmbKWzhoY8M";
+
+const SUPABASE_JWT_SECRET  = (process.env.SUPABASE_JWT_SECRET   ?? "").trim();
+const SUPABASE_URL         = (process.env.SUPABASE_URL          ?? process.env.VITE_SUPABASE_URL          ?? _FALLBACK_URL).trim();
+const SUPABASE_SERVICE_KEY = (process.env.SUPABASE_SERVICE_ROLE_KEY ?? "").trim();
+const SUPABASE_ANON_KEY    = (process.env.SUPABASE_ANON_KEY     ?? process.env.VITE_SUPABASE_ANON_KEY     ?? _FALLBACK_ANON).trim();
+const INTERNAL_API_SECRET  = (process.env.INTERNAL_API_SECRET   ?? "").trim();
 
 const PLATFORM_ADMIN_EMAILS = new Set(
   (process.env.PLATFORM_ADMIN_EMAILS ?? "seomidt@gmail.com")
@@ -19,11 +24,13 @@ const LOCKDOWN_ALLOWLIST = new Set(
     .split(",").map((e) => e.trim().toLowerCase()).filter(Boolean),
 );
 
-// ── JWT verification (fast path — local HMAC, no network) ────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-function b64UrlToBuffer(s: string): Buffer {
+function b64UrlDecode(s: string): Buffer {
   return Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/"), "base64");
 }
+
+// ── Path 1: HMAC-SHA256 local verify (HS256 tokens) ──────────────────────────
 
 function verifyLocalJwt(token: string): { id: string; email?: string } | null {
   if (!SUPABASE_JWT_SECRET) return null;
@@ -31,37 +38,93 @@ function verifyLocalJwt(token: string): { id: string; email?: string } | null {
     const parts = token.split(".");
     if (parts.length !== 3) return null;
     const [h, p, sig] = parts;
+
+    // Only attempt HS256 verification
+    const header = JSON.parse(b64UrlDecode(h).toString("utf8")) as Record<string, unknown>;
+    if (header.alg !== "HS256") return null;
+
     const expected = createHmac("sha256", SUPABASE_JWT_SECRET)
       .update(`${h}.${p}`).digest("base64url");
     const expBuf = Buffer.from(expected, "utf8");
-    const actBuf = Buffer.from(sig,      "utf8");
+    const actBuf = Buffer.from(sig, "utf8");
     if (expBuf.length !== actBuf.length || !timingSafeEqual(expBuf, actBuf)) return null;
-    const payload = JSON.parse(b64UrlToBuffer(p).toString("utf8")) as Record<string, unknown>;
+
+    const payload = JSON.parse(b64UrlDecode(p).toString("utf8")) as Record<string, unknown>;
     if (typeof payload.exp === "number" && payload.exp < Math.floor(Date.now() / 1000)) return null;
     if (typeof payload.sub !== "string") return null;
     return { id: payload.sub, email: typeof payload.email === "string" ? payload.email : undefined };
   } catch { return null; }
 }
 
-// ── Supabase API fallback (slow path — network call to Supabase Auth API) ────
-// Uses SUPABASE_ANON_KEY as apikey (always available, identifies the project).
-// Falls back to SUPABASE_SERVICE_KEY if anon key is missing.
+// ── Path 2: JWKS verify (ES256 tokens — Supabase default) ────────────────────
+// Fetches Supabase's public JWKS once and caches for 1 hour.
+// Only requires SUPABASE_URL — no API key needed (JWKS is a public endpoint).
 
-interface SupabaseUserResponse {
-  id?: string;
-  email?: string;
-  error?: string;
-  message?: string;
+interface JWK { kty: string; alg?: string; kid?: string; crv?: string; x?: string; y?: string; n?: string; e?: string; use?: string; }
+let _jwksCache: { keys: JWK[]; exp: number } | null = null;
+
+async function getJWKS(): Promise<JWK[]> {
+  if (_jwksCache && _jwksCache.exp > Date.now()) return _jwksCache.keys;
+  if (!SUPABASE_URL) return [];
+  try {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1/jwks`);
+    if (!res.ok) return [];
+    const data = (await res.json()) as { keys?: JWK[] };
+    _jwksCache = { keys: data.keys ?? [], exp: Date.now() + 3_600_000 };
+    return _jwksCache.keys;
+  } catch { return []; }
 }
 
-const supabaseUserCache = new Map<string, { id: string; email?: string; exp: number }>();
+async function verifyES256(token: string): Promise<{ id: string; email?: string } | null> {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    const [h, p, sig] = parts;
+
+    const header = JSON.parse(b64UrlDecode(h).toString("utf8")) as Record<string, unknown>;
+    if (header.alg !== "ES256") return null;
+
+    const keys = await getJWKS();
+    if (!keys.length) return null;
+
+    const jwk = keys.find((k) => !header.kid || k.kid === header.kid) ?? keys[0];
+    if (!jwk) return null;
+
+    const cryptoKey = await webcrypto.subtle.importKey(
+      "jwk",
+      jwk as JsonWebKey,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["verify"],
+    );
+
+    const sigInput = new TextEncoder().encode(`${h}.${p}`);
+    const sigBytes = b64UrlDecode(sig);
+
+    const valid = await webcrypto.subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      cryptoKey,
+      sigBytes,
+      sigInput,
+    );
+    if (!valid) return null;
+
+    const payload = JSON.parse(b64UrlDecode(p).toString("utf8")) as Record<string, unknown>;
+    if (typeof payload.exp === "number" && payload.exp < Math.floor(Date.now() / 1000)) return null;
+    if (typeof payload.sub !== "string") return null;
+    return { id: payload.sub, email: typeof payload.email === "string" ? payload.email : undefined };
+  } catch { return null; }
+}
+
+// ── Path 3: Supabase API fallback (network call) ──────────────────────────────
+
+interface SupabaseUserResponse { id?: string; email?: string; error?: string; message?: string; }
+const _userCache = new Map<string, { id: string; email?: string; exp: number }>();
 
 async function verifyViaSupabaseApi(token: string): Promise<{ id: string; email?: string } | null> {
-  const cached = supabaseUserCache.get(token);
+  const cached = _userCache.get(token);
   if (cached && cached.exp > Date.now()) return { id: cached.id, email: cached.email };
 
-  // Prefer anon key as apikey — always available, sufficient to identify project.
-  // Service key works too but may not be configured in all environments.
   const apikey = SUPABASE_ANON_KEY || SUPABASE_SERVICE_KEY;
   if (!SUPABASE_URL || !apikey) return null;
 
@@ -72,19 +135,17 @@ async function verifyViaSupabaseApi(token: string): Promise<{ id: string; email?
     if (!res.ok) return null;
     const data = (await res.json()) as SupabaseUserResponse;
     if (!data.id) return null;
-    supabaseUserCache.set(token, { id: data.id, email: data.email, exp: Date.now() + 30_000 });
+    _userCache.set(token, { id: data.id, email: data.email, exp: Date.now() + 30_000 });
     return { id: data.id, email: data.email };
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 
-// ── Membership cache (30 s TTL per process instance) ─────────────────────────
+// ── Membership lookup ─────────────────────────────────────────────────────────
 
-const memberCache = new Map<string, { orgId: string; role: string; exp: number }>();
+const _memberCache = new Map<string, { orgId: string; role: string; exp: number }>();
 
 async function lookupMembership(userId: string): Promise<{ orgId: string; role: string }> {
-  const hit = memberCache.get(userId);
+  const hit = _memberCache.get(userId);
   if (hit && hit.exp > Date.now()) return { orgId: hit.orgId, role: hit.role };
 
   const apikey = SUPABASE_SERVICE_KEY || SUPABASE_ANON_KEY;
@@ -98,14 +159,14 @@ async function lookupMembership(userId: string): Promise<{ orgId: string; role: 
     const rows = (await res.json()) as Array<{ organization_id: string; role: string }>;
     const orgId = rows[0]?.organization_id ?? "blissops-main";
     const role  = rows[0]?.role             ?? "member";
-    memberCache.set(userId, { orgId, role, exp: Date.now() + 30_000 });
+    _memberCache.set(userId, { orgId, role, exp: Date.now() + 30_000 });
     return { orgId, role };
   } catch {
     return { orgId: "blissops-main", role: "member" };
   }
 }
 
-// ── AuthUser ─────────────────────────────────────────────────────────────────
+// ── AuthUser ──────────────────────────────────────────────────────────────────
 
 export interface AuthUser {
   id:             string;
@@ -114,13 +175,12 @@ export interface AuthUser {
   role:           string;
 }
 
-// ── authenticate() — main entry for handlers ─────────────────────────────────
+// ── authenticate() ────────────────────────────────────────────────────────────
 
 export async function authenticate(req: IncomingMessage): Promise<
   | { user: AuthUser; status: "ok" }
   | { user: null; status: "unauthenticated" | "lockdown" }
 > {
-  // Internal tooling bypass
   if (INTERNAL_API_SECRET && req.headers["x-internal-token"] === INTERNAL_API_SECRET) {
     return {
       user: { id: "internal-script", email: "internal@blissops.com", organizationId: "blissops-main", role: "platform_admin" },
@@ -133,20 +193,18 @@ export async function authenticate(req: IncomingMessage): Promise<
   const token = authHeader.slice(7).trim();
   if (!token) return { user: null, status: "unauthenticated" };
 
-  // Fast path: local JWT verification (< 1 ms, no network)
-  let jwt = verifyLocalJwt(token);
-
-  // Slow path: call Supabase Auth API when local verification fails
-  if (!jwt) jwt = await verifyViaSupabaseApi(token);
+  // Try all three verification paths in order of speed/reliability
+  let jwt =
+    verifyLocalJwt(token) ??           // HS256: <1ms, no network
+    (await verifyES256(token)) ??      // ES256: JWKS cached after first call
+    (await verifyViaSupabaseApi(token)); // Fallback: direct API call
 
   if (!jwt) return { user: null, status: "unauthenticated" };
 
-  // Lockdown guard
   if (LOCKDOWN_ENABLED && jwt.email && !LOCKDOWN_ALLOWLIST.has(jwt.email.toLowerCase())) {
     return { user: null, status: "lockdown" };
   }
 
-  // Platform admin — always gets full access
   if (jwt.email && PLATFORM_ADMIN_EMAILS.has(jwt.email.toLowerCase())) {
     const { orgId } = await lookupMembership(jwt.id);
     return {
