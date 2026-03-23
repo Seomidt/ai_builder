@@ -234,6 +234,8 @@ export const architectureProfiles = pgTable(
     category: text("category"),
     status: archProfileStatusEnum("status").notNull().default("active"),
     currentVersionId: varchar("current_version_id"), // FK set after versions table
+    departmentId: text("department_id"),             // optional dept association
+    language: text("language").default("da"),        // expert output language
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
@@ -6565,3 +6567,51 @@ export const tenantMemberDepartments = pgTable(
 export const insertTenantMemberDepartmentSchema = createInsertSchema(tenantMemberDepartments).omit({ id: true, assignedAt: true });
 export type InsertTenantMemberDepartment = z.infer<typeof insertTenantMemberDepartmentSchema>;
 export type TenantMemberDepartment = typeof tenantMemberDepartments.$inferSelect;
+
+// ─── Specialist Rules ─────────────────────────────────────────────────────────
+// Rules bound to an AI Expert. Types: decision | threshold | required_evidence | source_restriction
+export const specialistRules = pgTable(
+  "specialist_rules",
+  {
+    id:             text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId: text("organization_id").notNull(),
+    expertId:       text("expert_id").notNull().references(() => architectureProfiles.id, { onDelete: "cascade" }),
+    type:           text("type").notNull(),      // decision | threshold | required_evidence | source_restriction
+    name:           text("name").notNull(),
+    description:    text("description"),
+    config:         jsonb("config"),             // structured rule payload
+    status:         text("status").notNull().default("active"),
+    createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt:      timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("specialist_rules_expert_idx").on(t.expertId),
+    index("specialist_rules_org_idx").on(t.organizationId),
+  ],
+);
+export const insertSpecialistRuleSchema = createInsertSchema(specialistRules).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertSpecialistRule = z.infer<typeof insertSpecialistRuleSchema>;
+export type SpecialistRule = typeof specialistRules.$inferSelect;
+
+// ─── Specialist Sources ───────────────────────────────────────────────────────
+// Data sources linked to an AI Expert (points to projects / external files).
+export const specialistSources = pgTable(
+  "specialist_sources",
+  {
+    id:             text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    organizationId: text("organization_id").notNull(),
+    expertId:       text("expert_id").notNull().references(() => architectureProfiles.id, { onDelete: "cascade" }),
+    projectId:      text("project_id"),          // optional link to projects table
+    sourceName:     text("source_name").notNull(),
+    sourceType:     text("source_type").notNull().default("document"), // document | policy | legal | rule | image
+    status:         text("status").notNull().default("linked"),        // linked | ingesting | ready | error
+    linkedAt:       timestamp("linked_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("specialist_sources_expert_idx").on(t.expertId),
+    index("specialist_sources_org_idx").on(t.organizationId),
+  ],
+);
+export const insertSpecialistSourceSchema = createInsertSchema(specialistSources).omit({ id: true, linkedAt: true });
+export type InsertSpecialistSource = z.infer<typeof insertSpecialistSourceSchema>;
+export type SpecialistSource = typeof specialistSources.$inferSelect;
