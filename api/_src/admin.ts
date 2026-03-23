@@ -125,10 +125,42 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     // ── GET /api/admin/integrations/status ────────────────────────────────────
     if (segs[0] === "integrations" && segs[1] === "status" && method === "GET") {
-      const integrations = getPlatformIntegrationStatus();
-      const allConfigured = Object.values(integrations).every((i) => i.configured);
+      const raw = getPlatformIntegrationStatus();
+
+      const PROVIDER_META: Record<string, { label: string; category: "ai" | "platform" | "infra"; requiredEnvVars: string[]; docsHint?: string }> = {
+        openai:     { label: "OpenAI",     category: "ai",       requiredEnvVars: ["OPENAI_API_KEY"],    docsHint: "Set OPENAI_API_KEY in your secrets manager." },
+        supabase:   { label: "Supabase",   category: "platform", requiredEnvVars: ["SUPABASE_URL", "SUPABASE_ANON_KEY"], docsHint: "Set SUPABASE_URL and SUPABASE_ANON_KEY." },
+        cloudflare: { label: "Cloudflare", category: "infra",    requiredEnvVars: ["CF_R2_ACCOUNT_ID", "CF_R2_ACCESS_KEY_ID", "CF_R2_SECRET_ACCESS_KEY"], docsHint: "Set Cloudflare R2 credentials." },
+        github:     { label: "GitHub",     category: "platform", requiredEnvVars: ["GITHUB_TOKEN"],      docsHint: "Set GITHUB_TOKEN with repo access." },
+        vercel:     { label: "Vercel",     category: "infra",    requiredEnvVars: ["VERCEL_TOKEN"],       docsHint: "Set VERCEL_TOKEN from the Vercel dashboard." },
+      };
+
+      const providers = Object.entries(raw).map(([key, info]) => {
+        const meta = PROVIDER_META[key] ?? { label: key, category: "infra" as const, requiredEnvVars: [] };
+        const configured = info.configured;
+        const missingEnvVars = configured ? [] : (meta.requiredEnvVars ?? []);
+        return {
+          key,
+          label:           meta.label,
+          category:        meta.category,
+          configured,
+          status:          configured ? "healthy" : "missing",
+          message:         configured ? `${meta.label} is connected and operational.` : `${meta.label} is not configured.`,
+          requiredEnvVars: meta.requiredEnvVars ?? [],
+          missingEnvVars,
+          docsHint:        meta.docsHint,
+        };
+      });
+
+      const healthy = providers.filter((p) => p.status === "healthy").length;
+      const missing = providers.filter((p) => p.status === "missing").length;
+
       res.setHeader("Cache-Control", "private, max-age=60, stale-while-revalidate=120");
-      return json(res, { integrations, allConfigured });
+      return json(res, {
+        providers,
+        summary: { total: providers.length, healthy, missing, warning: 0, stub: 0 },
+        generatedAt: new Date().toISOString(),
+      });
     }
 
     // ── GET /api/admin/ops-summary ────────────────────────────────────────────
