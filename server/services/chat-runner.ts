@@ -125,62 +125,114 @@ export async function runChatMessage(params: {
     builtPrompt = await buildFromLive(fullExpert, organizationId, buildExpertPrompt);
   }
 
-  // ── 3. Byg det endelige user-input (dokument-kontekst INJICERET) ───────────
-  let finalUserInput = message;
-  let finalSystemPrompt = builtPrompt.systemPrompt;
+  // ── 3. Kør AI-kald ────────────────────────────────────────────────────────
+  const { runRetrieval } = await import("../lib/retrieval/retrieval-orchestrator");
+
+  let aiText: string;
+  let aiLatencyMs: number;
 
   if (docCtx.length > 0) {
-    // TASK 6 — hard system-prompt-tilføjelse: forbyd "kan ikke tilgå filer"
-    const docSystemAddition = [
-      "",
-      "=== KRITISK INSTRUKTION — DOKUMENTANALYSE ===",
-      "Du har ALTID adgang til det fulde dokumentindhold nedenfor i bruger-inputtet.",
-      "Du MÅ ALDRIG sige at du ikke kan åbne, tilgå eller læse vedhæftede filer.",
-      "Du SKAL analysere dokumentets faktiske indhold direkte.",
-      "Du SKAL referere til konkrete sætninger, klausuler, tal og navne fra dokumentet.",
-      "Hvis det efterspurgte ikke er i dokumentet, skal du sige: 'Det fremgår ikke af det uploadede dokument.'",
-      "Du MÅ ALDRIG give generiske råd eller tjeklister i stedet for faktisk dokumentanalyse.",
-      "=== SLUT KRITISK INSTRUKTION ===",
-    ].join("\n");
-
-    finalSystemPrompt = builtPrompt.systemPrompt + docSystemAddition;
-
-    // TASK 2 — force document content direkte ind i user-input
-    const docBlock = docCtx.map(d =>
-      `=== DOKUMENTINDHOLD START: ${d.filename} (${d.extracted_text.length} tegn) ===\n\n${d.extracted_text}\n\n=== DOKUMENTINDHOLD SLUT: ${d.filename} ===`
-    ).join("\n\n");
-
-    finalUserInput = `${message}\n\n${docBlock}`;
+    // ── DOKUMENT-MODE: Chat Completions API med messages-array ────────────────
+    // Bypasser runAiCall (som bruger Responses API — understøtter ikke messages-array).
+    // Følger præcist samme flow som api/_src/chat.ts (Vercel-stien).
+    const { getOpenAIClient } = await import("../lib/openai-client");
+    const oai = getOpenAIClient();
 
     const totalChars = docCtx.reduce((s, d) => s + d.extracted_text.length, 0);
-    console.log(`[chat-runner] PAYLOAD_READY: userInput_len=${finalUserInput.length} doc_chars=${totalChars} systemPrompt_len=${finalSystemPrompt.length}`);
-  }
+    console.log(`[chat-runner] DOC_MODE: doc_ctx_ok=${docCtx.length} total_doc_chars=${totalChars}`);
+    console.log(`[chat-runner] first200="${docCtx[0].extracted_text.slice(0, 200).replace(/\n/g, " ")}"`);
 
-  // TASK 5 — hard assertion FØR model-kald
-  if (docCtx.length > 0) {
-    if (!finalUserInput.includes("=== DOKUMENTINDHOLD START:")) {
+    // TASK 4 — STRICT document-only system prompt (ERSTATTER expert-prompt)
+    const docSystemPrompt = [
+      `Du er en AI-ekspert ved navn ${expert.name}.`,
+      `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
+      ``,
+      `=== ABSOLUT BINDENDE REGLER FOR DOKUMENTANALYSE ===`,
+      `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
+      `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
+      `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
+      `REGEL 4: Hvis svaret IKKE fremgår af dokumentet, siger du præcist: "Jeg kan ikke finde det i det uploadede dokument."`,
+      `REGEL 5: Hvis svaret fremgår af dokumentet, citerer du den relevante sætning direkte.`,
+      `REGEL 6: Du MÅ ALDRIG give generiske forklaringer eller bred kontekst, medmindre det fremgår af dokumentet.`,
+      `REGEL 7: Dit svar skal starte med den direkte konklusion, ikke med en forklaring.`,
+      `REGEL 8: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
+      `=== SLUT REGLER ===`,
+      ``,
+      `Svar altid på dansk.`,
+    ].join("\n");
+
+    // TASK 3 — dokument som separat user-besked (højest prioritet)
+    const docBlock = docCtx.map(d =>
+      `FILNAVN: ${d.filename}\nTEGN: ${d.extracted_text.length}\n\n${d.extracted_text}`
+    ).join("\n\n---\n\n");
+
+    const messagesPayload = [
+      { role: "system" as const, content: docSystemPrompt },
+      {
+        role: "user" as const,
+        content: `=== DOKUMENTINDHOLD START ===\n\n${docBlock}\n\n=== DOKUMENTINDHOLD SLUT ===\n\nOvenstående er det komplette ekstraherede indhold fra det uploadede dokument. Brug dette som eneste kilde.`,
+      },
+      {
+        role: "assistant" as const,
+        content: "Jeg har læst dokumentet fuldt ud og forstår indholdet. Jeg er klar til at besvare spørgsmål udelukkende baseret på det faktiske dokumentindhold.",
+      },
+      { role: "user" as const, content: message },
+    ];
+
+    const totalPromptChars = messagesPayload.reduce((s, m) => s + m.content.length, 0);
+    console.log(`[chat-runner] PAYLOAD_READY: messages=${messagesPayload.length} total_chars=${totalPromptChars} doc_in_payload=true`);
+
+    // Hard assertion: bekræft dokument er i payload
+    const docInPayload = messagesPayload[1].content.includes("=== DOKUMENTINDHOLD START ===");
+    if (!docInPayload) {
       throw Object.assign(
-        new Error("DOCUMENT_CONTEXT_NOT_INJECTED: Document text not found in final payload"),
+        new Error("DOCUMENT_CONTEXT_NOT_INJECTED"),
         { errorCode: "DOCUMENT_CONTEXT_NOT_INJECTED" },
       );
     }
+
+    const t0 = Date.now();
+    const completion = await oai.chat.completions.create({
+      model: "gpt-4o",
+      temperature: 0.1,
+      max_tokens: 2000,
+      messages: messagesPayload,
+    });
+    aiLatencyMs = Date.now() - t0;
+    aiText = completion.choices[0]?.message?.content ?? "";
+
+    console.log(`[chat-runner] DOC_ANSWER_LEN=${aiText.length} latency=${aiLatencyMs}ms`);
+    console.log(`[chat-runner] DOC_ANSWER_PREVIEW="${aiText.slice(0, 200).replace(/\n/g, " ")}"`);
+
+    // TASK 5 — grounding-validering
+    if (aiText) {
+      aiText = validateDocumentGrounding(aiText, docCtx[0].extracted_text);
+    }
+
+    if (!aiText) {
+      throw Object.assign(
+        new Error("AI returnerede tomt svar i dokument-mode"),
+        { errorCode: "AI_EMPTY_RESPONSE" },
+      );
+    }
+  } else {
+    // ── NORMAL MODE: runAiCall via Responses API ──────────────────────────────
+    const { runAiCall } = await import("../lib/ai/runner");
+    const t0 = Date.now();
+    const aiResult = await runAiCall(
+      { feature: "ai-chat", tenantId: organizationId, userId },
+      { systemPrompt: builtPrompt.systemPrompt, userInput: message },
+    );
+    aiLatencyMs = Date.now() - t0;
+    aiText = aiResult.text;
   }
 
-  // ── 3. Run AI + retrieval i parallel ─────────────────────────────────────
-  const { runAiCall } = await import("../lib/ai/runner");
-  const { runRetrieval } = await import("../lib/retrieval/retrieval-orchestrator");
-
-  const [aiResult, retrievalResult] = await Promise.all([
-    runAiCall(
-      { feature: "ai-chat", tenantId: organizationId, userId },
-      { systemPrompt: finalSystemPrompt, userInput: finalUserInput },
-    ),
+  const [, retrievalResult] = await Promise.all([
+    Promise.resolve(),
     runRetrieval({ tenantId: organizationId, queryText: message, strategy: "hybrid", topK: 5 }).catch(
       () => null,
     ),
   ]);
-
-  const latencyMs = Date.now() - startMs;
 
   // ── 4. Map sources ─────────────────────────────────────────────────────────
   const metadataSources = builtPrompt.usedSources.map((s) => ({
@@ -209,8 +261,11 @@ export async function runChatMessage(params: {
     warnings.push("Kildegenfinding utilgængelig — svar baseret på ekspertens regler og instruktioner.");
   }
 
-  // ── 7. Confidence band (truthful only — never fabricated) ─────────────────
-  const confidenceBand = deriveConfidenceBand(usedSources.length, usedRules.length, warnings);
+  // ── 7. Confidence band ─────────────────────────────────────────────────────
+  // Dokument-mode: "high" kun hvis svaret refererer til faktisk dokumentindhold
+  const confidenceBand = docCtx.length > 0
+    ? deriveDocumentConfidence(aiText, docCtx.map(d => d.extracted_text).join(" "))
+    : deriveConfidenceBand(usedSources.length, usedRules.length, warnings);
   const needsManualReview = warnings.length > 0 || confidenceBand === "low";
 
   // ── 8. Persist conversation + messages ────────────────────────────────────
@@ -219,17 +274,17 @@ export async function runChatMessage(params: {
     userId,
     expertId: expert.id,
     message,
-    answer: aiResult.text,
+    answer: aiText,
     usedSources,
     usedRules,
     warnings,
-    latencyMs,
+    latencyMs: aiLatencyMs,
     confidenceBand,
     existingConversationId: params.conversationId ?? null,
   });
 
   return {
-    answer: aiResult.text,
+    answer: aiText,
     conversationId,
     expert: {
       id: expert.id,
@@ -239,7 +294,7 @@ export async function runChatMessage(params: {
     usedSources,
     usedRules,
     warnings,
-    latencyMs,
+    latencyMs: aiLatencyMs,
     confidenceBand,
     needsManualReview,
     routingExplanation,
@@ -247,6 +302,77 @@ export async function runChatMessage(params: {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * TASK 5 — Grounding-validering.
+ * Tjekker om modellens svar er forankret i det faktiske dokumentindhold.
+ * Afviser generiske svar der ikke refererer til dokumentet.
+ */
+function validateDocumentGrounding(answer: string, extractedText: string): string {
+  if (!answer) return answer;
+
+  const lowerAnswer = answer.toLowerCase();
+  const lowerDoc    = extractedText.toLowerCase();
+
+  // 1. Ingen grounding nødvendig hvis svaret eksplicit siger "ikke i dokumentet"
+  const notFoundPhrases = [
+    "kan ikke finde",
+    "fremgår ikke",
+    "ikke i det uploadede",
+    "ikke nævnt",
+    "ikke specificeret",
+    "ikke angivet",
+    "fremkommer ikke",
+  ];
+  if (notFoundPhrases.some(p => lowerAnswer.includes(p))) {
+    console.log("[chat-runner] GROUNDING: svaret angiver 'ikke fundet' — accepteret");
+    return answer;
+  }
+
+  // 2. Tjek om svaret indeholder ord/tal der faktisk er i dokumentet (n-gram overlap)
+  const answerWords = lowerAnswer
+    .replace(/[^a-zæøå0-9\s]/gi, " ")
+    .split(/\s+/)
+    .filter(w => w.length >= 4);
+
+  const docWords = new Set(
+    lowerDoc.replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4)
+  );
+
+  const matchingWords = answerWords.filter(w => docWords.has(w));
+  const overlapRatio  = answerWords.length > 0 ? matchingWords.length / answerWords.length : 0;
+
+  console.log(`[chat-runner] GROUNDING: overlap=${(overlapRatio * 100).toFixed(0)}% matching=${matchingWords.length}/${answerWords.length}`);
+
+  // 3. Afvis svar med < 15% overlap (er sandsynligvis generisk viden)
+  if (overlapRatio < 0.15 && answerWords.length > 10) {
+    console.warn(`[chat-runner] GROUNDING_FAILED: overlap=${(overlapRatio * 100).toFixed(0)}% — erstat med safe response`);
+    return "Jeg kan ikke finde det sikkert i det uploadede dokument.";
+  }
+
+  return answer;
+}
+
+/**
+ * Bestem confidence for dokument-mode svar.
+ */
+function deriveDocumentConfidence(answer: string, extractedText: string): ConfidenceBand {
+  if (!answer) return "unknown";
+
+  const notFoundPhrases = ["kan ikke finde", "fremgår ikke", "ikke i det uploadede"];
+  if (notFoundPhrases.some(p => answer.toLowerCase().includes(p))) return "low";
+
+  const lowerAnswer = answer.toLowerCase();
+  const lowerDoc    = extractedText.toLowerCase();
+  const answerWords = lowerAnswer.replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4);
+  const docWords    = new Set(lowerDoc.replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4));
+  const matchingWords = answerWords.filter(w => docWords.has(w));
+  const overlapRatio  = answerWords.length > 0 ? matchingWords.length / answerWords.length : 0;
+
+  if (overlapRatio >= 0.4) return "high";
+  if (overlapRatio >= 0.2) return "medium";
+  return "low";
+}
 
 async function buildFromLive(
   expert: typeof architectureProfiles.$inferSelect,
