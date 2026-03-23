@@ -206,19 +206,32 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   const token = (req.headers.authorization ?? "").slice(7);
 
-  // ── Step 1: Hent aktive eksperter (status != archived, enabled_for_chat = true) ──
+  // ── Step 1: Hent aktive eksperter med service role (bypasser RLS) ──────────
+  // org_id er altid fra authenticate — aldrig fra request payload.
   let experts: Expert[];
   try {
-    const rows = await dbList("architecture_profiles", token, {
+    const svcHeaders = {
+      apikey:         SUPABASE_SVC,
+      Authorization:  `Bearer ${SUPABASE_SVC}`,
+      "Content-Type": "application/json",
+    };
+    const qs = new URLSearchParams({
       organization_id:  `eq.${orgId}`,
       status:           "neq.archived",
       enabled_for_chat: "eq.true",
       select:           "id,name,category,description,routing_hints,enabled_for_chat,status",
+    }).toString();
+    const expertRes = await fetch(`${SUPABASE_URL}/rest/v1/architecture_profiles?${qs}`, {
+      headers: svcHeaders,
     });
-    experts = rows as unknown as Expert[];
+    if (!expertRes.ok) {
+      const txt = await expertRes.text();
+      throw new Error(`${expertRes.status}: ${txt}`);
+    }
+    experts = (await expertRes.json()) as Expert[];
   } catch (e) {
     console.error("[chat] expert fetch failed:", (e as Error).message);
-    return err(res, 500, "EXPERT_FETCH_FAILED", "Kunne ikke hente eksperter");
+    return err(res, 500, "EXPERT_FETCH_FAILED", "Kunne ikke hente eksperter: " + (e as Error).message);
   }
 
   if (!experts.length) {
