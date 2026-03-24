@@ -497,11 +497,23 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   }
 
   // ── Step 7: Returner svar ─────────────────────────────────────────────────
+  const traceId = (body as any)._trace_id ?? "no-id";
   return json(res, {
     answer:              finalAnswer,
     conversation_id:     conversationId,
     expert:              { id: expert.id, name: expert.name, category: expert.category ?? null },
     used_sources:        [],
+    _trace: {
+      trace_id:          traceId,
+      runtime_file:      "api/chat.js (Vercel)",
+      raw_doc_ctx:       rawDocCtx.length,
+      doc_ctx_ok:        docCtx.length,
+      document_mode:     docCtx.length > 0,
+      extracted_chars:   docCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0),
+      extracted_first50: docCtx[0]?.extracted_text?.slice(0, 50).replace(/\n/g, " ") ?? null,
+      mode:              docCtx.length > 0 ? "document" : "normal",
+      failed_docs:       failedDocs.map(d => ({ filename: d.filename, status: d.status, message: d.message })),
+    },
     used_rules:          [],
     warnings,
     latency_ms:          aiLatencyMs,
