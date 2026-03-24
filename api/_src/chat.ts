@@ -447,6 +447,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       finalAnswer = "Jeg kan ikke finde det i det uploadede dokument.";
       console.log("[chat] DOC_MODE NOT_FOUND");
     }
+
+    // ── Grounding enforcement ──────────────────────────────────────────────
+    const groundingDocText = docCtx.map(d => d.extracted_text).join(" ").toLowerCase();
+    const groundingAnswer  = finalAnswer.toLowerCase().replace(/[*"\\]/g, " ").replace(/\s+/g, " ");
+    const overlap = groundingAnswer.split(" ").filter(w => groundingDocText.includes(w)).length;
+    console.log(`[chat] GROUNDING overlap=${overlap}`);
+    if (overlap < 5) {
+      finalAnswer = "Jeg kan ikke finde det i det uploadede dokument.";
+      console.log("[chat] GROUNDING_OVERRIDE applied");
+    }
   } else {
     // ── NORMAL MODE: fri tekstbesvarelse ──────────────────────────────────
     const cleanMessage = message.replace(/\n\nVedhæftede filer:.*$/s, "").trim();
