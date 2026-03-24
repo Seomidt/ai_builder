@@ -705,7 +705,7 @@ export default function AiChatPage() {
       <div className="flex-1 overflow-y-auto px-4 pb-4">
         <div className="mx-auto w-full max-w-3xl sm:max-w-4xl min-h-full flex flex-col">
           {isEmpty ? (
-            <div className="flex-1 flex items-center justify-center py-8">
+            <div className="flex-1 flex items-center justify-center py-8 -translate-y-[10%]">
               <EmptyState />
             </div>
           ) : (
