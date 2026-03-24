@@ -483,16 +483,13 @@ function EmptyState() {
       <p className="text-sm text-muted-foreground max-w-sm">
         Stil et spørgsmål eller upload et dokument for at komme i gang.
       </p>
-      <div className="flex flex-wrap justify-center gap-2 mt-1">
+      <ul className="mt-1 space-y-0.5">
         {EMPTY_EXAMPLES.map(ex => (
-          <span
-            key={ex}
-            className="text-xs text-muted-foreground border border-border/60 rounded-md px-3 py-1.5"
-          >
-            {ex}
-          </span>
+          <li key={ex} className="text-xs text-muted-foreground/60">
+            – {ex}
+          </li>
         ))}
-      </div>
+      </ul>
     </div>
   );
 }
@@ -746,7 +743,7 @@ export default function AiChatPage() {
           )}
 
           {/* Input row — crisp enterprise style */}
-          <div className="flex items-center gap-1.5 bg-background border border-border rounded-lg px-2 py-1.5 focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/50 transition-all">
+          <div className="flex items-center gap-1.5 bg-background border border-border rounded-lg px-3 py-2 focus-within:ring-1 focus-within:ring-primary/10 focus-within:border-primary transition-all">
             <button
               onClick={() => openPicker()}
               disabled={chatMutation.isPending}
