@@ -2,6 +2,15 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { authenticate } from "./_lib/auth";
 import { json, err, readBody } from "./_lib/response";
 import { dbList, dbInsert } from "./_lib/db";
+import { AI_MODEL_ROUTES } from "../../server/lib/ai/config";
+
+// ── Phase 6I: central model resolution (Vercel path, no DB overrides) ─────────
+// Uses AI_MODEL_ROUTES from the single source-of-truth config.
+// DB overrides are applied by the Express path via server/lib/ai/router.ts.
+function resolveVercelModel(key: keyof typeof AI_MODEL_ROUTES = "default"): { model: string; provider: string; key: string } {
+  const route = AI_MODEL_ROUTES[key] ?? AI_MODEL_ROUTES.default;
+  return { model: route.model, provider: route.provider, key };
+}
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 const SUPABASE_URL   = process.env.SUPABASE_URL   ?? "";
@@ -65,7 +74,7 @@ function scoreExpert(expert: Expert, message: string): number {
 
 type OAIMessage = { role: "system" | "user" | "assistant"; content: string };
 
-async function callOpenAI(messages: OAIMessage[]): Promise<{
+async function callOpenAI(messages: OAIMessage[], routeKey: keyof typeof AI_MODEL_ROUTES = "default"): Promise<{
   text:             string;
   latencyMs:        number;
   promptTokens:     number;
@@ -73,12 +82,15 @@ async function callOpenAI(messages: OAIMessage[]): Promise<{
 }> {
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY ikke konfigureret");
 
+  const route = resolveVercelModel(routeKey);
+  console.log(`[ai:router] model=${route.model} provider=${route.provider} key=${route.key}`);
+
   const start = Date.now();
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method:  "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: JSON.stringify({
-      model:       "gpt-4o",
+      model:       route.model,
       max_tokens:  2000,
       temperature: 0.2,
       messages,
@@ -402,8 +414,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       { role: "system", content: docSystemPrompt },
       { role: "user",   content: `DOKUMENT:\n\n${docText}\n\nSPØRGSMÅL: ${message}` },
     ];
+    const docRoute = resolveVercelModel("default");
+    console.log(`[ai:router] model=${docRoute.model} provider=${docRoute.provider} key=${docRoute.key} use_case=doc_mode`);
     console.log("FINAL_PAYLOAD:", JSON.stringify({
-      model: "gpt-4o", temperature: 0.0, response_format: "json_object",
+      model: docRoute.model, temperature: 0.0, response_format: "json_object",
       messages: [
         { role: "system", content: docSystemPrompt.slice(0, 100) + "..." },
         { role: "user",   content: `DOKUMENT (${docText.length} chars)... SPØRGSMÅL: ${message}` },
@@ -415,7 +429,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
       body: JSON.stringify({
-        model: "gpt-4o",
+        model: docRoute.model,
         temperature: 0.0,
         max_tokens: 600,
         response_format: { type: "json_object" },
