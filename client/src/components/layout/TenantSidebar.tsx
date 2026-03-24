@@ -98,7 +98,6 @@ function NavLink({
           ? "2px solid rgba(34,211,238,0.9)"
           : "2px solid transparent",
         color: active ? "#f1f5f9" : "rgba(148,163,184,0.80)",
-        backgroundColor: active ? "rgba(255,255,255,0.03)" : undefined,
       }}
     >
       <Icon
