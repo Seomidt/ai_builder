@@ -3,8 +3,7 @@ import { useMutation } from "@tanstack/react-query";
 import {
   Send, Bot, User, ChevronDown, ChevronUp, ShieldAlert, BookOpen,
   AlertTriangle, CheckCircle2, HelpCircle, Paperclip, X,
-  FileText, Image, Video, Zap, Search, BarChart3, Shield, MessageSquare,
-  Sparkles,
+  FileText, Image, Video, Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -470,7 +469,7 @@ function TypingIndicator() {
 
 // ─── Empty State ──────────────────────────────────────────────────────────────
 
-function EmptyState({ onPrompt: _onPrompt }: { onPrompt: (p: string) => void }) {
+function EmptyState() {
   return (
     <div className="mt-20 text-center" data-testid="empty-state-chat">
       <p className="text-sm text-muted-foreground">
@@ -480,26 +479,6 @@ function EmptyState({ onPrompt: _onPrompt }: { onPrompt: (p: string) => void }) 
   );
 }
 
-// ─── Quick Actions ────────────────────────────────────────────────────────────
-
-interface QuickAction {
-  label: string;
-  icon: typeof Zap;
-  prefill?: string;
-  openPicker?: "document" | "image" | "video" | "any";
-  use_case?: "grounded_chat" | "document_qa" | "retrieval_answer" | "validation" | "analysis" | "classification";
-}
-
-const QUICK_ACTIONS: QuickAction[] = [
-  { label: "Stil spørgsmål",      icon: MessageSquare, prefill: "" },
-  { label: "Upload dokument",     icon: FileText,      openPicker: "document" },
-  { label: "Upload billede",      icon: Image,         openPicker: "image" },
-  { label: "Upload video",        icon: Video,         openPicker: "video" },
-  { label: "Dokumentvalidering",  icon: Shield,        prefill: "Valider venligst dette dokument for ægthed og fuldstændighed.", use_case: "validation" },
-  { label: "Find lignende sager", icon: Search,        prefill: "Find lignende sager baseret på følgende beskrivelse: " },
-  { label: "Regnskabsanalyse",    icon: BarChart3,     prefill: "Lav en analyse af det vedhæftede regnskabsmateriale med fokus på afvigelser og kontrolpunkter.", use_case: "analysis" },
-];
-
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function AiChatPage() {
@@ -508,11 +487,8 @@ export default function AiChatPage() {
   const [input, setInput]                 = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [attachments, setAttachments]     = useState<AttachedFile[]>([]);
-  const [moreOpen, setMoreOpen]           = useState(false);
   const bottomRef   = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [fileAccept, setFileAccept]       = useState(ACCEPT_ALL);
-  const selectedUseCaseRef = useRef<string>("grounded_chat");
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -520,8 +496,7 @@ export default function AiChatPage() {
 
   // ── File picker ──────────────────────────────────────────────────────────────
 
-  const openPicker = useCallback((accept: string) => {
-    setFileAccept(accept);
+  const openPicker = useCallback(() => {
     setTimeout(() => fileInputRef.current?.click(), 0);
   }, []);
 
@@ -673,9 +648,9 @@ export default function AiChatPage() {
     const text = input.trim();
     if ((!text && attachments.length === 0) || chatMutation.isPending) return;
     const displayText = text || (attachments.length === 1 ? `[${attachments[0].file.name}]` : `[${attachments.length} filer vedhæftet]`);
-    const useCase = selectedUseCaseRef.current;
+    // Auto-detect: any document attachment → validation pipeline
+    const useCase = attachments.some(a => a.type === "document") ? "validation" : "grounded_chat";
     console.log(`[TRACE-SEND] use_case="${useCase}" attachments=${attachments.length}`);
-    selectedUseCaseRef.current = "grounded_chat";
     setMessages(prev => [...prev, {
       id: crypto.randomUUID(),
       role: "user",
@@ -683,32 +658,13 @@ export default function AiChatPage() {
       attachments: [...attachments],
       timestamp: new Date(),
     }]);
-    chatMutation.mutate({ text: text || "Analyser venligst de vedhæftede filer.", attachments, useCase });
+    chatMutation.mutate({ text: text || "Analysér venligst det uploadede dokument.", attachments, useCase });
     setInput("");
     setAttachments([]);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
-  };
-
-  const handlePrompt = (text: string) => {
-    setInput(text);
-    setTimeout(() => document.getElementById("chat-input")?.focus(), 50);
-  };
-
-  const handleQuickAction = (action: QuickAction) => {
-    selectedUseCaseRef.current = action.use_case ?? "grounded_chat";
-    console.log(`[TRACE-0] quick_action="${action.label}" use_case="${selectedUseCaseRef.current}"`);
-    if (action.openPicker) {
-      const accept = action.openPicker === "document" ? ACCEPT_DOCS
-        : action.openPicker === "image" ? ACCEPT_IMG
-        : action.openPicker === "video" ? ACCEPT_VIDEO
-        : ACCEPT_ALL;
-      openPicker(accept);
-      return;
-    }
-    if (action.prefill !== undefined) handlePrompt(action.prefill);
   };
 
   const isEmpty = messages.length === 0 && !chatMutation.isPending;
@@ -722,7 +678,7 @@ export default function AiChatPage() {
         ref={fileInputRef}
         type="file"
         multiple
-        accept={fileAccept}
+        accept={ACCEPT_ALL}
         className="hidden"
         onChange={handleFileChange}
         data-testid="input-file-upload"
@@ -747,7 +703,7 @@ export default function AiChatPage() {
       <div className="flex-1 overflow-y-auto px-4 pt-6 pb-4">
         <div className="mx-auto w-full max-w-3xl">
           {isEmpty ? (
-            <EmptyState onPrompt={handlePrompt} />
+            <EmptyState />
           ) : (
             <>
               {messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)}
@@ -762,103 +718,53 @@ export default function AiChatPage() {
       <div className="shrink-0 border-t border-border/40 px-4 pt-3 pb-4">
         <div className="mx-auto max-w-3xl space-y-2">
 
-        {/* Quick actions — 3 primary + "Mere" collapse */}
-        <div className="flex items-center gap-1.5 flex-wrap">
-          {QUICK_ACTIONS.slice(0, 3).map((action) => (
-            <button
-              key={action.label}
-              onClick={() => handleQuickAction(action)}
-              disabled={chatMutation.isPending}
-              data-testid={`quick-action-${action.label.toLowerCase().replace(/\s+/g, "-")}`}
-              className={cn(
-                "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border transition-all",
-                "text-muted-foreground border-border/60 hover:text-foreground hover:border-primary/40 hover:bg-primary/5",
-                "disabled:opacity-40 disabled:cursor-not-allowed"
-              )}
-            >
-              <action.icon className="w-3 h-3" />
-              {action.label}
-            </button>
-          ))}
-          <button
-            onClick={() => setMoreOpen(v => !v)}
-            disabled={chatMutation.isPending}
-            data-testid="quick-action-mere"
-            className={cn(
-              "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border transition-all",
-              "text-muted-foreground border-border/60 hover:text-foreground hover:border-primary/40 hover:bg-primary/5",
-              "disabled:opacity-40 disabled:cursor-not-allowed",
-              moreOpen && "border-primary/40 text-foreground bg-primary/5"
-            )}
-          >
-            {moreOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            Mere
-          </button>
-          {moreOpen && QUICK_ACTIONS.slice(3).map((action) => (
-            <button
-              key={action.label}
-              onClick={() => handleQuickAction(action)}
-              disabled={chatMutation.isPending}
-              data-testid={`quick-action-${action.label.toLowerCase().replace(/\s+/g, "-")}`}
-              className={cn(
-                "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border transition-all",
-                "text-muted-foreground border-border/60 hover:text-foreground hover:border-primary/40 hover:bg-primary/5",
-                "disabled:opacity-40 disabled:cursor-not-allowed"
-              )}
-            >
-              <action.icon className="w-3 h-3" />
-              {action.label}
-            </button>
-          ))}
-        </div>
+          {/* Attachment previews */}
+          {attachments.length > 0 && (
+            <div className="flex flex-wrap gap-1.5 px-1" data-testid="attachment-preview-area">
+              {attachments.map(a => (
+                <AttachmentChip key={a.id} file={a} onRemove={() => removeAttachment(a.id)} />
+              ))}
+            </div>
+          )}
 
-        {/* Attachment previews */}
-        {attachments.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 px-1" data-testid="attachment-preview-area">
-            {attachments.map(a => (
-              <AttachmentChip key={a.id} file={a} onRemove={() => removeAttachment(a.id)} />
-            ))}
+          {/* Input row */}
+          <div className="flex items-end gap-2 bg-card border border-border/60 rounded-2xl p-2 focus-within:border-primary/40 transition-colors">
+            <button
+              onClick={() => openPicker()}
+              disabled={chatMutation.isPending}
+              data-testid="button-attach-file"
+              className="shrink-0 h-9 w-9 flex items-center justify-center rounded-xl text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all disabled:opacity-40"
+              title="Vedhæft fil"
+            >
+              <Paperclip className="w-4 h-4" />
+            </button>
+
+            <Textarea
+              id="chat-input"
+              placeholder="Stil et spørgsmål eller upload et dokument…"
+              className="flex-1 min-h-[44px] max-h-[160px] resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 text-sm placeholder:text-muted-foreground/60 py-2 px-1"
+              value={input}
+              onChange={e => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              disabled={chatMutation.isPending}
+              data-testid="input-chat-message"
+            />
+
+            <Button
+              size="icon"
+              className="shrink-0 h-9 w-9 rounded-xl"
+              onClick={handleSend}
+              disabled={!canSend}
+              data-testid="button-chat-send"
+            >
+              <Send className="w-4 h-4" />
+            </Button>
           </div>
-        )}
 
-        {/* Input row */}
-        <div className="flex items-end gap-2 bg-card border border-border/60 rounded-2xl p-2 focus-within:border-primary/40 transition-colors">
-          {/* Attachment button */}
-          <button
-            onClick={() => openPicker(ACCEPT_ALL)}
-            disabled={chatMutation.isPending}
-            data-testid="button-attach-file"
-            className="shrink-0 h-9 w-9 flex items-center justify-center rounded-xl text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all disabled:opacity-40"
-            title="Vedhæft fil"
-          >
-            <Paperclip className="w-4 h-4" />
-          </button>
+          <p className="text-xs text-muted-foreground/40 text-center">
+            Understøtter dokumenter, billeder og tekst · Enter sender · Max {MAX_SIZE_MB} MB
+          </p>
 
-          <Textarea
-            id="chat-input"
-            placeholder="Stil et spørgsmål, eller vedhæft et dokument…"
-            className="flex-1 min-h-[44px] max-h-[160px] resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 text-sm placeholder:text-muted-foreground/60 py-2 px-1"
-            value={input}
-            onChange={e => setInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            disabled={chatMutation.isPending}
-            data-testid="input-chat-message"
-          />
-
-          <Button
-            size="icon"
-            className="shrink-0 h-9 w-9 rounded-xl"
-            onClick={handleSend}
-            disabled={!canSend}
-            data-testid="button-chat-send"
-          >
-            <Send className="w-4 h-4" />
-          </Button>
-        </div>
-
-        <p className="text-xs text-muted-foreground/40 text-center">
-          Enter sender · Shift+Enter for ny linje · Max {MAX_SIZE_MB} MB pr. fil
-        </p>
         </div>{/* /max-w-3xl */}
       </div>
     </div>
