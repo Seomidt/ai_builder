@@ -777,7 +777,7 @@ export default function AiChatPage() {
           </div>
 
           <p className="text-xs text-muted-foreground/30 text-center">
-            Understøtter dokumenter, billeder og tekst · Enter sender · Max {MAX_SIZE_MB} MB
+            Understøtter dokumenter, billeder og tekst · Max {MAX_SIZE_MB} MB
           </p>
 
         </div>{/* /max-w */}
