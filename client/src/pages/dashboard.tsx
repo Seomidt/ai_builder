@@ -243,7 +243,7 @@ export default function Dashboard() {
 
       {/* Quick actions — lightweight inline section */}
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1">
-        <p className="text-xs text-muted-foreground/60 uppercase tracking-wide font-medium shrink-0">Hurtig adgang</p>
+        <p className="text-xs text-muted-foreground uppercase tracking-wide font-medium shrink-0">Hurtig adgang</p>
         <Link href="/viden-data">
           <Button size="sm" variant="ghost" className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground" data-testid="btn-new-project">
             <Plus className="w-3 h-3 mr-1" /> Tilføj datakilde
