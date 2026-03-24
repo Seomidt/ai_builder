@@ -670,7 +670,7 @@ export default function AiChatPage() {
   const canSend = (input.trim().length > 0 || attachments.length > 0) && !chatMutation.isPending;
 
   return (
-    <div className="flex flex-col h-[100dvh]" data-testid="page-ai-chat">
+    <div className="flex flex-col h-full" data-testid="page-ai-chat">
 
       {/* Hidden file input */}
       <input
