@@ -483,13 +483,9 @@ function EmptyState() {
       <p className="text-sm text-muted-foreground max-w-sm">
         Stil et spørgsmål eller upload et dokument for at komme i gang.
       </p>
-      <ul className="mt-1 space-y-0.5">
-        {EMPTY_EXAMPLES.map(ex => (
-          <li key={ex} className="text-xs text-muted-foreground/60">
-            – {ex}
-          </li>
-        ))}
-      </ul>
+      <p className="text-xs text-muted-foreground/50 mt-1">
+        {EMPTY_EXAMPLES.join(" · ")}
+      </p>
     </div>
   );
 }
