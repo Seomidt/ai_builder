@@ -97,6 +97,7 @@ function ConfidenceBadge({ band }: { band: ConfidenceBand }) {
 
 // ─── Validation parser ────────────────────────────────────────────────────────
 
+// Raw struct from backend text
 interface ParsedValidation {
   status: "ok" | "warning" | "review_required";
   completeness_summary: string;
@@ -121,30 +122,98 @@ function parseValidationText(text: string): ParsedValidation | null {
     .split("\n")
     .map(l => l.replace(/^\s*[•·\-]\s*/, "").trim())
     .filter(l => l && !l.toLowerCase().includes("ingen problemer"));
+  return { status, completeness_summary: field("Fuldstændighed"), trust_summary: field("Troværdighed"), issues, recommendation: field("Anbefaling") };
+}
+
+// ─── Validation view-model ────────────────────────────────────────────────────
+
+type IssueCode = "PARSE_ERROR" | "UNSUPPORTED_FORMAT" | "EMPTY_DOCUMENT" | "MISSING_DATA" | "INCOMPLETE" | "LOW_CONFIDENCE" | "UNKNOWN";
+
+const ISSUE_LABELS: Record<IssueCode, string> = {
+  PARSE_ERROR:        "Dokumentet kunne ikke behandles korrekt",
+  UNSUPPORTED_FORMAT: "Dokumentets format understøttes ikke fuldt",
+  EMPTY_DOCUMENT:     "Dokumentet indeholder ikke læsbart indhold",
+  MISSING_DATA:       "Dokumentet mangler væsentlige oplysninger",
+  INCOMPLETE:         "Dokumentationen er ikke fuldstændig",
+  LOW_CONFIDENCE:     "Dokumentet kunne ikke vurderes med høj sikkerhed",
+  UNKNOWN:            "Dokumentet kræver manuel vurdering",
+};
+
+interface ValidationCardViewModel {
+  status: "ok" | "warning" | "review_required";
+  summary: string;
+  primaryAction: string;
+  secondaryAction: string | null;
+  trustText: string | null;
+  issueItems: string[];
+  detailsLabel: string;
+}
+
+function detectIssueCode(t: string): IssueCode {
+  const s = t.toLowerCase();
+  if (s.includes("format") || s.includes("behandles") || s.includes("parse") || s.includes("kunne ikke behandles")) return "PARSE_ERROR";
+  if (s.includes("understøttes ikke")) return "UNSUPPORTED_FORMAT";
+  if (s.includes("indeholder ikke") || s.includes("tomt") || s.includes("tom ")) return "EMPTY_DOCUMENT";
+  if (s.includes("mangler") || s.includes("manglen")) return "MISSING_DATA";
+  if (s.includes("ufuldstændig") || s.includes("ikke fuldstændig")) return "INCOMPLETE";
+  if (s.includes("sikkerhed") || s.includes("vurderes")) return "LOW_CONFIDENCE";
+  return "UNKNOWN";
+}
+
+function buildValidationSummary(status: ParsedValidation["status"], codes: IssueCode[]): string {
+  if (codes.some(c => c === "PARSE_ERROR" || c === "UNSUPPORTED_FORMAT")) return "Dokumentet kunne ikke behandles pålideligt.";
+  if (codes.some(c => c === "EMPTY_DOCUMENT")) return "Dokumentet indeholder ikke læsbart indhold.";
+  if (codes.some(c => c === "MISSING_DATA" || c === "INCOMPLETE")) return "Dokumentet mangler nødvendige oplysninger.";
+  if (status === "review_required") return "Dokumentet kræver manuel gennemgang.";
+  if (status === "warning") return "Dokumentet indeholder forhold, der bør vurderes nærmere.";
+  return "Dokumentet fremstår klar til videre behandling.";
+}
+
+function buildValidationActions(codes: IssueCode[], status: ParsedValidation["status"]): { primary: string; secondary: string | null } {
+  if (codes.some(c => c === "PARSE_ERROR" || c === "UNSUPPORTED_FORMAT")) return { primary: "Kontrollér dokumentets format", secondary: "Send til manuel gennemgang" };
+  if (codes.some(c => c === "EMPTY_DOCUMENT")) return { primary: "Kontrollér at dokumentet er læsbart", secondary: "Send til manuel gennemgang" };
+  if (codes.some(c => c === "MISSING_DATA" || c === "INCOMPLETE")) return { primary: "Indhent supplerende dokumentation", secondary: "Send til manuel gennemgang" };
+  if (status === "ok") return { primary: "Dokumentet kan sendes videre til behandling", secondary: null };
+  return { primary: "Send til manuel gennemgang", secondary: null };
+}
+
+function buildValidationViewModel(parsed: ParsedValidation): ValidationCardViewModel {
+  const codes = parsed.issues.length > 0 ? parsed.issues.map(detectIssueCode) : [];
+  const seen = new Set<IssueCode>();
+  const issueItems: string[] = [];
+  for (const code of codes) {
+    if (!seen.has(code)) { seen.add(code); issueItems.push(ISSUE_LABELS[code]); }
+  }
+  if (issueItems.length === 0 && parsed.issues.length > 0) issueItems.push(ISSUE_LABELS["UNKNOWN"]);
+  const { primary, secondary } = buildValidationActions(codes, parsed.status);
+  const n = issueItems.length;
   return {
-    status,
-    completeness_summary: field("Fuldstændighed"),
-    trust_summary: field("Troværdighed"),
-    issues,
-    recommendation: field("Anbefaling"),
+    status: parsed.status,
+    summary: buildValidationSummary(parsed.status, codes),
+    primaryAction: primary,
+    secondaryAction: secondary,
+    trustText: parsed.trust_summary || null,
+    issueItems,
+    detailsLabel: n > 0 ? `Se detaljer (${n} ${n === 1 ? "forhold" : "forhold"})` : "Se detaljer",
   };
 }
 
 // ─── Validation Card ──────────────────────────────────────────────────────────
 
-function ValidationCard({ parsed, warnings }: { parsed: ParsedValidation; warnings: string[] }) {
+const VALIDATION_STATUS_CONFIG: Record<ValidationCardViewModel["status"], { label: string; color: string; Icon: typeof CheckCircle2 }> = {
+  ok:               { label: "Godkendt",         color: "text-green-400 border-green-400/30 bg-green-400/10",    Icon: CheckCircle2 },
+  warning:          { label: "Advarsel",          color: "text-yellow-400 border-yellow-400/30 bg-yellow-400/10", Icon: AlertTriangle },
+  review_required:  { label: "Kræver gennemgang", color: "text-amber-400 border-amber-400/30 bg-amber-400/10",   Icon: ShieldAlert   },
+};
+
+function ValidationCard({ vm, warnings }: { vm: ValidationCardViewModel; warnings: string[] }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const statusConfig: Record<ParsedValidation["status"], { label: string; color: string; Icon: typeof CheckCircle2 }> = {
-    ok:               { label: "Godkendt",         color: "text-green-400 border-green-400/30 bg-green-400/10",    Icon: CheckCircle2  },
-    warning:          { label: "Advarsel",          color: "text-yellow-400 border-yellow-400/30 bg-yellow-400/10", Icon: AlertTriangle  },
-    review_required:  { label: "Kræver gennemgang", color: "text-amber-400 border-amber-400/30 bg-amber-400/10",   Icon: ShieldAlert    },
-  };
-  const { label, color, Icon } = statusConfig[parsed.status];
-  const hasDetails = !!(parsed.trust_summary || parsed.issues.length > 0);
+  const { label, color, Icon } = VALIDATION_STATUS_CONFIG[vm.status];
+  const hasDetails = !!(vm.trustText || vm.issueItems.length > 0);
 
   return (
     <div className="space-y-3">
-      {/* Header */}
+      {/* Header — title + one badge */}
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-semibold text-muted-foreground">Dokumentvalidering</span>
         <span className={cn("inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium", color)}>
@@ -159,22 +228,25 @@ function ValidationCard({ parsed, warnings }: { parsed: ParsedValidation; warnin
         </div>
       ))}
 
-      {/* Summary — completeness as primary sentence */}
-      {parsed.completeness_summary && (
-        <p className="text-sm text-foreground leading-relaxed" data-testid="text-chat-answer">
-          {parsed.completeness_summary}
+      {/* Summary — deterministic, not raw AI text */}
+      <p className="text-sm text-foreground leading-relaxed" data-testid="text-chat-answer">
+        {vm.summary}
+      </p>
+
+      {/* Primary action */}
+      <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-muted/30 border border-border/50">
+        <ArrowRight className="w-3.5 h-3.5 text-primary shrink-0 mt-0.5" />
+        <p className="text-xs text-foreground/80 font-medium">{vm.primaryAction}</p>
+      </div>
+
+      {/* Secondary action — optional */}
+      {vm.secondaryAction && (
+        <p className="text-xs text-muted-foreground pl-1">
+          Alternativt: <span className="lowercase">{vm.secondaryAction}</span>
         </p>
       )}
 
-      {/* Recommendation — once only */}
-      {parsed.recommendation && (
-        <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-muted/30 border border-border/50">
-          <ArrowRight className="w-3.5 h-3.5 text-primary shrink-0 mt-0.5" />
-          <p className="text-xs text-foreground/80">{parsed.recommendation}</p>
-        </div>
-      )}
-
-      {/* Secondary details — collapsible */}
+      {/* Details — collapsible, labelled with count */}
       {hasDetails && (
         <>
           <button
@@ -183,21 +255,21 @@ function ValidationCard({ parsed, warnings }: { parsed: ParsedValidation; warnin
             data-testid="button-toggle-details"
           >
             {detailsOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            {detailsOpen ? "Skjul detaljer" : "Se detaljer"}
+            {detailsOpen ? "Skjul detaljer" : vm.detailsLabel}
           </button>
           {detailsOpen && (
             <div className="rounded-xl border border-border/60 bg-muted/20 p-3 space-y-2.5 text-xs" data-testid="panel-chat-details">
-              {parsed.trust_summary && (
+              {vm.trustText && (
                 <p className="text-muted-foreground">
-                  <span className="text-foreground/70 font-medium">Troværdighed: </span>{parsed.trust_summary}
+                  <span className="text-foreground/70 font-medium">Troværdighed: </span>{vm.trustText}
                 </p>
               )}
-              {parsed.issues.length > 0 && (
+              {vm.issueItems.length > 0 && (
                 <div>
-                  <p className="text-foreground/70 font-medium mb-1">Problemer</p>
-                  {parsed.issues.map((issue, i) => (
+                  <p className="text-foreground/70 font-medium mb-1">Problemoversigt</p>
+                  {vm.issueItems.map((item, i) => (
                     <div key={i} className="flex items-start gap-1.5 text-muted-foreground mb-0.5">
-                      <span className="mt-0.5 shrink-0 text-muted-foreground/60">•</span>{issue}
+                      <span className="mt-0.5 shrink-0 text-muted-foreground/60">•</span>{item}
                     </div>
                   ))}
                 </div>
@@ -230,10 +302,10 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
   const [expanded, setExpanded] = useState(false);
   const isExpert = response.source?.type === "expert";
 
-  // Validation: parse text → dedicated structured card
+  // Validation: parse text → view-model → dedicated structured card
   const parsedValidation = parseValidationText(text);
   if (parsedValidation) {
-    return <ValidationCard parsed={parsedValidation} warnings={response.warnings} />;
+    return <ValidationCard vm={buildValidationViewModel(parsedValidation)} warnings={response.warnings} />;
   }
 
   // Normal grounded Q&A card
