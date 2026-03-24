@@ -468,12 +468,6 @@ function TypingIndicator() {
 
 // ─── Empty State ──────────────────────────────────────────────────────────────
 
-const EMPTY_EXAMPLES = [
-  "Upload kontrakt",
-  "Analyser regnskab",
-  "Er dette dokument gyldigt?",
-];
-
 function EmptyState() {
   return (
     <div className="mt-16 flex flex-col items-center text-center gap-3" data-testid="empty-state-chat">
@@ -482,9 +476,6 @@ function EmptyState() {
       </h2>
       <p className="text-sm text-muted-foreground max-w-sm">
         Stil et spørgsmål eller upload et dokument for at komme i gang.
-      </p>
-      <p className="text-xs text-muted-foreground/50 mt-1">
-        {EMPTY_EXAMPLES.join(" · ")}
       </p>
     </div>
   );
