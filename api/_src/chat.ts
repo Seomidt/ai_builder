@@ -311,7 +311,15 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     console.log("FAILED_DOCS:", failedDocs.map(d => `${d.filename}:${d.status}:${d.message}`).join(", "));
   }
 
-  // TASK 1 — hard validering: afvis hvis dokument lovet men intet indhold
+  // HARD STOP A — attachment sendt men document_context mangler helt
+  const attachmentCount = body.context?.attachment_count ?? 0;
+  if (attachmentCount > 0 && rawDocCtx.length === 0) {
+    console.error("[HARD-STOP] DOCUMENT_CONTEXT_MISSING: attachment_count>0 but document_context is empty");
+    console.error("[HARD-STOP] MODEL_CALL_BLOCKED");
+    return err(res, 422, "DOCUMENT_CONTEXT_MISSING", "Dokument er vedhæftet men dokumentindhold mangler.");
+  }
+
+  // HARD STOP B — document_context sendt men intet gyldigt indhold
   if (hasDocIntent && docCtx.length === 0) {
     const reason = failedDocs.map(d => d.message).filter(Boolean).join("; ")
       || "Ingen tekst kunne udtrækkes fra dokumentet";
