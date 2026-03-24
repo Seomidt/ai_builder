@@ -223,7 +223,7 @@ export async function runChatMessage(params: {
     const { runAiCall } = await import("../lib/ai/runner");
     const t0 = Date.now();
     const aiResult = await runAiCall(
-      { feature: "ai-chat", tenantId: organizationId, userId },
+      { feature: "ai-chat", useCase: "grounded_chat", tenantId: organizationId, userId },
       { systemPrompt: builtPrompt.systemPrompt, userInput: message },
     );
     aiLatencyMs = Date.now() - t0;

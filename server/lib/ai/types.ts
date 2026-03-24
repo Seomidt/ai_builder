@@ -8,6 +8,33 @@
 import type { AiModelKey } from "./config";
 
 /**
+ * Use-case identifier — determines whether the grounded-data gate applies.
+ *
+ * Grounded (require documentContext):
+ *   document_qa       — answer questions from an uploaded document
+ *   retrieval_answer  — answer from retrieval hits
+ *   grounded_chat     — chat grounded in internal sources
+ *
+ * Controlled non-grounded (gate does NOT apply):
+ *   validation        — validate a document or content
+ *   analysis          — analyse content, suggest improvements
+ *   classification    — classify or categorise input
+ */
+export type AiUseCase =
+  | "document_qa"
+  | "retrieval_answer"
+  | "grounded_chat"
+  | "validation"
+  | "analysis"
+  | "classification";
+
+const GROUNDED_USE_CASES = new Set<AiUseCase>(["document_qa", "retrieval_answer", "grounded_chat"]);
+
+export function isGroundedUseCase(useCase: AiUseCase): boolean {
+  return GROUNDED_USE_CASES.has(useCase);
+}
+
+/**
  * Context passed by the caller into every AI call.
  * Carries identity and routing metadata — no business logic.
  */
@@ -16,6 +43,13 @@ export interface AiCallContext {
   requestId?: string | null;
   /** Feature or agent key that initiated the call (e.g. "planner_agent", "summarize") */
   feature: string;
+  /**
+   * Use-case identifier — required. Controls whether the grounded-data gate applies.
+   * Grounded use cases (document_qa, retrieval_answer, grounded_chat) require documentContext.
+   * Controlled use cases (validation, analysis, classification) are never blocked by the gate.
+   * Missing useCase → runAiCall throws USE_CASE_REQUIRED.
+   */
+  useCase: AiUseCase;
   /** Organisation / tenant ID for usage attribution */
   tenantId?: string | null;
   /** User ID for usage attribution */
@@ -23,9 +57,8 @@ export interface AiCallContext {
   /** Model tier override — defaults to AI_MODELS.default when omitted */
   model?: AiModelKey;
   /**
-   * Internal document context required by the global hard gate.
-   * AI call is BLOCKED if this is absent or empty.
-   * Pass extracted document entries from the active request.
+   * Internal document context — required for grounded use cases.
+   * Ignored for controlled non-grounded use cases.
    */
   documentContext?: unknown[];
 }
