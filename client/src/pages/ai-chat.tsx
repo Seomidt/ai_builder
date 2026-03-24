@@ -5,7 +5,6 @@ import {
   AlertTriangle, CheckCircle2, HelpCircle, Paperclip, X,
   FileText, Image, Video, Sparkles,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
@@ -469,12 +468,31 @@ function TypingIndicator() {
 
 // ─── Empty State ──────────────────────────────────────────────────────────────
 
+const EMPTY_EXAMPLES = [
+  "Upload kontrakt",
+  "Analyser regnskab",
+  "Er dette dokument gyldigt?",
+];
+
 function EmptyState() {
   return (
-    <div className="mt-20 text-center" data-testid="empty-state-chat">
-      <p className="text-sm text-muted-foreground">
+    <div className="mt-16 flex flex-col items-center text-center gap-3" data-testid="empty-state-chat">
+      <h2 className="text-base font-semibold text-foreground tracking-tight">
+        Hvad vil du analysere?
+      </h2>
+      <p className="text-sm text-muted-foreground max-w-sm">
         Stil et spørgsmål eller upload et dokument for at komme i gang.
       </p>
+      <div className="flex flex-wrap justify-center gap-2 mt-1">
+        {EMPTY_EXAMPLES.map(ex => (
+          <span
+            key={ex}
+            className="text-xs text-muted-foreground border border-border/60 rounded-md px-3 py-1.5"
+          >
+            {ex}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
@@ -700,8 +718,8 @@ export default function AiChatPage() {
       </div>
 
       {/* Thread */}
-      <div className="flex-1 overflow-y-auto px-4 pt-6 pb-4">
-        <div className="mx-auto w-full max-w-3xl">
+      <div className="flex-1 overflow-y-auto px-4 pt-12 pb-4">
+        <div className="mx-auto w-full max-w-3xl sm:max-w-4xl">
           {isEmpty ? (
             <EmptyState />
           ) : (
@@ -715,8 +733,8 @@ export default function AiChatPage() {
       </div>
 
       {/* Composer area */}
-      <div className="shrink-0 border-t border-border/40 px-4 pt-3 pb-4">
-        <div className="mx-auto max-w-3xl space-y-2">
+      <div className="shrink-0 border-t border-border px-4 pt-3 pb-5">
+        <div className="mx-auto max-w-3xl sm:max-w-4xl space-y-2">
 
           {/* Attachment previews */}
           {attachments.length > 0 && (
@@ -727,13 +745,13 @@ export default function AiChatPage() {
             </div>
           )}
 
-          {/* Input row */}
-          <div className="flex items-end gap-2 bg-card border border-border/60 rounded-2xl p-2 focus-within:border-primary/40 transition-colors">
+          {/* Input row — crisp enterprise style */}
+          <div className="flex items-center gap-1.5 bg-background border border-border rounded-lg px-2 py-1.5 focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/50 transition-all">
             <button
               onClick={() => openPicker()}
               disabled={chatMutation.isPending}
               data-testid="button-attach-file"
-              className="shrink-0 h-9 w-9 flex items-center justify-center rounded-xl text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all disabled:opacity-40"
+              className="shrink-0 h-8 w-8 flex items-center justify-center rounded text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted transition-all disabled:opacity-30"
               title="Vedhæft fil"
             >
               <Paperclip className="w-4 h-4" />
@@ -742,7 +760,7 @@ export default function AiChatPage() {
             <Textarea
               id="chat-input"
               placeholder="Stil et spørgsmål eller upload et dokument…"
-              className="flex-1 min-h-[44px] max-h-[160px] resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 text-sm placeholder:text-muted-foreground/60 py-2 px-1"
+              className="flex-1 min-h-[36px] max-h-[140px] resize-none border-0 bg-transparent shadow-none focus-visible:ring-0 text-sm placeholder:text-muted-foreground/40 py-1.5 px-1"
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -750,22 +768,26 @@ export default function AiChatPage() {
               data-testid="input-chat-message"
             />
 
-            <Button
-              size="icon"
-              className="shrink-0 h-9 w-9 rounded-xl"
+            <button
               onClick={handleSend}
               disabled={!canSend}
               data-testid="button-chat-send"
+              className={cn(
+                "shrink-0 h-8 w-8 flex items-center justify-center rounded transition-all",
+                canSend
+                  ? "text-primary hover:bg-primary/10"
+                  : "text-muted-foreground/30 cursor-not-allowed"
+              )}
             >
               <Send className="w-4 h-4" />
-            </Button>
+            </button>
           </div>
 
-          <p className="text-xs text-muted-foreground/40 text-center">
+          <p className="text-xs text-muted-foreground/30 text-center">
             Understøtter dokumenter, billeder og tekst · Enter sender · Max {MAX_SIZE_MB} MB
           </p>
 
-        </div>{/* /max-w-3xl */}
+        </div>{/* /max-w */}
       </div>
     </div>
   );
