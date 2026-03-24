@@ -168,6 +168,22 @@ export async function runAiCall(
     };
   }
 
+  // CASE V: validation without documentContext → block before provider call
+  if (context.useCase === "validation" &&
+      (!context.documentContext || context.documentContext.length === 0)) {
+    console.log(`[HARD-GATE] BLOCKED: useCase=validation requires documentContext — no provider call`);
+    return {
+      blocked: true,
+      reason: "DOCUMENT_REQUIRED",
+      answer: "Du skal uploade et dokument for at kunne validere.",
+      text: "Du skal uploade et dokument for at kunne validere.",
+      usage: null,
+      latencyMs: 0,
+      model: "",
+      feature,
+    };
+  }
+
   // CASE B/C: grounded with data → allowed. Non-grounded (validation/analysis/classification) → always allowed.
   console.log(`[ai:gate] ALLOWED: useCase=${context.useCase} documentContext=${context.documentContext?.length ?? 0}`);
 

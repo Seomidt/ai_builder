@@ -346,6 +346,25 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         : `Dokumentet kunne ikke læses: ${reason}`);
   }
 
+  // HARD STOP V — validation uden dokument → blokér, ingen model-kald
+  if (useCase === "validation" && docCtx.length === 0) {
+    console.log("[HARD-GATE] BLOCKED: useCase=validation requires documentContext — no provider call");
+    return json(res, 200, {
+      answer:               "Du skal uploade et dokument for at kunne validere.",
+      conversation_id:      body.conversation_id ?? crypto.randomUUID(),
+      expert:               { id: "", name: "", category: null },
+      used_sources:         [],
+      used_rules:           [],
+      warnings:             [],
+      latency_ms:           0,
+      confidence_band:      "low" as const,
+      needs_manual_review:  false,
+      routing_explanation:  "Validation blocked: no document",
+      blocked:              true,
+      reason:               "DOCUMENT_REQUIRED",
+    });
+  }
+
   // ── Step 4: System-prompt ─────────────────────────────────────────────────
   // Dokument-mode: ERSTAT expert-prompt med STRICT document-only prompt.
   // Normal mode: brug expert-prompt som sædvanlig.
