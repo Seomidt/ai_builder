@@ -468,10 +468,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         console.warn("[chat] VALIDATION JSON parse failed — using failsafe");
         vParsed = {
           status: "review_required",
-          completeness_summary: "Parsing failed",
-          trust_summary: "Unknown",
-          issues: ["Model output invalid"],
-          recommendation: "Manual review required",
+          completeness_summary: "Dokumentet kunne ikke analyseres sikkert",
+          trust_summary: "Kunne ikke vurderes",
+          issues: ["Dokumentets indhold kunne ikke behandles korrekt"],
+          recommendation: "Upload dokumentet igen eller send det til manuel gennemgang",
         };
       }
 
