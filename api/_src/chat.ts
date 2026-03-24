@@ -418,6 +418,32 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     if (useCase === "validation") {
       // ── VALIDATION MODE: structured JSON output ────────────────────────────
+
+      // Readable detection — MUST happen before any classification
+      const isReadable = docText.trim().length > 50;
+      console.log(`[chat] VALIDATION isReadable=${isReadable} docTextLen=${docText.trim().length}`);
+
+      // Helper: does an issue string suggest a technical parse/format failure?
+      const isTechnicalIssue = (s: string) => {
+        const t = s.toLowerCase();
+        return t.includes("format") || t.includes("behandles") || t.includes("parse") || t.includes("kunne ikke læses");
+      };
+
+      // Cause-aware recommendation
+      const causeAwareRecommendation = (issues: string[], readable: boolean): string => {
+        if (!readable) {
+          const joined = issues.join(" ").toLowerCase();
+          if (joined.includes("format") || joined.includes("behandles") || joined.includes("parse")) {
+            return "Kontrollér dokumentets format eller send det til manuel gennemgang.";
+          }
+        }
+        const joined = issues.join(" ").toLowerCase();
+        if (joined.includes("utilstrækkelig") || joined.includes("mangler") || joined.includes("ufuldstændig")) {
+          return "Indhent supplerende dokumentation eller send til manuel gennemgang.";
+        }
+        return "Send til manuel gennemgang.";
+      };
+
       const VALIDATION_SYSTEM_PROMPT = [
         "You are a document validation engine.",
         "",
@@ -461,33 +487,50 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         recommendation: string;
       }
 
-      // Cause-aware recommendation — never suggest re-upload generically
-      const causeAwareRecommendation = (issues: string[]): string => {
-        const joined = issues.join(" ").toLowerCase();
-        const isTechnical = joined.includes("format") || joined.includes("behandles") || joined.includes("læses") || joined.includes("parse");
-        const isInsufficient = joined.includes("utilstrækkelig") || joined.includes("mangler") || joined.includes("ufuldstændig");
-        if (isTechnical) return "Kontrollér dokumentets format eller send det til manuel gennemgang.";
-        if (isInsufficient) return "Indhent supplerende dokumentation eller send til manuel gennemgang.";
-        return "Send til manuel gennemgang.";
-      };
-
       let vParsed: ValidationResult;
       try {
         vParsed = JSON.parse(vData.choices?.[0]?.message?.content ?? "{}") as ValidationResult;
         if (!vParsed.status) throw new Error("missing status field");
+
+        // GUARD: if document IS readable, never classify as technical parse error
+        if (isReadable) {
+          vParsed.issues = (vParsed.issues ?? []).map(issue =>
+            isTechnicalIssue(issue)
+              ? "Dokumentet kan læses, men kan ikke verificeres som en officiel eller autentisk kilde"
+              : issue
+          );
+          // If AI incorrectly used low status for readable doc, keep review_required but not PARSE_ERROR framing
+        }
+
         // Override any generic bad recommendation from AI
         if (!vParsed.recommendation || vParsed.recommendation.toLowerCase().includes("upload dokumentet igen")) {
-          vParsed.recommendation = causeAwareRecommendation(vParsed.issues ?? []);
+          vParsed.recommendation = causeAwareRecommendation(vParsed.issues ?? [], isReadable);
         }
       } catch {
-        console.warn("[chat] VALIDATION JSON parse failed — using failsafe");
-        vParsed = {
-          status: "review_required",
-          completeness_summary: "Dokumentet kunne ikke analyseres sikkert",
-          trust_summary: "Kunne ikke vurderes",
-          issues: ["Dokumentets indhold kunne ikke behandles korrekt"],
-          recommendation: "Kontrollér dokumentets format eller send det til manuel gennemgang.",
-        };
+        console.warn(`[chat] VALIDATION JSON parse failed — isReadable=${isReadable} — using failsafe`);
+        if (isReadable) {
+          // Readable but AI response was malformed — treat as unverifiable, NOT parse error
+          vParsed = {
+            status: "review_required",
+            completeness_summary: "Dokumentet kan læses, men kan ikke verificeres som en officiel eller autentisk kilde.",
+            trust_summary: "Ingen verificerbar afsender eller signatur fundet.",
+            issues: [
+              "Ingen verificerbar afsender",
+              "Ingen signatur eller metadata",
+              "Tekstbaseret dokument uden validerbar oprindelse",
+            ],
+            recommendation: "Send til manuel gennemgang.",
+          };
+        } else {
+          // Truly unreadable/empty/corrupted — use parse error failsafe
+          vParsed = {
+            status: "review_required",
+            completeness_summary: "Dokumentet kunne ikke analyseres sikkert.",
+            trust_summary: "Kunne ikke vurderes.",
+            issues: ["Dokumentets indhold kunne ikke behandles korrekt"],
+            recommendation: "Kontrollér dokumentets format eller send det til manuel gennemgang.",
+          };
+        }
       }
 
       const STATUS_LABELS: Record<ValidationResult["status"], string> = {

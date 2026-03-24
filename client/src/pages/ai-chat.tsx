@@ -151,12 +151,15 @@ interface ValidationCardViewModel {
 
 function detectIssueCode(t: string): IssueCode {
   const s = t.toLowerCase();
+  // LOW_CONFIDENCE must be checked BEFORE PARSE_ERROR — readable-but-unverifiable issues
+  if (s.includes("verificer") || s.includes("signatur") || s.includes("metadata") || s.includes("oprindelse") || s.includes("autentisk") || s.includes("afsender")) return "LOW_CONFIDENCE";
+  if (s.includes("sikkerhed") || s.includes("vurderes")) return "LOW_CONFIDENCE";
+  // Technical parse/format failures (only for truly unreadable docs)
   if (s.includes("format") || s.includes("behandles") || s.includes("parse") || s.includes("kunne ikke behandles")) return "PARSE_ERROR";
   if (s.includes("understøttes ikke")) return "UNSUPPORTED_FORMAT";
   if (s.includes("indeholder ikke") || s.includes("tomt") || s.includes("tom ")) return "EMPTY_DOCUMENT";
   if (s.includes("mangler") || s.includes("manglen")) return "MISSING_DATA";
   if (s.includes("ufuldstændig") || s.includes("ikke fuldstændig")) return "INCOMPLETE";
-  if (s.includes("sikkerhed") || s.includes("vurderes")) return "LOW_CONFIDENCE";
   return "UNKNOWN";
 }
 
@@ -164,6 +167,7 @@ function buildValidationSummary(status: ParsedValidation["status"], codes: Issue
   if (codes.some(c => c === "PARSE_ERROR" || c === "UNSUPPORTED_FORMAT")) return "Dokumentet kunne ikke behandles pålideligt.";
   if (codes.some(c => c === "EMPTY_DOCUMENT")) return "Dokumentet indeholder ikke læsbart indhold.";
   if (codes.some(c => c === "MISSING_DATA" || c === "INCOMPLETE")) return "Dokumentet mangler nødvendige oplysninger.";
+  if (codes.some(c => c === "LOW_CONFIDENCE")) return "Dokumentet kan læses, men kan ikke verificeres som en officiel eller autentisk kilde.";
   if (status === "review_required") return "Dokumentet kræver manuel gennemgang.";
   if (status === "warning") return "Dokumentet indeholder forhold, der bør vurderes nærmere.";
   return "Dokumentet fremstår klar til videre behandling.";
@@ -173,6 +177,7 @@ function buildValidationActions(codes: IssueCode[], status: ParsedValidation["st
   if (codes.some(c => c === "PARSE_ERROR" || c === "UNSUPPORTED_FORMAT")) return { primary: "Kontrollér dokumentets format", secondary: "Send til manuel gennemgang" };
   if (codes.some(c => c === "EMPTY_DOCUMENT")) return { primary: "Kontrollér at dokumentet er læsbart", secondary: "Send til manuel gennemgang" };
   if (codes.some(c => c === "MISSING_DATA" || c === "INCOMPLETE")) return { primary: "Indhent supplerende dokumentation", secondary: "Send til manuel gennemgang" };
+  if (codes.some(c => c === "LOW_CONFIDENCE")) return { primary: "Send til manuel gennemgang", secondary: null };
   if (status === "ok") return { primary: "Dokumentet kan sendes videre til behandling", secondary: null };
   return { primary: "Send til manuel gennemgang", secondary: null };
 }
