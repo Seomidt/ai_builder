@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { useMutation } from "@tanstack/react-query";
 import {
   Send, Bot, User, ChevronDown, ChevronUp, ShieldAlert, BookOpen,
-  AlertTriangle, Clock, CheckCircle2, HelpCircle, Paperclip, X,
+  AlertTriangle, CheckCircle2, HelpCircle, Paperclip, X,
   FileText, Image, Video, Zap, Search, BarChart3, Shield, MessageSquare,
   ArrowRight, Sparkles,
 } from "lucide-react";
@@ -97,37 +97,39 @@ function ConfidenceBadge({ band }: { band: ConfidenceBand }) {
 
 // ─── Answer Card ──────────────────────────────────────────────────────────────
 
+const isValidationText = (text: string) => text.startsWith("**Valideringsstatus:**");
+
+function StatusBadge({ response }: { response: ChatResponse }) {
+  if (response.needs_manual_review) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-amber-400 border border-amber-400/30 bg-amber-400/10 rounded-full px-2 py-0.5 font-medium">
+        <ShieldAlert className="w-3 h-3" />Kræver gennemgang
+      </span>
+    );
+  }
+  if (response.confidence_band === "unknown" || response.confidence_band === "low") return null;
+  return <ConfidenceBadge band={response.confidence_band} />;
+}
+
 function AnswerCard({ response, text }: { response: ChatResponse; text: string }) {
   const [expanded, setExpanded] = useState(false);
-  const hasDetails = response.used_sources.length > 0 || response.used_rules.length > 0 || response.warnings.length > 0;
+  const hasDetails = response.used_sources.length > 0 || response.used_rules.length > 0;
+  const isValidation = isValidationText(text);
+  const isExpert = response.source?.type === "expert";
 
   return (
-    <div className="space-y-3">
-      {/* Expert + confidence row */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {response.source?.type === "expert" && (
-          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary bg-primary/10 border border-primary/20 rounded-full px-2.5 py-1">
-            <Sparkles className="w-3 h-3" />
-            Svar fra: {response.source.name ?? response.expert.name}
-          </span>
-        )}
-        <ConfidenceBadge band={response.confidence_band} />
-        {response.needs_manual_review && (
-          <span className="inline-flex items-center gap-1 text-xs text-amber-400 border border-amber-400/30 bg-amber-400/10 rounded-full px-2 py-0.5 font-medium">
-            <ShieldAlert className="w-3 h-3" />
-            Kræver manuel gennemgang
-          </span>
-        )}
+    <div className="space-y-2.5">
+      {/* Header — one label + one badge */}
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-muted-foreground">
+          {isValidation
+            ? "Dokumentvalidering"
+            : isExpert
+            ? `${response.source?.name ?? response.expert.name}`
+            : "Systemsvar"}
+        </span>
+        <StatusBadge response={response} />
       </div>
-
-      {/* Baseret på */}
-      {response.used_sources.length > 0 && (
-        <p className="text-xs text-muted-foreground flex items-center gap-1">
-          <BookOpen className="w-3 h-3 shrink-0" />
-          Baseret på: {response.used_sources.slice(0, 2).map(s => s.name).join(", ")}
-          {response.used_sources.length > 2 && ` +${response.used_sources.length - 2} mere`}
-        </p>
-      )}
 
       {/* Warnings */}
       {response.warnings.map((w, i) => (
@@ -136,59 +138,48 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
         </div>
       ))}
 
-      {/* Answer */}
+      {/* Answer body */}
       <div className="text-sm leading-relaxed whitespace-pre-wrap text-foreground" data-testid="text-chat-answer">
         {text}
       </div>
 
-      {/* Anbefaling */}
-      {response.needs_manual_review && (
-        <div className="flex items-start gap-2 p-2.5 rounded-lg bg-primary/5 border border-primary/20">
-          <ArrowRight className="w-3.5 h-3.5 text-primary shrink-0 mt-0.5" />
-          <p className="text-xs text-foreground/80">
-            <span className="font-medium text-primary">Anbefaling:</span> Send til manuel gennemgang af relevant sagsbehandler.
-          </p>
+      {/* Sources + details toggle */}
+      {(hasDetails || response.used_sources.length > 0) && (
+        <div className="flex items-center justify-between pt-0.5">
+          {response.used_sources.length > 0 && (
+            <p className="text-xs text-muted-foreground flex items-center gap-1">
+              <BookOpen className="w-3 h-3 shrink-0" />
+              {response.used_sources.slice(0, 2).map(s => s.name).join(", ")}
+              {response.used_sources.length > 2 && ` +${response.used_sources.length - 2}`}
+            </p>
+          )}
+          {hasDetails && (
+            <button
+              onClick={() => setExpanded(v => !v)}
+              className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors ml-auto"
+              data-testid="button-toggle-details"
+            >
+              {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              {expanded ? "Skjul" : "Detaljer"}
+            </button>
+          )}
         </div>
       )}
 
-      {/* Footer */}
-      <div className="flex items-center justify-between pt-1">
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          {response.used_sources.length > 0 && (
-            <span className="flex items-center gap-1">
-              <BookOpen className="w-3 h-3" />
-              {response.used_sources.length} {response.used_sources.length === 1 ? "kilde" : "kilder"}
-            </span>
-          )}
-          <span className="flex items-center gap-1">
-            <Clock className="w-3 h-3" />{response.latency_ms}ms
-          </span>
-        </div>
-        {hasDetails && (
-          <button
-            onClick={() => setExpanded(v => !v)}
-            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
-            data-testid="button-toggle-details"
-          >
-            {expanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-            {expanded ? "Skjul detaljer" : "Se detaljer"}
-          </button>
-        )}
-      </div>
-
       {/* Details panel */}
       {expanded && (
-        <div className="rounded-xl border border-border/60 bg-muted/20 p-3 space-y-3 text-xs" data-testid="panel-chat-details">
-          <div className="space-y-0.5 text-muted-foreground">
-            <p><span className="text-foreground/70 font-medium">Valgt ekspert:</span> {response.expert.name}</p>
-            {response.expert.category && <p><span className="text-foreground/70 font-medium">Domæne:</span> {response.expert.category}</p>}
-            {response.routing_explanation && <p><span className="text-foreground/70 font-medium">Udvælgelse:</span> {response.routing_explanation}</p>}
-          </div>
+        <div className="rounded-xl border border-border/60 bg-muted/20 p-3 space-y-2 text-xs" data-testid="panel-chat-details">
+          {response.expert.name && (
+            <p className="text-muted-foreground">
+              <span className="text-foreground/70 font-medium">Ekspert:</span> {response.expert.name}
+              {response.expert.category && ` · ${response.expert.category}`}
+            </p>
+          )}
           {response.used_sources.length > 0 && (
             <div>
-              <p className="text-muted-foreground font-medium mb-1.5">Kilder brugt</p>
+              <p className="text-muted-foreground font-medium mb-1">Kilder</p>
               {response.used_sources.map(s => (
-                <div key={s.id} className="flex items-center gap-2 text-foreground/80 mb-1">
+                <div key={s.id} className="flex items-center gap-2 text-foreground/80 mb-0.5">
                   <BookOpen className="w-3 h-3 text-primary/70 shrink-0" />{s.name}
                 </div>
               ))}
@@ -196,17 +187,14 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
           )}
           {response.used_rules.length > 0 && (
             <div>
-              <p className="text-muted-foreground font-medium mb-1.5">Vigtige forhold</p>
+              <p className="text-muted-foreground font-medium mb-1">Regler</p>
               {response.used_rules.map(r => (
-                <div key={r.id} className="flex items-center gap-2 text-foreground/80 mb-1">
+                <div key={r.id} className="flex items-center gap-2 text-foreground/80 mb-0.5">
                   <ShieldAlert className="w-3 h-3 text-primary/70 shrink-0" />{r.title}
                 </div>
               ))}
             </div>
           )}
-          <div className="pt-1 border-t border-border/40 text-muted-foreground">
-            Svartid: {response.latency_ms}ms
-          </div>
         </div>
       )}
     </div>
@@ -418,6 +406,7 @@ export default function AiChatPage() {
   const [input, setInput]                 = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [attachments, setAttachments]     = useState<AttachedFile[]>([]);
+  const [moreOpen, setMoreOpen]           = useState(false);
   const bottomRef   = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [fileAccept, setFileAccept]       = useState(ACCEPT_ALL);
@@ -668,9 +657,39 @@ export default function AiChatPage() {
       {/* Composer area */}
       <div className="shrink-0 border-t border-border/40 px-4 pt-3 pb-4 space-y-2">
 
-        {/* Quick actions */}
+        {/* Quick actions — 3 primary + "Mere" collapse */}
         <div className="flex items-center gap-1.5 flex-wrap">
-          {QUICK_ACTIONS.map((action) => (
+          {QUICK_ACTIONS.slice(0, 3).map((action) => (
+            <button
+              key={action.label}
+              onClick={() => handleQuickAction(action)}
+              disabled={chatMutation.isPending}
+              data-testid={`quick-action-${action.label.toLowerCase().replace(/\s+/g, "-")}`}
+              className={cn(
+                "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border transition-all",
+                "text-muted-foreground border-border/60 hover:text-foreground hover:border-primary/40 hover:bg-primary/5",
+                "disabled:opacity-40 disabled:cursor-not-allowed"
+              )}
+            >
+              <action.icon className="w-3 h-3" />
+              {action.label}
+            </button>
+          ))}
+          <button
+            onClick={() => setMoreOpen(v => !v)}
+            disabled={chatMutation.isPending}
+            data-testid="quick-action-mere"
+            className={cn(
+              "inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border transition-all",
+              "text-muted-foreground border-border/60 hover:text-foreground hover:border-primary/40 hover:bg-primary/5",
+              "disabled:opacity-40 disabled:cursor-not-allowed",
+              moreOpen && "border-primary/40 text-foreground bg-primary/5"
+            )}
+          >
+            {moreOpen ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            Mere
+          </button>
+          {moreOpen && QUICK_ACTIONS.slice(3).map((action) => (
             <button
               key={action.label}
               onClick={() => handleQuickAction(action)}
