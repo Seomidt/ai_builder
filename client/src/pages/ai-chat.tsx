@@ -474,9 +474,6 @@ function EmptyState() {
       <h2 className="text-base font-semibold text-foreground tracking-tight">
         Hvad vil du analysere?
       </h2>
-      <p className="text-sm text-muted-foreground max-w-sm">
-        Stil et spørgsmål eller upload et dokument for at komme i gang.
-      </p>
     </div>
   );
 }
