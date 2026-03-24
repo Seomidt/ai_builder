@@ -38,6 +38,7 @@ export async function summarize(input: SummarizeInput): Promise<SummarizeResult>
   const result = await runAiCall(
     {
       feature: "summarize",
+      useCase: "analysis",
       tenantId: tenantId ?? null,
       userId: userId ?? null,
       requestId: requestId ?? null,

@@ -935,7 +935,7 @@ Generate names and content in ${langNote}.`;
       ].filter(Boolean).join("\n");
 
       const result = await runAiCall(
-        { feature: "expert-suggest", tenantId: getOrgId(req), userId: getUserId(req) },
+        { feature: "expert-suggest", useCase: "analysis", tenantId: getOrgId(req), userId: getUserId(req) },
         { systemPrompt, userInput },
       );
 
@@ -1042,7 +1042,7 @@ Generate names and content in ${langNote}.`;
 
       const [aiResult, retrievalResult] = await Promise.all([
         runAiCall(
-          { feature: "expert-test", tenantId: orgId, userId, model: builtPrompt.modelName },
+          { feature: "expert-test", useCase: "analysis", tenantId: orgId, userId, model: builtPrompt.modelName },
           { systemPrompt: builtPrompt.systemPrompt, userInput: body.prompt },
         ),
         runRetrieval({ tenantId: orgId, queryText: body.prompt, strategy: "hybrid", topK: 5 })

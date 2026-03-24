@@ -111,6 +111,7 @@ import {
   recordCacheHitReplayedEvent,
 } from "./billing-events";
 import type { AiCallContext, AiCallResult } from "./types";
+import { isGroundedUseCase } from "./types";
 import type { AiUsageLimit } from "@shared/schema";
 
 export interface AiCallInput {
@@ -145,9 +146,16 @@ export async function runAiCall(
   const { feature, tenantId, userId, model: modelKey = "default" } = context;
   const startMs = Date.now();
 
-  // ── GLOBAL HARD GATE — no provider call without internal document data ────────
-  if (!context?.documentContext || context.documentContext.length === 0) {
-    console.log("[HARD-GATE] BLOCKED: no internal data → AI call prevented");
+  // ── USE-CASE-AWARE GATE ───────────────────────────────────────────────────────
+  // CASE D: useCase missing → throw immediately, no silent default
+  if (!context.useCase) {
+    throw new Error("USE_CASE_REQUIRED: runAiCall() called without useCase");
+  }
+
+  // CASE A: grounded use case + no documentContext → block before provider call
+  if (isGroundedUseCase(context.useCase) &&
+      (!context.documentContext || context.documentContext.length === 0)) {
+    console.log(`[HARD-GATE] BLOCKED: useCase=${context.useCase} requires documentContext — no provider call`);
     return {
       blocked: true,
       reason: "NO_INTERNAL_DATA",
@@ -159,6 +167,9 @@ export async function runAiCall(
       feature,
     };
   }
+
+  // CASE B/C: grounded with data → allowed. Non-grounded (validation/analysis/classification) → always allowed.
+  console.log(`[ai:gate] ALLOWED: useCase=${context.useCase} documentContext=${context.documentContext?.length ?? 0}`);
 
   // ── Step 1: Resolve route ────────────────────────────────────────────────────
   const route = await resolveRoute(modelKey, tenantId);
