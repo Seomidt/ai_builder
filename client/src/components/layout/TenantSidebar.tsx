@@ -85,21 +85,19 @@ function NavLink({
       href={href}
       data-testid={`nav-link-${href.replace(/\//g, "-").replace(/^-/, "")}`}
       className={cn(
-        "relative h-7 flex items-center gap-2 px-3 text-[12.5px] leading-none cursor-pointer transition-colors shrink-0 whitespace-nowrap select-none",
+        "relative h-[26px] flex items-center gap-2 px-3 text-[12.5px] leading-none cursor-pointer transition-colors shrink-0 whitespace-nowrap select-none",
         active
-          ? "text-slate-100 font-semibold bg-white/[0.05]"
-          : "text-slate-400/90 font-medium hover:text-slate-200 hover:bg-white/[0.03]",
+          ? "text-slate-100 font-medium bg-white/[0.025]"
+          : "text-slate-400/70 font-normal hover:text-slate-300 hover:bg-white/[0.02]",
       )}
     >
-      {/* T2: left border indicator only — no pill highlight */}
       {active && (
-        <span className="absolute left-0 top-[3px] bottom-[3px] w-[2px] bg-cyan-500" />
+        <span className="absolute left-0 top-[3px] bottom-[3px] w-[2px] bg-cyan-500/90" />
       )}
-      {/* T1: neutral icon, no accent color, low opacity */}
       <Icon
-        size={14}
-        strokeWidth={1.8}
-        className="shrink-0 text-slate-500/45"
+        size={13}
+        strokeWidth={1.7}
+        className={cn("shrink-0", active ? "text-slate-400/55" : "text-slate-500/40")}
       />
       {label}
     </Link>
