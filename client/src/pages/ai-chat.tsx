@@ -459,30 +459,41 @@ export default function AiChatPage() {
 
   const chatMutation = useMutation({
     mutationFn: async (payload: { text: string; attachments: AttachedFile[] }) => {
-      // ── Step A: Ekstraher dokumentindhold ──────────────────────────────────
-      // Dokumenter (PDF, TXT, CSV, m.fl.) uploades til /api/extract som multipart.
-      // Billedfiler sendes ikke til extract (ikke understøttet endnu).
-      let documentContext: any[] = [];
+      const traceId = crypto.randomUUID().slice(0, 8);
+
+      // ── TRACE STAGE 1: FRONTEND SEND ─────────────────────────────────────
       const docFiles = payload.attachments.filter(a => a.type === "document");
+      const imgFiles = payload.attachments.filter(a => a.type === "image");
+      console.log(`[TRACE-1][${traceId}] attachments_total=${payload.attachments.length} doc_files=${docFiles.length} img_files=${imgFiles.length} names=[${docFiles.map(a=>a.file.name).join(",")}]`);
+
+      // ── Step A: Ekstraher dokumentindhold ──────────────────────────────────
+      let documentContext: any[] = [];
 
       if (docFiles.length > 0) {
         const form = new FormData();
         docFiles.forEach(a => form.append("file", a.file, a.file.name));
         try {
+          console.log(`[TRACE-2a][${traceId}] calling /api/extract for ${docFiles.length} file(s)`);
           const extractRes = await apiRequestForm("POST", "/api/extract", form);
+          console.log(`[TRACE-2b][${traceId}] extract HTTP status=${extractRes.status}`);
           const extractData = await extractRes.json() as { results: any[] };
           documentContext = extractData.results ?? [];
+          console.log(`[TRACE-2c][${traceId}] extract results=${documentContext.length} statuses=[${documentContext.map((r:any)=>r.status).join(",")}] chars=[${documentContext.map((r:any)=>r.extracted_text?.length??0).join(",")}]`);
+          if (documentContext.length > 0) {
+            console.log(`[TRACE-2d][${traceId}] first200="${(documentContext[0] as any).extracted_text?.slice(0,200)?.replace(/\n/g," ")}"`);
+          }
         } catch (e) {
-          console.warn("[ai-chat] extract fejlede:", e);
-          // Non-fatal: fortsæt uden dokument-kontekst
+          console.warn(`[TRACE-2-ERR][${traceId}] extract failed:`, e);
         }
+      } else {
+        console.log(`[TRACE-2-SKIP][${traceId}] no doc files — skipping extract`);
       }
 
       // ── Step B: Byg besked-tekst ───────────────────────────────────────────
-      // Vi inkluderer IKKE fil-label-tekst ("Vedhæftede filer: [Dokument: ...]")
-      // da det trigger modellens "kan ikke tilgå filer"-svar.
-      // Serveren renser den alligevel — men vi sender den heller ikke.
       const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";
+
+      // ── TRACE STAGE 3: CHAT REQUEST ───────────────────────────────────────
+      console.log(`[TRACE-3][${traceId}] sending /api/chat message_len=${fullMessage.length} document_context_len=${documentContext.length}`);
 
       // ── Step C: Send til /api/chat med dokument-kontekst ───────────────────
       const res = await apiRequest("POST", "/api/chat", {
@@ -495,8 +506,15 @@ export default function AiChatPage() {
           attachment_count: payload.attachments.length,
           attachment_types: Array.from(new Set(payload.attachments.map(a => a.type))),
         },
+        _trace_id: traceId,
       });
-      return res.json() as Promise<ChatResponse>;
+      const data = await res.json() as ChatResponse & { _trace?: any };
+
+      // ── TRACE STAGE 5: SERVER RESPONSE ────────────────────────────────────
+      console.log(`[TRACE-5][${traceId}] server _trace:`, JSON.stringify((data as any)._trace ?? "none"));
+      console.log(`[TRACE-5][${traceId}] final_answer_first100="${data.answer?.slice(0,100)}"`);
+
+      return data;
     },
     onSuccess: (data) => {
       setConversationId(data.conversation_id);
