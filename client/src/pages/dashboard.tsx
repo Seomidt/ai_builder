@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { QUERY_POLICY } from "@/lib/query-policy";
-import { Brain, BookOpen, PlayCircle, Plug, Plus, ArrowRight, Building2, Zap } from "lucide-react";
+import { Brain, BookOpen, PlayCircle, Plug, Plus, ArrowRight, Building2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -34,12 +34,12 @@ function StatCard({
       {barClass && (
         <span className={`absolute left-0 top-0 bottom-0 w-0.5 rounded-r-full ${barClass}`} style={{ boxShadow: barClass.includes("primary") || barClass.includes("cyan") ? "0 0 8px rgba(34,211,238,0.5)" : barClass.includes("secondary") ? "0 0 8px rgba(245,158,11,0.5)" : "0 0 8px rgba(34,197,94,0.5)" }} />
       )}
-      <CardContent className="flex items-center gap-4 pt-5 pb-5">
-        <div className={`flex items-center justify-center w-10 h-10 rounded-xl ${accentClass} shrink-0`}>
-          <Icon className="w-5 h-5" />
+      <CardContent className="flex items-center gap-3 pt-3 pb-3">
+        <div className={`flex items-center justify-center w-8 h-8 rounded-lg ${accentClass} shrink-0`}>
+          <Icon className="w-4 h-4" />
         </div>
         <div>
-          <p className="text-2xl font-bold text-card-foreground tabular-nums" data-testid={`stat-${label.toLowerCase().replace(/\s/g, "-")}`}>
+          <p className="text-xl font-bold text-card-foreground tabular-nums" data-testid={`stat-${label.toLowerCase().replace(/\s/g, "-")}`}>
             {value}
           </p>
           <p className="text-xs text-muted-foreground font-medium mt-0.5">{label}</p>
@@ -78,32 +78,27 @@ export default function Dashboard() {
   });
 
   return (
-    <div className="p-6 md:p-8 space-y-7 max-w-6xl">
+    <div className="p-5 md:p-7 space-y-6 max-w-6xl">
 
       {/* Header */}
-      <div className="space-y-1">
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center justify-center w-8 h-8 rounded-lg bg-primary/12 shrink-0" style={{ boxShadow: "0 0 12px rgba(34,211,238,0.15)" }}>
-            <Zap className="w-4 h-4 text-primary" />
-          </div>
-          <h1 className="text-xl font-bold text-foreground tracking-tight" data-testid="dashboard-title">
-            Dashboard
-          </h1>
-        </div>
+      <div className="space-y-0.5">
+        <h1 className="text-lg font-semibold text-foreground tracking-tight" data-testid="dashboard-title">
+          Dashboard
+        </h1>
         {isLoading ? (
-          <Skeleton className="h-4 w-44 ml-10" />
+          <Skeleton className="h-4 w-40" />
         ) : (
-          <p className="text-sm text-muted-foreground ml-10 flex items-center gap-1.5">
-            <Building2 className="w-3.5 h-3.5 shrink-0" />
+          <p className="text-xs text-muted-foreground flex items-center gap-1">
+            <Building2 className="w-3 h-3 shrink-0" />
             {data?.orgName ?? "AI Builder Platform"}
           </p>
         )}
       </div>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {isLoading ? (
-          Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[78px]" />)
+          Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[62px]" />)
         ) : (
           <>
             <StatCard
@@ -114,7 +109,7 @@ export default function Dashboard() {
               barClass="bg-primary"
             />
             <StatCard
-              label="Aktive kørseler"
+              label="Aktive kørsler"
               value={data?.activeRunCount ?? 0}
               icon={PlayCircle}
               accentClass="bg-green-500/12 text-green-400"
@@ -128,7 +123,7 @@ export default function Dashboard() {
               barClass="bg-secondary"
             />
             <StatCard
-              label="Integrations"
+              label="Integrationer"
               value={`${data?.configuredIntegrationCount ?? 0}/5`}
               icon={Plug}
               accentClass="bg-purple-500/12 text-purple-400"
@@ -139,11 +134,11 @@ export default function Dashboard() {
       </div>
 
       {/* Recent lists */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
 
         {/* Seneste datakilder */}
         <Card className="bg-card border-card-border">
-          <CardHeader className="flex flex-row items-center justify-between pb-3 pt-5">
+          <CardHeader className="flex flex-row items-center justify-between pb-3 pt-4">
             <CardTitle className="text-sm font-semibold text-card-foreground flex items-center gap-2">
               <BookOpen className="w-3.5 h-3.5 text-primary" />
               Seneste datakilder
@@ -156,15 +151,15 @@ export default function Dashboard() {
               Se alle <ArrowRight className="w-3 h-3" />
             </Link>
           </CardHeader>
-          <CardContent className="space-y-1.5 pb-5">
+          <CardContent className="space-y-1.5 pb-4">
             {isLoading ? (
               <SkeletonRows count={3} />
             ) : !data?.recentProjects?.length ? (
-              <div className="text-center py-8">
-                <BookOpen className="w-8 h-8 text-muted-foreground/20 mx-auto mb-2" />
-                <p className="text-sm text-muted-foreground">Ingen datakilder endnu</p>
+              <div className="text-center py-6">
+                <BookOpen className="w-7 h-7 text-muted-foreground/20 mx-auto mb-2" />
+                <p className="text-sm text-muted-foreground mb-3">Ingen datakilder endnu</p>
                 <Link href="/viden-data">
-                  <Button size="sm" variant="outline" className="mt-3" data-testid="btn-create-first-project">
+                  <Button size="sm" variant="outline" data-testid="btn-create-first-project">
                     <Plus className="w-3 h-3 mr-1" /> Tilføj datakilde
                   </Button>
                 </Link>
@@ -195,12 +190,12 @@ export default function Dashboard() {
           </CardContent>
         </Card>
 
-        {/* Recent Runs */}
+        {/* Seneste kørsler */}
         <Card className="bg-card border-card-border">
-          <CardHeader className="flex flex-row items-center justify-between pb-3 pt-5">
+          <CardHeader className="flex flex-row items-center justify-between pb-3 pt-4">
             <CardTitle className="text-sm font-semibold text-card-foreground flex items-center gap-2">
               <PlayCircle className="w-3.5 h-3.5 text-primary" />
-              Seneste kørseler
+              Seneste kørsler
             </CardTitle>
             <Link
               href="/koerseler"
@@ -210,13 +205,13 @@ export default function Dashboard() {
               Se alle <ArrowRight className="w-3 h-3" />
             </Link>
           </CardHeader>
-          <CardContent className="space-y-1.5 pb-5">
+          <CardContent className="space-y-1.5 pb-4">
             {isLoading ? (
               <SkeletonRows count={3} />
             ) : !data?.recentRuns?.length ? (
-              <div className="text-center py-8">
-                <PlayCircle className="w-8 h-8 text-muted-foreground/20 mx-auto mb-2" />
-                <p className="text-sm text-muted-foreground">No runs yet</p>
+              <div className="text-center py-6">
+                <PlayCircle className="w-7 h-7 text-muted-foreground/20 mx-auto mb-2" />
+                <p className="text-sm text-muted-foreground">Ingen kørsler endnu</p>
               </div>
             ) : (
               data.recentRuns.map((r) => (
@@ -246,29 +241,25 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      {/* Quick Actions */}
-      <Card className="bg-card border-card-border">
-        <CardHeader className="pb-3 pt-5">
-          <CardTitle className="text-sm font-semibold text-card-foreground">Hurtig adgang</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-wrap gap-2 pb-5">
-          <Link href="/viden-data">
-            <Button size="sm" data-testid="btn-new-project">
-              <Plus className="w-3.5 h-3.5 mr-1" /> Tilføj datakilde
-            </Button>
-          </Link>
-          <Link href="/ai-eksperter">
-            <Button size="sm" variant="outline" data-testid="btn-new-architecture">
-              <Plus className="w-3.5 h-3.5 mr-1" /> Opret AI ekspert
-            </Button>
-          </Link>
-          <Link href="/koerseler">
-            <Button size="sm" variant="outline" data-testid="btn-new-run">
-              <PlayCircle className="w-3.5 h-3.5 mr-1" /> Se kørseler
-            </Button>
-          </Link>
-        </CardContent>
-      </Card>
+      {/* Quick actions — lightweight inline section */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-1">
+        <p className="text-xs text-muted-foreground/60 uppercase tracking-wide font-medium shrink-0">Hurtig adgang</p>
+        <Link href="/viden-data">
+          <Button size="sm" variant="ghost" className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground" data-testid="btn-new-project">
+            <Plus className="w-3 h-3 mr-1" /> Tilføj datakilde
+          </Button>
+        </Link>
+        <Link href="/ai-eksperter">
+          <Button size="sm" variant="ghost" className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground" data-testid="btn-new-architecture">
+            <Plus className="w-3 h-3 mr-1" /> Opret AI ekspert
+          </Button>
+        </Link>
+        <Link href="/koerseler">
+          <Button size="sm" variant="ghost" className="h-7 px-2.5 text-xs text-muted-foreground hover:text-foreground" data-testid="btn-new-run">
+            <PlayCircle className="w-3 h-3 mr-1" /> Se kørsler
+          </Button>
+        </Link>
+      </div>
     </div>
   );
 }
