@@ -6,13 +6,19 @@
 
 ---
 
-`),model=resolveVercelModel(),t0=Date.now(),resp=await fetch("https://api.openai.com/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${process.env.OPENAI_API_KEY}`},body:JSON.stringify({model,messages:[{role:"system",content:systemPrompt},{role:"user",content:`DOKUMENT:
+`),model=resolveVercelModel(),t0=Date.now();if(useCase==="validation"){let VALIDATION_SYSTEM_PROMPT=["You are a document validation engine.","","Analyze the provided document.","","Return ONLY valid JSON with:",'- status ("ok", "warning", or "review_required")',"- completeness_summary (string)","- trust_summary (string)","- issues (array of strings)","- recommendation (string)","","Do NOT return explanations outside JSON.","Do NOT hallucinate missing data.","Base everything ONLY on the provided document."].join(`
+`),vResp=await fetch("https://api.openai.com/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${process.env.OPENAI_API_KEY}`},body:JSON.stringify({model,temperature:0,response_format:{type:"json_object"},messages:[{role:"system",content:VALIDATION_SYSTEM_PROMPT},{role:"user",content:`DOKUMENT:
+
+${docText}`}]})});aiLatencyMs=Date.now()-t0;let vData=await vResp.json();aiPromptTokens=vData.usage?.prompt_tokens??0,aiComplTokens=vData.usage?.completion_tokens??0;let vParsed;try{if(vParsed=JSON.parse(vData.choices?.[0]?.message?.content??"{}"),!vParsed.status)throw new Error("missing status field")}catch{console.warn("[chat] VALIDATION JSON parse failed \u2014 using failsafe"),vParsed={status:"review_required",completeness_summary:"Parsing failed",trust_summary:"Unknown",issues:["Model output invalid"],recommendation:"Manual review required"}}let STATUS_LABELS={ok:"\u2705 OK",warning:"\u26A0\uFE0F Advarsel",review_required:"\u{1F50D} Kr\xE6ver gennemgang"},issueLines=vParsed.issues.length>0?vParsed.issues.map(i=>`  \u2022 ${i}`).join(`
+`):"  Ingen problemer fundet.";finalAnswer=[`**Valideringsstatus:** ${STATUS_LABELS[vParsed.status]??vParsed.status}`,"",`**Fuldst\xE6ndighed:** ${vParsed.completeness_summary}`,"",`**Trov\xE6rdighed:** ${vParsed.trust_summary}`,"",`**Problemer:**
+${issueLines}`,"",`**Anbefaling:** ${vParsed.recommendation}`].join(`
+`),console.log(`[chat] VALIDATION_ANSWER status=${vParsed.status} issues=${vParsed.issues.length}`)}else{let resp=await fetch("https://api.openai.com/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${process.env.OPENAI_API_KEY}`},body:JSON.stringify({model,messages:[{role:"system",content:systemPrompt},{role:"user",content:`DOKUMENT:
 
 ${docText}
 
 ---
 
-${message}`}]})});aiLatencyMs=Date.now()-t0;let data=await resp.json();finalAnswer=data.choices?.[0]?.message?.content?.trim()??"",aiPromptTokens=data.usage?.prompt_tokens??0,aiComplTokens=data.usage?.completion_tokens??0,console.log(`[chat] DOC_ANALYSIS_ANSWER len=${finalAnswer.length}`)}else if(docCtx.length>0){let docText=docCtx.map(d=>d.extracted_text).join(`
+${message}`}]})});aiLatencyMs=Date.now()-t0;let data=await resp.json();finalAnswer=data.choices?.[0]?.message?.content?.trim()??"",aiPromptTokens=data.usage?.prompt_tokens??0,aiComplTokens=data.usage?.completion_tokens??0,console.log(`[chat] DOC_ANALYSIS_ANSWER len=${finalAnswer.length}`)}}else if(docCtx.length>0){let docText=docCtx.map(d=>d.extracted_text).join(`
 
 ---
 

@@ -390,29 +390,115 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   if (docCtx.length > 0 && !isGroundedUseCase(useCase)) {
     // ── DOKUMENT-ANALYSE MODE: non-grounded + document present ────────────
     // validation / analysis / classification med dokument:
-    // Kald model med expert-prompt + dokument appendet — ingen JSON-tvang,
-    // ingen grounding-check, ingen NOT_FOUND fallback.
+    // Kald model med expert-prompt + dokument appendet — ingen grounding-check, ingen NOT_FOUND fallback.
     console.log(`[chat] DOC_ANALYSIS_MODE useCase=${useCase} docCtx=${docCtx.length}`);
     const docText  = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
     const model    = resolveVercelModel();
     const t0       = Date.now();
-    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
-      body:    JSON.stringify({
-        model,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user",   content: `DOKUMENT:\n\n${docText}\n\n---\n\n${message}` },
-        ],
-      }),
-    });
-    aiLatencyMs = Date.now() - t0;
-    const data = await resp.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
-    finalAnswer    = data.choices?.[0]?.message?.content?.trim() ?? "";
-    aiPromptTokens = data.usage?.prompt_tokens  ?? 0;
-    aiComplTokens  = data.usage?.completion_tokens ?? 0;
-    console.log(`[chat] DOC_ANALYSIS_ANSWER len=${finalAnswer.length}`);
+
+    if (useCase === "validation") {
+      // ── VALIDATION MODE: structured JSON output ────────────────────────────
+      const VALIDATION_SYSTEM_PROMPT = [
+        "You are a document validation engine.",
+        "",
+        "Analyze the provided document.",
+        "",
+        "Return ONLY valid JSON with:",
+        '- status ("ok", "warning", or "review_required")',
+        "- completeness_summary (string)",
+        "- trust_summary (string)",
+        "- issues (array of strings)",
+        "- recommendation (string)",
+        "",
+        "Do NOT return explanations outside JSON.",
+        "Do NOT hallucinate missing data.",
+        "Base everything ONLY on the provided document.",
+      ].join("\n");
+
+      const vResp = await fetch("https://api.openai.com/v1/chat/completions", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+        body:    JSON.stringify({
+          model,
+          temperature: 0.0,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: VALIDATION_SYSTEM_PROMPT },
+            { role: "user",   content: `DOKUMENT:\n\n${docText}` },
+          ],
+        }),
+      });
+      aiLatencyMs = Date.now() - t0;
+      const vData = await vResp.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      aiPromptTokens = vData.usage?.prompt_tokens  ?? 0;
+      aiComplTokens  = vData.usage?.completion_tokens ?? 0;
+
+      interface ValidationResult {
+        status: "ok" | "warning" | "review_required";
+        completeness_summary: string;
+        trust_summary: string;
+        issues: string[];
+        recommendation: string;
+      }
+
+      let vParsed: ValidationResult;
+      try {
+        vParsed = JSON.parse(vData.choices?.[0]?.message?.content ?? "{}") as ValidationResult;
+        if (!vParsed.status) throw new Error("missing status field");
+      } catch {
+        console.warn("[chat] VALIDATION JSON parse failed — using failsafe");
+        vParsed = {
+          status: "review_required",
+          completeness_summary: "Parsing failed",
+          trust_summary: "Unknown",
+          issues: ["Model output invalid"],
+          recommendation: "Manual review required",
+        };
+      }
+
+      const STATUS_LABELS: Record<ValidationResult["status"], string> = {
+        ok:               "✅ OK",
+        warning:          "⚠️ Advarsel",
+        review_required:  "🔍 Kræver gennemgang",
+      };
+
+      const issueLines = vParsed.issues.length > 0
+        ? vParsed.issues.map(i => `  • ${i}`).join("\n")
+        : "  Ingen problemer fundet.";
+
+      finalAnswer = [
+        `**Valideringsstatus:** ${STATUS_LABELS[vParsed.status] ?? vParsed.status}`,
+        "",
+        `**Fuldstændighed:** ${vParsed.completeness_summary}`,
+        "",
+        `**Troværdighed:** ${vParsed.trust_summary}`,
+        "",
+        `**Problemer:**\n${issueLines}`,
+        "",
+        `**Anbefaling:** ${vParsed.recommendation}`,
+      ].join("\n");
+
+      console.log(`[chat] VALIDATION_ANSWER status=${vParsed.status} issues=${vParsed.issues.length}`);
+    } else {
+      // ── ANALYSIS / CLASSIFICATION: free-form model call ───────────────────
+      const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+        body:    JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user",   content: `DOKUMENT:\n\n${docText}\n\n---\n\n${message}` },
+          ],
+        }),
+      });
+      aiLatencyMs = Date.now() - t0;
+      const data = await resp.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+      finalAnswer    = data.choices?.[0]?.message?.content?.trim() ?? "";
+      aiPromptTokens = data.usage?.prompt_tokens  ?? 0;
+      aiComplTokens  = data.usage?.completion_tokens ?? 0;
+      console.log(`[chat] DOC_ANALYSIS_ANSWER len=${finalAnswer.length}`);
+    }
   } else if (docCtx.length > 0) {
     // ── DOKUMENT-MODE: Structured JSON output (100% grounded) ─────────────
     // Modellen TVINGES via response_format:json_object til at returnere enten:
