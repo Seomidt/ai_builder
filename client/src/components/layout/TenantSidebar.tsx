@@ -55,57 +55,51 @@ function isActive(href: AllHref, location: string): boolean {
   return location === href || location.startsWith(href + "/");
 }
 
-// ── Section label — T4: tighter, muted, intentional ────────────────────────
+// ── Section label ───────────────────────────────────────────────────────────
 
 function SectionLabel({ label }: { label: string }) {
   return (
-    <div className="pt-2.5 pb-px px-2">
-      <span className="text-[9px] uppercase tracking-[0.07em] font-semibold text-slate-500/55 select-none">
+    <div className="pt-3 pb-px px-3">
+      <span className="text-[9px] uppercase tracking-[0.07em] font-semibold text-slate-500/50 select-none">
         {label}
       </span>
     </div>
   );
 }
 
-// ── Nav link — T3/T5: restrained active, tight height, enterprise type ──────
+// ── Nav link — inline icon, left border on active ───────────────────────────
 
-function NavLink({ href, label, active }: { href: string; label: string; active: boolean }) {
+function NavLink({
+  href,
+  label,
+  icon: Icon,
+  active,
+}: {
+  href: string;
+  label: string;
+  icon: React.ElementType;
+  active: boolean;
+}) {
   return (
     <Link
       href={href}
       data-testid={`nav-link-${href.replace(/\//g, "-").replace(/^-/, "")}`}
       className={cn(
-        "h-8 flex items-center px-2.5 text-[12.5px] leading-none cursor-pointer transition-colors rounded-md shrink-0 whitespace-nowrap",
+        "relative h-8 flex items-center gap-2.5 px-3 text-[12.5px] leading-none cursor-pointer transition-colors rounded-md shrink-0 whitespace-nowrap",
         active
-          ? "bg-cyan-500/[0.09] text-cyan-300 font-semibold tracking-[-0.01em]"
+          ? "bg-cyan-500/[0.09] text-cyan-300 font-semibold"
           : "text-slate-400 font-medium hover:text-slate-200 hover:bg-white/[0.04]",
       )}
     >
-      {label}
-    </Link>
-  );
-}
-
-// ── Icon link — T2: lighter rail, reduced roundness ──────────────────────────
-
-function IconLink({
-  href, label, icon: Icon, active,
-}: {
-  href: string; label: string; icon: React.ElementType; active: boolean;
-}) {
-  return (
-    <Link
-      href={href}
-      data-testid={`icon-nav-${href.replace(/\//g, "-").replace(/^-/, "")}`}
-      title={label}
-      className={cn(
-        "h-9 w-full flex items-center justify-center rounded-lg cursor-pointer transition-colors shrink-0",
-        active
-          ? "bg-cyan-500/10 text-cyan-400"
-          : "text-slate-500/70 hover:text-slate-300 hover:bg-white/[0.04]",
+      {active && (
+        <span className="absolute left-0 top-1 bottom-1 w-[2px] rounded-full bg-cyan-400/70" />
       )}
-    >
-      <Icon size={17} strokeWidth={active ? 2.4 : 1.9} />
+      <Icon
+        size={13}
+        strokeWidth={active ? 2.2 : 1.8}
+        className={active ? "text-cyan-400 shrink-0" : "text-slate-500/60 shrink-0"}
+      />
+      {label}
     </Link>
   );
 }
@@ -124,10 +118,10 @@ export function TenantSidebar() {
     window.location.href = getPostLogoutUrl();
   }
 
-  const role        = user?.role;
-  const isAdmin     = isTenantAdmin(role);
-  const isPlatAdmin = isPlatformAdmin(role);
-  const initials    = user?.email ? user.email.slice(0, 2).toUpperCase() : "??";
+  const role         = user?.role;
+  const isAdmin      = isTenantAdmin(role);
+  const isPlatAdmin  = isPlatformAdmin(role);
+  const initials     = user?.email ? user.email.slice(0, 2).toUpperCase() : "??";
   const displayEmail = user?.email ?? "—";
 
   const coreActive  = (href: AllHref) => isActive(href, location);
@@ -162,124 +156,92 @@ export function TenantSidebar() {
         />
       )}
 
-      {/* ── Sidebar — T1: tighter width ──────────────────────────────────── */}
+      {/* ── Sidebar — single panel, no icon rail ────────────────────────── */}
       <aside
         className={cn(
-          "fixed top-0 left-0 z-50 flex shrink-0 border-r border-white/[0.08] transition-transform duration-300",
+          "fixed top-0 left-0 z-50 flex flex-col shrink-0 border-r border-white/[0.08] transition-transform duration-300",
           "lg:relative lg:translate-x-0 lg:z-auto",
           mobileOpen ? "translate-x-0" : "-translate-x-full lg:translate-x-0",
         )}
-        style={{ width: "244px", height: "100dvh" }}
+        style={{
+          width: "220px",
+          height: "100dvh",
+          backgroundColor: "hsl(218 30% 11%)",
+        }}
       >
-        {/* ── ICON RAIL — T2: narrower, lighter ───────────────────────── */}
-        <div
-          className="w-12 flex flex-col items-center border-r border-white/[0.06] shrink-0"
-          style={{ backgroundColor: "hsl(218 32% 10%)", height: "100%" }}
-        >
-          <div className="py-3.5 shrink-0">
-            <BrandMark size={28} />
-          </div>
-
-          <div className="flex-1 w-full flex flex-col gap-0.5 px-1 overflow-y-auto py-0.5">
-            {CORE_ITEMS.map(({ href, label, icon }) => (
-              <IconLink key={href} href={href} label={label} icon={icon} active={coreActive(href)} />
-            ))}
-
-            {isAdmin && ADMIN_ITEMS.map(({ href, label, icon }) => (
-              <IconLink key={href} href={href} label={label} icon={icon} active={adminActive(href)} />
-            ))}
-
-            {isPlatAdmin && (
-              <a
-                href={getAdminAppUrl()}
-                data-testid="icon-link-switch-to-admin"
-                className="h-9 w-full flex items-center justify-center text-slate-500/60 hover:text-destructive hover:bg-destructive/8 rounded-lg cursor-pointer transition-colors mt-1.5 shrink-0"
-                title="Platform Ops"
-              >
-                <ShieldAlert size={16} strokeWidth={1.9} />
-              </a>
-            )}
-          </div>
-
-          {/* T6: tighter avatar/footer area */}
-          <div className="flex flex-col items-center gap-2 py-3 shrink-0">
-            <div
-              className="w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold text-cyan-400"
-              style={{ background: "rgba(34,211,238,0.12)", border: "1px solid rgba(34,211,238,0.22)" }}
-              title={displayEmail}
-            >
-              {initials}
-            </div>
-            <button
-              onClick={handleLogout}
-              title="Log ud"
-              data-testid="button-logout"
-              className="h-9 w-full flex items-center justify-center text-slate-500/60 hover:text-destructive cursor-pointer transition-colors"
-            >
-              <LogOut size={16} strokeWidth={1.9} />
-            </button>
-          </div>
-        </div>
-
-        {/* ── TEXT PANEL — T1/T7: tighter header, sharper surface ──────── */}
-        <div
-          className="flex-1 flex flex-col min-w-0"
-          style={{ backgroundColor: "hsl(218 28% 13%)", height: "100%" }}
-        >
-          <div className="flex items-center justify-between px-3 pt-3 pb-1.5 shrink-0">
-            <span className="text-[9px] font-bold tracking-[0.1em] text-slate-500/70 uppercase select-none">
+        {/* Header */}
+        <div className="flex items-center justify-between px-3 pt-3.5 pb-2 shrink-0">
+          <div className="flex items-center gap-2">
+            <BrandMark size={24} />
+            <span className="text-[11px] font-bold tracking-[0.06em] text-slate-400/80 uppercase select-none">
               BlissOps
             </span>
-            <button
-              onClick={() => setMobileOpen(false)}
-              data-testid="button-mobile-menu-close"
-              className="p-1 rounded text-slate-500 hover:text-white hover:bg-white/5 transition-colors lg:hidden"
-              aria-label="Luk menu"
-            >
-              <X size={14} />
-            </button>
           </div>
+          <button
+            onClick={() => setMobileOpen(false)}
+            data-testid="button-mobile-menu-close"
+            className="p-1 rounded text-slate-500 hover:text-white hover:bg-white/5 transition-colors lg:hidden"
+            aria-label="Luk menu"
+          >
+            <X size={14} />
+          </button>
+        </div>
 
-          {/* T1: tighter nav px, no inter-item gap */}
-          <nav className="flex-1 flex flex-col overflow-y-auto px-1.5 pb-2">
+        {/* Nav */}
+        <nav className="flex-1 flex flex-col overflow-y-auto px-2 pb-2 mt-0.5">
 
-            <SectionLabel label="Core" />
-            {CORE_ITEMS.map(({ href, label }) => (
-              <NavLink key={href} href={href} label={label} active={coreActive(href)} />
-            ))}
+          <SectionLabel label="Core" />
+          {CORE_ITEMS.map(({ href, label, icon }) => (
+            <NavLink key={href} href={href} label={label} icon={icon} active={coreActive(href)} />
+          ))}
 
-            {isAdmin && (
-              <>
-                <SectionLabel label="Administration" />
-                {ADMIN_ITEMS.map(({ href, label }) => (
-                  <NavLink key={href} href={href} label={label} active={adminActive(href)} />
-                ))}
-              </>
-            )}
+          {isAdmin && (
+            <>
+              <SectionLabel label="Administration" />
+              {ADMIN_ITEMS.map(({ href, label, icon }) => (
+                <NavLink key={href} href={href} label={label} icon={icon} active={adminActive(href)} />
+              ))}
+            </>
+          )}
 
-            {isPlatAdmin && (
-              <>
-                <SectionLabel label="Intern" />
-                <a
-                  href={getAdminAppUrl()}
-                  data-testid="link-switch-to-admin"
-                  className="h-8 flex items-center px-2.5 text-[12.5px] font-medium text-slate-500/70 hover:text-destructive hover:bg-destructive/8 rounded-md cursor-pointer transition-colors shrink-0"
-                >
-                  Platform Ops
-                </a>
-              </>
-            )}
-          </nav>
+          {isPlatAdmin && (
+            <>
+              <SectionLabel label="Intern" />
+              <a
+                href={getAdminAppUrl()}
+                data-testid="link-switch-to-admin"
+                className="h-8 flex items-center gap-2.5 px-3 text-[12.5px] font-medium text-slate-500/60 hover:text-destructive hover:bg-destructive/8 rounded-md cursor-pointer transition-colors shrink-0"
+              >
+                <ShieldAlert size={13} strokeWidth={1.8} className="shrink-0 text-slate-500/50" />
+                Platform Ops
+              </a>
+            </>
+          )}
+        </nav>
 
-          {/* T6: reduced footer padding and subdued email */}
-          <div className="px-3 pt-2 pb-3 border-t border-white/[0.07] shrink-0">
-            <p
-              className="text-[11px] text-slate-500/70 truncate"
-              data-testid="text-sidebar-email"
-            >
-              {displayEmail}
-            </p>
+        {/* Footer — avatar + email + logout */}
+        <div className="flex items-center gap-2 px-3 py-2.5 border-t border-white/[0.07] shrink-0">
+          <div
+            className="w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold text-cyan-400 shrink-0"
+            style={{ background: "rgba(34,211,238,0.10)", border: "1px solid rgba(34,211,238,0.20)" }}
+            title={displayEmail}
+          >
+            {initials}
           </div>
+          <p
+            className="flex-1 text-[11px] text-slate-500/65 truncate"
+            data-testid="text-sidebar-email"
+          >
+            {displayEmail}
+          </p>
+          <button
+            onClick={handleLogout}
+            title="Log ud"
+            data-testid="button-logout"
+            className="text-slate-500/60 hover:text-destructive cursor-pointer transition-colors shrink-0"
+          >
+            <LogOut size={14} strokeWidth={1.9} />
+          </button>
         </div>
       </aside>
     </>
