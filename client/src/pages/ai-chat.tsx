@@ -470,10 +470,13 @@ function TypingIndicator() {
 
 function EmptyState() {
   return (
-    <div className="mt-16 flex flex-col items-center text-center gap-3" data-testid="empty-state-chat">
+    <div className="flex flex-col items-center text-center gap-1.5" data-testid="empty-state-chat">
       <h2 className="text-base font-semibold text-foreground tracking-tight">
         Hvad vil du analysere?
       </h2>
+      <p className="text-sm text-muted-foreground/60 max-w-xs">
+        Stil et spørgsmål eller upload et dokument for at komme i gang.
+      </p>
     </div>
   );
 }
@@ -684,14 +687,14 @@ export default function AiChatPage() {
       />
 
       {/* Header */}
-      <div className="shrink-0 px-6 py-4 border-b border-border/60 flex items-center gap-3">
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0"
-          style={{ background: "rgba(34,211,238,0.12)", border: "1px solid rgba(34,211,238,0.20)" }}>
-          <Sparkles className="w-4 h-4 text-primary" />
+      <div className="shrink-0 px-4 py-2.5 border-b border-border/40 flex items-center gap-2.5">
+        <div className="w-6 h-6 rounded-md flex items-center justify-center shrink-0"
+          style={{ background: "rgba(34,211,238,0.08)", border: "1px solid rgba(34,211,238,0.15)" }}>
+          <Sparkles className="w-3.5 h-3.5 text-primary" />
         </div>
         <div className="min-w-0">
-          <h1 className="text-base font-bold text-foreground tracking-tight">AI Ekspert</h1>
-          <p className="text-xs text-muted-foreground truncate">Få svar baseret på jeres egne data, dokumenter og regler.</p>
+          <h1 className="text-sm font-medium text-foreground">AI Ekspert</h1>
+          <p className="text-xs text-muted-foreground/60 truncate">Få svar baseret på jeres egne data, dokumenter og regler.</p>
         </div>
         {conversationId && (
           <Badge variant="outline" className="ml-auto shrink-0 text-xs text-muted-foreground">Aktiv samtale</Badge>
@@ -699,15 +702,17 @@ export default function AiChatPage() {
       </div>
 
       {/* Thread */}
-      <div className="flex-1 overflow-y-auto px-4 pt-12 pb-4">
-        <div className="mx-auto w-full max-w-3xl sm:max-w-4xl">
+      <div className="flex-1 overflow-y-auto px-4 pb-4">
+        <div className="mx-auto w-full max-w-3xl sm:max-w-4xl min-h-full flex flex-col">
           {isEmpty ? (
-            <EmptyState />
+            <div className="flex-1 flex items-center justify-center py-8">
+              <EmptyState />
+            </div>
           ) : (
-            <>
+            <div className="pt-6">
               {messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)}
               {chatMutation.isPending && <TypingIndicator />}
-            </>
+            </div>
           )}
           <div ref={bottomRef} />
         </div>
@@ -727,7 +732,7 @@ export default function AiChatPage() {
           )}
 
           {/* Input row — crisp enterprise style */}
-          <div className="flex items-center gap-1.5 bg-background border border-border rounded-lg px-3 py-2 focus-within:ring-1 focus-within:ring-primary/10 focus-within:border-primary transition-all">
+          <div className="flex items-center gap-1.5 bg-background border border-foreground/12 rounded-lg px-3 py-2 focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary/40 transition-all shadow-sm">
             <button
               onClick={() => openPicker()}
               disabled={chatMutation.isPending}
