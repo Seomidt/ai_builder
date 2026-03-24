@@ -3,6 +3,7 @@ import { authenticate } from "./_lib/auth";
 import { json, err, readBody } from "./_lib/response";
 import { dbList, dbInsert } from "./_lib/db";
 import { AI_MODEL_ROUTES } from "../../server/lib/ai/config";
+import { isGroundedUseCase, type AiUseCase } from "../../server/lib/ai/types";
 
 // ── Phase 6I: central model resolution (Vercel path, no DB overrides) ─────────
 // Uses AI_MODEL_ROUTES from the single source-of-truth config.
@@ -46,6 +47,7 @@ interface ChatRequest {
     document_ids?:        string[];
     attachment_count?:    number;
     attachment_types?:    string[];
+    use_case?:            AiUseCase;
   };
 }
 
@@ -261,6 +263,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const body    = await readBody<ChatRequest>(req);
   const message = (body.message ?? "").trim();
   if (!message) return err(res, 400, "MISSING_MESSAGE", "Besked mangler");
+
+  const useCase: AiUseCase = body.context?.use_case ?? "grounded_chat";
 
   const token = (req.headers.authorization ?? "").slice(7);
 
@@ -479,12 +483,33 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       finalAnswer = "Jeg kan ikke finde det i jeres interne data.";
       console.log("[chat] GROUNDING_OVERRIDE applied");
     }
-  } else {
-    // ── INTERNAL-ONLY GATE: ingen intern data → blokér model-kald ────────
-    // Ingen dokument-kontekst, ingen retrieval hits, ingen interne kilder.
+  } else if (isGroundedUseCase(useCase)) {
+    // ── INTERNAL-ONLY GATE: grounded use case + ingen intern data → blokér ─
+    // document_qa / retrieval_answer / grounded_chat kræver altid docCtx.
     // Model MÅ IKKE kaldes — returner fast svar uden OpenAI-kald.
-    console.log("[chat] NO_INTERNAL_DATA_GATE: no document context → model call blocked");
+    console.log(`[chat] NO_INTERNAL_DATA_GATE: useCase=${useCase} no document context → blocked`);
     finalAnswer = "Jeg kan ikke finde det i jeres interne data.";
+  } else {
+    // ── NON-GROUNDED MODE: validation / analysis / classification ─────────
+    // Ingen docCtx krævet — kald model direkte med expert-prompt.
+    console.log(`[chat] NON_GROUNDED_MODE: useCase=${useCase} → model call allowed without docCtx`);
+    const model = resolveVercelModel();
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      body:    JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user",   content: message },
+        ],
+      }),
+    });
+    const data = await resp.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+    finalAnswer     = data.choices?.[0]?.message?.content?.trim() ?? "";
+    aiPromptTokens  = data.usage?.prompt_tokens  ?? 0;
+    aiComplTokens   = data.usage?.completion_tokens ?? 0;
+    console.log(`[chat] NON_GROUNDED_ANSWER len=${finalAnswer.length}`);
   }
 
   // ── Vurder svar ───────────────────────────────────────────────────────────

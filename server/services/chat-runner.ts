@@ -55,6 +55,7 @@ export async function runChatMessage(params: {
   conversationId?: string | null;
   routingExplanation: string;
   documentContext?: DocumentContextItem[];
+  useCase?: import("../lib/ai/types").AiUseCase;
 }): Promise<ChatRunResult> {
   const { message, expert, organizationId, userId, routingExplanation } = params;
   const startMs = Date.now();
@@ -221,9 +222,13 @@ export async function runChatMessage(params: {
   } else {
     // ── NORMAL MODE: runAiCall via Responses API ──────────────────────────────
     const { runAiCall } = await import("../lib/ai/runner");
+    // Use the caller-supplied useCase; default to "grounded_chat" for backward compat.
+    // Non-grounded use cases (validation/analysis/classification) bypass the docCtx gate.
+    const resolvedUseCase = params.useCase ?? "grounded_chat";
+    console.log(`[chat-runner] NORMAL_MODE useCase=${resolvedUseCase}`);
     const t0 = Date.now();
     const aiResult = await runAiCall(
-      { feature: "ai-chat", useCase: "grounded_chat", tenantId: organizationId, userId },
+      { feature: "ai-chat", useCase: resolvedUseCase, tenantId: organizationId, userId },
       { systemPrompt: builtPrompt.systemPrompt, userInput: message },
     );
     aiLatencyMs = Date.now() - t0;
