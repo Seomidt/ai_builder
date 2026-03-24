@@ -387,7 +387,33 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   let aiComplTokens    = 0;
   const warnings: string[] = [];
 
-  if (docCtx.length > 0) {
+  if (docCtx.length > 0 && !isGroundedUseCase(useCase)) {
+    // ── DOKUMENT-ANALYSE MODE: non-grounded + document present ────────────
+    // validation / analysis / classification med dokument:
+    // Kald model med expert-prompt + dokument appendet — ingen JSON-tvang,
+    // ingen grounding-check, ingen NOT_FOUND fallback.
+    console.log(`[chat] DOC_ANALYSIS_MODE useCase=${useCase} docCtx=${docCtx.length}`);
+    const docText  = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
+    const model    = resolveVercelModel();
+    const t0       = Date.now();
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      body:    JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user",   content: `DOKUMENT:\n\n${docText}\n\n---\n\n${message}` },
+        ],
+      }),
+    });
+    aiLatencyMs = Date.now() - t0;
+    const data = await resp.json() as { choices?: { message?: { content?: string } }[]; usage?: { prompt_tokens?: number; completion_tokens?: number } };
+    finalAnswer    = data.choices?.[0]?.message?.content?.trim() ?? "";
+    aiPromptTokens = data.usage?.prompt_tokens  ?? 0;
+    aiComplTokens  = data.usage?.completion_tokens ?? 0;
+    console.log(`[chat] DOC_ANALYSIS_ANSWER len=${finalAnswer.length}`);
+  } else if (docCtx.length > 0) {
     // ── DOKUMENT-MODE: Structured JSON output (100% grounded) ─────────────
     // Modellen TVINGES via response_format:json_object til at returnere enten:
     //   {"found":true,  "quote":"<exact excerpt>",      "answer":"<direct answer>"}

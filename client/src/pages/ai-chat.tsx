@@ -394,6 +394,7 @@ interface QuickAction {
   icon: typeof Zap;
   prefill?: string;
   openPicker?: "document" | "image" | "video" | "any";
+  use_case?: "grounded_chat" | "document_qa" | "retrieval_answer" | "validation" | "analysis" | "classification";
 }
 
 const QUICK_ACTIONS: QuickAction[] = [
@@ -401,9 +402,9 @@ const QUICK_ACTIONS: QuickAction[] = [
   { label: "Upload dokument",     icon: FileText,      openPicker: "document" },
   { label: "Upload billede",      icon: Image,         openPicker: "image" },
   { label: "Upload video",        icon: Video,         openPicker: "video" },
-  { label: "Dokumentvalidering",  icon: Shield,        prefill: "Valider venligst dette dokument for ægthed og fuldstændighed." },
+  { label: "Dokumentvalidering",  icon: Shield,        prefill: "Valider venligst dette dokument for ægthed og fuldstændighed.", use_case: "validation" },
   { label: "Find lignende sager", icon: Search,        prefill: "Find lignende sager baseret på følgende beskrivelse: " },
-  { label: "Regnskabsanalyse",    icon: BarChart3,     prefill: "Lav en analyse af det vedhæftede regnskabsmateriale med fokus på afvigelser og kontrolpunkter." },
+  { label: "Regnskabsanalyse",    icon: BarChart3,     prefill: "Lav en analyse af det vedhæftede regnskabsmateriale med fokus på afvigelser og kontrolpunkter.", use_case: "analysis" },
 ];
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
@@ -417,6 +418,7 @@ export default function AiChatPage() {
   const bottomRef   = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [fileAccept, setFileAccept]       = useState(ACCEPT_ALL);
+  const selectedUseCaseRef = useRef<string>("grounded_chat");
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -458,13 +460,13 @@ export default function AiChatPage() {
   // ── Send ─────────────────────────────────────────────────────────────────────
 
   const chatMutation = useMutation({
-    mutationFn: async (payload: { text: string; attachments: AttachedFile[] }) => {
+    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string }) => {
       const traceId = crypto.randomUUID().slice(0, 8);
 
       // ── TRACE STAGE 1: FRONTEND SEND ─────────────────────────────────────
       const docFiles = payload.attachments.filter(a => a.type === "document");
       const imgFiles = payload.attachments.filter(a => a.type === "image");
-      console.log(`[TRACE-1][${traceId}] attachments_total=${payload.attachments.length} doc_files=${docFiles.length} img_files=${imgFiles.length} names=[${docFiles.map(a=>a.file.name).join(",")}]`);
+      console.log(`[TRACE-1][${traceId}] use_case="${payload.useCase ?? "grounded_chat"}" attachments_total=${payload.attachments.length} doc_files=${docFiles.length} img_files=${imgFiles.length} names=[${docFiles.map(a=>a.file.name).join(",")}]`);
 
       // ── Step A: Ekstraher dokumentindhold ──────────────────────────────────
       let documentContext: any[] = [];
@@ -517,6 +519,7 @@ export default function AiChatPage() {
           preferred_expert_id: null,
           attachment_count: payload.attachments.length,
           attachment_types: Array.from(new Set(payload.attachments.map(a => a.type))),
+          use_case: (payload.useCase ?? "grounded_chat") as any,
         },
         _trace_id: traceId,
       });
@@ -561,6 +564,9 @@ export default function AiChatPage() {
     const text = input.trim();
     if ((!text && attachments.length === 0) || chatMutation.isPending) return;
     const displayText = text || (attachments.length === 1 ? `[${attachments[0].file.name}]` : `[${attachments.length} filer vedhæftet]`);
+    const useCase = selectedUseCaseRef.current;
+    console.log(`[TRACE-SEND] use_case="${useCase}" attachments=${attachments.length}`);
+    selectedUseCaseRef.current = "grounded_chat";
     setMessages(prev => [...prev, {
       id: crypto.randomUUID(),
       role: "user",
@@ -568,7 +574,7 @@ export default function AiChatPage() {
       attachments: [...attachments],
       timestamp: new Date(),
     }]);
-    chatMutation.mutate({ text: text || "Analyser venligst de vedhæftede filer.", attachments });
+    chatMutation.mutate({ text: text || "Analyser venligst de vedhæftede filer.", attachments, useCase });
     setInput("");
     setAttachments([]);
   };
@@ -583,6 +589,8 @@ export default function AiChatPage() {
   };
 
   const handleQuickAction = (action: QuickAction) => {
+    selectedUseCaseRef.current = action.use_case ?? "grounded_chat";
+    console.log(`[TRACE-0] quick_action="${action.label}" use_case="${selectedUseCaseRef.current}"`);
     if (action.openPicker) {
       const accept = action.openPicker === "document" ? ACCEPT_DOCS
         : action.openPicker === "image" ? ACCEPT_IMG
