@@ -55,19 +55,20 @@ function isActive(href: AllHref, location: string): boolean {
   return location === href || location.startsWith(href + "/");
 }
 
-// ── Section label — T5: smaller, lower opacity ──────────────────────────────
+// ── Section label — T5: slightly tighter top spacing ───────────────────────
 
 function SectionLabel({ label }: { label: string }) {
   return (
-    <div className="pt-4 pb-px px-3">
-      <span className="text-[9px] uppercase tracking-[0.08em] font-medium text-slate-600/80 select-none">
+    <div className="pt-3 pb-px" style={{ paddingLeft: "11px" }}>
+      <span className="text-[9px] uppercase tracking-[0.08em] font-medium select-none"
+        style={{ color: "rgba(148,163,184,0.45)" }}>
         {label}
       </span>
     </div>
   );
 }
 
-// ── Nav link — border-only active, no row highlight ─────────────────────────
+// ── Nav link — border-only active, guaranteed via inline style ───────────────
 
 function NavLink({
   href,
@@ -85,21 +86,25 @@ function NavLink({
       href={href}
       data-testid={`nav-link-${href.replace(/\//g, "-").replace(/^-/, "")}`}
       className={cn(
-        "h-[26px] flex items-center gap-2 text-[12.5px] leading-none cursor-pointer transition-colors shrink-0 whitespace-nowrap select-none",
+        "h-[27px] flex items-center gap-2 text-[12.5px] leading-none cursor-pointer transition-colors shrink-0 whitespace-nowrap select-none",
         active
-          ? "text-white font-medium"
-          : "text-slate-500 font-normal hover:text-slate-300 hover:bg-white/[0.025]",
+          ? "font-semibold"
+          : "font-normal hover:bg-white/[0.03]",
       )}
       style={{
         paddingLeft: "11px",
         paddingRight: "12px",
-        borderLeft: active ? "2px solid rgba(34,211,238,0.85)" : "2px solid transparent",
+        borderLeft: active
+          ? "2px solid rgba(34,211,238,0.9)"
+          : "2px solid transparent",
+        color: active ? "#f1f5f9" : "rgba(148,163,184,0.80)",
+        backgroundColor: active ? "rgba(255,255,255,0.03)" : undefined,
       }}
     >
       <Icon
-        size={16}
-        strokeWidth={1.7}
-        style={{ opacity: active ? 0.55 : 0.35, flexShrink: 0 }}
+        size={15}
+        strokeWidth={1.75}
+        style={{ opacity: active ? 0.65 : 0.45, flexShrink: 0 }}
       />
       {label}
     </Link>
@@ -171,26 +176,30 @@ export function TenantSidebar() {
           backgroundColor: "hsl(218 30% 11%)",
         }}
       >
-        {/* T6: header — smaller, lower opacity wordmark */}
-        <div className="flex items-center justify-between px-3 pt-3.5 pb-1.5 shrink-0">
-          <div className="flex items-center gap-1.5">
-            <BrandMark size={20} />
-            <span className="text-[10px] font-semibold tracking-[0.08em] text-slate-500/55 uppercase select-none">
+        {/* T1: header — stronger brand presence, anchored */}
+        <div className="flex items-center justify-between px-3 pt-3 pb-2.5 border-b border-white/[0.06] shrink-0">
+          <div className="flex items-center gap-2">
+            <BrandMark size={24} />
+            <span
+              className="text-[11px] font-semibold tracking-[0.07em] uppercase select-none"
+              style={{ color: "rgba(148,163,184,0.70)" }}
+            >
               BlissOps
             </span>
           </div>
           <button
             onClick={() => setMobileOpen(false)}
             data-testid="button-mobile-menu-close"
-            className="p-1 rounded text-slate-500 hover:text-white hover:bg-white/5 transition-colors lg:hidden"
+            className="p-1 rounded transition-colors lg:hidden"
+            style={{ color: "rgba(148,163,184,0.45)" }}
             aria-label="Luk menu"
           >
             <X size={14} />
           </button>
         </div>
 
-        {/* Nav — T4: tight vertical rhythm */}
-        <nav className="flex-1 flex flex-col overflow-y-auto px-0 pb-2">
+        {/* Nav */}
+        <nav className="flex-1 flex flex-col overflow-y-auto pb-2">
 
           <SectionLabel label="Core" />
           {CORE_ITEMS.map(({ href, label, icon }) => (
@@ -212,27 +221,40 @@ export function TenantSidebar() {
               <a
                 href={getAdminAppUrl()}
                 data-testid="link-switch-to-admin"
-                className="h-[26px] flex items-center gap-2 text-[12.5px] font-normal text-slate-600 hover:text-destructive hover:bg-white/[0.025] cursor-pointer transition-colors shrink-0 select-none"
-                style={{ paddingLeft: "11px", paddingRight: "12px", borderLeft: "2px solid transparent" }}
+                className="h-[27px] flex items-center gap-2 text-[12.5px] font-normal hover:bg-white/[0.03] cursor-pointer transition-colors shrink-0 select-none"
+                style={{
+                  paddingLeft: "11px",
+                  paddingRight: "12px",
+                  borderLeft: "2px solid transparent",
+                  color: "rgba(148,163,184,0.50)",
+                }}
               >
-                <ShieldAlert size={16} strokeWidth={1.7} style={{ opacity: 0.35, flexShrink: 0 }} />
+                <ShieldAlert size={15} strokeWidth={1.75} style={{ opacity: 0.40, flexShrink: 0 }} />
                 Platform Ops
               </a>
             </>
           )}
         </nav>
 
-        {/* Footer — T4: compact, utilitarian */}
-        <div className="flex items-center gap-2 px-3 py-2 border-t border-white/[0.07] shrink-0">
+        {/* T6: footer — utilitarian, does not compete with nav */}
+        <div
+          className="flex items-center gap-2 px-3 py-1.5 shrink-0"
+          style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}
+        >
           <div
-            className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold text-slate-400 shrink-0"
-            style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.10)" }}
+            className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold shrink-0"
+            style={{
+              background: "rgba(255,255,255,0.06)",
+              border: "1px solid rgba(255,255,255,0.09)",
+              color: "rgba(148,163,184,0.70)",
+            }}
             title={displayEmail}
           >
             {initials}
           </div>
           <p
-            className="flex-1 text-[11px] text-slate-600 truncate"
+            className="flex-1 text-[11px] truncate"
+            style={{ color: "rgba(148,163,184,0.40)" }}
             data-testid="text-sidebar-email"
           >
             {displayEmail}
@@ -241,7 +263,8 @@ export function TenantSidebar() {
             onClick={handleLogout}
             title="Log ud"
             data-testid="button-logout"
-            className="text-slate-600/70 hover:text-destructive cursor-pointer transition-colors shrink-0"
+            className="cursor-pointer transition-colors shrink-0 hover:text-red-400"
+            style={{ color: "rgba(148,163,184,0.40)" }}
           >
             <LogOut size={13} strokeWidth={1.8} />
           </button>
