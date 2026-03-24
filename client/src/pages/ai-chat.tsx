@@ -213,7 +213,7 @@ function ValidationCard({ vm, warnings }: { vm: ValidationCardViewModel; warning
 
   return (
     <div className="space-y-3">
-      {/* Header — title + one badge */}
+      {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-semibold text-muted-foreground">Dokumentvalidering</span>
         <span className={cn("inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium", color)}>
@@ -221,32 +221,31 @@ function ValidationCard({ vm, warnings }: { vm: ValidationCardViewModel; warning
         </span>
       </div>
 
-      {/* System warnings */}
       {warnings.map((w, i) => (
         <div key={i} className="flex items-start gap-2 text-xs text-amber-300 bg-amber-400/5 border border-amber-400/20 rounded-lg p-2">
           <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />{w}
         </div>
       ))}
 
-      {/* Summary — deterministic, not raw AI text */}
-      <p className="text-sm text-foreground leading-relaxed" data-testid="text-chat-answer">
+      {/* Summary */}
+      <p className="text-sm font-medium text-foreground leading-relaxed" data-testid="text-chat-answer">
         {vm.summary}
       </p>
 
-      {/* Primary action */}
-      <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-muted/30 border border-border/50">
-        <ArrowRight className="w-3.5 h-3.5 text-primary shrink-0 mt-0.5" />
-        <p className="text-xs text-foreground/80 font-medium">{vm.primaryAction}</p>
-      </div>
+      {/* Primary action — inline arrow, no box */}
+      <p className="text-sm text-foreground/80 flex items-center gap-1.5">
+        <ArrowRight className="w-3.5 h-3.5 text-primary shrink-0" />
+        {vm.primaryAction}
+      </p>
 
-      {/* Secondary action — optional */}
+      {/* Secondary action — muted, smaller */}
       {vm.secondaryAction && (
-        <p className="text-xs text-muted-foreground pl-1">
-          Alternativt: <span className="lowercase">{vm.secondaryAction}</span>
+        <p className="text-xs text-muted-foreground">
+          Alternativt: {vm.secondaryAction}
         </p>
       )}
 
-      {/* Details — collapsible, labelled with count */}
+      {/* Details toggle */}
       {hasDetails && (
         <>
           <button
@@ -258,18 +257,19 @@ function ValidationCard({ vm, warnings }: { vm: ValidationCardViewModel; warning
             {detailsOpen ? "Skjul detaljer" : vm.detailsLabel}
           </button>
           {detailsOpen && (
-            <div className="rounded-xl border border-border/60 bg-muted/20 p-3 space-y-2.5 text-xs" data-testid="panel-chat-details">
+            <div className="rounded-xl border border-border/60 bg-muted/20 p-4 space-y-3 text-sm" data-testid="panel-chat-details">
               {vm.trustText && (
-                <p className="text-muted-foreground">
-                  <span className="text-foreground/70 font-medium">Troværdighed: </span>{vm.trustText}
-                </p>
+                <div>
+                  <p className="text-xs font-semibold text-foreground/70 mb-0.5">Troværdighed</p>
+                  <p className="text-muted-foreground text-xs">{vm.trustText}</p>
+                </div>
               )}
               {vm.issueItems.length > 0 && (
                 <div>
-                  <p className="text-foreground/70 font-medium mb-1">Problemoversigt</p>
+                  <p className="text-xs font-semibold text-foreground/70 mb-1">Problemoversigt</p>
                   {vm.issueItems.map((item, i) => (
-                    <div key={i} className="flex items-start gap-1.5 text-muted-foreground mb-0.5">
-                      <span className="mt-0.5 shrink-0 text-muted-foreground/60">•</span>{item}
+                    <div key={i} className="flex items-start gap-1.5 text-xs text-muted-foreground mb-0.5">
+                      <span className="shrink-0 text-muted-foreground/50 mt-0.5">•</span>{item}
                     </div>
                   ))}
                 </div>
