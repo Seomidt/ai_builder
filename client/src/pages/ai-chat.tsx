@@ -24,6 +24,7 @@ interface ChatResponse {
   answer: string;
   conversation_id: string;
   expert: { id: string; name: string; category: string | null };
+  source?: { type: "expert" | "system"; name?: string };
   used_sources: ChatSource[];
   used_rules: ChatRule[];
   warnings: string[];
@@ -104,10 +105,12 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
     <div className="space-y-3">
       {/* Expert + confidence row */}
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary bg-primary/10 border border-primary/20 rounded-full px-2.5 py-1">
-          <Sparkles className="w-3 h-3" />
-          Svar fra: {response.expert.name}
-        </span>
+        {response.source?.type === "expert" && (
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary bg-primary/10 border border-primary/20 rounded-full px-2.5 py-1">
+            <Sparkles className="w-3 h-3" />
+            Svar fra: {response.source.name ?? response.expert.name}
+          </span>
+        )}
         <ConfidenceBadge band={response.confidence_band} />
         {response.needs_manual_review && (
           <span className="inline-flex items-center gap-1 text-xs text-amber-400 border border-amber-400/30 bg-amber-400/10 rounded-full px-2 py-0.5 font-medium">

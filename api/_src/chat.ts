@@ -353,6 +353,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       answer:               "Du skal uploade et dokument for at kunne validere.",
       conversation_id:      body.conversation_id ?? crypto.randomUUID(),
       expert:               { id: "", name: "", category: null },
+      source:               { type: "system" },
       used_sources:         [],
       used_rules:           [],
       warnings:             [],
@@ -671,10 +672,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   // ── Step 7: Returner svar ─────────────────────────────────────────────────
   const traceId = (body as any)._trace_id ?? "no-id";
+  // source: "expert" kun når en ekspert faktisk bruges til at besvare (ikke validation/system)
+  const responseSource = useCase === "validation"
+    ? { type: "system" as const }
+    : { type: "expert" as const, name: expert.name };
+
   return json(res, {
     answer:              finalAnswer,
     conversation_id:     conversationId,
     expert:              { id: expert.id, name: expert.name, category: expert.category ?? null },
+    source:              responseSource,
     used_sources:        [],
     _trace: {
       trace_id:          traceId,
