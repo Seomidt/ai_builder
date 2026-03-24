@@ -97,9 +97,10 @@ function ConfidenceBadge({ band }: { band: ConfidenceBand }) {
 
 // ─── Validation parser ────────────────────────────────────────────────────────
 
-// Raw struct from backend text
+// Raw struct parsed from backend text
 interface ParsedValidation {
   status: "ok" | "warning" | "review_required";
+  code: string | null;       // classification code set by backend (LOW_CONFIDENCE, PARSE_ERROR, …)
   completeness_summary: string;
   trust_summary: string;
   issues: string[];
@@ -122,22 +123,18 @@ function parseValidationText(text: string): ParsedValidation | null {
     .split("\n")
     .map(l => l.replace(/^\s*[•·\-]\s*/, "").trim())
     .filter(l => l && !l.toLowerCase().includes("ingen problemer"));
-  return { status, completeness_summary: field("Fuldstændighed"), trust_summary: field("Troværdighed"), issues, recommendation: field("Anbefaling") };
+  const codeRaw = field("ClassificationCode");
+  return {
+    status,
+    code: codeRaw || null,
+    completeness_summary: field("Fuldstændighed"),
+    trust_summary: field("Troværdighed"),
+    issues,
+    recommendation: field("Anbefaling"),
+  };
 }
 
 // ─── Validation view-model ────────────────────────────────────────────────────
-
-type IssueCode = "PARSE_ERROR" | "UNSUPPORTED_FORMAT" | "EMPTY_DOCUMENT" | "MISSING_DATA" | "INCOMPLETE" | "LOW_CONFIDENCE" | "UNKNOWN";
-
-const ISSUE_LABELS: Record<IssueCode, string> = {
-  PARSE_ERROR:        "Dokumentet kunne ikke behandles korrekt",
-  UNSUPPORTED_FORMAT: "Dokumentets format understøttes ikke fuldt",
-  EMPTY_DOCUMENT:     "Dokumentet indeholder ikke læsbart indhold",
-  MISSING_DATA:       "Dokumentet mangler væsentlige oplysninger",
-  INCOMPLETE:         "Dokumentationen er ikke fuldstændig",
-  LOW_CONFIDENCE:     "Dokumentet kunne ikke vurderes med høj sikkerhed",
-  UNKNOWN:            "Dokumentet kræver manuel vurdering",
-};
 
 interface ValidationCardViewModel {
   status: "ok" | "warning" | "review_required";
@@ -149,57 +146,44 @@ interface ValidationCardViewModel {
   detailsLabel: string;
 }
 
-function detectIssueCode(t: string): IssueCode {
-  const s = t.toLowerCase();
-  // LOW_CONFIDENCE must be checked BEFORE PARSE_ERROR — readable-but-unverifiable issues
-  if (s.includes("verificer") || s.includes("signatur") || s.includes("metadata") || s.includes("oprindelse") || s.includes("autentisk") || s.includes("afsender")) return "LOW_CONFIDENCE";
-  if (s.includes("sikkerhed") || s.includes("vurderes")) return "LOW_CONFIDENCE";
-  // Technical parse/format failures (only for truly unreadable docs)
-  if (s.includes("format") || s.includes("behandles") || s.includes("parse") || s.includes("kunne ikke behandles")) return "PARSE_ERROR";
-  if (s.includes("understøttes ikke")) return "UNSUPPORTED_FORMAT";
-  if (s.includes("indeholder ikke") || s.includes("tomt") || s.includes("tom ")) return "EMPTY_DOCUMENT";
-  if (s.includes("mangler") || s.includes("manglen")) return "MISSING_DATA";
-  if (s.includes("ufuldstændig") || s.includes("ikke fuldstændig")) return "INCOMPLETE";
-  return "UNKNOWN";
-}
-
-function buildValidationSummary(status: ParsedValidation["status"], codes: IssueCode[]): string {
-  if (codes.some(c => c === "PARSE_ERROR" || c === "UNSUPPORTED_FORMAT")) return "Dokumentet kunne ikke behandles pålideligt.";
-  if (codes.some(c => c === "EMPTY_DOCUMENT")) return "Dokumentet indeholder ikke læsbart indhold.";
-  if (codes.some(c => c === "MISSING_DATA" || c === "INCOMPLETE")) return "Dokumentet mangler nødvendige oplysninger.";
-  if (codes.some(c => c === "LOW_CONFIDENCE")) return "Dokumentet kan læses, men kan ikke verificeres som en officiel eller autentisk kilde.";
-  if (status === "review_required") return "Dokumentet kræver manuel gennemgang.";
-  if (status === "warning") return "Dokumentet indeholder forhold, der bør vurderes nærmere.";
-  return "Dokumentet fremstår klar til videre behandling.";
-}
-
-function buildValidationActions(codes: IssueCode[], status: ParsedValidation["status"]): { primary: string; secondary: string | null } {
-  if (codes.some(c => c === "PARSE_ERROR" || c === "UNSUPPORTED_FORMAT")) return { primary: "Kontrollér dokumentets format", secondary: "Send til manuel gennemgang" };
-  if (codes.some(c => c === "EMPTY_DOCUMENT")) return { primary: "Kontrollér at dokumentet er læsbart", secondary: "Send til manuel gennemgang" };
-  if (codes.some(c => c === "MISSING_DATA" || c === "INCOMPLETE")) return { primary: "Indhent supplerende dokumentation", secondary: "Send til manuel gennemgang" };
-  if (codes.some(c => c === "LOW_CONFIDENCE")) return { primary: "Send til manuel gennemgang", secondary: null };
-  if (status === "ok") return { primary: "Dokumentet kan sendes videre til behandling", secondary: null };
-  return { primary: "Send til manuel gennemgang", secondary: null };
-}
-
-function buildValidationViewModel(parsed: ParsedValidation): ValidationCardViewModel {
-  const codes = parsed.issues.length > 0 ? parsed.issues.map(detectIssueCode) : [];
-  const seen = new Set<IssueCode>();
-  const issueItems: string[] = [];
-  for (const code of codes) {
-    if (!seen.has(code)) { seen.add(code); issueItems.push(ISSUE_LABELS[code]); }
-  }
-  if (issueItems.length === 0 && parsed.issues.length > 0) issueItems.push(ISSUE_LABELS["UNKNOWN"]);
-  const { primary, secondary } = buildValidationActions(codes, parsed.status);
+function mapValidationToViewModel(parsed: ParsedValidation): ValidationCardViewModel {
+  const issueItems = parsed.issues ?? [];
   const n = issueItems.length;
+  const detailsLabel = n > 0 ? `Se detaljer (${n} ${n === 1 ? "forhold" : "forhold"})` : "Se detaljer";
+
+  if (parsed.code === "LOW_CONFIDENCE") {
+    return {
+      status: "review_required",
+      summary: "Dokumentet kan læses, men kan ikke verificeres som en officiel eller autentisk kilde.",
+      primaryAction: "Send til manuel gennemgang",
+      secondaryAction: null,
+      trustText: parsed.trust_summary || null,
+      issueItems,
+      detailsLabel,
+    };
+  }
+
+  if (parsed.code === "PARSE_ERROR") {
+    return {
+      status: "review_required",
+      summary: "Dokumentet kunne ikke behandles pålideligt.",
+      primaryAction: "Kontrollér dokumentets format",
+      secondaryAction: "Send til manuel gennemgang",
+      trustText: parsed.trust_summary || null,
+      issueItems,
+      detailsLabel,
+    };
+  }
+
+  // Default: use raw AI result — backend is the source of truth
   return {
     status: parsed.status,
-    summary: buildValidationSummary(parsed.status, codes),
-    primaryAction: primary,
-    secondaryAction: secondary,
+    summary: parsed.completeness_summary || "Dokumentet er behandlet.",
+    primaryAction: parsed.recommendation || "Send til manuel gennemgang",
+    secondaryAction: null,
     trustText: parsed.trust_summary || null,
     issueItems,
-    detailsLabel: n > 0 ? `Se detaljer (${n} ${n === 1 ? "forhold" : "forhold"})` : "Se detaljer",
+    detailsLabel,
   };
 }
 
@@ -310,7 +294,7 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
   // Validation: parse text → view-model → dedicated structured card
   const parsedValidation = parseValidationText(text);
   if (parsedValidation) {
-    return <ValidationCard vm={buildValidationViewModel(parsedValidation)} warnings={response.warnings} />;
+    return <ValidationCard vm={mapValidationToViewModel(parsedValidation)} warnings={response.warnings} />;
   }
 
   // Normal grounded Q&A card

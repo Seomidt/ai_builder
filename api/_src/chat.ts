@@ -488,47 +488,42 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       }
 
       let vParsed: ValidationResult;
+      let classificationCode: string | null = null;
+
       try {
         vParsed = JSON.parse(vData.choices?.[0]?.message?.content ?? "{}") as ValidationResult;
         if (!vParsed.status) throw new Error("missing status field");
 
-        // GUARD: if document IS readable, never classify as technical parse error
-        if (isReadable) {
-          vParsed.issues = (vParsed.issues ?? []).map(issue =>
-            isTechnicalIssue(issue)
-              ? "Dokumentet kan læses, men kan ikke verificeres som en officiel eller autentisk kilde"
-              : issue
-          );
-          // If AI incorrectly used low status for readable doc, keep review_required but not PARSE_ERROR framing
+        // Derive classification code — do NOT mutate vParsed fields
+        if (isReadable && (vParsed.issues ?? []).some(isTechnicalIssue)) {
+          classificationCode = "LOW_CONFIDENCE"; // readable doc, AI incorrectly flagged as parse issue
         }
 
-        // Override any generic bad recommendation from AI
+        // Fix bad recommendation phrasing (only the recommendation string, not issues)
         if (!vParsed.recommendation || vParsed.recommendation.toLowerCase().includes("upload dokumentet igen")) {
-          vParsed.recommendation = causeAwareRecommendation(vParsed.issues ?? [], isReadable);
+          vParsed.recommendation = isReadable
+            ? "Send til manuel gennemgang."
+            : causeAwareRecommendation(vParsed.issues ?? [], false);
         }
       } catch {
         console.warn(`[chat] VALIDATION JSON parse failed — isReadable=${isReadable} — using failsafe`);
         if (isReadable) {
-          // Readable but AI response was malformed — treat as unverifiable, NOT parse error
+          classificationCode = "LOW_CONFIDENCE";
           vParsed = {
             status: "review_required",
-            completeness_summary: "Dokumentet kan læses, men kan ikke verificeres som en officiel eller autentisk kilde.",
+            completeness_summary: "Dokumentet er læsbart, men kan ikke verificeres som autentisk.",
             trust_summary: "Ingen verificerbar afsender eller signatur fundet.",
-            issues: [
-              "Ingen verificerbar afsender",
-              "Ingen signatur eller metadata",
-              "Tekstbaseret dokument uden validerbar oprindelse",
-            ],
+            issues: ["Ingen verificerbar afsender", "Ingen signatur eller metadata"],
             recommendation: "Send til manuel gennemgang.",
           };
         } else {
-          // Truly unreadable/empty/corrupted — use parse error failsafe
+          classificationCode = "PARSE_ERROR";
           vParsed = {
             status: "review_required",
-            completeness_summary: "Dokumentet kunne ikke analyseres sikkert.",
+            completeness_summary: "Dokumentet kunne ikke analyseres.",
             trust_summary: "Kunne ikke vurderes.",
             issues: ["Dokumentets indhold kunne ikke behandles korrekt"],
-            recommendation: "Kontrollér dokumentets format eller send det til manuel gennemgang.",
+            recommendation: "Kontrollér dokumentets format eller send til manuel gennemgang.",
           };
         }
       }
@@ -543,9 +538,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         ? vParsed.issues.map(i => `  • ${i}`).join("\n")
         : "  Ingen problemer fundet.";
 
+      // ClassificationCode embedded in text — frontend uses this for deterministic view-model
       finalAnswer = [
         `**Valideringsstatus:** ${STATUS_LABELS[vParsed.status] ?? vParsed.status}`,
         "",
+        ...(classificationCode ? [`**ClassificationCode:** ${classificationCode}`, ""] : []),
         `**Fuldstændighed:** ${vParsed.completeness_summary}`,
         "",
         `**Troværdighed:** ${vParsed.trust_summary}`,
@@ -555,7 +552,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         `**Anbefaling:** ${vParsed.recommendation}`,
       ].join("\n");
 
-      console.log(`[chat] VALIDATION_ANSWER status=${vParsed.status} issues=${vParsed.issues.length}`);
+      console.log(`[chat] VALIDATION_ANSWER status=${vParsed.status} code=${classificationCode} issues=${vParsed.issues.length}`);
     } else {
       // ── ANALYSIS / CLASSIFICATION: free-form model call ───────────────────
       const resp = await fetch("https://api.openai.com/v1/chat/completions", {
