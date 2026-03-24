@@ -34,7 +34,7 @@ function StatCard({
       {barClass && (
         <span className={`absolute left-0 top-0 bottom-0 w-0.5 ${barClass}`} />
       )}
-      <CardContent className="flex items-start justify-between px-3.5 py-2.5">
+      <CardContent className="flex items-start justify-between px-3.5 py-2">
         <div>
           <p className="text-2xl font-bold text-card-foreground tabular-nums leading-none" data-testid={`stat-${label.toLowerCase().replace(/\s/g, "-")}`}>
             {value}
@@ -78,7 +78,7 @@ export default function Dashboard() {
   });
 
   return (
-    <div className="p-5 md:p-6 space-y-4 max-w-6xl">
+    <div className="p-5 md:p-6 space-y-3.5 max-w-6xl">
 
       {/* Header */}
       <div className="flex items-center justify-between">
@@ -96,7 +96,7 @@ export default function Dashboard() {
           )}
         </div>
         <Link href="/viden-data">
-          <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" data-testid="btn-new-project">
+          <Button size="sm" variant="outline" className="h-6 px-2 text-xs" data-testid="btn-new-project">
             <Plus className="w-3 h-3 mr-1" /> Tilføj datakilde
           </Button>
         </Link>
@@ -117,7 +117,7 @@ export default function Dashboard() {
       </div>
 
       {/* Recent lists */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-2.5">
 
         {/* Seneste datakilder */}
         <Card className="bg-card border-card-border">
@@ -138,9 +138,9 @@ export default function Dashboard() {
             {isLoading ? (
               <SkeletonRows count={3} />
             ) : !data?.recentProjects?.length ? (
-              <div className="text-center py-4">
-                <BookOpen className="w-5 h-5 text-muted-foreground/20 mx-auto mb-1.5" />
-                <p className="text-xs text-muted-foreground mb-2">Ingen datakilder endnu</p>
+              <div className="text-center py-3">
+                <BookOpen className="w-5 h-5 text-muted-foreground/20 mx-auto mb-1" />
+                <p className="text-xs text-muted-foreground mb-1.5">Ingen datakilder endnu</p>
                 <Link href="/viden-data">
                   <Button size="sm" variant="outline" className="h-6 text-xs px-2.5" data-testid="btn-create-first-project">
                     <Plus className="w-2.5 h-2.5 mr-1" /> Tilføj datakilde
@@ -192,8 +192,8 @@ export default function Dashboard() {
             {isLoading ? (
               <SkeletonRows count={3} />
             ) : !data?.recentRuns?.length ? (
-              <div className="text-center py-4">
-                <PlayCircle className="w-5 h-5 text-muted-foreground/20 mx-auto mb-1.5" />
+              <div className="text-center py-3">
+                <PlayCircle className="w-5 h-5 text-muted-foreground/20 mx-auto mb-1" />
                 <p className="text-xs text-muted-foreground">Ingen kørsler endnu</p>
               </div>
             ) : (
