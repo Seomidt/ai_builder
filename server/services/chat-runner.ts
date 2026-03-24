@@ -17,6 +17,7 @@ import {
 } from "../../shared/schema";
 import { eq, and } from "drizzle-orm";
 import type { AccessibleExpert } from "./chat-routing";
+import { AI_MODEL_ROUTES } from "../lib/ai/config";
 
 export type ConfidenceBand = "high" | "medium" | "low" | "unknown";
 
@@ -191,9 +192,11 @@ export async function runChatMessage(params: {
       );
     }
 
+    const docModel = AI_MODEL_ROUTES.default.model;
+    console.log(`[ai:router] model=${docModel} provider=${AI_MODEL_ROUTES.default.provider} key=default use_case=doc_mode`);
     const t0 = Date.now();
     const completion = await oai.chat.completions.create({
-      model: "gpt-4o",
+      model: docModel,
       temperature: 0.1,
       max_tokens: 2000,
       messages: messagesPayload,
