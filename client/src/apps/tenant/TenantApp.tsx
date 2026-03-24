@@ -63,9 +63,9 @@ function TenantLoader() {
 
 function TenantShell({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-screen overflow-hidden bg-background">
+    <div className="flex h-[100dvh] overflow-hidden bg-background">
       <TenantSidebar />
-      <main className="flex-1 overflow-y-auto pt-14 lg:pt-0">{children}</main>
+      <main className="flex-1 min-h-0 overflow-y-auto pt-14 lg:pt-0">{children}</main>
     </div>
   );
 }
