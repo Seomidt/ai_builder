@@ -670,7 +670,7 @@ export default function AiChatPage() {
   const canSend = (input.trim().length > 0 || attachments.length > 0) && !chatMutation.isPending;
 
   return (
-    <div className="flex flex-col h-full max-h-screen" data-testid="page-ai-chat">
+    <div className="flex flex-col h-[100dvh]" data-testid="page-ai-chat">
 
       {/* Hidden file input */}
       <input
@@ -714,7 +714,7 @@ export default function AiChatPage() {
       </div>
 
       {/* Composer area */}
-      <div className="shrink-0 border-t border-border px-4 pt-3 pb-5">
+      <div className="shrink-0 border-t border-border px-4 pt-3" style={{ paddingBottom: "max(1.25rem, env(safe-area-inset-bottom))" }}>
         <div className="mx-auto max-w-3xl sm:max-w-4xl space-y-2">
 
           {/* Attachment previews */}
