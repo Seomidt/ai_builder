@@ -461,10 +461,24 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         recommendation: string;
       }
 
+      // Cause-aware recommendation — never suggest re-upload generically
+      const causeAwareRecommendation = (issues: string[]): string => {
+        const joined = issues.join(" ").toLowerCase();
+        const isTechnical = joined.includes("format") || joined.includes("behandles") || joined.includes("læses") || joined.includes("parse");
+        const isInsufficient = joined.includes("utilstrækkelig") || joined.includes("mangler") || joined.includes("ufuldstændig");
+        if (isTechnical) return "Kontrollér dokumentets format eller send det til manuel gennemgang.";
+        if (isInsufficient) return "Indhent supplerende dokumentation eller send til manuel gennemgang.";
+        return "Send til manuel gennemgang.";
+      };
+
       let vParsed: ValidationResult;
       try {
         vParsed = JSON.parse(vData.choices?.[0]?.message?.content ?? "{}") as ValidationResult;
         if (!vParsed.status) throw new Error("missing status field");
+        // Override any generic bad recommendation from AI
+        if (!vParsed.recommendation || vParsed.recommendation.toLowerCase().includes("upload dokumentet igen")) {
+          vParsed.recommendation = causeAwareRecommendation(vParsed.issues ?? []);
+        }
       } catch {
         console.warn("[chat] VALIDATION JSON parse failed — using failsafe");
         vParsed = {
@@ -472,7 +486,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           completeness_summary: "Dokumentet kunne ikke analyseres sikkert",
           trust_summary: "Kunne ikke vurderes",
           issues: ["Dokumentets indhold kunne ikke behandles korrekt"],
-          recommendation: "Upload dokumentet igen eller send det til manuel gennemgang",
+          recommendation: "Kontrollér dokumentets format eller send det til manuel gennemgang.",
         };
       }
 
