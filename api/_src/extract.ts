@@ -2,9 +2,18 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { authenticate }                         from "./_lib/auth";
 import { json, err }                            from "./_lib/response";
 import Busboy                                   from "busboy";
-// pdf-parse er et CJS-modul — vi bruger require() direkte i det bundlede output
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const pdfParse: (buf: Buffer) => Promise<{ text: string; numpages: number }> = require("pdf-parse");
+// pdf-parse 2.x bruger pdfjs-dist som kræver DOMMatrix (browser API).
+// Vi laver et lazy require + global stub FØR load for at undgå crash i Node.js.
+function loadPdfParse(): (buf: Buffer) => Promise<{ text: string; numpages: number }> {
+  // Minimal stubs til DOM-APIs som pdfjs-dist forventer
+  const g = globalThis as any;
+  if (!g.DOMMatrix)    g.DOMMatrix    = class DOMMatrix    { constructor() { (this as any).a=1;(this as any).b=0;(this as any).c=0;(this as any).d=1;(this as any).e=0;(this as any).f=0; } };
+  if (!g.ImageData)    g.ImageData    = class ImageData    {};
+  if (!g.Path2D)       g.Path2D       = class Path2D       {};
+  if (!g.DOMPoint)     g.DOMPoint     = class DOMPoint     {};
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  return require("pdf-parse");
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -46,6 +55,7 @@ async function extractFromBuffer(
   // ── PDF ────────────────────────────────────────────────────────────────────
   if (isPdfMime(mime, filename)) {
     try {
+      const pdfParse = loadPdfParse();
       const result = await pdfParse(buf);
       const text   = (result.text ?? "").trim().slice(0, 80_000);
       if (!text) return { text: "", status: "error", message: "PDF indeholder ingen læsbar tekst (muligvis scanned billede)" };
