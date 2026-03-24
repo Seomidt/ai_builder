@@ -476,14 +476,26 @@ export default function AiChatPage() {
           console.log(`[TRACE-2a][${traceId}] calling /api/extract for ${docFiles.length} file(s)`);
           const extractRes = await apiRequestForm("POST", "/api/extract", form);
           console.log(`[TRACE-2b][${traceId}] extract HTTP status=${extractRes.status}`);
+          if (!extractRes.ok) {
+            console.error(`[HARD-STOP][${traceId}] EXTRACT_FAILED HTTP ${extractRes.status}`);
+            throw Object.assign(new Error("Dokument kunne ikke læses."), { errorCode: "DOCUMENT_UNREADABLE" });
+          }
           const extractData = await extractRes.json() as { results: any[] };
           documentContext = extractData.results ?? [];
           console.log(`[TRACE-2c][${traceId}] extract results=${documentContext.length} statuses=[${documentContext.map((r:any)=>r.status).join(",")}] chars=[${documentContext.map((r:any)=>r.extracted_text?.length??0).join(",")}]`);
           if (documentContext.length > 0) {
             console.log(`[TRACE-2d][${traceId}] first200="${(documentContext[0] as any).extracted_text?.slice(0,200)?.replace(/\n/g," ")}"`);
           }
-        } catch (e) {
-          console.warn(`[TRACE-2-ERR][${traceId}] extract failed:`, e);
+          // HARD STOP: extract returnerede 0 gyldige dokumenter
+          const validEntries = documentContext.filter((r: any) => r.status === "ok" && r.extracted_text?.trim());
+          if (validEntries.length === 0) {
+            console.error(`[HARD-STOP][${traceId}] DOCUMENT_CONTEXT_MISSING: 0 valid entries after extract`);
+            throw Object.assign(new Error("Dokument kunne ikke læses."), { errorCode: "DOCUMENT_UNREADABLE" });
+          }
+        } catch (e: any) {
+          if (e?.errorCode) throw e; // re-throw hard-stops
+          console.error(`[HARD-STOP][${traceId}] EXTRACT_FAILED:`, e);
+          throw Object.assign(new Error("Dokument kunne ikke læses."), { errorCode: "DOCUMENT_UNREADABLE" });
         }
       } else {
         console.log(`[TRACE-2-SKIP][${traceId}] no doc files — skipping extract`);
@@ -537,8 +549,8 @@ export default function AiChatPage() {
         ? "AI-eksperten kunne ikke svare i øjeblikket. Prøv igen om lidt."
         : code === "UNAUTHENTICATED"
         ? "Du er ikke logget ind. Genindlæs siden og log ind igen."
-        : code === "DOCUMENT_UNREADABLE"
-        ? serverMsg || "Dokumentet kunne ikke læses. Upload PDF eller tekstfil (.txt, .csv)."
+        : code === "DOCUMENT_UNREADABLE" || code === "DOCUMENT_CONTEXT_MISSING"
+        ? "Dokument kunne ikke læses."
         : serverMsg || "Der opstod en fejl. Prøv igen.";
       setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", text: msg, timestamp: new Date(), isError: true }]);
       toast({ title: "Chat fejl", description: msg, variant: "destructive" });
