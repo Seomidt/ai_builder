@@ -30,19 +30,19 @@ function StatCard({
   barClass?: string;
 }) {
   return (
-    <Card className="bg-card border-card-border relative overflow-hidden transition-all duration-200 hover:border-primary/25 hover:-translate-y-0.5">
+    <Card className="bg-card border-card-border relative overflow-hidden transition-all duration-200 hover:border-primary/30">
       {barClass && (
-        <span className={`absolute left-0 top-0 bottom-0 w-0.5 ${barClass}`} style={{ boxShadow: barClass.includes("primary") || barClass.includes("cyan") ? "0 0 6px rgba(34,211,238,0.4)" : barClass.includes("secondary") ? "0 0 6px rgba(245,158,11,0.4)" : "0 0 6px rgba(34,197,94,0.4)" }} />
+        <span className={`absolute left-0 top-0 bottom-0 w-0.5 ${barClass}`} />
       )}
-      <CardContent className="flex items-start justify-between px-4 py-2.5">
+      <CardContent className="flex items-start justify-between px-3.5 py-2.5">
         <div>
-          <p className="text-xl font-bold text-card-foreground tabular-nums leading-tight" data-testid={`stat-${label.toLowerCase().replace(/\s/g, "-")}`}>
+          <p className="text-2xl font-bold text-card-foreground tabular-nums leading-none" data-testid={`stat-${label.toLowerCase().replace(/\s/g, "-")}`}>
             {value}
           </p>
-          <p className="text-xs text-muted-foreground/70 mt-0.5">{label}</p>
+          <p className="text-[11px] text-muted-foreground/60 mt-1 font-medium">{label}</p>
         </div>
-        <div className={`flex items-center justify-center w-6 h-6 rounded ${accentClass} opacity-60 shrink-0 mt-0.5`}>
-          <Icon className="w-3.5 h-3.5" />
+        <div className={`flex items-center justify-center w-5 h-5 rounded ${accentClass} opacity-50 shrink-0 mt-0.5`}>
+          <Icon className="w-3 h-3" />
         </div>
       </CardContent>
     </Card>
@@ -78,53 +78,60 @@ export default function Dashboard() {
   });
 
   return (
-    <div className="p-5 md:p-6 space-y-5 max-w-6xl">
+    <div className="p-5 md:p-6 space-y-4 max-w-6xl">
 
       {/* Header */}
-      <div className="space-y-0.5">
-        <h1 className="text-base font-semibold text-foreground tracking-tight" data-testid="dashboard-title">
-          Dashboard
-        </h1>
-        {isLoading ? (
-          <Skeleton className="h-3.5 w-36" />
-        ) : (
-          <p className="text-xs text-muted-foreground/70 flex items-center gap-1">
-            <Building2 className="w-3 h-3 shrink-0" />
-            {data?.orgName ?? "AI Builder Platform"}
-          </p>
-        )}
+      <div className="flex items-center justify-between">
+        <div className="space-y-0.5">
+          <h1 className="text-base font-semibold text-foreground tracking-tight" data-testid="dashboard-title">
+            Dashboard
+          </h1>
+          {isLoading ? (
+            <Skeleton className="h-3.5 w-36" />
+          ) : (
+            <p className="text-xs text-muted-foreground/60 flex items-center gap-1">
+              <Building2 className="w-3 h-3 shrink-0" />
+              {data?.orgName ?? "AI Builder Platform"}
+            </p>
+          )}
+        </div>
+        <Link href="/viden-data">
+          <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" data-testid="btn-new-project">
+            <Plus className="w-3 h-3 mr-1" /> Tilføj datakilde
+          </Button>
+        </Link>
       </div>
 
-      {/* Stat cards — 2×2 mobile, 4-col desktop */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5">
+      {/* KPI strip — 2×2 mobile, 4-col desktop */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
         {isLoading ? (
           Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[54px]" />)
         ) : (
           <>
-            <StatCard label="Datakilder"     value={data?.projectCount ?? 0}                         icon={BookOpen}   accentClass="bg-primary/12 text-primary"      barClass="bg-primary"    />
-            <StatCard label="Aktive kørsler" value={data?.activeRunCount ?? 0}                       icon={PlayCircle} accentClass="bg-green-500/12 text-green-400"  barClass="bg-green-500"  />
-            <StatCard label="AI Eksperter"   value={data?.architectureCount ?? 0}                    icon={Brain}      accentClass="bg-secondary/12 text-secondary"  barClass="bg-secondary"  />
-            <StatCard label="Integrationer"  value={`${data?.configuredIntegrationCount ?? 0}/5`}   icon={Plug}       accentClass="bg-purple-500/12 text-purple-400" barClass="bg-purple-500" />
+            <StatCard label="Datakilder"     value={data?.projectCount ?? 0}                       icon={BookOpen}   accentClass="bg-primary/12 text-primary"      barClass="bg-primary"    />
+            <StatCard label="Aktive kørsler" value={data?.activeRunCount ?? 0}                     icon={PlayCircle} accentClass="bg-green-500/12 text-green-400"  barClass="bg-green-500"  />
+            <StatCard label="AI Eksperter"   value={data?.architectureCount ?? 0}                  icon={Brain}      accentClass="bg-secondary/12 text-secondary"  barClass="bg-secondary"  />
+            <StatCard label="Integrationer"  value={`${data?.configuredIntegrationCount ?? 0}/5`} icon={Plug}       accentClass="bg-purple-500/12 text-purple-400" barClass="bg-purple-500" />
           </>
         )}
       </div>
 
       {/* Recent lists */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
 
         {/* Seneste datakilder */}
         <Card className="bg-card border-card-border">
           <CardHeader className="flex flex-row items-center justify-between pb-2 pt-3 px-4">
             <CardTitle className="text-xs font-semibold text-card-foreground flex items-center gap-1.5">
-              <BookOpen className="w-3 h-3 text-primary" />
+              <BookOpen className="w-3 h-3 text-primary/70" />
               Seneste datakilder
             </CardTitle>
             <Link
               href="/viden-data"
-              className="flex items-center gap-0.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              className="flex items-center gap-0.5 text-[11px] text-muted-foreground/60 hover:text-muted-foreground transition-colors"
               data-testid="link-all-projects"
             >
-              Se alle <ArrowRight className="w-3 h-3" />
+              Se alle <ArrowRight className="w-2.5 h-2.5" />
             </Link>
           </CardHeader>
           <CardContent className="space-y-1 pb-3 px-4">
@@ -135,8 +142,8 @@ export default function Dashboard() {
                 <BookOpen className="w-5 h-5 text-muted-foreground/20 mx-auto mb-1.5" />
                 <p className="text-xs text-muted-foreground mb-2">Ingen datakilder endnu</p>
                 <Link href="/viden-data">
-                  <Button size="sm" variant="outline" className="h-7 text-xs px-2.5" data-testid="btn-create-first-project">
-                    <Plus className="w-3 h-3 mr-1" /> Tilføj datakilde
+                  <Button size="sm" variant="outline" className="h-6 text-xs px-2.5" data-testid="btn-create-first-project">
+                    <Plus className="w-2.5 h-2.5 mr-1" /> Tilføj datakilde
                   </Button>
                 </Link>
               </div>
@@ -149,7 +156,7 @@ export default function Dashboard() {
                   >
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-foreground truncate">{p.name}</p>
-                      <p className="text-xs text-muted-foreground/70 mt-0.5">
+                      <p className="text-xs text-muted-foreground/60 mt-0.5">
                         {new Date(p.updatedAt).toLocaleDateString()}
                       </p>
                     </div>
@@ -170,15 +177,15 @@ export default function Dashboard() {
         <Card className="bg-card border-card-border">
           <CardHeader className="flex flex-row items-center justify-between pb-2 pt-3 px-4">
             <CardTitle className="text-xs font-semibold text-card-foreground flex items-center gap-1.5">
-              <PlayCircle className="w-3 h-3 text-primary" />
+              <PlayCircle className="w-3 h-3 text-primary/70" />
               Seneste kørsler
             </CardTitle>
             <Link
               href="/koerseler"
-              className="flex items-center gap-0.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
+              className="flex items-center gap-0.5 text-[11px] text-muted-foreground/60 hover:text-muted-foreground transition-colors"
               data-testid="link-all-runs"
             >
-              Se alle <ArrowRight className="w-3 h-3" />
+              Se alle <ArrowRight className="w-2.5 h-2.5" />
             </Link>
           </CardHeader>
           <CardContent className="space-y-1 pb-3 px-4">
@@ -200,7 +207,7 @@ export default function Dashboard() {
                     <p className="text-xs font-mono text-foreground truncate">
                       {r.id.slice(0, 8)}…
                     </p>
-                    <p className="text-xs text-muted-foreground/70 mt-0.5">
+                    <p className="text-xs text-muted-foreground/60 mt-0.5">
                       {new Date(r.createdAt).toLocaleDateString()}
                     </p>
                   </div>
@@ -215,26 +222,6 @@ export default function Dashboard() {
             )}
           </CardContent>
         </Card>
-      </div>
-
-      {/* Quick actions — utility row */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-        <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium shrink-0">Hurtig adgang</p>
-        <Link href="/viden-data">
-          <Button size="sm" variant="outline" className="h-6 px-2 text-[11px] font-medium" data-testid="btn-new-project">
-            <Plus className="w-2.5 h-2.5 mr-1" /> Tilføj datakilde
-          </Button>
-        </Link>
-        <Link href="/ai-eksperter">
-          <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px] text-muted-foreground hover:text-foreground" data-testid="btn-new-architecture">
-            <Plus className="w-2.5 h-2.5 mr-1" /> Opret AI ekspert
-          </Button>
-        </Link>
-        <Link href="/koerseler">
-          <Button size="sm" variant="ghost" className="h-6 px-2 text-[11px] text-muted-foreground hover:text-foreground" data-testid="btn-new-run">
-            <PlayCircle className="w-2.5 h-2.5 mr-1" /> Se kørsler
-          </Button>
-        </Link>
       </div>
     </div>
   );
