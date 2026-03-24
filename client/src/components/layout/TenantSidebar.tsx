@@ -67,7 +67,7 @@ function SectionLabel({ label }: { label: string }) {
   );
 }
 
-// ── Nav link — T1–T4: neutral icons, left-border active, list-style ──────────
+// ── Nav link — border-only active, no row highlight ─────────────────────────
 
 function NavLink({
   href,
@@ -85,19 +85,21 @@ function NavLink({
       href={href}
       data-testid={`nav-link-${href.replace(/\//g, "-").replace(/^-/, "")}`}
       className={cn(
-        "relative h-[26px] flex items-center gap-2 px-3 text-[12.5px] leading-none cursor-pointer transition-colors shrink-0 whitespace-nowrap select-none",
+        "h-[26px] flex items-center gap-2 text-[12.5px] leading-none cursor-pointer transition-colors shrink-0 whitespace-nowrap select-none",
         active
-          ? "text-slate-100 font-medium bg-white/[0.025]"
-          : "text-slate-400/70 font-normal hover:text-slate-300 hover:bg-white/[0.02]",
+          ? "text-white font-medium"
+          : "text-slate-500 font-normal hover:text-slate-300 hover:bg-white/[0.025]",
       )}
+      style={{
+        paddingLeft: "11px",
+        paddingRight: "12px",
+        borderLeft: active ? "2px solid rgba(34,211,238,0.85)" : "2px solid transparent",
+      }}
     >
-      {active && (
-        <span className="absolute left-0 top-[3px] bottom-[3px] w-[2px] bg-cyan-500/90" />
-      )}
       <Icon
-        size={13}
+        size={16}
         strokeWidth={1.7}
-        className={cn("shrink-0", active ? "text-slate-400/55" : "text-slate-500/40")}
+        style={{ opacity: active ? 0.55 : 0.35, flexShrink: 0 }}
       />
       {label}
     </Link>
@@ -210,9 +212,10 @@ export function TenantSidebar() {
               <a
                 href={getAdminAppUrl()}
                 data-testid="link-switch-to-admin"
-                className="h-7 flex items-center gap-2 px-3 text-[12.5px] font-medium text-slate-600 hover:text-destructive hover:bg-white/[0.03] cursor-pointer transition-colors shrink-0 select-none"
+                className="h-[26px] flex items-center gap-2 text-[12.5px] font-normal text-slate-600 hover:text-destructive hover:bg-white/[0.025] cursor-pointer transition-colors shrink-0 select-none"
+                style={{ paddingLeft: "11px", paddingRight: "12px", borderLeft: "2px solid transparent" }}
               >
-                <ShieldAlert size={14} strokeWidth={1.8} className="shrink-0 text-slate-600/60" />
+                <ShieldAlert size={16} strokeWidth={1.7} style={{ opacity: 0.35, flexShrink: 0 }} />
                 Platform Ops
               </a>
             </>
