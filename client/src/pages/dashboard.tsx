@@ -30,7 +30,7 @@ function StatCard({
   barClass?: string;
 }) {
   return (
-    <Card className="bg-card border-card-border relative overflow-hidden transition-all duration-200 hover:border-primary/30">
+    <Card className="bg-background border-border/60 relative overflow-hidden shadow-none rounded-md transition-colors duration-200 hover:border-border">
       {barClass && (
         <span className={`absolute left-0 top-0 bottom-0 w-0.5 ${barClass}`} />
       )}
@@ -103,7 +103,7 @@ export default function Dashboard() {
       </div>
 
       {/* KPI strip — 2×2 mobile, 4-col desktop */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-1.5">
         {isLoading ? (
           Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-[54px]" />)
         ) : (
