@@ -437,14 +437,14 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       parsed = JSON.parse(rawJson);
     } catch {
       console.error("[chat] DOC_MODE JSON parse failed — using safe response");
-      parsed = { found: false, answer: "Jeg kan ikke finde det i det uploadede dokument." };
+      parsed = { found: false, answer: "Jeg kan ikke finde det i jeres interne data." };
     }
 
     if (parsed.found && parsed.quote && parsed.answer) {
       finalAnswer = `${parsed.answer}\n\n*Fra dokumentet: "${parsed.quote}"*`;
       console.log(`[chat] DOC_MODE FOUND answer="${finalAnswer.slice(0,100)}"`);
     } else {
-      finalAnswer = "Jeg kan ikke finde det i det uploadede dokument.";
+      finalAnswer = "Jeg kan ikke finde det i jeres interne data.";
       console.log("[chat] DOC_MODE NOT_FOUND");
     }
 
@@ -454,30 +454,15 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const overlap = groundingAnswer.split(" ").filter(w => groundingDocText.includes(w)).length;
     console.log(`[chat] GROUNDING overlap=${overlap}`);
     if (overlap < 5) {
-      finalAnswer = "Jeg kan ikke finde det i det uploadede dokument.";
+      finalAnswer = "Jeg kan ikke finde det i jeres interne data.";
       console.log("[chat] GROUNDING_OVERRIDE applied");
     }
   } else {
-    // ── NORMAL MODE: fri tekstbesvarelse ──────────────────────────────────
-    const cleanMessage = message.replace(/\n\nVedhæftede filer:.*$/s, "").trim();
-    const messages: OAIMessage[] = [
-      { role: "system", content: systemPrompt },
-      { role: "user",   content: cleanMessage },
-    ];
-    console.log(`[chat] NORMAL_MODE chars=${systemPrompt.length + cleanMessage.length}`);
-
-    let aiResult: Awaited<ReturnType<typeof callOpenAI>>;
-    try {
-      aiResult = await callOpenAI(messages);
-    } catch (e) {
-      console.error("[chat] OpenAI call failed:", (e as Error).message);
-      return err(res, 502, "AI_EXECUTION_FAILED", "AI-eksperten kunne ikke svare i øjeblikket.");
-    }
-    if (!aiResult.text) return err(res, 502, "AI_EMPTY_RESPONSE", "AI-eksperten returnerede et tomt svar.");
-    finalAnswer   = aiResult.text;
-    aiLatencyMs   = aiResult.latencyMs;
-    aiPromptTokens   = aiResult.promptTokens;
-    aiComplTokens    = aiResult.completionTokens;
+    // ── INTERNAL-ONLY GATE: ingen intern data → blokér model-kald ────────
+    // Ingen dokument-kontekst, ingen retrieval hits, ingen interne kilder.
+    // Model MÅ IKKE kaldes — returner fast svar uden OpenAI-kald.
+    console.log("[chat] NO_INTERNAL_DATA_GATE: no document context → model call blocked");
+    finalAnswer = "Jeg kan ikke finde det i jeres interne data.";
   }
 
   // ── Vurder svar ───────────────────────────────────────────────────────────
