@@ -349,7 +349,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   // HARD STOP V — validation uden dokument → blokér, ingen model-kald
   if (useCase === "validation" && docCtx.length === 0) {
     console.log("[HARD-GATE] BLOCKED: useCase=validation requires documentContext — no provider call");
-    return json(res, 200, {
+    return json(res, {
       answer:               "Du skal uploade et dokument for at kunne validere.",
       conversation_id:      body.conversation_id ?? crypto.randomUUID(),
       expert:               { id: "", name: "", category: null },
@@ -357,7 +357,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       used_rules:           [],
       warnings:             [],
       latency_ms:           0,
-      confidence_band:      "low" as const,
+      confidence_band:      "low",
       needs_manual_review:  false,
       routing_explanation:  "Validation blocked: no document",
       blocked:              true,

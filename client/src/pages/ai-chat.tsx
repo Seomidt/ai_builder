@@ -544,6 +544,21 @@ export default function AiChatPage() {
     onError: (err: any) => {
       const code = err?.errorCode ?? err?.code ?? "";
       const serverMsg = err?.message ?? "";
+
+      // Business blocks — render as normal assistant message, no red toast
+      const businessBlockMsg =
+        code === "DOCUMENT_REQUIRED" || serverMsg.includes("DOCUMENT_REQUIRED")
+          ? "Du skal uploade et dokument for at kunne validere."
+          : code === "NO_INTERNAL_DATA" || serverMsg.includes("NO_INTERNAL_DATA")
+          ? "Jeg kan ikke finde det i jeres interne data."
+          : null;
+
+      if (businessBlockMsg) {
+        setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", text: businessBlockMsg, timestamp: new Date() }]);
+        return;
+      }
+
+      // Real errors — show red toast
       const msg = code === "NO_EXPERTS_AVAILABLE" || serverMsg.includes("NO_EXPERTS_AVAILABLE")
         ? "Ingen AI-eksperter er tilgængelige. Aktivér mindst én ekspert til chat i indstillingerne."
         : code === "NO_RELEVANT_EXPERT" || serverMsg.includes("NO_RELEVANT_EXPERT")
