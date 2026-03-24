@@ -22,6 +22,12 @@ export interface AiCallContext {
   userId?: string | null;
   /** Model tier override — defaults to AI_MODELS.default when omitted */
   model?: AiModelKey;
+  /**
+   * Internal document context required by the global hard gate.
+   * AI call is BLOCKED if this is absent or empty.
+   * Pass extracted document entries from the active request.
+   */
+  documentContext?: unknown[];
 }
 
 /**
@@ -42,4 +48,10 @@ export interface AiCallResult {
   model: string;
   /** Echo of context.feature — for tracing without re-reading context */
   feature: string;
+  /** Set when the global hard gate blocked the call before provider contact */
+  blocked?: boolean;
+  /** Machine-readable block reason */
+  reason?: string;
+  /** Human-readable fallback answer when blocked */
+  answer?: string;
 }

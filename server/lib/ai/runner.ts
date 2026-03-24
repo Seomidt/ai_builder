@@ -145,6 +145,21 @@ export async function runAiCall(
   const { feature, tenantId, userId, model: modelKey = "default" } = context;
   const startMs = Date.now();
 
+  // ── GLOBAL HARD GATE — no provider call without internal document data ────────
+  if (!context?.documentContext || context.documentContext.length === 0) {
+    console.log("[HARD-GATE] BLOCKED: no internal data → AI call prevented");
+    return {
+      blocked: true,
+      reason: "NO_INTERNAL_DATA",
+      answer: "Jeg kan ikke finde det i jeres interne data.",
+      text: "Jeg kan ikke finde det i jeres interne data.",
+      usage: null,
+      latencyMs: 0,
+      model: "",
+      feature,
+    };
+  }
+
   // ── Step 1: Resolve route ────────────────────────────────────────────────────
   const route = await resolveRoute(modelKey, tenantId);
   const inputPreview = input.userInput.slice(0, AI_INPUT_PREVIEW_MAX_CHARS);
