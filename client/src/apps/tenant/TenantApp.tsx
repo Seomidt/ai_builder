@@ -19,7 +19,6 @@ import { ProtectedRoute } from "@/components/auth/ProtectedRoute";
 import NotFound from "@/pages/not-found";
 
 // ── Eagerly loaded: core tenant product pages ──────────────────────────────────
-import Dashboard   from "@/pages/dashboard";
 import AiEksperter from "@/pages/ai-eksperter";
 import VidenData   from "@/pages/viden-data";
 import Regler      from "@/pages/regler";
@@ -42,6 +41,9 @@ const WorkspaceAudit        = lazy(() => import("@/pages/tenant/audit"));
 
 // ── Lazy: AI Chat ─────────────────────────────────────────────────────────────
 const AiChat = lazy(() => import("@/pages/ai-chat"));
+
+// ── Lazy: Dashboard (still accessible, not default) ───────────────────────────
+const Dashboard = lazy(() => import("@/pages/dashboard"));
 
 // ── Lazy: onboarding ─────────────────────────────────────────────────────────
 const Onboarding = lazy(() => import("@/pages/onboarding"));
@@ -76,8 +78,10 @@ export function TenantApp() {
       <TenantShell>
         <Suspense fallback={<TenantLoader />}>
           <Switch>
-            {/* ── Core tenant product ──────────────────────────────────── */}
-            <Route path="/"             component={Dashboard} />
+            {/* ── Default: redirect root to AI Chat ───────────────────── */}
+            <Route path="/">
+              <Redirect to="/ai-chat" />
+            </Route>
             <Route path="/ai-eksperter" component={AiEksperter} />
             <Route path="/ai-eksperter/:id" component={AiEkspertDetail} />
             <Route path="/viden-data"   component={VidenData} />
