@@ -55,19 +55,19 @@ function isActive(href: AllHref, location: string): boolean {
   return location === href || location.startsWith(href + "/");
 }
 
-// ── Section label ───────────────────────────────────────────────────────────
+// ── Section label — T5: smaller, lower opacity ──────────────────────────────
 
 function SectionLabel({ label }: { label: string }) {
   return (
-    <div className="pt-3 pb-px px-3">
-      <span className="text-[9px] uppercase tracking-[0.07em] font-semibold text-slate-500/50 select-none">
+    <div className="pt-4 pb-px px-3">
+      <span className="text-[9px] uppercase tracking-[0.08em] font-medium text-slate-600/80 select-none">
         {label}
       </span>
     </div>
   );
 }
 
-// ── Nav link — inline icon, left border on active ───────────────────────────
+// ── Nav link — T1–T4: neutral icons, left-border active, list-style ──────────
 
 function NavLink({
   href,
@@ -85,19 +85,21 @@ function NavLink({
       href={href}
       data-testid={`nav-link-${href.replace(/\//g, "-").replace(/^-/, "")}`}
       className={cn(
-        "relative h-8 flex items-center gap-2.5 px-3 text-[12.5px] leading-none cursor-pointer transition-colors rounded-md shrink-0 whitespace-nowrap",
+        "relative h-7 flex items-center gap-2 px-3 text-[12.5px] leading-none cursor-pointer transition-colors shrink-0 whitespace-nowrap select-none",
         active
-          ? "bg-cyan-500/[0.09] text-cyan-300 font-semibold"
-          : "text-slate-400 font-medium hover:text-slate-200 hover:bg-white/[0.04]",
+          ? "text-slate-100 font-semibold bg-white/[0.05]"
+          : "text-slate-400/90 font-medium hover:text-slate-200 hover:bg-white/[0.03]",
       )}
     >
+      {/* T2: left border indicator only — no pill highlight */}
       {active && (
-        <span className="absolute left-0 top-1 bottom-1 w-[2px] rounded-full bg-cyan-400/70" />
+        <span className="absolute left-0 top-[3px] bottom-[3px] w-[2px] bg-cyan-500" />
       )}
+      {/* T1: neutral icon, no accent color, low opacity */}
       <Icon
-        size={13}
-        strokeWidth={active ? 2.2 : 1.8}
-        className={active ? "text-cyan-400 shrink-0" : "text-slate-500/60 shrink-0"}
+        size={14}
+        strokeWidth={1.8}
+        className="shrink-0 text-slate-500/45"
       />
       {label}
     </Link>
@@ -137,13 +139,13 @@ export function TenantSidebar() {
         <button
           onClick={() => setMobileOpen(true)}
           data-testid="button-mobile-menu-open"
-          className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+          className="p-2 rounded text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
           aria-label="Åbn menu"
         >
           <Menu size={20} />
         </button>
         <div className="flex items-center gap-2 ml-3">
-          <BrandMark size={26} />
+          <BrandMark size={24} />
           <span className="text-sm font-semibold text-white tracking-tight">BlissOps</span>
         </div>
       </div>
@@ -156,7 +158,7 @@ export function TenantSidebar() {
         />
       )}
 
-      {/* ── Sidebar — single panel, no icon rail ────────────────────────── */}
+      {/* ── Sidebar ─────────────────────────────────────────────────────── */}
       <aside
         className={cn(
           "fixed top-0 left-0 z-50 flex flex-col shrink-0 border-r border-white/[0.08] transition-transform duration-300",
@@ -169,11 +171,11 @@ export function TenantSidebar() {
           backgroundColor: "hsl(218 30% 11%)",
         }}
       >
-        {/* Header */}
-        <div className="flex items-center justify-between px-3 pt-3.5 pb-2 shrink-0">
-          <div className="flex items-center gap-2">
-            <BrandMark size={24} />
-            <span className="text-[11px] font-bold tracking-[0.06em] text-slate-400/80 uppercase select-none">
+        {/* T6: header — smaller, lower opacity wordmark */}
+        <div className="flex items-center justify-between px-3 pt-3.5 pb-1.5 shrink-0">
+          <div className="flex items-center gap-1.5">
+            <BrandMark size={20} />
+            <span className="text-[10px] font-semibold tracking-[0.08em] text-slate-500/55 uppercase select-none">
               BlissOps
             </span>
           </div>
@@ -187,8 +189,8 @@ export function TenantSidebar() {
           </button>
         </div>
 
-        {/* Nav */}
-        <nav className="flex-1 flex flex-col overflow-y-auto px-2 pb-2 mt-0.5">
+        {/* Nav — T4: tight vertical rhythm */}
+        <nav className="flex-1 flex flex-col overflow-y-auto px-0 pb-2">
 
           <SectionLabel label="Core" />
           {CORE_ITEMS.map(({ href, label, icon }) => (
@@ -210,26 +212,26 @@ export function TenantSidebar() {
               <a
                 href={getAdminAppUrl()}
                 data-testid="link-switch-to-admin"
-                className="h-8 flex items-center gap-2.5 px-3 text-[12.5px] font-medium text-slate-500/60 hover:text-destructive hover:bg-destructive/8 rounded-md cursor-pointer transition-colors shrink-0"
+                className="h-7 flex items-center gap-2 px-3 text-[12.5px] font-medium text-slate-600 hover:text-destructive hover:bg-white/[0.03] cursor-pointer transition-colors shrink-0 select-none"
               >
-                <ShieldAlert size={13} strokeWidth={1.8} className="shrink-0 text-slate-500/50" />
+                <ShieldAlert size={14} strokeWidth={1.8} className="shrink-0 text-slate-600/60" />
                 Platform Ops
               </a>
             </>
           )}
         </nav>
 
-        {/* Footer — avatar + email + logout */}
-        <div className="flex items-center gap-2 px-3 py-2.5 border-t border-white/[0.07] shrink-0">
+        {/* Footer — T4: compact, utilitarian */}
+        <div className="flex items-center gap-2 px-3 py-2 border-t border-white/[0.07] shrink-0">
           <div
-            className="w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold text-cyan-400 shrink-0"
-            style={{ background: "rgba(34,211,238,0.10)", border: "1px solid rgba(34,211,238,0.20)" }}
+            className="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold text-slate-400 shrink-0"
+            style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.10)" }}
             title={displayEmail}
           >
             {initials}
           </div>
           <p
-            className="flex-1 text-[11px] text-slate-500/65 truncate"
+            className="flex-1 text-[11px] text-slate-600 truncate"
             data-testid="text-sidebar-email"
           >
             {displayEmail}
@@ -238,9 +240,9 @@ export function TenantSidebar() {
             onClick={handleLogout}
             title="Log ud"
             data-testid="button-logout"
-            className="text-slate-500/60 hover:text-destructive cursor-pointer transition-colors shrink-0"
+            className="text-slate-600/70 hover:text-destructive cursor-pointer transition-colors shrink-0"
           >
-            <LogOut size={14} strokeWidth={1.9} />
+            <LogOut size={13} strokeWidth={1.8} />
           </button>
         </div>
       </aside>
