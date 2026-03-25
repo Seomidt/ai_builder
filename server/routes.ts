@@ -614,6 +614,102 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     } catch (err) { handleError(res, err); }
   });
 
+  // POST /api/experts/:id/pause
+  app.post("/api/experts/:id/pause", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { architectureProfiles } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const orgId = getOrgId(req);
+      const [updated] = await db
+        .update(architectureProfiles)
+        .set({ status: "paused", updatedAt: new Date() })
+        .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)))
+        .returning();
+      if (!updated) return res.status(404).json({ error: "Expert not found" });
+      res.json(updated);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // POST /api/experts/:id/resume
+  app.post("/api/experts/:id/resume", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { architectureProfiles } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const orgId = getOrgId(req);
+      const [updated] = await db
+        .update(architectureProfiles)
+        .set({ status: "active", updatedAt: new Date() })
+        .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)))
+        .returning();
+      if (!updated) return res.status(404).json({ error: "Expert not found" });
+      res.json(updated);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // POST /api/experts/:id/duplicate
+  app.post("/api/experts/:id/duplicate", async (req, res) => {
+    try {
+      const { db } = await import("./db");
+      const { architectureProfiles } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+      const orgId  = getOrgId(req);
+      const userId = getUserId(req);
+      const [src]  = await db.select().from(architectureProfiles)
+        .where(and(eq(architectureProfiles.id, req.params.id), eq(architectureProfiles.organizationId, orgId)));
+      if (!src) return res.status(404).json({ error: "Expert not found" });
+      const slug = `${src.slug}-kopi-${Date.now().toString(36)}`;
+      const [copy] = await db.insert(architectureProfiles).values({
+        organizationId: orgId,
+        createdBy:      userId,
+        name:           `${src.name} (kopi)`,
+        slug,
+        description:    src.description,
+        goal:           src.goal,
+        instructions:   src.instructions,
+        outputStyle:    src.outputStyle,
+        departmentId:   src.departmentId,
+        language:       src.language ?? "da",
+        status:         "draft",
+      }).returning();
+      res.json(copy);
+    } catch (err) { handleError(res, err); }
+  });
+
+  // POST /api/experts/ai-refine — per-field AI refinement, routed through tenant runtime
+  app.post("/api/experts/ai-refine", async (req, res) => {
+    try {
+      const body = z.object({
+        field:        z.string().min(1),
+        currentValue: z.string().min(1),
+        action:       z.enum(["improve", "shorten", "rewrite", "more_precise"]),
+      }).parse(req.body);
+
+      const { runAiCall } = await import("./lib/ai/runner");
+
+      const ACTION_PROMPTS: Record<string, string> = {
+        improve:      "Improve this text while keeping its meaning and purpose. Make it more professional and clear.",
+        shorten:      "Shorten this text significantly while keeping all key meaning. Keep it Danish if it is Danish.",
+        rewrite:      "Rewrite this text with different wording but the same intent. Keep it Danish if it is Danish.",
+        more_precise: "Make this text more precise and specific. Remove vague language. Keep it Danish if it is Danish.",
+      };
+
+      const systemPrompt = `You are an expert configuration assistant for a B2B AI platform. 
+The user wants to refine a specific field of their AI expert configuration.
+Field being refined: "${body.field}"
+Action requested: ${ACTION_PROMPTS[body.action]}
+Return ONLY the refined text — no quotes, no explanation, no JSON. Just the improved text directly.`;
+
+      const result = await runAiCall(
+        { feature: "expert-refine", useCase: "configuration_assist", tenantId: getOrgId(req), userId: getUserId(req) },
+        { systemPrompt, userInput: body.currentValue },
+      );
+
+      res.json({ refined: result.content.trim() });
+    } catch (err) { handleError(res, err); }
+  });
+
   // POST /api/experts/:id/promote — promote draft → live
   app.post("/api/experts/:id/promote", async (req, res) => {
     try {
