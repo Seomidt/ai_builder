@@ -12,8 +12,13 @@ export const createProfileSchema = z.object({
   organizationId: z.string().min(1),
   name: z.string().min(1).max(100),
   slug: z.string().min(1).max(100).regex(/^[a-z0-9-]+$/, "Slug must be lowercase letters, numbers and hyphens only"),
-  description: z.string().max(500).optional(),
+  description: z.string().optional(),
   category: z.string().max(50).optional(),
+  goal: z.string().optional(),
+  instructions: z.string().optional(),
+  outputStyle: z.string().optional(),
+  departmentId: z.string().optional(),
+  language: z.string().optional().default("da"),
 });
 
 export const updateProfileSchema = z.object({
@@ -75,7 +80,7 @@ export const architecturesService = {
   async createProfile(input: CreateProfileInput): Promise<ArchitectureProfile> {
     const data = createProfileSchema.parse(input);
     try {
-      return await architecturesRepository.createProfile({ ...data, status: "active" });
+      return await architecturesRepository.createProfile({ ...data, status: "draft" });
     } catch (err: unknown) {
       if (isDuplicateSlug(err)) {
         throw new ConflictError("DUPLICATE_SLUG", "An architecture with this slug already exists in your organization. Choose a different slug.");
