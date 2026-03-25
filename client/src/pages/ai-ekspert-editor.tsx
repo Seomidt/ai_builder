@@ -131,9 +131,14 @@ function isAdminRole(role?: string) {
 
 // ─── Field style constants ─────────────────────────────────────────────────────
 
-const FIELD_CLS   = "bg-white/[0.06] border-white/[0.18] focus:border-primary/50 focus-visible:ring-1 focus-visible:ring-primary/20 placeholder:text-muted-foreground/30 text-foreground/90";
-const LABEL_CLS   = "text-xs font-medium text-muted-foreground/80";
-const HELPER_CLS  = "text-[11px] text-muted-foreground/40 mt-2 leading-relaxed";
+const FIELD_CLS  = [
+  "bg-white/[0.08] border-white/25",
+  "focus:border-primary/70 focus-visible:ring-2 focus-visible:ring-primary/30 focus-visible:ring-offset-0",
+  "placeholder:text-white/20 text-white/90",
+  "transition-colors duration-150",
+].join(" ");
+const LABEL_CLS  = "text-xs font-medium text-white/70 mb-1";
+const HELPER_CLS = "text-[11px] text-white/30 mt-2 leading-relaxed";
 
 // ─── Section Header ───────────────────────────────────────────────────────────
 
@@ -206,11 +211,11 @@ function RefineButton({
         type="button"
         onClick={() => setOpen(true)}
         disabled={disabled || !currentValue?.trim()}
-        className="flex items-center gap-1 text-[11px] text-primary/50 hover:text-primary/80 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+        className="flex items-center gap-1 text-[10px] text-white/30 hover:text-primary/60 transition-colors disabled:opacity-20 disabled:cursor-not-allowed"
         data-testid={`button-ai-refine-${field}`}
       >
-        <Sparkles size={11} />
-        ✨ AI hjælp
+        <Sparkles size={10} />
+        AI hjælp
       </button>
     );
   }
@@ -783,23 +788,31 @@ export default function AiEkspertEditor() {
                     {advancedOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                   </button>
                   {advancedOpen && (
-                    <div className="px-3.5 pb-3.5 space-y-2 border-t border-white/[0.06]">
-                      <p className="text-[11px] text-muted-foreground/40 pt-3">
-                        Disse felter er til intern brug og viderekomne konfigurationer.
-                      </p>
-                      {!isNew && expert && (
-                        <div className="space-y-1.5">
-                          <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider font-medium">Ekspert ID</p>
-                          <code className="text-[10px] text-muted-foreground/40 font-mono">{expert.id}</code>
+                    <div className="border-t border-white/[0.06]">
+                      {isNew ? (
+                        <div className="px-3.5 py-4">
+                          <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-3.5 text-center">
+                            <p className="text-xs text-white/30 font-medium">Ingen avancerede indstillinger endnu</p>
+                            <p className="text-[11px] text-white/20 mt-1">Tilgængeligt efter oprettelse af eksperten</p>
+                          </div>
                         </div>
-                      )}
-                      {!isNew && expert && (
-                        <div className="space-y-1.5">
-                          <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider font-medium">Versioner</p>
-                          <p className="text-[11px] text-muted-foreground/50">
-                            Live: {expert.currentVersionId ? expert.currentVersionId.slice(0, 8) + "…" : "Ingen"} ·
-                            Kladde: {expert.draftVersionId ? expert.draftVersionId.slice(0, 8) + "…" : "Ingen"}
-                          </p>
+                      ) : (
+                        <div className="px-3.5 pb-3.5 pt-3 space-y-3">
+                          {expert && (
+                            <>
+                              <div className="space-y-1">
+                                <p className="text-[10px] text-white/30 uppercase tracking-wider font-medium">Ekspert ID</p>
+                                <code className="text-[10px] text-white/35 font-mono">{expert.id}</code>
+                              </div>
+                              <div className="space-y-1">
+                                <p className="text-[10px] text-white/30 uppercase tracking-wider font-medium">Versioner</p>
+                                <p className="text-[11px] text-white/40">
+                                  Live: {expert.currentVersionId ? expert.currentVersionId.slice(0, 8) + "…" : "Ingen"} ·
+                                  Kladde: {expert.draftVersionId ? expert.draftVersionId.slice(0, 8) + "…" : "Ingen"}
+                                </p>
+                              </div>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
