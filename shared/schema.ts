@@ -83,7 +83,9 @@ export const projectStatusEnum = pgEnum("project_status", [
 ]);
 
 export const archProfileStatusEnum = pgEnum("arch_profile_status", [
+  "draft",
   "active",
+  "paused",
   "archived",
 ]);
 
@@ -232,7 +234,7 @@ export const architectureProfiles = pgTable(
     slug: text("slug").notNull(),
     description: text("description"),
     category: text("category"),
-    status: archProfileStatusEnum("status").notNull().default("active"),
+    status: archProfileStatusEnum("status").notNull().default("draft"),
     currentVersionId: varchar("current_version_id"), // FK set after versions table
     departmentId: text("department_id"),             // optional dept association
     language: text("language").default("da"),        // expert output language

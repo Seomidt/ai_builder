@@ -1,7 +1,7 @@
 /**
  * AI Ekspert Editor — /ai-eksperter/opret og /ai-eksperter/:id/rediger
  *
- * Struktureret editor (ikke wizard). Admin-only.
+ * V2: UX + AI hardening.
  * Sektioner: A Identitet · B AI Adfærd · C Datagrundlag · D AI Hjælp
  * AI-assistance rutes via tenant runtime (runAiCall) — metered + logged.
  */
@@ -11,8 +11,8 @@ import { useRoute, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Brain, Sparkles, Loader2, Save, Pause, Play,
-  Archive, Copy, ChevronDown, ChevronUp, Database, AlertTriangle,
-  CheckCircle2, Wand2, RefreshCw, Scissors, Zap,
+  Archive, Copy, ChevronDown, ChevronUp, Database,
+  CheckCircle2, Wand2, RefreshCw, Scissors, Zap, Plus,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -63,6 +63,7 @@ interface AiSuggestion {
   improved_description:   string;
   goal:                   string;
   instructions:           string;
+  restrictions:           string;
   suggested_output_style: "concise" | "formal" | "advisory";
   warnings:               string[];
 }
@@ -95,6 +96,35 @@ const STATUS_META: Record<string, { label: string; color: string }> = {
   archived: { label: "Arkiveret", color: "text-rose-400 border-rose-500/30 bg-rose-500/8" },
 };
 
+// ─── Smart templates ──────────────────────────────────────────────────────────
+
+const SMART_TEMPLATES = {
+  support: {
+    label:        "+ Support ekspert",
+    name:         "Support Specialist",
+    goal:         "Besvarer kundespørgsmål præcist ud fra virksomhedens egne produkter, politikker og processer.",
+    instructions: "- Analyser brugerens spørgsmål og find relevant information i de tilkoblede datakilder\n- Giv klare, konkrete svar baseret udelukkende på virksomhedens dokumentation\n- Henvis til specifikke sektioner eller dokumenter, når det er muligt\n- Tilbyd næste skridt eller handlingsanvisninger ved komplekse sager\n- Eskalér til menneskelig support, hvis spørgsmålet er uden for ekspertens rækkevidde",
+    restrictions: "- Gæt ikke på svar, der ikke er dokumenteret i datakilden\n- Foretag ikke antagelser om kundens kontosituation uden data\n- Udfør ikke handlinger på vegne af kunden (refunderinger, kontoændringer osv.)\n- Brug ikke eksterne søgeresultater eller generel viden som kilde",
+    outputStyle:  "concise" as const,
+  },
+  salg: {
+    label:        "+ Salg ekspert",
+    name:         "Salgs Assistent",
+    goal:         "Hjælper sælgere med at finde relevante argumenter, produktinformation og konkurrencemæssige fordele.",
+    instructions: "- Identificér relevante produkter og fordele ud fra kundens behov og de tilkoblede salgsdata\n- Fremhæv unikke salgsargumenter baseret på virksomhedens egne materialer\n- Foreslå konkrete next steps og handlingsorienterede anbefalinger\n- Brug virksomhedens pristrapper og kampagner korrekt\n- Giv svar i et overbevisende, professionelt sprog tilpasset salgssituationen",
+    restrictions: "- Lov ikke noget, der ikke fremgår af de godkendte salgsmaterialer\n- Angiv ikke priser uden at tjekke aktuelle prisdata\n- Undgå spekulativ sammenligning med konkurrenter uden dokumentation\n- Gæt ikke på tekniske specifikationer — henvis til produktdatablade",
+    outputStyle:  "advisory" as const,
+  },
+  compliance: {
+    label:        "+ Compliance ekspert",
+    name:         "Compliance Rådgiver",
+    goal:         "Vurderer situationer op mod interne regler, lovgivning og politikker og giver præcise compliance-svar.",
+    instructions: "- Analyser den beskrevne situation op mod de relevante regler og politikker i datakilderne\n- Identificér potentielle compliance-risici og angiv regelreferencer\n- Giv strukturerede vurderinger med klar konklusion (godkendt / afvist / kræver review)\n- Fremhæv, hvilke specifikke politikker eller lovparagraffer der er relevante\n- Anbefal eskalering til legal team ved tvivlstilfælde",
+    restrictions: "- Giv aldrig juridisk rådgivning uden forbehold\n- Gæt ikke på lovgivning eller regler, der ikke er i datakilderne\n- Udlæg ikke situationer til brugerens fordel uden dækning\n- Foretag ikke endelige beslutninger — kun vurderinger til menneskelig godkendelse",
+    outputStyle:  "formal" as const,
+  },
+};
+
 function isAdminRole(role?: string) {
   return role === "tenant_admin" || role === "platform_admin" || role === "owner";
 }
@@ -118,18 +148,19 @@ function SectionHeader({ letter, title, subtitle }: { letter: string; title: str
   );
 }
 
-// ─── AI Refine Button ─────────────────────────────────────────────────────────
+// ─── AI Refine Button — med preview før replace ───────────────────────────────
 
 function RefineButton({
-  field, currentValue, onRefined, disabled,
+  field, currentValue, onAccept, disabled,
 }: {
   field: string;
   currentValue: string;
-  onRefined: (text: string) => void;
+  onAccept: (text: string, mode: "replace" | "insert") => void;
   disabled?: boolean;
 }) {
   const { toast } = useToast();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen]         = useState(false);
+  const [preview, setPreview]   = useState<string | null>(null);
 
   const refineMutation = useMutation({
     mutationFn: async (action: "improve" | "shorten" | "rewrite" | "more_precise") => {
@@ -138,23 +169,32 @@ function RefineButton({
       });
       return res.json() as Promise<{ refined: string }>;
     },
-    onSuccess: (data) => {
-      onRefined(data.refined);
-      setOpen(false);
-      toast({ title: "Tekst opdateret" });
-    },
+    onSuccess: (data) => setPreview(data.refined),
     onError: (err: ApiError | Error) =>
       toast({ title: "AI fejl", description: friendlyError(err), variant: "destructive" }),
   });
 
+  const handleAccept = (mode: "replace" | "insert") => {
+    if (!preview) return;
+    onAccept(preview, mode);
+    setPreview(null);
+    setOpen(false);
+    toast({ title: mode === "replace" ? "Tekst erstattet" : "Tekst tilføjet" });
+  };
+
+  const handleCancel = () => {
+    setPreview(null);
+    setOpen(false);
+  };
+
   const actions = [
-    { id: "improve" as const,      label: "Forbedr",        icon: Wand2 },
-    { id: "shorten" as const,      label: "Forkort",        icon: Scissors },
-    { id: "rewrite" as const,      label: "Omskriv",        icon: RefreshCw },
+    { id: "improve" as const,      label: "Forbedr",         icon: Wand2 },
+    { id: "shorten" as const,      label: "Forkort",         icon: Scissors },
+    { id: "rewrite" as const,      label: "Omskriv",         icon: RefreshCw },
     { id: "more_precise" as const, label: "Gør mere præcis", icon: Zap },
   ];
 
-  if (!open) {
+  if (!open && !preview) {
     return (
       <button
         type="button"
@@ -164,8 +204,51 @@ function RefineButton({
         data-testid={`button-ai-refine-${field}`}
       >
         <Sparkles size={11} />
-        AI hjælp
+        ✨ AI hjælp
       </button>
+    );
+  }
+
+  if (preview) {
+    return (
+      <div
+        className="mt-2 rounded-lg border border-primary/20 bg-primary/[0.04] p-3 space-y-2"
+        data-testid="panel-ai-preview"
+      >
+        <p className="text-[10px] text-primary/50 uppercase tracking-wider font-medium">AI forslag</p>
+        <p className="text-xs text-foreground/80 whitespace-pre-wrap leading-relaxed">{preview}</p>
+        <div className="flex items-center gap-2 pt-1">
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => handleAccept("replace")}
+            className="h-6 px-2.5 text-[11px]"
+            data-testid="button-preview-replace"
+          >
+            <CheckCircle2 size={11} className="mr-1" />
+            Erstat
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => handleAccept("insert")}
+            className="h-6 px-2.5 text-[11px] border-white/10"
+            data-testid="button-preview-insert"
+          >
+            <Plus size={11} className="mr-1" />
+            Tilføj
+          </Button>
+          <button
+            type="button"
+            onClick={handleCancel}
+            className="text-[11px] text-muted-foreground/40 hover:text-muted-foreground/70 transition-colors px-1"
+            data-testid="button-preview-cancel"
+          >
+            Annullér
+          </button>
+        </div>
+      </div>
     );
   }
 
@@ -203,7 +286,6 @@ export default function AiEkspertEditor() {
   const { user }        = useAuth();
   const isAdmin         = isAdminRole(user?.role);
 
-  // Route matching — edit mode has :id, create mode is /opret
   const [matchEdit, paramsEdit] = useRoute("/ai-eksperter/:id/rediger");
   const expertId = matchEdit ? paramsEdit?.id : undefined;
   const isNew    = !expertId;
@@ -273,7 +355,10 @@ export default function AiEkspertEditor() {
     },
     onSuccess: (data) => {
       invalidate.afterArchMutation();
-      toast({ title: isNew ? "Ekspert oprettet" : "Kladde gemt", description: isNew ? "Eksperten er klar til konfiguration." : "Ændringer gemt som kladde." });
+      toast({
+        title: isNew ? "Ekspert oprettet" : "Ændringer gemt",
+        description: isNew ? "Eksperten er klar til konfiguration." : "Ændringer er gemt.",
+      });
       if (isNew) navigate(`/ai-eksperter/${data.id}`);
       else qc.invalidateQueries({ queryKey: ["/api/experts", expertId] });
     },
@@ -334,12 +419,40 @@ export default function AiEkspertEditor() {
     form.setValue("name",         aiSuggestion.suggested_name);
     form.setValue("goal",         aiSuggestion.goal);
     form.setValue("instructions", aiSuggestion.instructions);
+    form.setValue("description",  aiSuggestion.restrictions || aiSuggestion.improved_description);
     if (aiSuggestion.suggested_output_style) {
       form.setValue("outputStyle", aiSuggestion.suggested_output_style);
     }
     setAiSuggestion(null);
     setAiPrompt("");
-    toast({ title: "Forslag anvendt", description: "Felterne er udfyldt med AI-forslaget. Kontrollér og gem." });
+    toast({ title: "Forslag anvendt", description: "Alle felter er udfyldt. Kontrollér og gem." });
+  };
+
+  // ── Smart template fill ────────────────────────────────────────────────────
+  const applyTemplate = (key: keyof typeof SMART_TEMPLATES) => {
+    const t = SMART_TEMPLATES[key];
+    form.setValue("name",         t.name);
+    form.setValue("goal",         t.goal);
+    form.setValue("instructions", t.instructions);
+    form.setValue("description",  t.restrictions);
+    form.setValue("outputStyle",  t.outputStyle);
+    toast({ title: `${t.name} skabelon anvendt`, description: "Ret felterne til din virksomhed og gem." });
+  };
+
+  // ── Refine helpers ─────────────────────────────────────────────────────────
+  const handleRefinedInstructions = (text: string, mode: "replace" | "insert") => {
+    const current = form.getValues("instructions") ?? "";
+    form.setValue("instructions", mode === "replace" ? text : `${current}\n${text}`.trim());
+  };
+
+  const handleRefinedGoal = (text: string, mode: "replace" | "insert") => {
+    const current = form.getValues("goal") ?? "";
+    form.setValue("goal", mode === "replace" ? text : `${current} ${text}`.trim());
+  };
+
+  const handleRefinedDescription = (text: string, mode: "replace" | "insert") => {
+    const current = form.getValues("description") ?? "";
+    form.setValue("description", mode === "replace" ? text : `${current}\n${text}`.trim());
   };
 
   // ── Access guard ────────────────────────────────────────────────────────────
@@ -454,6 +567,8 @@ export default function AiEkspertEditor() {
               </Button>
             </>
           )}
+
+          {/* PRIMARY ACTION — kun ét knap, label afhænger af mode */}
           <Button
             type="button"
             size="sm"
@@ -465,7 +580,7 @@ export default function AiEkspertEditor() {
             {saveMutation.isPending
               ? <Loader2 size={12} className="animate-spin mr-1" />
               : <Save size={12} className="mr-1" />}
-            Gem
+            {isNew ? "Opret ekspert" : "Gem ændringer"}
           </Button>
         </div>
       </header>
@@ -508,7 +623,7 @@ export default function AiEkspertEditor() {
                       <RefineButton
                         field="kort formål"
                         currentValue={goalValue}
-                        onRefined={(t) => form.setValue("goal", t)}
+                        onAccept={handleRefinedGoal}
                         disabled={!goalValue?.trim()}
                       />
                     </div>
@@ -555,30 +670,54 @@ export default function AiEkspertEditor() {
                 title="AI Adfærd"
                 subtitle="Beskriv hvad AI'en skal gøre, hvad den ikke må, og hvordan svarene skal fremstå."
               />
-              <div className="space-y-4">
+              <div className="space-y-5">
+
+                {/* Smart templates */}
+                <div data-testid="panel-smart-templates">
+                  <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider font-medium mb-2">Hurtig skabelon</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {(Object.keys(SMART_TEMPLATES) as (keyof typeof SMART_TEMPLATES)[]).map((key) => (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => applyTemplate(key)}
+                        className="text-[11px] px-2.5 py-1 rounded border border-white/10 text-muted-foreground/60 hover:text-foreground hover:border-primary/30 hover:bg-primary/5 transition-colors"
+                        data-testid={`button-template-${key}`}
+                      >
+                        {SMART_TEMPLATES[key].label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Hvad skal AI gøre */}
                 <FormField control={form.control} name="instructions" render={({ field }) => (
                   <FormItem>
                     <div className="flex items-center justify-between">
-                      <FormLabel className="text-xs text-muted-foreground/70">Hvad skal AI gøre? *</FormLabel>
+                      <FormLabel className="text-xs text-muted-foreground/70">Hvad skal AI gøre?</FormLabel>
                       <RefineButton
                         field="hvad skal AI gøre"
                         currentValue={instructionsValue}
-                        onRefined={(t) => form.setValue("instructions", t)}
+                        onAccept={handleRefinedInstructions}
                         disabled={!instructionsValue.trim()}
                       />
                     </div>
                     <FormControl>
                       <Textarea
-                        placeholder="Beskriv de opgaver eksperten skal løse. Brug gerne punktform."
-                        rows={4}
+                        placeholder={"Brug gerne punktform:\n- Analyser data fra tilkoblede kilder\n- Besvare spørgsmål baseret på interne regler\n- Følg virksomhedens egne processer"}
+                        rows={5}
                         data-testid="input-expert-instructions"
                         className="bg-white/[0.03] border-white/10 focus:border-primary/40 resize-none"
                         {...field}
                       />
                     </FormControl>
+                    <p className="text-[11px] text-muted-foreground/35 mt-1">
+                      Eksempler: Analysér data · Besvar spørgsmål · Følg interne regler · Giv strukturerede anbefalinger
+                    </p>
                   </FormItem>
                 )} />
 
+                {/* Hvad må AI ikke gøre */}
                 <FormField control={form.control} name="description" render={({ field }) => (
                   <FormItem>
                     <div className="flex items-center justify-between">
@@ -586,19 +725,22 @@ export default function AiEkspertEditor() {
                       <RefineButton
                         field="hvad må AI ikke gøre"
                         currentValue={descriptionValue}
-                        onRefined={(t) => form.setValue("description", t)}
+                        onAccept={handleRefinedDescription}
                         disabled={!descriptionValue.trim()}
                       />
                     </div>
                     <FormControl>
                       <Textarea
-                        placeholder="Beskriv begrænsninger, ting AI ikke må antage, eller handlinger den ikke må udføre."
-                        rows={3}
+                        placeholder={"Brug gerne punktform:\n- Gæt ikke — svar kun baseret på tilgængelig data\n- Anta ikke noget om ekstern viden\n- Udfør ikke handlinger uden dokumentation"}
+                        rows={4}
                         data-testid="input-expert-restrictions"
                         className="bg-white/[0.03] border-white/10 focus:border-primary/40 resize-none"
                         {...field}
                       />
                     </FormControl>
+                    <p className="text-[11px] text-muted-foreground/35 mt-1">
+                      Eksempler: Ingen gætteri · Ingen eksterne antagelser · Ingen handlinger uden data
+                    </p>
                   </FormItem>
                 )} />
 
@@ -623,7 +765,7 @@ export default function AiEkspertEditor() {
                   </FormItem>
                 )} />
 
-                {/* Advanced — collapsed by default */}
+                {/* Advanced — collapsed */}
                 <div className="border border-white/[0.06] rounded-lg overflow-hidden">
                   <button
                     type="button"
@@ -637,7 +779,7 @@ export default function AiEkspertEditor() {
                   {advancedOpen && (
                     <div className="px-3.5 pb-3.5 space-y-2 border-t border-white/[0.06]">
                       <p className="text-[11px] text-muted-foreground/40 pt-3">
-                        Disse felter er til intern brug og viderekomne konfigurationer. Brug ikke som primær indgang til ekspert-opsætning.
+                        Disse felter er til intern brug og viderekomne konfigurationer.
                       </p>
                       {!isNew && expert && (
                         <div className="space-y-1.5">
@@ -702,12 +844,12 @@ export default function AiEkspertEditor() {
               <SectionHeader
                 letter="D"
                 title="AI Hjælp"
-                subtitle="Lad AI generere et komplet konfigurationsforslag — køres via din organisations AI runtime."
+                subtitle="Beskriv eksperten med dine egne ord — AI udfylder alle felter automatisk."
               />
               <div className="space-y-3">
                 <Textarea
-                  placeholder="f.eks. En ekspert der vurderer forsikringssager ud fra policer, skadeshistorik og interne dokumenter."
-                  rows={3}
+                  placeholder="f.eks. En ekspert der vurderer forsikringssager ud fra policer, skadeshistorik og interne dokumenter — giver strukturerede vurderinger og anbefaler videre behandling."
+                  rows={4}
                   value={aiPrompt}
                   onChange={(e) => setAiPrompt(e.target.value)}
                   className="bg-white/[0.03] border-white/10 focus:border-primary/40 resize-none"
@@ -718,109 +860,89 @@ export default function AiEkspertEditor() {
                   variant="outline"
                   onClick={() => aiSuggestMutation.mutate()}
                   disabled={!aiPrompt.trim() || aiSuggestMutation.isPending}
-                  className="w-full border-primary/20 text-primary/80 hover:bg-primary/5 text-xs h-8"
+                  className="w-full border-primary/20 text-primary/80 hover:bg-primary/5 text-xs h-9"
                   data-testid="button-ai-generate"
                 >
                   {aiSuggestMutation.isPending
                     ? <><Loader2 size={13} className="mr-1.5 animate-spin" />Analyserer…</>
-                    : <><Sparkles size={13} className="mr-1.5" />Generér forslag</>}
+                    : <><Sparkles size={13} className="mr-1.5" />Generér fuldt forslag</>}
                 </Button>
 
                 {aiSuggestion && (
                   <div
-                    className="rounded-xl border border-primary/15 p-4 space-y-3"
-                    style={{ background: "rgba(34,211,238,0.03)" }}
-                    data-testid="ai-suggestion-block"
+                    className="rounded-xl border border-primary/20 bg-primary/[0.04] p-4 space-y-3"
+                    data-testid="panel-ai-suggestion"
                   >
                     <div className="flex items-center gap-2">
-                      <Sparkles size={13} className="text-primary/70" />
-                      <span className="text-xs font-semibold text-primary/80">AI konfigurationsforslag</span>
+                      <CheckCircle2 size={14} className="text-primary/60" />
+                      <p className="text-xs font-semibold text-foreground">AI forslag klar</p>
                     </div>
 
-                    <div className="space-y-2">
-                      <SuggRow label="Navn"         value={aiSuggestion.suggested_name} />
-                      <SuggRow label="Kort formål"  value={aiSuggestion.goal} />
-                      <SuggRow label="Instruktioner" value={aiSuggestion.instructions} multiline />
-                      <SuggRow label="Outputstil"
-                        value={OUTPUT_STYLE_OPTIONS.find((o) => o.value === aiSuggestion.suggested_output_style)?.label ?? aiSuggestion.suggested_output_style}
-                      />
+                    <div className="space-y-2 text-xs">
+                      <div>
+                        <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider mb-0.5">Navn</p>
+                        <p className="text-foreground/80">{aiSuggestion.suggested_name}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider mb-0.5">Formål</p>
+                        <p className="text-foreground/80">{aiSuggestion.goal}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider mb-0.5">Hvad AI skal gøre</p>
+                        <p className="text-foreground/80 whitespace-pre-line">{aiSuggestion.instructions}</p>
+                      </div>
+                      {(aiSuggestion.restrictions || aiSuggestion.improved_description) && (
+                        <div>
+                          <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider mb-0.5">Hvad AI ikke må</p>
+                          <p className="text-foreground/80 whitespace-pre-line">
+                            {aiSuggestion.restrictions || aiSuggestion.improved_description}
+                          </p>
+                        </div>
+                      )}
+                      <div>
+                        <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider mb-0.5">Svarstil</p>
+                        <p className="text-foreground/80 capitalize">{aiSuggestion.suggested_output_style}</p>
+                      </div>
                     </div>
 
-                    {(aiSuggestion.warnings ?? []).length > 0 && (
-                      <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-500/8 border border-amber-500/15">
-                        <AlertTriangle size={12} className="text-amber-400 shrink-0 mt-0.5" />
-                        <p className="text-xs text-amber-400">{aiSuggestion.warnings.join(" ")}</p>
+                    {aiSuggestion.warnings.length > 0 && (
+                      <div className="rounded-lg border border-amber-500/20 bg-amber-500/[0.05] p-2.5">
+                        {aiSuggestion.warnings.map((w, i) => (
+                          <p key={i} className="text-[11px] text-amber-400/80">{w}</p>
+                        ))}
                       </div>
                     )}
 
-                    <div className="flex items-center gap-2 pt-1">
+                    <div className="flex gap-2 pt-1">
                       <Button
                         type="button"
                         size="sm"
                         onClick={applyAiSuggestion}
-                        className="text-xs h-7 flex-1"
+                        className="h-7 px-3 text-xs flex-1"
                         data-testid="button-apply-suggestion"
                       >
                         <CheckCircle2 size={12} className="mr-1.5" />
-                        Anvend forslag
+                        Anvend alle felter
                       </Button>
                       <Button
                         type="button"
-                        variant="ghost"
                         size="sm"
+                        variant="ghost"
                         onClick={() => setAiSuggestion(null)}
-                        className="text-xs h-7 text-muted-foreground/50"
+                        className="h-7 px-2 text-xs text-muted-foreground/50"
+                        data-testid="button-dismiss-suggestion"
                       >
                         Afvis
                       </Button>
                     </div>
                   </div>
                 )}
-
-                <div
-                  className="flex items-center gap-2 rounded-lg px-3 py-2.5"
-                  style={{ background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.05)" }}
-                >
-                  <Brain size={12} className="text-primary/30 shrink-0" />
-                  <p className="text-[11px] text-muted-foreground/40">
-                    AI-kald faktureres til din organisations konto — brug og omkostninger logges automatisk.
-                  </p>
-                </div>
               </div>
             </section>
-
-            {/* Bottom save button (convenience, mobile) */}
-            <div className="pb-6">
-              <Button
-                type="button"
-                onClick={form.handleSubmit((v) => saveMutation.mutate(v))}
-                disabled={anyPending}
-                className="w-full"
-                data-testid="button-save-bottom"
-              >
-                {saveMutation.isPending
-                  ? <><Loader2 size={14} className="animate-spin mr-2" />Gemmer…</>
-                  : <><Save size={14} className="mr-2" />{isNew ? "Opret ekspert" : "Gem kladde"}</>}
-              </Button>
-            </div>
 
           </form>
         </Form>
       </div>
-    </div>
-  );
-}
-
-// ─── Suggestion row ────────────────────────────────────────────────────────────
-
-function SuggRow({ label, value, multiline }: { label: string; value: string; multiline?: boolean }) {
-  return (
-    <div>
-      <p className="text-[10px] uppercase tracking-wider font-semibold text-muted-foreground/40 mb-0.5">{label}</p>
-      {multiline
-        ? <p className="text-xs text-foreground/75 whitespace-pre-wrap border-l-2 border-primary/20 pl-2">{value}</p>
-        : <p className="text-xs text-foreground/75">{value}</p>
-      }
     </div>
   );
 }
