@@ -7,8 +7,7 @@
 // No prompt injection surface from tenant content.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import OpenAI from "openai";
-import { env } from "../env";
+import { runAiCall } from "../ai/runner";
 import { assertValidIntent, getIntentDefinition, OPS_INTENT, type OpsIntentId } from "./intents";
 import { assertAiOpsAccess, resolveAiOpsScope, type AiOpsAccessContext, type AiOpsScope } from "./access-control";
 import {
@@ -33,8 +32,6 @@ import { validateOpsResponse, makeBaseResponse, type OpsResponseBase } from "./r
 import { assertAiOpsSafeContext, assertAiOpsOutputSafe, assertNoForbiddenIntent, assertNoRawTenantContent } from "./safety";
 import { logAiOpsAudit } from "./audit";
 import type { AiOpsSourceId } from "./data-sources";
-
-const openai = new OpenAI({ apiKey: env.OPENAI_API_KEY });
 
 export interface OrchestratorInput {
   intent: string;
@@ -271,18 +268,21 @@ export async function runAiOpsQuery(input: OrchestratorInput): Promise<Orchestra
 
     const userPrompt = buildUserPrompt(intentId, scope, context);
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.1,
-      max_tokens: 1200,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: userPrompt },
-      ],
-    });
+    const aiResult = await runAiCall(
+      {
+        feature: "ai_ops_assistant",
+        useCase: "analysis",
+        model: "ops.analysis",
+        tenantId: scope.tenantId ?? null,
+        userId: input.accessCtx.user.userId,
+      },
+      {
+        systemPrompt: SYSTEM_PROMPT,
+        userInput: userPrompt,
+      },
+    );
 
-    const rawOutput = completion.choices[0]?.message?.content ?? "{}";
+    const rawOutput = aiResult.text || "{}";
     assertAiOpsOutputSafe(rawOutput);
 
     const parsed = JSON.parse(rawOutput) as Record<string, unknown>;

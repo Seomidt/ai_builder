@@ -33,20 +33,37 @@ export interface AiModelRoute {
 /**
  * Maps logical model keys to concrete provider + model routes.
  *
- * - default   → OpenAI  gpt-4.1-mini    (fast, cost-efficient)
- * - heavy     → OpenAI  gpt-4.1         (complex reasoning steps)
- * - nano      → OpenAI  gpt-4.1-nano    (trivial tasks)
- * - coding    → OpenAI  gpt-4.1         (code generation)
- * - cheap     → Google  gemini-2.0-flash (not yet wired — provider placeholder)
- * - reasoning → Anthropic claude-opus-4-5 (not yet wired — provider placeholder)
+ * Tier-based (internal):
+ * - default           → OpenAI gpt-4.1-mini    (fast, cost-efficient)
+ * - heavy             → OpenAI gpt-4.1         (complex reasoning)
+ * - nano              → OpenAI gpt-4.1-nano    (trivial tasks)
+ * - coding            → OpenAI gpt-4.1         (code generation)
+ * - cheap             → Google gemini-2.0-flash (not yet wired — placeholder)
+ * - reasoning         → Anthropic claude-opus   (not yet wired — placeholder)
+ *
+ * Semantic (feature-aligned — use these in new callers):
+ * - expert.chat       → mini   (tenant expert runtime chat — high volume, cost-sensitive)
+ * - expert.suggest    → nano   (AI field-suggestion in editor — trivial, fast)
+ * - expert.refine     → mini   (AI text refinement per field — short, structured)
+ * - summarize.fast    → mini   (document summarisation — predictable, cached)
+ * - ops.analysis      → heavy  (platform ops assistant — justifies stronger model)
+ * - extraction.struct → mini   (structured JSON extraction — prompt-constrained)
  */
 export const AI_MODEL_ROUTES = {
-  default:   { provider: "openai"    as AiProviderKey, model: "gpt-4.1-mini" },
-  heavy:     { provider: "openai"    as AiProviderKey, model: "gpt-4.1" },
-  nano:      { provider: "openai"    as AiProviderKey, model: "gpt-4.1-nano" },
-  coding:    { provider: "openai"    as AiProviderKey, model: "gpt-4.1" },
-  cheap:     { provider: "google"    as AiProviderKey, model: "gemini-2.0-flash" },
-  reasoning: { provider: "anthropic" as AiProviderKey, model: "claude-opus-4-5" },
+  // ── Tier-based ────────────────────────────────────────────────────────────
+  default:            { provider: "openai"    as AiProviderKey, model: "gpt-4.1-mini" },
+  heavy:              { provider: "openai"    as AiProviderKey, model: "gpt-4.1" },
+  nano:               { provider: "openai"    as AiProviderKey, model: "gpt-4.1-nano" },
+  coding:             { provider: "openai"    as AiProviderKey, model: "gpt-4.1" },
+  cheap:              { provider: "google"    as AiProviderKey, model: "gemini-2.0-flash" },
+  reasoning:          { provider: "anthropic" as AiProviderKey, model: "claude-opus-4-5" },
+  // ── Semantic (feature-aligned) ────────────────────────────────────────────
+  "expert.chat":      { provider: "openai"    as AiProviderKey, model: "gpt-4.1-mini" },
+  "expert.suggest":   { provider: "openai"    as AiProviderKey, model: "gpt-4.1-nano" },
+  "expert.refine":    { provider: "openai"    as AiProviderKey, model: "gpt-4.1-mini" },
+  "summarize.fast":   { provider: "openai"    as AiProviderKey, model: "gpt-4.1-mini" },
+  "ops.analysis":     { provider: "openai"    as AiProviderKey, model: "gpt-4.1" },
+  "extraction.struct":{ provider: "openai"    as AiProviderKey, model: "gpt-4.1-mini" },
 } satisfies Record<string, AiModelRoute>;
 
 export type AiModelKey = keyof typeof AI_MODEL_ROUTES;

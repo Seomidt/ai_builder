@@ -201,6 +201,7 @@ export async function runAiCall(
     const aiErr = normalizeError(err, meta);
     void logAiUsage({
       feature,
+      routeKey: modelKey,
       provider: route.provider,
       tenantId: tenantId ?? null,
       userId: userId ?? null,
@@ -346,6 +347,7 @@ export async function runAiCall(
 
       void logAiUsage({
         feature,
+        routeKey: modelKey,
         provider: route.provider,
         tenantId: tenantId ?? null,
         userId: userId ?? null,
@@ -514,6 +516,7 @@ export async function runAiCall(
     // ── Step 12: Usage logging + threshold events ───────────────────────────────
     void logAiUsage({
       feature,
+      routeKey: modelKey,
       provider: route.provider,
       tenantId: tenantId ?? null,
       userId: userId ?? null,
@@ -679,6 +682,7 @@ export async function runAiCall(
 
     void logAiUsage({
       feature,
+      routeKey: modelKey,
       provider: route.provider,
       tenantId: tenantId ?? null,
       userId: userId ?? null,

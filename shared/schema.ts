@@ -1997,6 +1997,11 @@ export const aiUsage = pgTable(
     requestId: text("request_id"),
     /** Feature or agent key that made the call (e.g. "planner_agent", "summarize") */
     feature: text("feature").notNull(),
+    /**
+     * Logical route key resolved by the AI router (e.g. "expert.chat", "ops.analysis").
+     * Null for legacy calls that predate route-key logging.
+     */
+    routeKey: text("route_key"),
     /** AI provider key — "openai" | "anthropic" | "google" */
     provider: text("provider"),
     /** OpenAI model used (e.g. "gpt-4.1-mini") */
