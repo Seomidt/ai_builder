@@ -27,7 +27,8 @@ import Team        from "@/pages/team";
 
 // ── Lazy: detail pages ────────────────────────────────────────────────────────
 const RunDetail       = lazy(() => import("@/pages/run-detail"));
-const AiEkspertDetail = lazy(() => import("@/pages/ai-ekspert-detail"));
+const AiEkspertDetail  = lazy(() => import("@/pages/ai-ekspert-detail"));
+const AiEkspertEditor  = lazy(() => import("@/pages/ai-ekspert-editor"));
 
 // ── Lazy: workspace surface ───────────────────────────────────────────────────
 const WorkspaceDashboard    = lazy(() => import("@/pages/tenant/dashboard"));
@@ -83,6 +84,8 @@ export function TenantApp() {
               <Redirect to="/ai-chat" />
             </Route>
             <Route path="/ai-eksperter" component={AiEksperter} />
+            <Route path="/ai-eksperter/opret" component={AiEkspertEditor} />
+            <Route path="/ai-eksperter/:id/rediger" component={AiEkspertEditor} />
             <Route path="/ai-eksperter/:id" component={AiEkspertDetail} />
             <Route path="/viden-data"   component={VidenData} />
             <Route path="/regler"       component={Regler} />

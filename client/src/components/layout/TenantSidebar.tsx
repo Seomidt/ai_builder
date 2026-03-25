@@ -86,10 +86,8 @@ function NavLink({
       href={href}
       data-testid={`nav-link-${href.replace(/\//g, "-").replace(/^-/, "")}`}
       className={cn(
-        "h-[27px] flex items-center gap-2 text-[12.5px] leading-none cursor-pointer transition-colors shrink-0 whitespace-nowrap select-none",
-        active
-          ? "font-semibold"
-          : "font-normal hover:bg-white/[0.03]",
+        "h-[30px] flex items-center gap-2.5 text-[12.5px] leading-none cursor-pointer shrink-0 whitespace-nowrap select-none",
+        active ? "font-semibold" : "font-normal",
       )}
       style={{
         paddingLeft: "11px",
@@ -97,13 +95,21 @@ function NavLink({
         borderLeft: active
           ? "2px solid rgba(34,211,238,0.9)"
           : "2px solid transparent",
-        color: active ? "#f1f5f9" : "rgba(148,163,184,0.80)",
+        color: active ? "#e2e8f0" : "rgba(148,163,184,0.75)",
+        background: active ? "none" : "transparent",
+        textDecoration: "none",
+      }}
+      onMouseEnter={(e) => {
+        if (!active) (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.03)";
+      }}
+      onMouseLeave={(e) => {
+        (e.currentTarget as HTMLElement).style.background = active ? "none" : "transparent";
       }}
     >
       <Icon
-        size={15}
-        strokeWidth={1.75}
-        style={{ opacity: active ? 0.65 : 0.45, flexShrink: 0 }}
+        size={14}
+        strokeWidth={1.6}
+        style={{ opacity: active ? 0.7 : 0.4, flexShrink: 0 }}
       />
       {label}
     </Link>
@@ -220,15 +226,19 @@ export function TenantSidebar() {
               <a
                 href={getAdminAppUrl()}
                 data-testid="link-switch-to-admin"
-                className="h-[27px] flex items-center gap-2 text-[12.5px] font-normal hover:bg-white/[0.03] cursor-pointer transition-colors shrink-0 select-none"
+                className="h-[30px] flex items-center gap-2.5 text-[12.5px] font-normal cursor-pointer shrink-0 select-none"
                 style={{
                   paddingLeft: "11px",
                   paddingRight: "12px",
                   borderLeft: "2px solid transparent",
-                  color: "rgba(148,163,184,0.50)",
+                  color: "rgba(148,163,184,0.45)",
+                  background: "transparent",
+                  textDecoration: "none",
                 }}
+                onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = "rgba(255,255,255,0.03)"; }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = "transparent"; }}
               >
-                <ShieldAlert size={15} strokeWidth={1.75} style={{ opacity: 0.40, flexShrink: 0 }} />
+                <ShieldAlert size={14} strokeWidth={1.6} style={{ opacity: 0.35, flexShrink: 0 }} />
                 Platform Ops
               </a>
             </>
