@@ -132,13 +132,13 @@ function isAdminRole(role?: string) {
 // ─── Field style constants ─────────────────────────────────────────────────────
 
 const FIELD_CLS  = [
-  "bg-white/[0.08] border-white/25",
-  "focus:border-primary/70 focus-visible:ring-2 focus-visible:ring-primary/30 focus-visible:ring-offset-0",
-  "placeholder:text-white/20 text-white/90",
+  "bg-slate-800 border-slate-500",
+  "text-slate-100 placeholder:text-slate-500",
+  "focus:border-cyan-400 focus-visible:ring-2 focus-visible:ring-cyan-500/40 focus-visible:ring-offset-0",
   "transition-colors duration-150",
 ].join(" ");
-const LABEL_CLS  = "text-xs font-medium text-white/70 mb-1";
-const HELPER_CLS = "text-[11px] text-white/30 mt-2 leading-relaxed";
+const LABEL_CLS  = "text-xs font-semibold text-slate-200 mb-1";
+const HELPER_CLS = "text-[11px] text-slate-500 mt-2 leading-relaxed";
 
 // ─── Section Header ───────────────────────────────────────────────────────────
 
@@ -152,8 +152,8 @@ function SectionHeader({ letter, title, subtitle }: { letter: string; title: str
         {letter}
       </div>
       <div>
-        <p className="text-sm font-semibold text-foreground">{title}</p>
-        {subtitle && <p className="text-xs text-muted-foreground/55 mt-0.5">{subtitle}</p>}
+        <p className="text-sm font-semibold text-slate-100">{title}</p>
+        {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
       </div>
     </div>
   );
@@ -211,7 +211,7 @@ function RefineButton({
         type="button"
         onClick={() => setOpen(true)}
         disabled={disabled || !currentValue?.trim()}
-        className="flex items-center gap-1 text-[10px] text-white/30 hover:text-primary/60 transition-colors disabled:opacity-20 disabled:cursor-not-allowed"
+        className="flex items-center gap-1 text-[10px] text-slate-500 hover:text-cyan-400 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
         data-testid={`button-ai-refine-${field}`}
       >
         <Sparkles size={10} />
@@ -791,9 +791,9 @@ export default function AiEkspertEditor() {
                     <div className="border-t border-white/[0.06]">
                       {isNew ? (
                         <div className="px-3.5 py-4">
-                          <div className="rounded-lg border border-white/[0.08] bg-white/[0.02] px-4 py-3.5 text-center">
-                            <p className="text-xs text-white/30 font-medium">Ingen avancerede indstillinger endnu</p>
-                            <p className="text-[11px] text-white/20 mt-1">Tilgængeligt efter oprettelse af eksperten</p>
+                          <div className="rounded-lg border border-slate-600 bg-slate-800/50 px-4 py-3.5 text-center">
+                            <p className="text-xs text-slate-400 font-medium">Ingen avancerede indstillinger endnu</p>
+                            <p className="text-[11px] text-slate-500 mt-1">Tilgængeligt efter oprettelse af eksperten</p>
                           </div>
                         </div>
                       ) : (
@@ -801,12 +801,12 @@ export default function AiEkspertEditor() {
                           {expert && (
                             <>
                               <div className="space-y-1">
-                                <p className="text-[10px] text-white/30 uppercase tracking-wider font-medium">Ekspert ID</p>
-                                <code className="text-[10px] text-white/35 font-mono">{expert.id}</code>
+                                <p className="text-[10px] text-slate-500 uppercase tracking-wider font-medium">Ekspert ID</p>
+                                <code className="text-[10px] text-slate-400 font-mono">{expert.id}</code>
                               </div>
                               <div className="space-y-1">
-                                <p className="text-[10px] text-white/30 uppercase tracking-wider font-medium">Versioner</p>
-                                <p className="text-[11px] text-white/40">
+                                <p className="text-[10px] text-slate-500 uppercase tracking-wider font-medium">Versioner</p>
+                                <p className="text-[11px] text-slate-400">
                                   Live: {expert.currentVersionId ? expert.currentVersionId.slice(0, 8) + "…" : "Ingen"} ·
                                   Kladde: {expert.draftVersionId ? expert.draftVersionId.slice(0, 8) + "…" : "Ingen"}
                                 </p>
