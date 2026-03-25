@@ -29,7 +29,7 @@ Alt i tenant-produktet kredser om AI Eksperter.
 - **Sprog**: Kommuniker på dansk
 - **iPhone-bruger**: Kan ikke paste tekst i Replit shell fra iPhone — giv altid korte, trin-for-trin shell-kommandoer der kan skrives manuelt, én ad gangen
 - **GitHub**: Remote URL bruger `$GITHUB_PERSONAL_ACCESS_TOKEN` — repo: `github.com/Seomidt/ai_builder`
-- **GitHub workflow**: Efter HVERT task: 1) push til `feature/ui-surface-domain-routing`, 2) opret PR via GitHub API med dansk beskrivelse af ændringer, 3) merge PR til `main` via GitHub API. Vercel deployer automatisk fra `main`. Brugeren skal IKKE gøre noget manuelt i GitHub eller Replit.
+- **GitHub workflow**: Efter HVERT task (ALTID — ingen undtagelser): 1) push til `feature/ui-surface-domain-routing`, 2) opret PR via GitHub API med dansk beskrivelse, 3) hent PR-nummer og merge automatisk via API. Brugeren skal ALDRIG gøre noget manuelt. Merge sker uden brugerens bekræftelse — bare gør det.
 
 ## ⚠️ Infrastruktur-regel (KRITISK)
 
