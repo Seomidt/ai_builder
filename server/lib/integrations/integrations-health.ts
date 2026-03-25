@@ -76,8 +76,18 @@ export interface IntegrationsHealthReport {
 
 // ── Latency classification ─────────────────────────────────────────────────────
 
-function classifyLatency(ms: number | null): LatencyClass | null {
+/**
+ * Classify API call latency.
+ * - "api"  (default): HTTP endpoints — tight thresholds
+ * - "db"             : Database/storage — relaxed thresholds (cross-region normal)
+ */
+function classifyLatency(ms: number | null, kind: "api" | "db" = "api"): LatencyClass | null {
   if (ms === null) return null;
+  if (kind === "db") {
+    if (ms < 500)  return "good";
+    if (ms < 1800) return "warning";
+    return "poor";
+  }
   if (ms < 200)  return "good";
   if (ms < 800)  return "warning";
   return "poor";
@@ -268,7 +278,8 @@ async function _checkSupabase(): Promise<PartialProviderResult> {
   const t0 = Date.now();
   const res = await fetchWithTimeout(`${url}/rest/v1/`, { headers: { apikey: anon, Authorization: `Bearer ${anon}` } });
   const latencyMs = Date.now() - t0;
-  const latencyClass = classifyLatency(latencyMs);
+  // Use "db" thresholds — cross-region latency up to 1800ms is normal for database REST endpoints
+  const latencyClass = classifyLatency(latencyMs, "db");
 
   if (res.status === 200 || res.status === 404) {
     const status: HealthStatus = latencyClass === "poor" ? "degraded" : "connected";
