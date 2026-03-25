@@ -1007,7 +1007,8 @@ The user describes an AI expert they want to build. Return ONLY valid JSON with 
   "suggested_name": "string — precise professional name",
   "improved_description": "string — clear purpose-driven description, max 2 sentences",
   "goal": "string — one sentence: what this expert achieves",
-  "instructions": "string — 3-6 sentence system instruction block for the expert",
+  "instructions": "string — 3-6 bullet points describing what the AI SHOULD do (use newline-separated bullets starting with -)",
+  "restrictions": "string — 3-5 bullet points describing what the AI must NOT do (use newline-separated bullets starting with -)",
   "suggested_output_style": "concise | formal | advisory",
   "suggested_rules": [
     {
@@ -1040,6 +1041,7 @@ Generate names and content in ${langNote}.`;
         improved_description:   z.string(),
         goal:                   z.string(),
         instructions:           z.string(),
+        restrictions:           z.string().optional().default(""),
         suggested_output_style: z.enum(["concise","formal","advisory"]).catch("advisory"),
         suggested_rules: z.array(z.object({
           type:              z.string(),
