@@ -29,6 +29,7 @@ Alt i tenant-produktet kredser om AI Eksperter.
 - **Sprog**: Kommuniker på dansk
 - **iPhone-bruger**: Kan ikke paste tekst i Replit shell fra iPhone — giv altid korte, trin-for-trin shell-kommandoer der kan skrives manuelt, én ad gangen
 - **GitHub**: Remote URL bruger `$GITHUB_PERSONAL_ACCESS_TOKEN` — repo: `github.com/Seomidt/ai_builder`
+- **GitHub workflow**: Efter HVERT task: push til GitHub med beskrivende commit-besked. Vercel deployer automatisk fra `main`. Arbejdsgrenen er `feature/ui-surface-domain-routing` — push altid hertil, og fortæl brugeren at merge til `main` via GitHub PR for at deploye til produktion.
 
 ## ⚠️ Infrastruktur-regel (KRITISK)
 
