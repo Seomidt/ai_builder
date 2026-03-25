@@ -132,13 +132,13 @@ function isAdminRole(role?: string) {
 // ─── Field style constants ─────────────────────────────────────────────────────
 
 const FIELD_CLS  = [
-  "bg-white/[0.92] border-zinc-300/70",
-  "text-zinc-900 placeholder:text-zinc-400",
-  "focus:border-cyan-500 focus-visible:ring-2 focus-visible:ring-cyan-500/25 focus-visible:ring-offset-0",
+  "bg-white border-zinc-400",
+  "text-zinc-900 placeholder:text-zinc-500",
+  "focus:border-cyan-500 focus-visible:ring-2 focus-visible:ring-cyan-500/30 focus-visible:ring-offset-0",
   "transition-colors duration-150",
 ].join(" ");
-const LABEL_CLS  = "text-xs font-semibold text-slate-300 mb-1";
-const HELPER_CLS = "text-[11px] text-slate-400 mt-2 leading-relaxed";
+const LABEL_CLS  = "text-xs font-semibold text-slate-200 mb-1";
+const HELPER_CLS = "text-[11px] text-slate-500 mt-2 leading-relaxed";
 
 // ─── Section Header ───────────────────────────────────────────────────────────
 
@@ -601,7 +601,7 @@ export default function AiEkspertEditor() {
         <Form {...form}>
           <form
             onSubmit={(e) => e.preventDefault()}
-            className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-8"
+            className="max-w-2xl mx-auto px-4 sm:px-6 py-6 space-y-10"
           >
 
             {/* ── Section A — Identitet ────────────────────────────────────── */}
@@ -777,14 +777,14 @@ export default function AiEkspertEditor() {
                 )} />
 
                 {/* Advanced — collapsed */}
-                <div className="border border-white/[0.06] rounded-lg overflow-hidden">
+                <div className="border border-zinc-600/40 rounded-lg overflow-hidden bg-white/[0.03]">
                   <button
                     type="button"
                     onClick={() => setAdvancedOpen((p) => !p)}
-                    className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs text-muted-foreground/50 hover:text-muted-foreground/70 transition-colors"
+                    className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs text-slate-400 hover:text-slate-200 transition-colors"
                     data-testid="button-toggle-advanced"
                   >
-                    <span className="font-medium uppercase tracking-wide text-[10px]">Avanceret konfiguration</span>
+                    <span className="font-semibold uppercase tracking-wide text-[10px]">Avanceret konfiguration</span>
                     {advancedOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                   </button>
                   {advancedOpen && (
