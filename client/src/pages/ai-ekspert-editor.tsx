@@ -129,11 +129,17 @@ function isAdminRole(role?: string) {
   return role === "tenant_admin" || role === "platform_admin" || role === "owner";
 }
 
+// ─── Field style constants ─────────────────────────────────────────────────────
+
+const FIELD_CLS   = "bg-white/[0.06] border-white/[0.18] focus:border-primary/50 focus-visible:ring-1 focus-visible:ring-primary/20 placeholder:text-muted-foreground/30 text-foreground/90";
+const LABEL_CLS   = "text-xs font-medium text-muted-foreground/80";
+const HELPER_CLS  = "text-[11px] text-muted-foreground/40 mt-2 leading-relaxed";
+
 // ─── Section Header ───────────────────────────────────────────────────────────
 
 function SectionHeader({ letter, title, subtitle }: { letter: string; title: string; subtitle?: string }) {
   return (
-    <div className="flex items-start gap-3 mb-4">
+    <div className="flex items-start gap-3 mb-5">
       <div
         className="w-6 h-6 rounded flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5"
         style={{ background: "rgba(34,211,238,0.10)", color: "rgba(34,211,238,0.8)", border: "1px solid rgba(34,211,238,0.18)" }}
@@ -142,7 +148,7 @@ function SectionHeader({ letter, title, subtitle }: { letter: string; title: str
       </div>
       <div>
         <p className="text-sm font-semibold text-foreground">{title}</p>
-        {subtitle && <p className="text-xs text-muted-foreground/60 mt-0.5">{subtitle}</p>}
+        {subtitle && <p className="text-xs text-muted-foreground/55 mt-0.5">{subtitle}</p>}
       </div>
     </div>
   );
@@ -602,13 +608,13 @@ export default function AiEkspertEditor() {
               />
               <div className="space-y-4">
                 <FormField control={form.control} name="name" render={({ field }) => (
-                  <FormItem>
-                    <FormLabel className="text-xs text-muted-foreground/70">Navn *</FormLabel>
+                  <FormItem className="space-y-1.5">
+                    <FormLabel className={LABEL_CLS}>Navn *</FormLabel>
                     <FormControl>
                       <Input
                         placeholder="f.eks. Forsikringsspecialist"
                         data-testid="input-expert-name"
-                        className="bg-white/[0.03] border-white/10 focus:border-primary/40"
+                        className={FIELD_CLS}
                         {...field}
                       />
                     </FormControl>
@@ -617,9 +623,9 @@ export default function AiEkspertEditor() {
                 )} />
 
                 <FormField control={form.control} name="goal" render={({ field }) => (
-                  <FormItem>
+                  <FormItem className="space-y-1.5">
                     <div className="flex items-center justify-between">
-                      <FormLabel className="text-xs text-muted-foreground/70">Kort formål *</FormLabel>
+                      <FormLabel className={LABEL_CLS}>Kort formål *</FormLabel>
                       <RefineButton
                         field="kort formål"
                         currentValue={goalValue}
@@ -631,7 +637,7 @@ export default function AiEkspertEditor() {
                       <Input
                         placeholder="Vurderer forsikringssager og forklarer dækning ud fra virksomhedens egne data."
                         data-testid="input-expert-goal"
-                        className="bg-white/[0.03] border-white/10 focus:border-primary/40"
+                        className={FIELD_CLS}
                         {...field}
                       />
                     </FormControl>
@@ -641,12 +647,12 @@ export default function AiEkspertEditor() {
 
                 {depts.length > 1 && (
                   <FormField control={form.control} name="departmentId" render={({ field }) => (
-                    <FormItem>
-                      <FormLabel className="text-xs text-muted-foreground/70">Afdeling</FormLabel>
+                    <FormItem className="space-y-1.5">
+                      <FormLabel className={LABEL_CLS}>Afdeling</FormLabel>
                       <Select onValueChange={field.onChange} value={field.value ?? ""}>
                         <FormControl>
                           <SelectTrigger
-                            className="bg-white/[0.03] border-white/10"
+                            className={FIELD_CLS}
                             data-testid="select-expert-department"
                           >
                             <SelectValue placeholder="Vælg afdeling" />
@@ -672,16 +678,16 @@ export default function AiEkspertEditor() {
               />
               <div className="space-y-5">
 
-                {/* Smart templates */}
-                <div data-testid="panel-smart-templates">
-                  <p className="text-[10px] text-muted-foreground/40 uppercase tracking-wider font-medium mb-2">Hurtig skabelon</p>
+                {/* Smart templates — secondary emphasis */}
+                <div data-testid="panel-smart-templates" className="pb-1">
+                  <p className="text-[10px] text-muted-foreground/30 uppercase tracking-wider font-medium mb-2">Hurtig skabelon</p>
                   <div className="flex flex-wrap gap-1.5">
                     {(Object.keys(SMART_TEMPLATES) as (keyof typeof SMART_TEMPLATES)[]).map((key) => (
                       <button
                         key={key}
                         type="button"
                         onClick={() => applyTemplate(key)}
-                        className="text-[11px] px-2.5 py-1 rounded border border-white/10 text-muted-foreground/60 hover:text-foreground hover:border-primary/30 hover:bg-primary/5 transition-colors"
+                        className="text-[11px] px-2.5 py-1 rounded border border-white/[0.08] text-muted-foreground/40 hover:text-muted-foreground/70 hover:border-white/20 hover:bg-white/[0.03] transition-colors"
                         data-testid={`button-template-${key}`}
                       >
                         {SMART_TEMPLATES[key].label}
@@ -692,9 +698,9 @@ export default function AiEkspertEditor() {
 
                 {/* Hvad skal AI gøre */}
                 <FormField control={form.control} name="instructions" render={({ field }) => (
-                  <FormItem>
+                  <FormItem className="space-y-1.5">
                     <div className="flex items-center justify-between">
-                      <FormLabel className="text-xs text-muted-foreground/70">Hvad skal AI gøre?</FormLabel>
+                      <FormLabel className={LABEL_CLS}>Hvad skal AI gøre?</FormLabel>
                       <RefineButton
                         field="hvad skal AI gøre"
                         currentValue={instructionsValue}
@@ -704,14 +710,14 @@ export default function AiEkspertEditor() {
                     </div>
                     <FormControl>
                       <Textarea
-                        placeholder={"Brug gerne punktform:\n- Analyser data fra tilkoblede kilder\n- Besvare spørgsmål baseret på interne regler\n- Følg virksomhedens egne processer"}
+                        placeholder={"Brug gerne punktform:\n- Analyser data fra tilkoblede kilder\n- Besvar spørgsmål baseret på interne regler\n- Følg virksomhedens egne processer"}
                         rows={5}
                         data-testid="input-expert-instructions"
-                        className="bg-white/[0.03] border-white/10 focus:border-primary/40 resize-none"
+                        className={`${FIELD_CLS} resize-none min-h-[120px]`}
                         {...field}
                       />
                     </FormControl>
-                    <p className="text-[11px] text-muted-foreground/35 mt-1">
+                    <p className={HELPER_CLS}>
                       Eksempler: Analysér data · Besvar spørgsmål · Følg interne regler · Giv strukturerede anbefalinger
                     </p>
                   </FormItem>
@@ -719,9 +725,9 @@ export default function AiEkspertEditor() {
 
                 {/* Hvad må AI ikke gøre */}
                 <FormField control={form.control} name="description" render={({ field }) => (
-                  <FormItem>
+                  <FormItem className="space-y-1.5">
                     <div className="flex items-center justify-between">
-                      <FormLabel className="text-xs text-muted-foreground/70">Hvad må AI ikke gøre?</FormLabel>
+                      <FormLabel className={LABEL_CLS}>Hvad må AI ikke gøre?</FormLabel>
                       <RefineButton
                         field="hvad må AI ikke gøre"
                         currentValue={descriptionValue}
@@ -734,23 +740,23 @@ export default function AiEkspertEditor() {
                         placeholder={"Brug gerne punktform:\n- Gæt ikke — svar kun baseret på tilgængelig data\n- Anta ikke noget om ekstern viden\n- Udfør ikke handlinger uden dokumentation"}
                         rows={4}
                         data-testid="input-expert-restrictions"
-                        className="bg-white/[0.03] border-white/10 focus:border-primary/40 resize-none"
+                        className={`${FIELD_CLS} resize-none min-h-[100px]`}
                         {...field}
                       />
                     </FormControl>
-                    <p className="text-[11px] text-muted-foreground/35 mt-1">
+                    <p className={HELPER_CLS}>
                       Eksempler: Ingen gætteri · Ingen eksterne antagelser · Ingen handlinger uden data
                     </p>
                   </FormItem>
                 )} />
 
                 <FormField control={form.control} name="outputStyle" render={({ field }) => (
-                  <FormItem>
-                    <FormLabel className="text-xs text-muted-foreground/70">Hvordan skal svarene være?</FormLabel>
+                  <FormItem className="space-y-1.5">
+                    <FormLabel className={LABEL_CLS}>Hvordan skal svarene være?</FormLabel>
                     <Select onValueChange={field.onChange} value={field.value ?? "advisory"}>
                       <FormControl>
                         <SelectTrigger
-                          className="bg-white/[0.03] border-white/10"
+                          className={FIELD_CLS}
                           data-testid="select-expert-outputstyle"
                         >
                           <SelectValue />
@@ -852,7 +858,7 @@ export default function AiEkspertEditor() {
                   rows={4}
                   value={aiPrompt}
                   onChange={(e) => setAiPrompt(e.target.value)}
-                  className="bg-white/[0.03] border-white/10 focus:border-primary/40 resize-none"
+                  className={`${FIELD_CLS} resize-none min-h-[100px]`}
                   data-testid="input-ai-prompt"
                 />
                 <Button
