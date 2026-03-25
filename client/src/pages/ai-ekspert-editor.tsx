@@ -132,13 +132,13 @@ function isAdminRole(role?: string) {
 // ─── Field style constants ─────────────────────────────────────────────────────
 
 const FIELD_CLS  = [
-  "bg-slate-800 border-slate-500",
-  "text-slate-100 placeholder:text-slate-500",
-  "focus:border-cyan-400 focus-visible:ring-2 focus-visible:ring-cyan-500/40 focus-visible:ring-offset-0",
+  "bg-white/[0.92] border-zinc-300/70",
+  "text-zinc-900 placeholder:text-zinc-400",
+  "focus:border-cyan-500 focus-visible:ring-2 focus-visible:ring-cyan-500/25 focus-visible:ring-offset-0",
   "transition-colors duration-150",
 ].join(" ");
-const LABEL_CLS  = "text-xs font-semibold text-slate-200 mb-1";
-const HELPER_CLS = "text-[11px] text-slate-500 mt-2 leading-relaxed";
+const LABEL_CLS  = "text-xs font-semibold text-slate-300 mb-1";
+const HELPER_CLS = "text-[11px] text-slate-400 mt-2 leading-relaxed";
 
 // ─── Section Header ───────────────────────────────────────────────────────────
 
