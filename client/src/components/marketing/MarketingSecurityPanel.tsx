@@ -1,39 +1,35 @@
-import { Menu, Lock, Eye, FolderLock, ShieldCheck, Building2 } from "lucide-react";
+import { Lock, Eye, FolderLock, ShieldCheck, Building2, CheckCircle2 } from "lucide-react";
 import { MarketingLogo } from "./MarketingLogo";
 
 const securityItems = [
   {
     icon: <Lock className="h-4 w-4" />,
     title: "Tenant isolation by design",
-    text: "Built for organization-level separation, secure access control, and privacy-first architecture.",
+    text: "Organization-level separation, secure access control, and privacy-first architecture.",
   },
   {
     icon: <Eye className="h-4 w-4" />,
     title: "Full audit visibility",
-    text: "Track actions, access and activity with clear auditability across your AI operations.",
+    text: "Track actions, access and activity with clear auditability across all AI operations.",
   },
   {
     icon: <FolderLock className="h-4 w-4" />,
     title: "Your data stays yours",
-    text: "Designed so your data remains under your control, with secure storage and scoped access.",
+    text: "Data remains under your control with scoped access and secure isolated storage.",
   },
   {
     icon: <ShieldCheck className="h-4 w-4" />,
-    title: "Data privacy and GDPR readiness",
-    text: "Built with EU data protection principles, secure access control and privacy-first architecture.",
+    title: "GDPR-ready infrastructure",
+    text: "Built with EU data protection principles and privacy-first architecture from the ground up.",
   },
   {
     icon: <Building2 className="h-4 w-4" />,
     title: "Enterprise-ready architecture",
-    text: "Designed for teams that need control, visibility and a strong foundation for secure AI adoption.",
+    text: "Designed for teams that need control, visibility and a strong foundation for AI adoption.",
   },
 ];
 
-const earlyAccessBullets = [
-  { icon: <Lock className="h-3.5 w-3.5" />, label: "Limited rollout" },
-  { icon: <ShieldCheck className="h-3.5 w-3.5" />, label: "No spam" },
-  { icon: <Building2 className="h-3.5 w-3.5" />, label: "Priority onboarding" },
-];
+const trustBadges = ["SOC 2 ready", "GDPR compliant", "Tenant-isolated", "EU data residency"];
 
 export function MarketingSecurityPanel() {
   return (
@@ -44,31 +40,38 @@ export function MarketingSecurityPanel() {
       {/* Header row */}
       <div className="mb-8 flex items-center justify-between">
         <MarketingLogo small />
-        <button
-          aria-label="Menu"
-          className="grid h-8 w-8 place-items-center rounded-lg border border-white/10 bg-white/5 text-slate-400 transition hover:text-white"
-        >
-          <Menu className="h-4 w-4" />
-        </button>
+        <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-300 tracking-wide">
+          PRIVATE ROLLOUT
+        </div>
       </div>
 
-      {/* Security section */}
+      {/* Trust badges */}
+      <div className="mb-6 flex flex-wrap gap-2">
+        {trustBadges.map((badge) => (
+          <span key={badge} className="inline-flex items-center gap-1 rounded-full border border-sky-400/20 bg-sky-400/8 px-2.5 py-1 text-[10px] font-medium text-sky-300">
+            <CheckCircle2 className="h-2.5 w-2.5" />
+            {badge}
+          </span>
+        ))}
+      </div>
+
+      {/* Security section label */}
       <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.24em] text-sky-400/80">
         Secure AI infrastructure
       </div>
 
       <h2 className="mt-3 text-3xl font-semibold leading-tight tracking-tight text-white">
-        Secure AI Infrastructure<br />for Enterprises
+        Secure AI<br />for Enterprises
       </h2>
 
       <p className="mt-3 text-sm leading-6 text-slate-400">
-        BlissOps is designed for organizations that need control, visibility and data protection when using AI.
+        BlissOps is designed for organizations that need control, visibility and data protection when running AI at scale.
       </p>
 
-      <div className="mt-6 space-y-5">
+      <div className="mt-6 space-y-4">
         {securityItems.map((item) => (
           <div key={item.title} className="flex gap-3">
-            <div className="mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-sky-400/20 bg-[#0a1628] text-sky-300">
+            <div className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-xl border border-sky-400/20 bg-[#0a1628] text-sky-300">
               {item.icon}
             </div>
             <div>
@@ -79,36 +82,28 @@ export function MarketingSecurityPanel() {
         ))}
       </div>
 
-      <div className="my-8 h-px bg-white/8" />
+      <div className="my-7 h-px bg-white/8" />
 
-      {/* Early access section */}
+      {/* Early access CTA */}
       <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.24em] text-sky-400/80">
-        Built for contact
+        Early access
       </div>
 
-      <h3 className="mt-3 text-2xl font-semibold leading-tight tracking-tight text-white">
-        Private early access<br />for selected teams
+      <h3 className="mt-3 text-xl font-semibold leading-tight tracking-tight text-white">
+        Private rollout for<br />selected organizations
       </h3>
 
       <p className="mt-3 text-sm leading-6 text-slate-400">
-        BlissOps is in private rollout. Be among the first to gain access and help shape the platform.
+        Be among the first to gain access and help shape the platform. Limited seats available.
       </p>
 
-      <div className="mt-5 space-y-3">
-        {earlyAccessBullets.map((item) => (
-          <div key={item.label} className="flex items-center gap-3 text-sm text-slate-200">
-            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl border border-sky-400/20 bg-[#0a1628] text-sky-300">
-              {item.icon}
-            </span>
-            {item.label}
+      <div className="mt-5 space-y-2">
+        {["Limited rollout — selected teams only", "Priority onboarding and support", "Influence the product roadmap"].map((item) => (
+          <div key={item} className="flex items-center gap-2.5 text-sm text-slate-300">
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-sky-400" />
+            {item}
           </div>
         ))}
-      </div>
-
-      {/* Bottom logo card */}
-      <div className="mt-8 rounded-2xl border border-white/10 bg-[#0a1628]/80 p-4">
-        <MarketingLogo small />
-        <div className="mt-4 text-xs text-slate-400">Built for secure AI infrastructure</div>
       </div>
     </aside>
   );

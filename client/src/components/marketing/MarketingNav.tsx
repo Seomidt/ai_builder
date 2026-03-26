@@ -11,17 +11,18 @@ export function MarketingNav() {
             <MarketingLogo />
           </Link>
 
-          <nav className="hidden items-center gap-8 text-sm text-slate-300 md:flex">
+          <nav className="hidden items-center gap-8 text-sm text-slate-400 md:flex">
             <a href="#product" className="transition-colors hover:text-white">Product</a>
             <a href="#security" className="transition-colors hover:text-white">Security</a>
+            <a href="#contact" className="transition-colors hover:text-white">Contact</a>
           </nav>
 
           <Link
             href="/early-access"
-            className="inline-flex items-center gap-1.5 rounded-xl border border-sky-500/40 bg-[#060d1f]/80 px-4 py-2.5 text-sm font-medium text-white shadow-[0_0_18px_rgba(56,189,248,0.18)] transition hover:border-sky-400/60 hover:shadow-[0_0_26px_rgba(56,189,248,0.28)]"
+            className="inline-flex items-center gap-1.5 rounded-xl bg-sky-500 px-4 py-2.5 text-sm font-semibold text-white shadow-[0_0_20px_rgba(14,165,233,0.4)] transition hover:bg-sky-400 hover:shadow-[0_0_28px_rgba(14,165,233,0.5)]"
             data-testid="link-nav-early-access"
           >
-            Join Early Access <ArrowRight className="h-3.5 w-3.5" />
+            Get Early Access <ArrowRight className="h-3.5 w-3.5" />
           </Link>
         </div>
         <div className="h-px bg-white/[0.06]" />
