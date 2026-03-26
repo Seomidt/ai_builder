@@ -36,9 +36,12 @@ export function getAppContext(hostname: string): AppContext {
   if (h.startsWith("app."))                                 return "tenant";
   if (h === "blissops.com" || h === "www.blissops.com")     return "marketing";
 
-  // localhost default → tenant (most ergonomic for development)
+  // localhost and *.localhost → tenant (development default)
   // Use admin.localhost or app.localhost for explicit surface targeting
-  return "tenant";
+  if (h === "localhost" || h === "127.0.0.1" || h.endsWith(".localhost")) return "tenant";
+
+  // All other hostnames (Replit preview, staging, blissops.com variants) → marketing
+  return "marketing";
 }
 
 /**
