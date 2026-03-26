@@ -2409,6 +2409,67 @@ Generate names and content in ${langNote}.`;
     }
   });
 
+  // ── Early Access Applications ──────────────────────────────────────────────
+  app.post("/api/early-access", async (req: Request, res: Response) => {
+    try {
+      const { pool } = await import("./db");
+      const { z }   = await import("zod");
+
+      const schema = z.object({
+        email:    z.string().email(),
+        fullName: z.string().optional(),
+        company:  z.string().min(1).optional(),
+        role:     z.string().optional(),
+        useCase:  z.string().optional(),
+        teamSize: z.string().optional(),
+      });
+
+      const parsed = schema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(422).json({ error: "Ugyldig formulardata", details: parsed.error.issues });
+      }
+
+      const { email, fullName, company, role, useCase, teamSize } = parsed.data;
+
+      // Ensure table exists (idempotent DDL)
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS early_access_applications (
+          id         text PRIMARY KEY DEFAULT gen_random_uuid()::text,
+          email      text NOT NULL,
+          full_name  text,
+          company    text,
+          role       text,
+          use_case   text,
+          team_size  text,
+          created_at timestamptz NOT NULL DEFAULT now()
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ea_email_uq ON early_access_applications (email);
+        CREATE INDEX IF NOT EXISTS ea_created_idx ON early_access_applications (created_at);
+      `);
+
+      // Upsert — ignore duplicates silently
+      const existing = await pool.query(
+        "SELECT id FROM early_access_applications WHERE email = $1 LIMIT 1",
+        [email],
+      );
+      if (existing.rows.length > 0) {
+        return res.status(200).json({ status: "already_registered" });
+      }
+
+      await pool.query(
+        `INSERT INTO early_access_applications (email, full_name, company, role, use_case, team_size)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [email, fullName ?? null, company ?? null, role ?? null, useCase ?? null, teamSize ?? null],
+      );
+
+      console.log(`[early-access] New application: ${email} (company=${company ?? "—"})`);
+      return res.status(201).json({ status: "registered" });
+    } catch (err) {
+      console.error("[early-access] Error:", err);
+      return res.status(500).json({ error: "Der skete en fejl. Prøv igen." });
+    }
+  });
+
   return httpServer;
 }
 
