@@ -114,14 +114,16 @@ function MarketingHome() {
 
               {/* Early access capture */}
               <MarketingEarlyAccessBlock />
-
-              {/* Footer */}
-              <MarketingFooter />
             </div>
           </div>
 
           {/* ── Right column (Security panel) ── */}
           <MarketingSecurityPanel />
+        </div>
+
+        {/* ── Footer — always at the very bottom ── */}
+        <div className="mx-auto max-w-[1440px] px-6 md:px-8">
+          <MarketingFooter />
         </div>
       </div>
     </div>
