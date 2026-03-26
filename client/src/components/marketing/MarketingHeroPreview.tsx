@@ -1,6 +1,6 @@
 export function MarketingHeroPreview() {
   return (
-    <div className="relative mx-auto mt-12 w-full max-w-3xl pb-32">
+    <div className="relative mx-auto mt-12 w-full max-w-3xl pb-4">
       {/* Glow behind preview */}
       <div className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-[500px] w-[700px] rounded-full bg-[radial-gradient(circle,rgba(56,189,248,0.14),transparent_60%)] blur-3xl" />
 
@@ -102,52 +102,6 @@ export function MarketingHeroPreview() {
         </div>
       </div>
 
-      {/* Floating: AI Usage — top right */}
-      <div className="absolute -right-4 top-8 w-[200px] rounded-2xl border border-sky-400/20 bg-[#060d1f]/90 p-4 shadow-[0_16px_48px_rgba(0,0,0,0.5)] backdrop-blur-md md:-right-8">
-        <div className="text-xs text-slate-400">AI Usage</div>
-        <div className="mt-2 grid grid-cols-3 gap-1 text-white">
-          <div>
-            <div className="text-lg font-semibold">184</div>
-            <div className="text-[9px] text-slate-500">Teams</div>
-          </div>
-          <div>
-            <div className="text-lg font-semibold">2380</div>
-            <div className="text-[9px] text-slate-500">Sources</div>
-          </div>
-          <div>
-            <div className="text-lg font-semibold">$5.9K</div>
-            <div className="text-[9px] text-slate-500">Monthly</div>
-          </div>
-        </div>
-        <div className="mt-3 flex h-16 items-end gap-1">
-          {[20,34,29,45,40,54,66,78].map((h, i) => (
-            <div key={i} className="flex-1 rounded-t bg-sky-300/80" style={{ height: `${h}%` }} />
-          ))}
-        </div>
-      </div>
-
-      {/* Floating: Cost Guardrails — bottom left */}
-      <div className="absolute -bottom-8 left-4 w-[220px] rounded-2xl border border-sky-400/20 bg-[#060d1f]/90 p-4 shadow-[0_16px_48px_rgba(0,0,0,0.5)] backdrop-blur-md">
-        <div className="text-xs text-slate-400">Cost Guardrails</div>
-        <div className="mt-3 space-y-3">
-          <div>
-            <div className="mb-1 flex justify-between text-[11px] text-slate-300">
-              <span>Monthly budget</span><span>68%</span>
-            </div>
-            <div className="h-1.5 rounded-full bg-slate-800">
-              <div className="h-1.5 w-[68%] rounded-full bg-sky-400" />
-            </div>
-          </div>
-          <div>
-            <div className="mb-1 flex justify-between text-[11px] text-slate-300">
-              <span>AI route protection</span><span>Active</span>
-            </div>
-            <div className="h-1.5 rounded-full bg-slate-800">
-              <div className="h-1.5 w-[92%] rounded-full bg-emerald-400" />
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }
