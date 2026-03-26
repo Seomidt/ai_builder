@@ -40,7 +40,12 @@ export function getAppContext(hostname: string): AppContext {
   // Use admin.localhost or app.localhost for explicit surface targeting
   if (h === "localhost" || h === "127.0.0.1" || h.endsWith(".localhost")) return "tenant";
 
-  // All other hostnames (Replit preview, staging, blissops.com variants) → marketing
+  // Any blissops.com variant not already matched (e.g. preview.blissops.com) → marketing
+  if (h.includes("blissops.com")) return "marketing";
+
+  // All other hostnames (Replit preview, Vercel preview, CI/staging URLs) → marketing
+  // These environments are used to preview the public marketing surface.
+  // Tenant auth flows operate exclusively on app.blissops.com — not on preview URLs.
   return "marketing";
 }
 
