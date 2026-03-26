@@ -17,6 +17,7 @@ import { MarketingNav } from "@/components/marketing/MarketingNav";
 import { MarketingHeroPreview } from "@/components/marketing/MarketingHeroPreview";
 import { MarketingSecurityPanel } from "@/components/marketing/MarketingSecurityPanel";
 import { MarketingFooter } from "@/components/marketing/MarketingFooter";
+import EarlyAccessPage from "@/pages/marketing/EarlyAccessPage";
 
 const capabilities = [
   {
@@ -202,6 +203,7 @@ export function MarketingApp() {
   return (
     <Switch>
       <Route path="/auth/:rest*" component={AuthRedirect} />
+      <Route path="/early-access" component={EarlyAccessPage} />
       <Route component={MarketingHome} />
     </Switch>
   );
