@@ -249,6 +249,33 @@ async function assembleContext(intent: OpsIntentId, scope: AiOpsScope): Promise<
   }
 }
 
+/**
+ * Defensively extract a JSON object from model output.
+ *
+ * Models sometimes wrap JSON in prose ("Here is the result:\n{...}").
+ * This function first attempts a direct parse, then falls back to extracting
+ * the first top-level JSON object found in the text.
+ *
+ * Throws if no valid JSON object can be extracted.
+ */
+function safeParseJsonOutput(raw: string): Record<string, unknown> {
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    // Fallback: extract first {...} block from model prose
+    const match = trimmed.match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]) as Record<string, unknown>;
+      } catch {
+        // Fall through to final error below
+      }
+    }
+    throw new Error(`AI Ops model returned non-JSON output (length=${raw.length}). Cannot parse response.`);
+  }
+}
+
 export async function runAiOpsQuery(input: OrchestratorInput): Promise<OrchestratorResult> {
   const auditId = `aiops_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -285,7 +312,7 @@ export async function runAiOpsQuery(input: OrchestratorInput): Promise<Orchestra
     const rawOutput = aiResult.text || "{}";
     assertAiOpsOutputSafe(rawOutput);
 
-    const parsed = JSON.parse(rawOutput) as Record<string, unknown>;
+    const parsed = safeParseJsonOutput(rawOutput);
     const base = makeBaseResponse(intentId, scope.mode, scope.organizationId ?? null, sourceIds);
 
     const enriched: Record<string, unknown> = {
