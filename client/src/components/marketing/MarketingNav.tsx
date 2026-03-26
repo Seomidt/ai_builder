@@ -1,4 +1,5 @@
 import { Link } from "wouter";
+import { ArrowRight } from "lucide-react";
 import { MarketingLogo } from "./MarketingLogo";
 
 export function MarketingNav() {
@@ -18,16 +19,13 @@ export function MarketingNav() {
               <a href="#security" className="transition hover:text-white">
                 Security
               </a>
-              <a href="#contact" className="transition hover:text-white">
-                Contact
-              </a>
             </nav>
 
             <Link
               href="/early-access"
-              className="rounded-xl border border-sky-400/30 bg-slate-950/80 px-5 py-3 text-sm font-medium text-white shadow-[0_0_20px_rgba(59,130,246,0.2)] transition hover:border-sky-300/50 hover:shadow-[0_0_28px_rgba(59,130,246,0.28)]"
+              className="inline-flex items-center gap-2 rounded-xl border border-sky-400/30 bg-slate-950/80 px-5 py-3 text-sm font-medium text-white shadow-[0_0_20px_rgba(59,130,246,0.2)] transition hover:border-sky-300/50 hover:shadow-[0_0_28px_rgba(59,130,246,0.28)]"
             >
-              Join Early Access
+              Join Early Access <ArrowRight className="h-4 w-4" />
             </Link>
           </div>
 

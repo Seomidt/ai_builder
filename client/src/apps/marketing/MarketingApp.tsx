@@ -17,8 +17,8 @@
  */
 
 import { useEffect } from "react";
-import { Switch, Route, useLocation } from "wouter";
-import { Link } from "wouter";
+import { Switch, Route, useLocation, Link } from "wouter";
+import { ArrowRight } from "lucide-react";
 import { redirectAuthToTenantApp } from "@/lib/runtime/urls";
 import { MarketingNav } from "@/components/marketing/MarketingNav";
 import { MarketingHeroPreview } from "@/components/marketing/MarketingHeroPreview";
@@ -27,22 +27,27 @@ import { MarketingFooter } from "@/components/marketing/MarketingFooter";
 
 const capabilities = [
   {
+    icon: "⌂",
     title: "AI assistants on your data",
     text: "Ground AI on your documents, knowledge base and internal systems — keeping context accurate and private.",
   },
   {
+    icon: "$",
     title: "Predictable AI usage and cost",
     text: "Track usage with built-in guardrails and clear visibility into how AI is used across your organization.",
   },
   {
+    icon: "▣",
     title: "Tenant-isolated architecture",
     text: "Structured for secure organizational separation across teams, workspaces and data access boundaries.",
   },
   {
+    icon: "🔒",
     title: "Access control and permissions",
     text: "Support granular roles, scoped permissions and governance-ready access management.",
   },
   {
+    icon: "☰",
     title: "Audit logs and governance",
     text: "Maintain visibility into activity, access and changes with audit-friendly operational control.",
   },
@@ -66,24 +71,34 @@ function AuthRedirect() {
 
 function MarketingHome() {
   return (
-    <main className="min-h-screen bg-[#030711] text-white">
-      <div className="pointer-events-none fixed inset-0 opacity-70">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_20%,rgba(30,64,175,0.16),transparent_30%),radial-gradient(circle_at_75%_25%,rgba(59,130,246,0.12),transparent_24%),radial-gradient(circle_at_50%_90%,rgba(14,165,233,0.1),transparent_26%)]" />
-        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(2,6,23,0.5),rgba(2,6,23,0.9))]" />
+    <main className="min-h-screen bg-[#030711] text-white overflow-x-hidden">
+      {/* ── Fixed background layers ─────────────────────────────────── */}
+      <div className="pointer-events-none fixed inset-0 z-0">
+        {/* Deep blue radial glows */}
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_20%_20%,rgba(30,64,175,0.25),transparent_40%)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_75%_10%,rgba(56,189,248,0.15),transparent_30%)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_50%_80%,rgba(14,165,233,0.12),transparent_35%)]" />
+        {/* Subtle star dots using box-shadow trick via pseudo-element alternative */}
         <div
-          className="absolute inset-0"
+          className="absolute inset-0 opacity-30"
           style={{
             backgroundImage:
-              "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='1600' height='1000' fill='none'><g opacity='0.22'><circle cx='120' cy='110' r='1.2' fill='white'/><circle cx='320' cy='140' r='1.1' fill='white'/><circle cx='580' cy='90' r='1.3' fill='white'/><circle cx='960' cy='180' r='1.1' fill='white'/><circle cx='1260' cy='120' r='1.2' fill='white'/><circle cx='800' cy='60' r='1.0' fill='white'/><circle cx='1480' cy='200' r='1.1' fill='white'/></g></svg>\")",
+              "radial-gradient(circle, rgba(255,255,255,0.8) 1px, transparent 1px)",
+            backgroundSize: "80px 80px",
+            backgroundPosition: "0 0, 40px 40px",
           }}
         />
+        <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(3,7,17,0.3)_0%,rgba(3,7,17,0.7)_100%)]" />
       </div>
 
-      <div className="relative pb-16">
+      <div className="relative z-10 pb-16">
         <MarketingNav />
 
         <section className="mx-auto mt-10 grid max-w-[1440px] gap-6 px-6 md:px-8 xl:grid-cols-[1.55fr_0.75fr]">
-          <div className="rounded-[30px] border border-white/10 bg-slate-950/50 px-6 pb-8 pt-10 backdrop-blur-xl md:px-10 md:pt-14">
+          {/* ── Left main column ─────────────────────────────────────── */}
+          <div className="overflow-visible rounded-[30px] border border-white/10 bg-slate-950/50 px-6 pb-8 pt-10 backdrop-blur-xl md:px-10 md:pt-14">
+
+            {/* Hero text */}
             <div className="mx-auto max-w-4xl text-center">
               <h1 className="mx-auto max-w-4xl text-5xl font-semibold tracking-tight text-white md:text-7xl">
                 Control AI Across
@@ -98,17 +113,21 @@ function MarketingHome() {
               <div className="mt-8">
                 <Link
                   href="/early-access"
-                  className="inline-flex items-center rounded-2xl border border-sky-400/30 bg-slate-950/90 px-8 py-4 text-lg font-medium text-white shadow-[0_0_20px_rgba(59,130,246,0.24)] transition hover:border-sky-300/50 hover:shadow-[0_0_28px_rgba(59,130,246,0.28)]"
+                  className="inline-flex items-center gap-2 rounded-2xl border border-sky-400/30 bg-slate-950/90 px-8 py-4 text-lg font-medium text-white shadow-[0_0_20px_rgba(59,130,246,0.24)] transition hover:border-sky-300/50 hover:shadow-[0_0_28px_rgba(59,130,246,0.28)]"
                   data-testid="link-hero-early-access"
                 >
-                  Join Early Access
+                  Join Early Access <ArrowRight className="h-5 w-5" />
                 </Link>
               </div>
 
-              <MarketingHeroPreview />
+              {/* App preview mock — floating cards extend beyond this container intentionally */}
+              <div className="overflow-visible">
+                <MarketingHeroPreview />
+              </div>
             </div>
 
-            <div id="product" className="mx-auto mt-20 max-w-5xl">
+            {/* Platform capabilities */}
+            <div id="product" className="mx-auto mt-32 max-w-5xl">
               <div className="text-center text-[12px] uppercase tracking-[0.35em] text-sky-400/75">
                 Platform capabilities
               </div>
@@ -118,16 +137,11 @@ function MarketingHome() {
               </h2>
 
               <div className="mt-12 grid gap-8 md:grid-cols-2 xl:grid-cols-3">
-                {capabilities.map((item, idx) => (
+                {capabilities.map((item) => (
                   <div key={item.title} className="flex gap-4">
                     <div className="mt-1 grid h-12 w-12 shrink-0 place-items-center rounded-xl border border-sky-400/20 bg-slate-950/80 text-sky-300 text-lg">
-                      {idx === 0 && "⌂"}
-                      {idx === 1 && "$"}
-                      {idx === 2 && "▣"}
-                      {idx === 3 && "🔒"}
-                      {idx === 4 && "☰"}
+                      {item.icon}
                     </div>
-
                     <div>
                       <div className="text-xl font-medium text-white">{item.title}</div>
                       <div className="mt-2 text-sm leading-6 text-slate-400">{item.text}</div>
@@ -140,6 +154,7 @@ function MarketingHome() {
             <MarketingFooter />
           </div>
 
+          {/* ── Right security panel ─────────────────────────────────── */}
           <MarketingSecurityPanel />
         </section>
       </div>

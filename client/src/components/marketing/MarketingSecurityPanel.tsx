@@ -1,34 +1,39 @@
+import { Menu, Lock, Eye, FolderLock, ShieldCheck, Building2, CheckCircle2 } from "lucide-react";
 import { MarketingLogo } from "./MarketingLogo";
 
 const securityItems = [
   {
-    icon: "🔒",
+    icon: <Lock className="h-4 w-4" />,
     title: "Tenant isolation by design",
     text: "Built for organization-level separation, secure access control, and privacy-first architecture.",
   },
   {
-    icon: "👁",
+    icon: <Eye className="h-4 w-4" />,
     title: "Full audit visibility",
     text: "Track actions, access and activity with clear auditability across your AI operations.",
   },
   {
-    icon: "🗂",
+    icon: <FolderLock className="h-4 w-4" />,
     title: "Your data stays yours",
     text: "Designed so your data remains under your control, with secure storage and scoped access.",
   },
   {
-    icon: "◌",
+    icon: <ShieldCheck className="h-4 w-4" />,
     title: "Data privacy and GDPR readiness",
     text: "Built with EU data protection principles, secure access control and privacy-first architecture.",
   },
   {
-    icon: "▣",
+    icon: <Building2 className="h-4 w-4" />,
     title: "Enterprise-ready architecture",
     text: "Designed for teams that need control, visibility and a strong foundation for secure AI adoption.",
   },
 ];
 
-const earlyAccessBullets = ["Limited rollout", "No spam", "Priority onboarding"];
+const earlyAccessBullets = [
+  { icon: <Lock className="h-4 w-4" />, label: "Limited rollout" },
+  { icon: <CheckCircle2 className="h-4 w-4" />, label: "No spam" },
+  { icon: <ShieldCheck className="h-4 w-4" />, label: "Priority onboarding" },
+];
 
 export function MarketingSecurityPanel() {
   return (
@@ -36,8 +41,15 @@ export function MarketingSecurityPanel() {
       id="security"
       className="rounded-[26px] border border-white/10 bg-slate-950/72 p-6 backdrop-blur-xl"
     >
-      <div className="mb-10">
+      {/* Top header row: logo + hamburger */}
+      <div className="mb-10 flex items-center justify-between">
         <MarketingLogo small />
+        <button
+          aria-label="Menu"
+          className="grid h-9 w-9 place-items-center rounded-xl border border-white/10 bg-slate-900/80 text-slate-400 transition hover:text-white"
+        >
+          <Menu className="h-4 w-4" />
+        </button>
       </div>
 
       <div className="mb-4 text-[11px] uppercase tracking-[0.24em] text-sky-400/80">
@@ -59,7 +71,6 @@ export function MarketingSecurityPanel() {
             <div className="mt-1 grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-sky-400/20 bg-slate-900/80 text-sky-300">
               {item.icon}
             </div>
-
             <div>
               <div className="text-lg font-medium text-white">{item.title}</div>
               <div className="mt-1 text-sm leading-6 text-slate-400">{item.text}</div>
@@ -84,11 +95,11 @@ export function MarketingSecurityPanel() {
 
       <div className="mt-6 space-y-4">
         {earlyAccessBullets.map((item) => (
-          <div key={item} className="flex items-center gap-3 text-slate-200">
+          <div key={item.label} className="flex items-center gap-3 text-slate-200">
             <span className="grid h-9 w-9 place-items-center rounded-xl border border-sky-400/20 bg-slate-900/80 text-sky-300">
-              ✓
+              {item.icon}
             </span>
-            <span>{item}</span>
+            <span>{item.label}</span>
           </div>
         ))}
       </div>
