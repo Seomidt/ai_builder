@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { CheckCircle2, ArrowRight, Check } from "lucide-react";
+import { CheckCircle2, ArrowRight, Check, Lock, Eye, FolderLock, ShieldCheck } from "lucide-react";
 import { MarketingNav } from "@/components/marketing/MarketingNav";
 import { MarketingLogo } from "@/components/marketing/MarketingLogo";
 
@@ -37,11 +37,14 @@ const expectItems = [
 ];
 
 const securityItems = [
-  "Tenant-isoleret arkitektur",
-  "Privacy-first datahåndtering",
-  "Audit-venlig driftsmodel",
-  "Designet til GDPR-overholdelse",
+  { icon: <Lock className="h-3.5 w-3.5" />, text: "Tenant-isoleret arkitektur" },
+  { icon: <Eye className="h-3.5 w-3.5" />, text: "Privacy-first datahåndtering" },
+  { icon: <FolderLock className="h-3.5 w-3.5" />, text: "Audit-venlig driftsmodel" },
+  { icon: <ShieldCheck className="h-3.5 w-3.5" />, text: "Designet til GDPR-beredskab" },
 ];
+
+const inputCls = "w-full rounded-xl border border-white/10 bg-[#0a1628] px-4 py-3 text-sm text-white placeholder:text-slate-500 outline-none focus:border-sky-500/40 focus:ring-1 focus:ring-sky-500/15 transition";
+const labelCls = "mb-1.5 block text-xs font-medium uppercase tracking-wide text-slate-400";
 
 export default function EarlyAccessPage() {
   const [submitted, setSubmitted] = useState(false);
@@ -68,9 +71,7 @@ export default function EarlyAccessPage() {
         setServerError(json.error ?? "Der skete en fejl. Prøv igen.");
         return;
       }
-      if (json.status === "already_registered") {
-        setAlreadyRegistered(true);
-      }
+      if (json.status === "already_registered") setAlreadyRegistered(true);
       setSubmitted(true);
     } catch {
       setServerError("Netværksfejl. Tjek din forbindelse og prøv igen.");
@@ -102,216 +103,241 @@ export default function EarlyAccessPage() {
       <div className="relative z-10">
         <MarketingNav />
 
-        <main className="mx-auto max-w-5xl px-6 pb-20 pt-12 md:px-8">
-          {/* Header */}
-          <div className="mb-12 text-center">
-            <h1 className="text-5xl font-semibold leading-[1.1] tracking-tight text-white md:text-6xl">
-              Join Private<br />Early Access
+        <main className="mx-auto max-w-5xl px-6 pb-20 pt-10 md:px-8">
+          {/* Hero */}
+          <div className="mb-10 text-center">
+            <div className="mb-4 text-[10px] font-bold uppercase tracking-[0.3em] text-sky-400/70">
+              Privat adgang
+            </div>
+            <h1 className="text-4xl font-semibold leading-[1.1] tracking-tight text-white md:text-5xl">
+              Join Private Early Access
             </h1>
-            <p className="mx-auto mt-5 max-w-xl text-lg leading-7 text-slate-300">
-              BlissOps is rolling out private access to selected teams first.<br className="hidden sm:block" />
-              Share your company and use case so we can prioritize the right fit.
+            <p className="mx-auto mt-4 max-w-lg text-base leading-7 text-slate-400">
+              BlissOps er i privat rollout til udvalgte teams. Del din virksomhed og dit use case, så vi kan prioritere det rette match.
             </p>
           </div>
 
           {submitted ? (
             /* ── Success state ── */
-            <div className="mx-auto max-w-lg rounded-2xl border border-emerald-500/25 bg-[#060d1f]/80 p-10 text-center backdrop-blur-xl">
-              <div className="mx-auto mb-5 grid h-16 w-16 place-items-center rounded-full border border-emerald-500/30 bg-emerald-500/15">
-                <CheckCircle2 className="h-8 w-8 text-emerald-400" />
+            <div className="mx-auto max-w-md rounded-2xl border border-white/10 bg-[#060d1f]/80 p-10 text-center backdrop-blur-xl">
+              <div className="mx-auto mb-6 grid h-14 w-14 place-items-center rounded-2xl border border-emerald-500/25 bg-emerald-500/10">
+                <CheckCircle2 className="h-7 w-7 text-emerald-400" />
               </div>
-              <h2 className="text-2xl font-semibold text-white">
-                {alreadyRegistered ? "Du er allerede tilmeldt" : "Ansøgning modtaget"}
+              <h2 className="text-xl font-semibold text-white">
+                {alreadyRegistered ? "Du er allerede registreret" : "Du er på listen"}
               </h2>
               <p className="mt-3 text-sm leading-6 text-slate-400">
                 {alreadyRegistered
                   ? "Vi har allerede din ansøgning. Vi vender tilbage til dig snart."
-                  : "Vi gennemgår din ansøgning og vender tilbage til dig snart. Prioriteret onboarding for de bedst egnede teams."}
+                  : "Vi kontakter dig, når privat rollout udvides."}
               </p>
-              <div className="mt-6 flex flex-col gap-2">
+              <div className="mt-6 border-t border-white/8 pt-6 space-y-2">
                 {["Ingen spam", "Prioriteret onboarding", "Begrænset antal pladser"].map((item) => (
-                  <div key={item} className="flex items-center justify-center gap-2 text-sm text-slate-300">
-                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                  <div key={item} className="flex items-center justify-center gap-2 text-xs text-slate-400">
+                    <Check className="h-3.5 w-3.5 text-emerald-400/80" />
                     {item}
                   </div>
                 ))}
               </div>
             </div>
           ) : (
-            /* ── Two-column form + info ── */
-            <div className="grid gap-6 lg:grid-cols-[1fr_380px]">
-              {/* Left: Form card */}
+            /* ── Two-column layout ── */
+            <div className="grid gap-5 lg:grid-cols-[3fr_2fr]">
+
+              {/* ── Left: Form ── */}
               <div className="rounded-2xl border border-white/10 bg-[#060d1f]/80 p-7 backdrop-blur-xl">
-                <h2 className="mb-6 text-xl font-semibold text-white">Join Private Early Access</h2>
+                <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.28em] text-sky-400/70">
+                  Ansøgning
+                </div>
+                <h2 className="mt-2 mb-7 text-lg font-semibold text-white">
+                  Join Private Early Access
+                </h2>
 
-                <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4" noValidate>
-                  {/* Email */}
-                  <div>
-                    <input
-                      {...form.register("email")}
-                      type="email"
-                      placeholder="Arbejdsmail *"
-                      autoComplete="email"
-                      data-testid="input-ea-email"
-                      className="w-full rounded-xl border border-white/12 bg-[#0a1628] px-4 py-3 text-sm text-white placeholder:text-slate-500 outline-none focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/20 transition"
-                    />
-                    {form.formState.errors.email && (
-                      <p className="mt-1.5 text-xs text-red-400">{form.formState.errors.email.message}</p>
-                    )}
+                <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-5" noValidate>
+
+                  {/* Row: Email + Full name */}
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className={labelCls}>
+                        Arbejdsmail <span className="text-sky-400 normal-case tracking-normal">*</span>
+                      </label>
+                      <input
+                        {...form.register("email")}
+                        type="email"
+                        placeholder="navn@virksomhed.dk"
+                        autoComplete="email"
+                        data-testid="input-ea-email"
+                        className={inputCls}
+                      />
+                      {form.formState.errors.email && (
+                        <p className="mt-1.5 text-xs text-red-400/90">{form.formState.errors.email.message}</p>
+                      )}
+                    </div>
+                    <div>
+                      <label className={labelCls}>Fuldt navn</label>
+                      <input
+                        {...form.register("fullName")}
+                        type="text"
+                        placeholder="Valgfrit"
+                        autoComplete="name"
+                        data-testid="input-ea-fullname"
+                        className={inputCls}
+                      />
+                    </div>
                   </div>
 
-                  {/* Full name */}
-                  <input
-                    {...form.register("fullName")}
-                    type="text"
-                    placeholder="Fuldt navn"
-                    autoComplete="name"
-                    data-testid="input-ea-fullname"
-                    className="w-full rounded-xl border border-white/12 bg-[#0a1628] px-4 py-3 text-sm text-white placeholder:text-slate-500 outline-none focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/20 transition"
-                  />
-
-                  {/* Company */}
-                  <div>
-                    <input
-                      {...form.register("company")}
-                      type="text"
-                      placeholder="Virksomhed *"
-                      autoComplete="organization"
-                      data-testid="input-ea-company"
-                      className="w-full rounded-xl border border-white/12 bg-[#0a1628] px-4 py-3 text-sm text-white placeholder:text-slate-500 outline-none focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/20 transition"
-                    />
-                    {form.formState.errors.company && (
-                      <p className="mt-1.5 text-xs text-red-400">{form.formState.errors.company.message}</p>
-                    )}
+                  {/* Row: Company + Role */}
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <div>
+                      <label className={labelCls}>
+                        Virksomhed <span className="text-sky-400 normal-case tracking-normal">*</span>
+                      </label>
+                      <input
+                        {...form.register("company")}
+                        type="text"
+                        placeholder="Virksomhedsnavn"
+                        autoComplete="organization"
+                        data-testid="input-ea-company"
+                        className={inputCls}
+                      />
+                      {form.formState.errors.company && (
+                        <p className="mt-1.5 text-xs text-red-400/90">{form.formState.errors.company.message}</p>
+                      )}
+                    </div>
+                    <div>
+                      <label className={labelCls}>Stilling / rolle</label>
+                      <input
+                        {...form.register("role")}
+                        type="text"
+                        placeholder="Valgfrit"
+                        autoComplete="organization-title"
+                        data-testid="input-ea-role"
+                        className={inputCls}
+                      />
+                    </div>
                   </div>
-
-                  {/* Role */}
-                  <input
-                    {...form.register("role")}
-                    type="text"
-                    placeholder="Stilling / rolle"
-                    autoComplete="organization-title"
-                    data-testid="input-ea-role"
-                    className="w-full rounded-xl border border-white/12 bg-[#0a1628] px-4 py-3 text-sm text-white placeholder:text-slate-500 outline-none focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/20 transition"
-                  />
 
                   {/* Use case */}
                   <div>
-                    <label className="mb-1.5 block text-sm text-slate-300">
-                      Primært use case <span className="text-sky-400">*</span>
+                    <label className={labelCls}>
+                      Primært use case <span className="text-sky-400 normal-case tracking-normal">*</span>
                     </label>
                     <div className="relative">
                       <select
                         {...form.register("useCase")}
                         data-testid="select-ea-usecase"
-                        className="w-full appearance-none rounded-xl border border-white/12 bg-[#0a1628] px-4 py-3 text-sm text-white outline-none focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/20 transition"
+                        className={inputCls + " appearance-none pr-10"}
                         defaultValue=""
                       >
-                        <option value="" disabled className="text-slate-500">Vælg et use case</option>
+                        <option value="" disabled className="text-slate-500 bg-[#0a1628]">Vælg et use case</option>
                         {USE_CASES.map((uc) => (
                           <option key={uc} value={uc} className="bg-[#0a1628]">{uc}</option>
                         ))}
                       </select>
-                      <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2">
-                        <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400">
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 9l-7 7-7-7" />
                         </svg>
                       </div>
                     </div>
                     {form.formState.errors.useCase && (
-                      <p className="mt-1.5 text-xs text-red-400">{form.formState.errors.useCase.message}</p>
+                      <p className="mt-1.5 text-xs text-red-400/90">{form.formState.errors.useCase.message}</p>
                     )}
                   </div>
 
                   {/* Team size */}
                   <div>
-                    <label className="mb-1.5 block text-sm text-slate-300">Teamstørrelse</label>
+                    <label className={labelCls}>Teamstørrelse</label>
                     <div className="relative">
                       <select
                         {...form.register("teamSize")}
                         data-testid="select-ea-teamsize"
-                        className="w-full appearance-none rounded-xl border border-white/12 bg-[#0a1628] px-4 py-3 text-sm text-white outline-none focus:border-sky-500/50 focus:ring-1 focus:ring-sky-500/20 transition"
+                        className={inputCls + " appearance-none pr-10"}
                       >
                         {TEAM_SIZES.map((s) => (
                           <option key={s} value={s} className="bg-[#0a1628]">{s}</option>
                         ))}
                       </select>
-                      <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2">
-                        <svg className="h-4 w-4 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                      <div className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-slate-400">
+                        <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M19 9l-7 7-7-7" />
                         </svg>
                       </div>
                     </div>
                   </div>
 
                   {serverError && (
-                    <p className="rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+                    <p className="rounded-xl border border-red-500/15 bg-red-500/8 px-4 py-3 text-sm text-red-400">
                       {serverError}
                     </p>
                   )}
 
-                  <button
-                    type="submit"
-                    disabled={form.formState.isSubmitting}
-                    data-testid="button-ea-submit"
-                    className="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-sky-500 py-3.5 text-base font-semibold text-white shadow-[0_0_24px_rgba(14,165,233,0.4)] transition hover:bg-sky-400 hover:shadow-[0_0_32px_rgba(14,165,233,0.55)] disabled:opacity-60 disabled:cursor-not-allowed"
-                  >
-                    {form.formState.isSubmitting ? (
-                      <span className="flex items-center gap-2">
-                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                        Sender…
-                      </span>
-                    ) : (
-                      <>Request Early Access <ArrowRight className="h-4 w-4" /></>
-                    )}
-                  </button>
-
-                  <p className="text-center text-xs text-slate-500">
-                    Privat rollout · Ingen spam · Prioriteret onboarding
-                  </p>
+                  <div className="pt-1">
+                    <button
+                      type="submit"
+                      disabled={form.formState.isSubmitting}
+                      data-testid="button-ea-submit"
+                      className="flex w-full items-center justify-center gap-2 rounded-xl border border-sky-500/35 bg-sky-500/12 py-3.5 text-sm font-medium text-white transition hover:border-sky-400/55 hover:bg-sky-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {form.formState.isSubmitting ? (
+                        <>
+                          <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                          Sender…
+                        </>
+                      ) : (
+                        <>Request Early Access <ArrowRight className="h-4 w-4" /></>
+                      )}
+                    </button>
+                    <p className="mt-3 text-center text-xs text-slate-500">
+                      Privat rollout · Ingen spam · Prioriteret onboarding
+                    </p>
+                  </div>
                 </form>
               </div>
 
-              {/* Right: What to expect */}
-              <div className="rounded-2xl border border-white/10 bg-[#060d1f]/70 p-7 backdrop-blur-xl">
-                <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.28em] text-sky-400">
-                  Hvad du kan forvente
+              {/* ── Right: Trust panel ── */}
+              <div className="flex flex-col gap-4">
+
+                {/* What to expect */}
+                <div className="rounded-2xl border border-white/10 bg-[#060d1f]/70 p-6 backdrop-blur-xl">
+                  <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.28em] text-sky-400/70">
+                    Hvad du kan forvente
+                  </div>
+                  <h3 className="mt-3 text-lg font-semibold leading-tight text-white">
+                    Privat rollout for udvalgte teams
+                  </h3>
+                  <p className="mt-3 text-sm leading-6 text-slate-400">
+                    Vi prioriterer teams med brug for stærk kontrol over AI-forbrug, adgang og interne dataflows.
+                  </p>
+                  <div className="mt-5 space-y-3">
+                    {expectItems.map((item) => (
+                      <div key={item} className="flex items-start gap-2.5 text-sm text-slate-300">
+                        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-sky-400/80" />
+                        <span>{item}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
 
-                <h3 className="mt-3 text-2xl font-semibold leading-tight text-white">
-                  Privat rollout for<br />udvalgte teams
-                </h3>
-
-                <p className="mt-3 text-sm leading-6 text-slate-400">
-                  Vi prioriterer teams, der har brug for stærk kontrol over AI-forbrug, adgang og interne dataflows.
-                </p>
-
-                <div className="mt-5 space-y-3">
-                  {expectItems.map((item) => (
-                    <div key={item} className="flex items-start gap-2.5 text-sm text-slate-300">
-                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-sky-400" />
-                      <span>{item}</span>
-                    </div>
-                  ))}
+                {/* Security block */}
+                <div className="rounded-2xl border border-white/10 bg-[#060d1f]/70 p-6 backdrop-blur-xl">
+                  <h3 className="text-sm font-semibold text-white">
+                    Bygget til sikker AI-infrastruktur
+                  </h3>
+                  <div className="mt-4 space-y-3">
+                    {securityItems.map((item) => (
+                      <div key={item.text} className="flex items-center gap-2.5">
+                        <div className="grid h-6 w-6 shrink-0 place-items-center rounded-lg border border-sky-400/15 bg-[#0a1628] text-sky-300">
+                          {item.icon}
+                        </div>
+                        <span className="text-sm text-slate-400">{item.text}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
 
-                <div className="my-6 h-px bg-white/8" />
-
-                <h3 className="text-lg font-semibold leading-tight text-sky-300">
-                  Bygget til sikker AI-infrastruktur
-                </h3>
-
-                <div className="mt-4 space-y-3">
-                  {securityItems.map((item) => (
-                    <div key={item} className="flex items-start gap-2.5 text-sm text-slate-300">
-                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
-                      <span>{item}</span>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Logo card at bottom */}
-                <div className="mt-8 rounded-xl border border-white/8 bg-[#0a1628]/60 p-4">
+                {/* Brand support card */}
+                <div className="rounded-2xl border border-white/8 bg-[#0a1628]/50 p-5">
                   <MarketingLogo small />
                   <p className="mt-3 text-xs leading-5 text-slate-500">
                     BlissOps er i privat rollout. Adgang gives løbende til udvalgte organisationer.
