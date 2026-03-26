@@ -7,40 +7,40 @@ import { MarketingNav } from "@/components/marketing/MarketingNav";
 import { MarketingLogo } from "@/components/marketing/MarketingLogo";
 
 const formSchema = z.object({
-  email:    z.string().email("Indtast en gyldig arbejdsmail"),
+  email:    z.string().email("Enter a valid work email"),
   fullName: z.string().optional(),
-  company:  z.string().min(1, "Virksomhedsnavn er påkrævet"),
+  company:  z.string().min(1, "Company name is required"),
   role:     z.string().optional(),
-  useCase:  z.string().min(1, "Vælg venligst et use case"),
+  useCase:  z.string().min(1, "Please select a use case"),
   teamSize: z.string().optional(),
 });
 
 type FormData = z.infer<typeof formSchema>;
 
 const USE_CASES = [
-  "Intern vidensbase og dokumentsøgning",
-  "Kundesupport AI-assistent",
-  "AI-drevet HR og onboarding",
-  "Finansiel analyse og rapportering",
-  "Juridisk og compliance review",
-  "Salg og CRM-integration",
-  "Andet / custom workflow",
+  "Internal knowledge base and document search",
+  "Customer support AI assistant",
+  "AI-driven HR and onboarding",
+  "Financial analysis and reporting",
+  "Legal and compliance review",
+  "Sales and CRM integration",
+  "Other / custom workflow",
 ];
 
 const TEAM_SIZES = ["1–10", "11–50", "51–200", "201–1000", "1000+"];
 
 const expectItems = [
-  "Kvalificeret virksomheds- og use case-registrering",
-  "Prioriteret onboarding for de bedst egnede teams",
-  "Ingen spam eller generisk ventelistelarm",
-  "Struktureret til admin review og opfølgning",
+  "Qualified company and use case capture",
+  "Priority onboarding for best-fit teams",
+  "No spam or generic waitlist noise",
+  "Structured for future admin review workflows",
 ];
 
 const securityItems = [
-  { icon: <Lock className="h-3.5 w-3.5" />, text: "Tenant-isoleret arkitektur" },
-  { icon: <Eye className="h-3.5 w-3.5" />, text: "Privacy-first datahåndtering" },
-  { icon: <FolderLock className="h-3.5 w-3.5" />, text: "Audit-venlig driftsmodel" },
-  { icon: <ShieldCheck className="h-3.5 w-3.5" />, text: "Designet til GDPR-beredskab" },
+  { icon: <Lock className="h-3.5 w-3.5" />, text: "Tenant-isolated architecture" },
+  { icon: <Eye className="h-3.5 w-3.5" />, text: "Privacy-first data handling" },
+  { icon: <FolderLock className="h-3.5 w-3.5" />, text: "Audit-friendly operational model" },
+  { icon: <ShieldCheck className="h-3.5 w-3.5" />, text: "Designed for GDPR readiness" },
 ];
 
 const inputCls = "w-full rounded-xl border border-white/10 bg-[#0a1628] px-4 py-3 text-sm text-white placeholder:text-slate-500 outline-none focus:border-sky-500/40 focus:ring-1 focus:ring-sky-500/15 transition";
@@ -68,13 +68,13 @@ export default function EarlyAccessPage() {
       });
       const json = await res.json();
       if (!res.ok) {
-        setServerError(json.error ?? "Der skete en fejl. Prøv igen.");
+        setServerError(json.error ?? "An error occurred. Please try again.");
         return;
       }
       if (json.status === "already_registered") setAlreadyRegistered(true);
       setSubmitted(true);
     } catch {
-      setServerError("Netværksfejl. Tjek din forbindelse og prøv igen.");
+      setServerError("Network error. Check your connection and try again.");
     }
   }
 
@@ -107,13 +107,13 @@ export default function EarlyAccessPage() {
           {/* Hero */}
           <div className="mb-10 text-center">
             <div className="mb-4 text-[10px] font-bold uppercase tracking-[0.3em] text-sky-400/70">
-              Privat adgang
+              Private access
             </div>
             <h1 className="text-4xl font-semibold leading-[1.1] tracking-tight text-white md:text-5xl">
               Join Private Early Access
             </h1>
             <p className="mx-auto mt-4 max-w-lg text-base leading-7 text-slate-400">
-              BlissOps er i privat rollout til udvalgte teams. Del din virksomhed og dit use case, så vi kan prioritere det rette match.
+              BlissOps is rolling out private access to selected teams first. Share your company and use case so we can prioritize the right fit.
             </p>
           </div>
 
@@ -124,15 +124,15 @@ export default function EarlyAccessPage() {
                 <CheckCircle2 className="h-7 w-7 text-emerald-400" />
               </div>
               <h2 className="text-xl font-semibold text-white">
-                {alreadyRegistered ? "Du er allerede registreret" : "Du er på listen"}
+                {alreadyRegistered ? "Already registered" : "You're on the list"}
               </h2>
               <p className="mt-3 text-sm leading-6 text-slate-400">
                 {alreadyRegistered
-                  ? "Vi har allerede din ansøgning. Vi vender tilbage til dig snart."
-                  : "Vi kontakter dig, når privat rollout udvides."}
+                  ? "We already have your application. We'll be in touch soon."
+                  : "We'll be in touch as private rollout expands."}
               </p>
               <div className="mt-6 border-t border-white/8 pt-6 space-y-2">
-                {["Ingen spam", "Prioriteret onboarding", "Begrænset antal pladser"].map((item) => (
+                {["No spam", "Priority onboarding", "Limited seats"].map((item) => (
                   <div key={item} className="flex items-center justify-center gap-2 text-xs text-slate-400">
                     <Check className="h-3.5 w-3.5 text-emerald-400/80" />
                     {item}
@@ -147,7 +147,7 @@ export default function EarlyAccessPage() {
               {/* ── Left: Form ── */}
               <div className="rounded-2xl border border-white/10 bg-[#060d1f]/80 p-7 backdrop-blur-xl">
                 <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.28em] text-sky-400/70">
-                  Ansøgning
+                  Application
                 </div>
                 <h2 className="mt-2 mb-7 text-lg font-semibold text-white">
                   Join Private Early Access
@@ -159,12 +159,12 @@ export default function EarlyAccessPage() {
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div>
                       <label className={labelCls}>
-                        Arbejdsmail <span className="text-sky-400 normal-case tracking-normal">*</span>
+                        Work Email <span className="text-sky-400 normal-case tracking-normal">*</span>
                       </label>
                       <input
                         {...form.register("email")}
                         type="email"
-                        placeholder="navn@virksomhed.dk"
+                        placeholder="name@company.com"
                         autoComplete="email"
                         data-testid="input-ea-email"
                         className={inputCls}
@@ -174,11 +174,11 @@ export default function EarlyAccessPage() {
                       )}
                     </div>
                     <div>
-                      <label className={labelCls}>Fuldt navn</label>
+                      <label className={labelCls}>Full Name</label>
                       <input
                         {...form.register("fullName")}
                         type="text"
-                        placeholder="Valgfrit"
+                        placeholder="Optional"
                         autoComplete="name"
                         data-testid="input-ea-fullname"
                         className={inputCls}
@@ -190,12 +190,12 @@ export default function EarlyAccessPage() {
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div>
                       <label className={labelCls}>
-                        Virksomhed <span className="text-sky-400 normal-case tracking-normal">*</span>
+                        Company <span className="text-sky-400 normal-case tracking-normal">*</span>
                       </label>
                       <input
                         {...form.register("company")}
                         type="text"
-                        placeholder="Virksomhedsnavn"
+                        placeholder="Company name"
                         autoComplete="organization"
                         data-testid="input-ea-company"
                         className={inputCls}
@@ -205,11 +205,11 @@ export default function EarlyAccessPage() {
                       )}
                     </div>
                     <div>
-                      <label className={labelCls}>Stilling / rolle</label>
+                      <label className={labelCls}>Role / Title</label>
                       <input
                         {...form.register("role")}
                         type="text"
-                        placeholder="Valgfrit"
+                        placeholder="Optional"
                         autoComplete="organization-title"
                         data-testid="input-ea-role"
                         className={inputCls}
@@ -220,7 +220,7 @@ export default function EarlyAccessPage() {
                   {/* Use case */}
                   <div>
                     <label className={labelCls}>
-                      Primært use case <span className="text-sky-400 normal-case tracking-normal">*</span>
+                      Primary Use Case <span className="text-sky-400 normal-case tracking-normal">*</span>
                     </label>
                     <div className="relative">
                       <select
@@ -229,7 +229,7 @@ export default function EarlyAccessPage() {
                         className={inputCls + " appearance-none pr-10"}
                         defaultValue=""
                       >
-                        <option value="" disabled className="text-slate-500 bg-[#0a1628]">Vælg et use case</option>
+                        <option value="" disabled className="text-slate-500 bg-[#0a1628]">Select a use case</option>
                         {USE_CASES.map((uc) => (
                           <option key={uc} value={uc} className="bg-[#0a1628]">{uc}</option>
                         ))}
@@ -247,7 +247,7 @@ export default function EarlyAccessPage() {
 
                   {/* Team size */}
                   <div>
-                    <label className={labelCls}>Teamstørrelse</label>
+                    <label className={labelCls}>Team Size</label>
                     <div className="relative">
                       <select
                         {...form.register("teamSize")}
@@ -282,14 +282,14 @@ export default function EarlyAccessPage() {
                       {form.formState.isSubmitting ? (
                         <>
                           <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                          Sender…
+                          Submitting…
                         </>
                       ) : (
                         <>Request Early Access <ArrowRight className="h-4 w-4" /></>
                       )}
                     </button>
                     <p className="mt-3 text-center text-xs text-slate-500">
-                      Privat rollout · Ingen spam · Prioriteret onboarding
+                      Private rollout · No spam · Priority onboarding
                     </p>
                   </div>
                 </form>
@@ -301,13 +301,13 @@ export default function EarlyAccessPage() {
                 {/* What to expect */}
                 <div className="rounded-2xl border border-white/10 bg-[#060d1f]/70 p-6 backdrop-blur-xl">
                   <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.28em] text-sky-400/70">
-                    Hvad du kan forvente
+                    What to expect
                   </div>
                   <h3 className="mt-3 text-lg font-semibold leading-tight text-white">
-                    Privat rollout for udvalgte teams
+                    Private rollout for selected organizations
                   </h3>
                   <p className="mt-3 text-sm leading-6 text-slate-400">
-                    Vi prioriterer teams med brug for stærk kontrol over AI-forbrug, adgang og interne dataflows.
+                    We're prioritizing teams that need strong control over AI usage, access, and internal data workflows.
                   </p>
                   <div className="mt-5 space-y-3">
                     {expectItems.map((item) => (
@@ -322,7 +322,7 @@ export default function EarlyAccessPage() {
                 {/* Security block */}
                 <div className="rounded-2xl border border-white/10 bg-[#060d1f]/70 p-6 backdrop-blur-xl">
                   <h3 className="text-sm font-semibold text-white">
-                    Bygget til sikker AI-infrastruktur
+                    Built for secure AI infrastructure
                   </h3>
                   <div className="mt-4 space-y-3">
                     {securityItems.map((item) => (
@@ -340,7 +340,7 @@ export default function EarlyAccessPage() {
                 <div className="rounded-2xl border border-white/8 bg-[#0a1628]/50 p-5">
                   <MarketingLogo small />
                   <p className="mt-3 text-xs leading-5 text-slate-500">
-                    BlissOps er i privat rollout. Adgang gives løbende til udvalgte organisationer.
+                    BlissOps is in private rollout. Access is being expanded to selected organizations.
                   </p>
                 </div>
               </div>
