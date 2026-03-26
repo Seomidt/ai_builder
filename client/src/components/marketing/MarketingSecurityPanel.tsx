@@ -1,4 +1,4 @@
-import { Menu, Lock, Eye, FolderLock, ShieldCheck, Building2, CheckCircle2 } from "lucide-react";
+import { Menu, Lock, Eye, FolderLock, ShieldCheck, Building2 } from "lucide-react";
 import { MarketingLogo } from "./MarketingLogo";
 
 const securityItems = [
@@ -30,83 +30,85 @@ const securityItems = [
 ];
 
 const earlyAccessBullets = [
-  { icon: <Lock className="h-4 w-4" />, label: "Limited rollout" },
-  { icon: <CheckCircle2 className="h-4 w-4" />, label: "No spam" },
-  { icon: <ShieldCheck className="h-4 w-4" />, label: "Priority onboarding" },
+  { icon: <Lock className="h-3.5 w-3.5" />, label: "Limited rollout" },
+  { icon: <ShieldCheck className="h-3.5 w-3.5" />, label: "No spam" },
+  { icon: <Building2 className="h-3.5 w-3.5" />, label: "Priority onboarding" },
 ];
 
 export function MarketingSecurityPanel() {
   return (
     <aside
       id="security"
-      className="rounded-[26px] border border-white/10 bg-slate-950/72 p-6 backdrop-blur-xl"
+      className="sticky top-24 self-start rounded-[24px] border border-white/10 bg-[#060d1f]/70 p-6 backdrop-blur-2xl"
     >
-      {/* Top header row: logo + hamburger */}
-      <div className="mb-10 flex items-center justify-between">
+      {/* Header row */}
+      <div className="mb-8 flex items-center justify-between">
         <MarketingLogo small />
         <button
           aria-label="Menu"
-          className="grid h-9 w-9 place-items-center rounded-xl border border-white/10 bg-slate-900/80 text-slate-400 transition hover:text-white"
+          className="grid h-8 w-8 place-items-center rounded-lg border border-white/10 bg-white/5 text-slate-400 transition hover:text-white"
         >
           <Menu className="h-4 w-4" />
         </button>
       </div>
 
-      <div className="mb-4 text-[11px] uppercase tracking-[0.24em] text-sky-400/80">
+      {/* Security section */}
+      <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.24em] text-sky-400/80">
         Secure AI infrastructure
       </div>
 
-      <h2 className="max-w-sm text-4xl font-semibold tracking-tight text-white">
-        Secure AI Infrastructure for Enterprises
+      <h2 className="mt-3 text-3xl font-semibold leading-tight tracking-tight text-white">
+        Secure AI Infrastructure<br />for Enterprises
       </h2>
 
-      <p className="mt-4 max-w-sm text-base leading-7 text-slate-400">
-        BlissOps is designed for organizations that need control, visibility and data
-        protection when using AI.
+      <p className="mt-3 text-sm leading-6 text-slate-400">
+        BlissOps is designed for organizations that need control, visibility and data protection when using AI.
       </p>
 
-      <div className="mt-8 space-y-6">
+      <div className="mt-6 space-y-5">
         {securityItems.map((item) => (
-          <div key={item.title} className="flex gap-4">
-            <div className="mt-1 grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-sky-400/20 bg-slate-900/80 text-sky-300">
+          <div key={item.title} className="flex gap-3">
+            <div className="mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-sky-400/20 bg-[#0a1628] text-sky-300">
               {item.icon}
             </div>
             <div>
-              <div className="text-lg font-medium text-white">{item.title}</div>
-              <div className="mt-1 text-sm leading-6 text-slate-400">{item.text}</div>
+              <div className="text-sm font-semibold text-white">{item.title}</div>
+              <div className="mt-0.5 text-xs leading-5 text-slate-400">{item.text}</div>
             </div>
           </div>
         ))}
       </div>
 
-      <div className="my-10 h-px bg-white/10" />
+      <div className="my-8 h-px bg-white/8" />
 
-      <div className="mb-3 text-[11px] uppercase tracking-[0.24em] text-sky-400/80">
-        Built for control
+      {/* Early access section */}
+      <div className="mb-1 text-[10px] font-bold uppercase tracking-[0.24em] text-sky-400/80">
+        Built for contact
       </div>
 
-      <h3 className="text-3xl font-semibold tracking-tight text-white">
-        Private early access for selected teams
+      <h3 className="mt-3 text-2xl font-semibold leading-tight tracking-tight text-white">
+        Private early access<br />for selected teams
       </h3>
 
-      <p className="mt-4 text-base leading-7 text-slate-400">
+      <p className="mt-3 text-sm leading-6 text-slate-400">
         BlissOps is in private rollout. Be among the first to gain access and help shape the platform.
       </p>
 
-      <div className="mt-6 space-y-4">
+      <div className="mt-5 space-y-3">
         {earlyAccessBullets.map((item) => (
-          <div key={item.label} className="flex items-center gap-3 text-slate-200">
-            <span className="grid h-9 w-9 place-items-center rounded-xl border border-sky-400/20 bg-slate-900/80 text-sky-300">
+          <div key={item.label} className="flex items-center gap-3 text-sm text-slate-200">
+            <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl border border-sky-400/20 bg-[#0a1628] text-sky-300">
               {item.icon}
             </span>
-            <span>{item.label}</span>
+            {item.label}
           </div>
         ))}
       </div>
 
-      <div className="mt-10 rounded-2xl border border-white/10 bg-slate-950/70 p-5">
+      {/* Bottom logo card */}
+      <div className="mt-8 rounded-2xl border border-white/10 bg-[#0a1628]/80 p-4">
         <MarketingLogo small />
-        <div className="mt-5 text-sm text-slate-400">Built for secure AI infrastructure</div>
+        <div className="mt-4 text-xs text-slate-400">Built for secure AI infrastructure</div>
       </div>
     </aside>
   );
