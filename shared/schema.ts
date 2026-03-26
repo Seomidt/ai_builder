@@ -6524,6 +6524,32 @@ export const insertWaitlistSignupSchema = createInsertSchema(waitlistSignups).om
 export type InsertWaitlistSignup = z.infer<typeof insertWaitlistSignupSchema>;
 export type WaitlistSignup = typeof waitlistSignups.$inferSelect;
 
+// ─── Early Access Applications ─────────────────────────────────────────────────
+export const earlyAccessApplications = pgTable(
+  "early_access_applications",
+  {
+    id:        text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    email:     text("email").notNull(),
+    fullName:  text("full_name"),
+    company:   text("company"),
+    role:      text("role"),
+    useCase:   text("use_case"),
+    teamSize:  text("team_size"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ea_email_uq").on(t.email),
+    index("ea_created_idx").on(t.createdAt),
+  ],
+);
+
+export const insertEarlyAccessSchema = createInsertSchema(earlyAccessApplications).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertEarlyAccess = z.infer<typeof insertEarlyAccessSchema>;
+export type EarlyAccessApplication = typeof earlyAccessApplications.$inferSelect;
+
 // ─── 7. Tenant RBAC extensions ────────────────────────────────────────────────
 
 // 7.1 Departments
