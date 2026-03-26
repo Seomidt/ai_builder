@@ -335,14 +335,6 @@ export default function EarlyAccessPage() {
                     ))}
                   </div>
                 </div>
-
-                {/* Brand support card */}
-                <div className="rounded-2xl border border-white/8 bg-[#0a1628]/50 p-5">
-                  <MarketingLogo small />
-                  <p className="mt-3 text-xs leading-5 text-slate-500">
-                    BlissOps is in private rollout. Access is being expanded to selected organizations.
-                  </p>
-                </div>
               </div>
             </div>
           )}
