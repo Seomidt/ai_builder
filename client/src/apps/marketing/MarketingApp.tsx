@@ -131,7 +131,7 @@ function MarketingHome() {
                 <div className="mt-8 flex flex-col items-center gap-3 sm:flex-row sm:justify-center">
                   <Link
                     href="/early-access"
-                    className="inline-flex items-center gap-2 rounded-xl bg-sky-500 px-7 py-3.5 text-base font-semibold text-white shadow-[0_0_28px_rgba(14,165,233,0.45)] transition hover:bg-sky-400 hover:shadow-[0_0_36px_rgba(14,165,233,0.55)]"
+                    className="inline-flex items-center gap-2 rounded-xl border border-sky-500/40 bg-[#060d1f]/80 px-7 py-3.5 text-base font-medium text-white transition hover:border-sky-400/60 hover:bg-sky-500/10"
                     data-testid="link-hero-primary-cta"
                   >
                     Get Early Access <ArrowRight className="h-4 w-4" />
