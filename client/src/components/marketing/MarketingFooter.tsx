@@ -1,5 +1,3 @@
-import { MarketingLogo } from "./MarketingLogo";
-
 export function MarketingFooter() {
   return (
     <footer
