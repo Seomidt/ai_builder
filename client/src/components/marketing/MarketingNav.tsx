@@ -19,7 +19,7 @@ export function MarketingNav() {
 
           <Link
             href="/early-access"
-            className="inline-flex items-center gap-1.5 rounded-xl bg-sky-500 px-4 py-2.5 text-sm font-semibold text-white shadow-[0_0_20px_rgba(14,165,233,0.4)] transition hover:bg-sky-400 hover:shadow-[0_0_28px_rgba(14,165,233,0.5)]"
+            className="inline-flex items-center gap-1 rounded-lg border border-sky-500/50 bg-sky-500/15 px-3 py-1.5 text-xs font-medium text-sky-300 transition hover:border-sky-400/70 hover:bg-sky-500/25 hover:text-white"
             data-testid="link-nav-early-access"
           >
             Get Early Access <ArrowRight className="h-3.5 w-3.5" />
