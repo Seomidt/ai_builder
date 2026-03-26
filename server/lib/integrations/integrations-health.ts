@@ -76,8 +76,18 @@ export interface IntegrationsHealthReport {
 
 // ── Latency classification ─────────────────────────────────────────────────────
 
-function classifyLatency(ms: number | null): LatencyClass | null {
+/**
+ * Classify API call latency.
+ * - "api"  (default): HTTP endpoints — tight thresholds
+ * - "db"             : Database/storage — relaxed thresholds (cross-region normal)
+ */
+function classifyLatency(ms: number | null, kind: "api" | "db" = "api"): LatencyClass | null {
   if (ms === null) return null;
+  if (kind === "db") {
+    if (ms < 500)  return "good";
+    if (ms < 1800) return "warning";
+    return "poor";
+  }
   if (ms < 200)  return "good";
   if (ms < 800)  return "warning";
   return "poor";
@@ -183,8 +193,21 @@ async function _checkOpenAI(): Promise<PartialProviderResult> {
     const status: HealthStatus = latencyClass === "poor" ? "degraded" : "connected";
     return { ...meta, missingEnv: [], status, latencyMs, latencyClass, details: { modelsEndpoint: true }, message: status === "degraded" ? `Connected but slow — ${latencyMs}ms latency exceeds threshold.` : "Connected and operational." };
   }
-  if (res.status === 401) return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: {}, message: "API key is invalid or has been revoked." };
-  if (res.status === 429) return { ...meta, missingEnv: [], status: "rate_limited", latencyMs, latencyClass, details: {}, message: "Rate limited — key is valid but quota exceeded." };
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({})) as { error?: { code?: string; message?: string } };
+    const code = body.error?.code ?? "";
+    const msg  = body.error?.message ?? "";
+    if (code === "invalid_api_key" || msg.toLowerCase().includes("incorrect api key")) {
+      return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: { errorCode: code }, message: "API key format is incorrect. Check for typos or extra spaces. Find your keys at platform.openai.com → API keys." };
+    }
+    return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: { errorCode: code || "auth_error" }, message: "API key has been revoked or deleted. Generate a new key at platform.openai.com → API keys." };
+  }
+  if (res.status === 429) {
+    const body = await res.json().catch(() => ({})) as { error?: { code?: string } };
+    const code = body.error?.code ?? "";
+    if (code === "insufficient_quota") return { ...meta, missingEnv: [], status: "rate_limited", latencyMs, latencyClass, details: { errorCode: code }, message: "Quota exceeded — your OpenAI account has run out of credits. Top up at platform.openai.com → Billing." };
+    return { ...meta, missingEnv: [], status: "rate_limited", latencyMs, latencyClass, details: {}, message: "Rate limited — too many requests. Key is valid but quota is temporarily exhausted." };
+  }
   return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Unexpected response: HTTP ${res.status}.` };
 }
 
@@ -210,8 +233,17 @@ async function _checkAnthropic(): Promise<PartialProviderResult> {
     const status: HealthStatus = latencyClass === "poor" ? "degraded" : "connected";
     return { ...meta, missingEnv: [], status, latencyMs, latencyClass, details: { modelsEndpoint: true }, message: status === "degraded" ? `Connected but slow — ${latencyMs}ms.` : "Connected and operational." };
   }
-  if (res.status === 401) return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: {}, message: "API key is invalid or revoked." };
-  if (res.status === 429) return { ...meta, missingEnv: [], status: "rate_limited", latencyMs, latencyClass, details: {}, message: "Rate limited — quota exceeded." };
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({})) as { error?: { type?: string; message?: string } };
+    const type = body.error?.type ?? "";
+    const msg  = body.error?.message ?? "";
+    if (type === "authentication_error" || msg.toLowerCase().includes("invalid")) {
+      return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: { errorType: type }, message: "API key is invalid. Verify it at console.anthropic.com → API Keys." };
+    }
+    return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: {}, message: "API key rejected — it may have been revoked. Generate a new key at console.anthropic.com → API Keys." };
+  }
+  if (res.status === 403) return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: {}, message: "Access forbidden — verify the key has the correct permissions in console.anthropic.com." };
+  if (res.status === 429) return { ...meta, missingEnv: [], status: "rate_limited", latencyMs, latencyClass, details: {}, message: "Rate limited — quota exceeded. Check your usage limits at console.anthropic.com." };
   return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Unexpected response: HTTP ${res.status}.` };
 }
 
@@ -238,14 +270,18 @@ async function _checkGemini(): Promise<PartialProviderResult> {
     return { ...meta, missingEnv: [], status, latencyMs, latencyClass, details: { modelsEndpoint: true }, message: status === "degraded" ? `Connected but slow — ${latencyMs}ms.` : "Connected and operational." };
   }
   if (res.status === 400 || res.status === 403) {
-    const body = await res.json().catch(() => ({})) as Record<string, unknown>;
-    const errMsg = String((body as { error?: { message?: string } }).error?.message ?? "");
-    if (errMsg.toLowerCase().includes("api_key") || errMsg.toLowerCase().includes("invalid")) {
-      return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: {}, message: "API key is invalid." };
+    const body = await res.json().catch(() => ({})) as { error?: { status?: string; message?: string } };
+    const status = body.error?.status ?? "";
+    const errMsg = body.error?.message ?? "";
+    if (status === "INVALID_ARGUMENT" || errMsg.toLowerCase().includes("api key") || errMsg.toLowerCase().includes("invalid")) {
+      return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: { errorStatus: status }, message: "API key is invalid or has incorrect format. Get a valid key at aistudio.google.com → Get API key." };
     }
-    return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Access denied: ${errMsg || "HTTP " + res.status}.` };
+    if (status === "PERMISSION_DENIED") {
+      return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { errorStatus: status }, message: "Permission denied — the API key may not have access to Gemini models. Enable the Generative Language API in Google Cloud Console." };
+    }
+    return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status, errorStatus: status }, message: `Access denied: ${errMsg || "HTTP " + res.status}.` };
   }
-  if (res.status === 429) return { ...meta, missingEnv: [], status: "rate_limited", latencyMs, latencyClass, details: {}, message: "Rate limited." };
+  if (res.status === 429) return { ...meta, missingEnv: [], status: "rate_limited", latencyMs, latencyClass, details: {}, message: "Rate limited — quota exceeded. Check limits at console.cloud.google.com → APIs & Services → Quotas." };
   return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Unexpected response: HTTP ${res.status}.` };
 }
 
@@ -268,7 +304,8 @@ async function _checkSupabase(): Promise<PartialProviderResult> {
   const t0 = Date.now();
   const res = await fetchWithTimeout(`${url}/rest/v1/`, { headers: { apikey: anon, Authorization: `Bearer ${anon}` } });
   const latencyMs = Date.now() - t0;
-  const latencyClass = classifyLatency(latencyMs);
+  // Use "db" thresholds — cross-region latency up to 1800ms is normal for database REST endpoints
+  const latencyClass = classifyLatency(latencyMs, "db");
 
   if (res.status === 200 || res.status === 404) {
     const status: HealthStatus = latencyClass === "poor" ? "degraded" : "connected";
@@ -312,8 +349,18 @@ async function _checkGitHub(): Promise<PartialProviderResult> {
     const status: HealthStatus = latencyClass === "poor" ? "degraded" : "connected";
     return { ...meta, missingEnv: [], status, latencyMs, latencyClass, details: { user: body.login ?? null, accountType: body.type ?? null, readRepo: true, writeRepo: hasRepo, scopes: scopes.join(", ") || "fine-grained token" }, message: status === "degraded" ? `Authenticated but slow — ${latencyMs}ms.` : "Connected and authenticated." };
   }
-  if (res.status === 401) return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: {}, message: "Token is invalid or has been revoked." };
-  if (res.status === 403) return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { forbidden: true }, message: "Token valid but missing required permissions." };
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({})) as { message?: string };
+    const msg = (body.message ?? "").toLowerCase();
+    if (msg.includes("bad credentials")) return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: {}, message: "Token is invalid or has been deleted. Generate a new token at github.com → Settings → Developer settings → Personal access tokens." };
+    if (msg.includes("expired")) return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: {}, message: "Token has expired. Regenerate it at github.com → Settings → Developer settings → Personal access tokens." };
+    return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: {}, message: "Token rejected — it may have been revoked. Generate a new token at github.com → Settings → Developer settings." };
+  }
+  if (res.status === 403) {
+    const remaining = res.headers.get("x-ratelimit-remaining");
+    if (remaining === "0") return { ...meta, missingEnv: [], status: "rate_limited", latencyMs, latencyClass, details: { forbidden: true }, message: "GitHub API rate limit reached. Wait until the limit resets or use a token with higher limits." };
+    return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { forbidden: true }, message: "Token is valid but lacks required permissions. Ensure the token has repo and read:user scopes." };
+  }
   if (res.status === 429) return { ...meta, missingEnv: [], status: "rate_limited", latencyMs, latencyClass, details: {}, message: "GitHub API rate limit reached." };
   return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Unexpected response: HTTP ${res.status}.` };
 }
@@ -340,7 +387,18 @@ async function _checkStripe(): Promise<PartialProviderResult> {
     const status: HealthStatus = latencyClass === "poor" ? "degraded" : "connected";
     return { ...meta, missingEnv: [], status, latencyMs, latencyClass, details: { billingOk: true }, message: status === "degraded" ? `Connected but slow — ${latencyMs}ms.` : "Connected and operational." };
   }
-  if (res.status === 401) return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: {}, message: "Stripe key is invalid or restricted." };
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({})) as { error?: { code?: string; message?: string; type?: string } };
+    const code = body.error?.code ?? "";
+    const msg  = body.error?.message ?? "";
+    if (code === "api_key_expired" || msg.toLowerCase().includes("expired")) {
+      return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: { errorCode: code }, message: "Stripe API key has expired. Generate a new restricted key at dashboard.stripe.com → Developers → API keys." };
+    }
+    if (code === "api_key_invalid" || msg.toLowerCase().includes("no such api key")) {
+      return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: { errorCode: code }, message: "Stripe API key is invalid or has been deleted. Create a new key at dashboard.stripe.com → Developers → API keys." };
+    }
+    return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: { errorCode: code || "auth" }, message: "Stripe API key rejected. Verify the key is correct and not restricted at dashboard.stripe.com → Developers → API keys." };
+  }
   if (res.status === 429) return { ...meta, missingEnv: [], status: "rate_limited", latencyMs, latencyClass, details: {}, message: "Stripe API rate limit reached." };
   return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Unexpected response: HTTP ${res.status}.` };
 }
@@ -368,8 +426,16 @@ async function _checkVercel(): Promise<PartialProviderResult> {
     const status: HealthStatus = latencyClass === "poor" ? "degraded" : "connected";
     return { ...meta, missingEnv: [], status, latencyMs, latencyClass, details: { user: body.user?.username ?? null }, message: status === "degraded" ? `Connected but slow — ${latencyMs}ms.` : "Connected and authenticated." };
   }
-  if (res.status === 401) return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: {}, message: "Token is invalid or expired." };
-  if (res.status === 403) return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: {}, message: "Token valid but insufficient permissions." };
+  if (res.status === 401) {
+    const body = await res.json().catch(() => ({})) as { error?: { code?: string; message?: string } };
+    const code = body.error?.code ?? "";
+    const msg  = body.error?.message ?? "";
+    if (code === "forbidden" || msg.toLowerCase().includes("expired")) {
+      return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: { errorCode: code }, message: "Vercel token has expired or been revoked. Create a new token at vercel.com → Account Settings → Tokens." };
+    }
+    return { ...meta, missingEnv: [], status: "invalid", latencyMs, latencyClass, details: { errorCode: code || "auth" }, message: "Vercel token is invalid. Verify it at vercel.com → Account Settings → Tokens or create a new one." };
+  }
+  if (res.status === 403) return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: {}, message: "Token valid but lacks required permissions. Ensure the token has Full Account access at vercel.com → Account Settings → Tokens." };
   return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Unexpected response: HTTP ${res.status}.` };
 }
 
@@ -400,14 +466,35 @@ async function _checkCloudflare(): Promise<PartialProviderResult> {
     });
     const latencyMs = Date.now() - t0;
     const latencyClass = classifyLatency(latencyMs);
-    const body = await res.json().catch(() => ({})) as { success?: boolean; result?: { status?: string } };
+    const body = await res.json().catch(() => ({})) as {
+      success?: boolean;
+      result?: { status?: string; id?: string };
+      errors?: Array<{ code?: number; message?: string }>;
+    };
 
-    if (res.status === 200 && body.success && body.result?.status === "active") {
-      const partial = missingEnv.length > 0;
-      return { ...meta, missingEnv, status: partial ? "partial" : latencyClass === "poor" ? "degraded" : "connected", latencyMs, latencyClass, details: { tokenActive: true, r2CredsPresent: !partial }, message: partial ? "API token valid but R2 credentials incomplete." : "Connected and operational." };
+    if (res.status === 200 && body.success) {
+      const tokenStatus = body.result?.status;
+      if (tokenStatus === "active") {
+        const partial = missingEnv.length > 0;
+        return { ...meta, missingEnv, status: partial ? "partial" : latencyClass === "poor" ? "degraded" : "connected", latencyMs, latencyClass, details: { tokenActive: true, r2CredsPresent: !partial }, message: partial ? "API token valid but R2 credentials incomplete." : "Connected and operational." };
+      }
+      if (tokenStatus === "expired") {
+        return { ...meta, missingEnv, status: "invalid", latencyMs, latencyClass, details: { tokenStatus }, message: "Cloudflare API token has expired. Generate a new token at dash.cloudflare.com → My Profile → API Tokens → Create Token." };
+      }
+      if (tokenStatus === "disabled") {
+        return { ...meta, missingEnv, status: "invalid", latencyMs, latencyClass, details: { tokenStatus }, message: "Cloudflare API token is disabled. Re-enable it or generate a new one at dash.cloudflare.com → My Profile → API Tokens." };
+      }
+      return { ...meta, missingEnv, status: "partial", latencyMs, latencyClass, details: { tokenStatus: tokenStatus ?? "unknown" }, message: `Token verified but status is '${tokenStatus ?? "unknown"}'. Expected 'active'.` };
     }
-    if (res.status === 401) return { ...meta, missingEnv, status: "invalid", latencyMs, latencyClass, details: {}, message: "Cloudflare API token is invalid." };
-    return { ...meta, missingEnv, status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Unexpected response: HTTP ${res.status}.` };
+    if (res.status === 401) {
+      const errCode = body.errors?.[0]?.code;
+      const hint = "Generate a User API Token (not a Global API Key) at dash.cloudflare.com → My Profile → API Tokens → Create Token.";
+      if (errCode === 6003) {
+        return { ...meta, missingEnv, status: "invalid", latencyMs, latencyClass, details: { errorCode: errCode }, message: `Token format is invalid (error 6003) — ensure CF_API_TOKEN is a User API Token, not a Global API Key. ${hint}` };
+      }
+      return { ...meta, missingEnv, status: "invalid", latencyMs, latencyClass, details: { errorCode: errCode ?? "auth" }, message: `Token rejected by Cloudflare (HTTP 401). It may have been deleted or is not a valid User API Token. ${hint}` };
+    }
+    return { ...meta, missingEnv, status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Unexpected response from Cloudflare: HTTP ${res.status}.` };
   }
 
   if (missingEnv.length > 0) return { ...meta, missingEnv, status: "missing", latencyMs: null, latencyClass: null, details: {}, message: "R2 credentials are not fully configured." };

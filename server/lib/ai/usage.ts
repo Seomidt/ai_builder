@@ -35,6 +35,11 @@ export interface LogAiUsagePayload {
   requestId?: string | null;
   /** Feature or agent key that made the call (e.g. "planner_agent", "summarize") */
   feature: string;
+  /**
+   * Logical route key resolved by the AI router (e.g. "expert.chat", "ops.analysis").
+   * Should be set to the AiModelKey used in the runAiCall context.
+   */
+  routeKey?: string | null;
   /** AI provider key — "openai" | "anthropic" | "google" */
   provider?: string | null;
   /** Concrete model identifier (e.g. "gpt-4.1-mini") */
@@ -133,6 +138,7 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
           userId: payload.userId ?? null,
           requestId: payload.requestId ?? null,
           feature: payload.feature,
+          routeKey: payload.routeKey ?? null,
           provider: payload.provider ?? null,
           model: payload.model,
           promptTokens: payload.promptTokens ?? 0,
