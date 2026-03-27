@@ -129,10 +129,13 @@ async function getVerifiedUser(
   token: string,
 ): Promise<{ id: string; email?: string } | null> {
   // FAST PATH: local JWT verification — ~0ms, no network
+  // Falls through to slow-path if local verification fails (e.g. wrong secret).
   if (SUPABASE_JWT_SECRET) {
     const local = verifyLocalJwt(token, SUPABASE_JWT_SECRET);
-    if (local === null) return null; // signature invalid or expired
-    return local; // no caching needed — verification is already instant
+    if (local !== null) return local; // verified locally — skip network call
+    // Local verification failed: JWT signature does not match secret.
+    // Fall through to Supabase getUser() as authoritative check.
+    // This handles misconfigured SUPABASE_JWT_SECRET gracefully.
   }
 
   // SLOW PATH (cache + coalescing): Supabase getUser() network call
@@ -232,6 +235,7 @@ function getDemoUser(): AuthUser {
 const PUBLIC_PATHS = [
   "/api/auth/config",
   "/api/waitlist",
+  "/api/early-access",
   "/api/admin/platform/deploy-health",
   // Phase 29: Recovery & backup admin endpoints (internal tooling — CI/CD, runbooks, monitoring)
   "/api/admin/recovery/backup-status",

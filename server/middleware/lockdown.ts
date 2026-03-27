@@ -28,6 +28,7 @@ import type { Request, Response, NextFunction } from "express";
 const LOCKDOWN_BYPASS_PATHS: readonly string[] = [
   "/api/auth/config",
   "/api/waitlist",
+  "/api/early-access",
   "/api/admin/platform/deploy-health",
   "/api/admin/recovery/backup-status",
   "/api/admin/recovery/trigger-backup",
