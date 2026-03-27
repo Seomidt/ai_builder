@@ -137,7 +137,7 @@ const FIELD_CLS  = [
   "focus:border-cyan-500 focus-visible:ring-2 focus-visible:ring-cyan-500/30 focus-visible:ring-offset-0",
   "transition-colors duration-150",
 ].join(" ");
-const LABEL_CLS  = "text-xs font-semibold text-slate-200 mb-1";
+const LABEL_CLS  = "text-xs font-semibold text-white mb-1";
 const HELPER_CLS = "text-[11px] text-slate-500 mt-2 leading-relaxed";
 
 // ─── Section Header ───────────────────────────────────────────────────────────
@@ -791,9 +791,9 @@ export default function AiEkspertEditor() {
                     <div className="border-t border-white/[0.06]">
                       {isNew ? (
                         <div className="px-3.5 py-4">
-                          <div className="rounded-lg border border-slate-600 bg-slate-800/50 px-4 py-3.5 text-center">
-                            <p className="text-xs text-slate-400 font-medium">Ingen avancerede indstillinger endnu</p>
-                            <p className="text-[11px] text-slate-500 mt-1">Tilgængeligt efter oprettelse af eksperten</p>
+                          <div className="rounded-lg border border-slate-500/60 bg-slate-700/40 px-4 py-3.5 text-center">
+                            <p className="text-xs text-slate-200 font-medium">Ingen avancerede indstillinger endnu</p>
+                            <p className="text-[11px] text-slate-400 mt-1">Tilgængeligt efter oprettelse af eksperten</p>
                           </div>
                         </div>
                       ) : (
