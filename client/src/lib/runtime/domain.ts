@@ -43,7 +43,11 @@ export function getAppContext(hostname: string): AppContext {
   // Any blissops.com variant not already matched (e.g. preview.blissops.com) → marketing
   if (h.includes("blissops.com")) return "marketing";
 
-  // All other hostnames (Replit preview, Vercel preview, CI/staging URLs) → marketing
+  // Replit preview/dev URLs → tenant (development preview surface)
+  // Auth is still enforced by ProtectedRoute — this only controls which shell renders.
+  if (h.includes(".replit.dev") || h.includes(".repl.co") || h.includes(".picard.replit.dev") || h.includes(".id.replit.app")) return "tenant";
+
+  // All other hostnames (Vercel preview, CI/staging URLs) → marketing
   // These environments are used to preview the public marketing surface.
   // Tenant auth flows operate exclusively on app.blissops.com — not on preview URLs.
   return "marketing";
