@@ -24,6 +24,8 @@ import { robotsRouter } from "./routes/robots";
 import { adminGuardMiddleware } from "./middleware/ai-guards";
 // Emergency single-email production lockdown
 import { lockdownGuard } from "./middleware/lockdown";
+// Storage 1.4: pgvector migration
+import { runPgvectorMigration } from "./lib/knowledge/migrate-pgvector";
 
 const app = express();
 const httpServer = createServer(app);
@@ -164,6 +166,9 @@ app.use((req, res, next) => {
     const { setupVite } = await import("./vite");
     await setupVite(httpServer, app);
   }
+
+  // Storage 1.4: Run pgvector migration (idempotent, safe to run on every boot)
+  runPgvectorMigration().catch((err) => log(`[pgvector] migration failed: ${String(err)}`));
 
   // ALWAYS serve the app on the port specified in the environment variable PORT
   // Other ports are firewalled. Default to 5000 if not specified.
