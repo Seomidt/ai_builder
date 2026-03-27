@@ -6,8 +6,8 @@ export const modules: ModuleMap = {
   "./components/mockups/login-variants/CenteredCard.tsx": () => import("../components/mockups/login-variants/CenteredCard.tsx"),
   "./components/mockups/login-variants/HeroLogin.tsx": () => import("../components/mockups/login-variants/HeroLogin.tsx"),
   "./components/mockups/login-variants/SplitScreen.tsx": () => import("../components/mockups/login-variants/SplitScreen.tsx"),
-  "./components/mockups/marketing-variants/AsymHero.tsx": () => import("../components/mockups/marketing-variants/AsymHero.tsx"),
-  "./components/mockups/marketing-variants/CenteredHero.tsx": () => import("../components/mockups/marketing-variants/CenteredHero.tsx"),
   "./components/mockups/tenant-workspace/CommandCenter.tsx": () => import("../components/mockups/tenant-workspace/CommandCenter.tsx"),
-  "./components/mockups/tenant-workspace/Streamlined.tsx": () => import("../components/mockups/tenant-workspace/Streamlined.tsx")
+  "./components/mockups/tenant-workspace/Streamlined.tsx": () => import("../components/mockups/tenant-workspace/Streamlined.tsx"),
+  "./components/mockups/marketing-variants/AsymHero.tsx": () => import("../components/mockups/marketing-variants/AsymHero.tsx"),
+  "./components/mockups/marketing-variants/CenteredHero.tsx": () => import("../components/mockups/marketing-variants/CenteredHero.tsx")
 };
