@@ -5,7 +5,7 @@
  */
 
 import { useState, useRef, useCallback } from "react";
-import { useRoute, useLocation } from "wouter";
+import { useParams, useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Upload, FileText, Image, Video, File, Loader2,
@@ -223,10 +223,10 @@ function AssetRow({ asset }: { asset: AssetRow }) {
 
 export default function StorageDetail() {
   usePagePerf("storage-detail");
-  const [, params] = useRoute("/viden-data/:id");
+  const params = useParams();
   const [, navigate] = useLocation();
   const queryClient = useQueryClient();
-  const kbId = params?.id ?? "";
+  const kbId = params.id ?? "";
 
   const { data: kb, isLoading: kbLoading } = useQuery<KnowledgeBase>({
     queryKey: ["/api/kb", kbId],
