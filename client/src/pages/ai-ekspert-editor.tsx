@@ -137,8 +137,8 @@ const FIELD_CLS  = [
   "focus:border-cyan-500 focus-visible:ring-2 focus-visible:ring-cyan-500/30 focus-visible:ring-offset-0",
   "transition-colors duration-150",
 ].join(" ");
-const LABEL_CLS  = "text-xs font-semibold text-white mb-1";
-const HELPER_CLS = "text-[11px] text-slate-500 mt-2 leading-relaxed";
+const LABEL_CLS  = "text-xs font-semibold text-foreground mb-1";
+const HELPER_CLS = "text-[11px] text-muted-foreground mt-2 leading-relaxed";
 
 // ─── Section Header ───────────────────────────────────────────────────────────
 
@@ -152,8 +152,8 @@ function SectionHeader({ letter, title, subtitle }: { letter: string; title: str
         {letter}
       </div>
       <div>
-        <p className="text-sm font-semibold text-slate-100">{title}</p>
-        {subtitle && <p className="text-xs text-slate-400 mt-0.5">{subtitle}</p>}
+        <p className="text-sm font-semibold text-foreground">{title}</p>
+        {subtitle && <p className="text-xs text-muted-foreground mt-0.5">{subtitle}</p>}
       </div>
     </div>
   );
@@ -777,23 +777,23 @@ export default function AiEkspertEditor() {
                 )} />
 
                 {/* Advanced — collapsed */}
-                <div className="border border-zinc-600/40 rounded-lg overflow-hidden bg-white/[0.03]">
+                <div className="border border-border rounded-lg overflow-hidden">
                   <button
                     type="button"
                     onClick={() => setAdvancedOpen((p) => !p)}
-                    className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs text-slate-400 hover:text-slate-200 transition-colors"
+                    className="w-full flex items-center justify-between px-3.5 py-2.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
                     data-testid="button-toggle-advanced"
                   >
                     <span className="font-semibold uppercase tracking-wide text-[10px]">Avanceret konfiguration</span>
                     {advancedOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
                   </button>
                   {advancedOpen && (
-                    <div className="border-t border-white/[0.06]">
+                    <div className="border-t border-border">
                       {isNew ? (
                         <div className="px-3.5 py-4">
-                          <div className="rounded-lg border border-slate-500/60 bg-slate-700/40 px-4 py-3.5 text-center">
-                            <p className="text-xs text-slate-200 font-medium">Ingen avancerede indstillinger endnu</p>
-                            <p className="text-[11px] text-slate-400 mt-1">Tilgængeligt efter oprettelse af eksperten</p>
+                          <div className="rounded-lg border border-border bg-muted px-4 py-3.5 text-center">
+                            <p className="text-xs text-foreground font-medium">Ingen avancerede indstillinger endnu</p>
+                            <p className="text-[11px] text-muted-foreground mt-1">Tilgængeligt efter oprettelse af eksperten</p>
                           </div>
                         </div>
                       ) : (
@@ -801,12 +801,12 @@ export default function AiEkspertEditor() {
                           {expert && (
                             <>
                               <div className="space-y-1">
-                                <p className="text-[10px] text-slate-500 uppercase tracking-wider font-medium">Ekspert ID</p>
-                                <code className="text-[10px] text-slate-400 font-mono">{expert.id}</code>
+                                <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Ekspert ID</p>
+                                <code className="text-[10px] text-foreground font-mono">{expert.id}</code>
                               </div>
                               <div className="space-y-1">
-                                <p className="text-[10px] text-slate-500 uppercase tracking-wider font-medium">Versioner</p>
-                                <p className="text-[11px] text-slate-400">
+                                <p className="text-[10px] text-muted-foreground uppercase tracking-wider font-medium">Versioner</p>
+                                <p className="text-[11px] text-foreground/80">
                                   Live: {expert.currentVersionId ? expert.currentVersionId.slice(0, 8) + "…" : "Ingen"} ·
                                   Kladde: {expert.draftVersionId ? expert.draftVersionId.slice(0, 8) + "…" : "Ingen"}
                                 </p>
