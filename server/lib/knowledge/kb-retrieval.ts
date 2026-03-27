@@ -1,37 +1,53 @@
 /**
- * KB Retrieval Service — Storage 1.2
+ * KB Retrieval Service — Storage 1.3
  *
- * Searches knowledge_chunks (and knowledge_embeddings) for a given tenant.
- * Part D+F: tenant-scoped, expert-aware, no duplicate pipeline.
+ * Vector-first hybrid retrieval over knowledge_chunks + knowledge_embeddings.
  *
- * Strategy:
- *  1. Text similarity (pg_trgm) as primary retrieval signal — works without vectors
- *  2. If query embedding available (OpenAI), rerank top candidates by cosine similarity
- *  3. Expert-aware: filter to knowledge bases linked to an expert
+ * Search order (Part B):
+ *  1. Embed query via OpenAI (text-embedding-3-small)
+ *  2. IF embeddings exist for tenant:
+ *     → Fetch all active indexed chunks WITH embeddings
+ *     → Rank by cosine similarity (application-layer, real[]  storage)
+ *     → Supplement with lexical fallback if vector results < topK
+ *  3. IF OpenAI unavailable OR no embeddings at all:
+ *     → Lexical-only (pg_trgm + ts_rank)
+ *
+ * Note on vector indexing (Part C):
+ *   embedding_vector is stored as real[] (PostgreSQL float array), not pgvector
+ *   native vector type. Cosine similarity is computed application-side.
+ *   For true pgvector ANN indexing (HNSW/IVFFlat), schema migration to
+ *   vector(1536) type is needed — this is documented as a future upgrade path.
+ *   At current scale (<100K chunks per tenant) application-side cosine is safe.
+ *
+ * Part E:
+ *   Only returns chunks from active, indexed documents.
+ *   Archived/failed documents are excluded.
+ *
+ * Part F (expert-aware):
+ *   Filters to knowledge bases linked to an expert via expert_knowledge_bases.
  */
 
 import pg from "pg";
 import { generateQueryEmbedding, cosineSimilarity } from "./kb-embeddings";
-import type { PgSqlType } from "drizzle-orm/pg-core";
 
 export interface KbSearchResult {
-  chunkId:            string;
-  knowledgeBaseId:    string;
+  chunkId:             string;
+  knowledgeBaseId:     string;
   knowledgeDocumentId: string;
-  assetVersionId:     string;
-  chunkText:          string;
-  score:              number;
-  scoreText:          number;
-  scoreVector:        number;
+  assetVersionId:      string;
+  chunkText:           string;
+  score:               number;
+  scoreVector:         number;
+  scoreLexical:        number;
+  retrievalChannel:    "vector" | "lexical" | "hybrid";
 }
 
 export interface KbSearchParams {
-  tenantId:     string;
-  queryText:    string;
-  topK?:        number;
-  kbIds?:       string[];     // filter to specific knowledge bases
-  expertId?:    string;       // filter to knowledge bases linked to this expert
-  sourceIds?:   string[];     // filter to specific data source IDs
+  tenantId:  string;
+  queryText: string;
+  topK?:     number;
+  kbIds?:    string[];
+  expertId?: string;
 }
 
 function getClient(): pg.Client {
@@ -44,49 +60,169 @@ function getClient(): pg.Client {
 // ── searchKnowledge ────────────────────────────────────────────────────────────
 
 export async function searchKnowledge(params: KbSearchParams): Promise<KbSearchResult[]> {
-  const { tenantId, queryText, topK = 10, kbIds, expertId, sourceIds } = params;
+  const { tenantId, queryText, topK = 10, kbIds, expertId } = params;
 
   if (!queryText?.trim()) throw new Error("queryText is required");
   if (!tenantId?.trim())  throw new Error("tenantId is required");
 
   const safeTopK = Math.min(Math.max(1, topK), 100);
 
-  // ── Step 1: Resolve allowed knowledge base IDs ────────────────────────────
+  // Part F — Resolve allowed KB IDs via expert filter
   let allowedKbIds: string[] | null = kbIds?.length ? [...kbIds] : null;
-
   if (expertId) {
     const expertKbs = await resolveExpertKbs(tenantId, expertId);
-    if (expertKbs.length === 0) return []; // expert has no linked KBs
+    if (expertKbs.length === 0) return [];
     allowedKbIds = allowedKbIds
       ? allowedKbIds.filter((id) => expertKbs.includes(id))
       : expertKbs;
     if (allowedKbIds.length === 0) return [];
   }
 
-  // ── Step 2: Text similarity search on knowledge_chunks ──────────────────
+  // Part B Step 1 — Embed query first (vector-first priority)
+  const queryVector = await generateQueryEmbedding(queryText);
+
+  if (queryVector) {
+    return vectorFirstSearch({ tenantId, queryText, queryVector, allowedKbIds, safeTopK });
+  } else {
+    // Lexical fallback — OpenAI unavailable
+    return lexicalSearch({ tenantId, queryText, allowedKbIds, safeTopK });
+  }
+}
+
+// ── vectorFirstSearch ─────────────────────────────────────────────────────────
+// Part B: embed query first, cosine rank, supplement with lexical if needed.
+
+async function vectorFirstSearch(params: {
+  tenantId:     string;
+  queryText:    string;
+  queryVector:  number[];
+  allowedKbIds: string[] | null;
+  safeTopK:     number;
+}): Promise<KbSearchResult[]> {
+  const { tenantId, queryText, queryVector, allowedKbIds, safeTopK } = params;
+
   const client = getClient();
   await client.connect();
 
-  let candidates: Array<{
+  // Fetch chunks that have completed embeddings — tenant-safe, indexed docs only (Part E)
+  const kbFilter = allowedKbIds?.length
+    ? `AND kc.knowledge_base_id = ANY($2::text[])`
+    : "";
+  const values: unknown[] = allowedKbIds?.length
+    ? [tenantId, allowedKbIds]
+    : [tenantId];
+
+  let embRows: Array<{
     chunk_id: string; kb_id: string; doc_id: string; version_id: string;
-    chunk_text: string; score_text: number;
+    chunk_text: string; embedding_vector: number[];
   }> = [];
+
+  try {
+    const result = await client.query(
+      `SELECT
+         kc.id                            AS chunk_id,
+         kc.knowledge_base_id             AS kb_id,
+         kc.knowledge_document_id         AS doc_id,
+         kc.knowledge_document_version_id AS version_id,
+         kc.chunk_text,
+         ke.embedding_vector
+       FROM knowledge_chunks kc
+       INNER JOIN knowledge_embeddings ke
+               ON ke.knowledge_chunk_id = kc.id
+              AND ke.tenant_id          = kc.tenant_id
+              AND ke.embedding_status   = 'completed'
+              AND ke.embedding_vector   IS NOT NULL
+       INNER JOIN knowledge_documents kd
+               ON kd.id        = kc.knowledge_document_id
+              AND kd.document_status IN ('ready', 'active')
+       WHERE kc.tenant_id    = $1
+         AND kc.chunk_active = TRUE
+         AND kc.chunk_text   IS NOT NULL
+         ${kbFilter}
+       LIMIT 2000`,
+      values,
+    );
+    embRows = result.rows as typeof embRows;
+  } finally {
+    await client.end();
+  }
+
+  // Compute cosine similarity in-app and rank
+  const vectorResults = embRows
+    .map((r) => ({
+      chunkId:             r.chunk_id,
+      knowledgeBaseId:     r.kb_id,
+      knowledgeDocumentId: r.doc_id,
+      assetVersionId:      r.version_id,
+      chunkText:           r.chunk_text,
+      scoreVector:         cosineSimilarity(queryVector, r.embedding_vector),
+      scoreLexical:        0,
+    }))
+    .sort((a, b) => b.scoreVector - a.scoreVector)
+    .slice(0, safeTopK);
+
+  // If we have enough vector results, return them
+  if (vectorResults.length >= safeTopK) {
+    return vectorResults.map((r) => ({
+      ...r,
+      score:            r.scoreVector,
+      retrievalChannel: "vector" as const,
+    }));
+  }
+
+  // Supplement with lexical fallback for remaining slots (Part B)
+  const needed = safeTopK - vectorResults.length;
+  const existingChunkIds = new Set(vectorResults.map((r) => r.chunkId));
+
+  const lexical = await lexicalSearch({
+    tenantId,
+    queryText,
+    allowedKbIds,
+    safeTopK: needed * 3,
+    excludeChunkIds: [...existingChunkIds],
+  });
+
+  const lexicalSlots = lexical.slice(0, needed);
+
+  const combined: KbSearchResult[] = [
+    ...vectorResults.map((r) => ({ ...r, score: r.scoreVector, retrievalChannel: "vector" as const })),
+    ...lexicalSlots.map((r) => ({ ...r, retrievalChannel: r.scoreVector > 0 ? "hybrid" as const : "lexical" as const })),
+  ];
+
+  return combined.sort((a, b) => b.score - a.score).slice(0, safeTopK);
+}
+
+// ── lexicalSearch ─────────────────────────────────────────────────────────────
+// Fallback: pg_trgm + ts_rank. Used when OpenAI unavailable or to supplement.
+
+async function lexicalSearch(params: {
+  tenantId:         string;
+  queryText:        string;
+  allowedKbIds:     string[] | null;
+  safeTopK:         number;
+  excludeChunkIds?: string[];
+}): Promise<KbSearchResult[]> {
+  const { tenantId, queryText, allowedKbIds, safeTopK, excludeChunkIds } = params;
+
+  const client = getClient();
+  await client.connect();
 
   try {
     await client.query("CREATE EXTENSION IF NOT EXISTS pg_trgm").catch(() => {});
 
-    // Build optional filters
     const extraFilters: string[] = [];
-    const values: unknown[] = [tenantId, queryText.slice(0, 2000), safeTopK * 5]; // fetch 5x for reranking
+    const values: unknown[] = [tenantId, queryText.slice(0, 2000), safeTopK * 3];
 
     if (allowedKbIds?.length) {
       values.push(allowedKbIds);
       extraFilters.push(`kc.knowledge_base_id = ANY($${values.length}::text[])`);
     }
+    if (excludeChunkIds?.length) {
+      values.push(excludeChunkIds);
+      extraFilters.push(`kc.id != ALL($${values.length}::text[])`);
+    }
 
-    const whereClause = extraFilters.length
-      ? "AND " + extraFilters.join(" AND ")
-      : "";
+    const whereClause = extraFilters.length ? "AND " + extraFilters.join(" AND ") : "";
 
     const result = await client.query(
       `SELECT
@@ -98,111 +234,41 @@ export async function searchKnowledge(params: KbSearchParams): Promise<KbSearchR
          LEAST(1.0, GREATEST(0.0,
            COALESCE(SIMILARITY(kc.chunk_text, $2), 0.0) * 0.6
            + COALESCE(
-               ts_rank(
-                 to_tsvector('english', kc.chunk_text),
-                 plainto_tsquery('english', $2),
-                 32
-               ) * 2.0,
+               ts_rank(to_tsvector('english', kc.chunk_text), plainto_tsquery('english', $2), 32) * 2.0,
              0.0)
          )) AS score_text
        FROM knowledge_chunks kc
-       WHERE kc.tenant_id = $1
+       INNER JOIN knowledge_documents kd
+               ON kd.id = kc.knowledge_document_id
+              AND kd.document_status IN ('ready', 'active')
+       WHERE kc.tenant_id    = $1
          AND kc.chunk_active = TRUE
-         AND kc.chunk_text IS NOT NULL
+         AND kc.chunk_text   IS NOT NULL
          ${whereClause}
        ORDER BY score_text DESC
        LIMIT $3`,
       values,
     );
 
-    candidates = result.rows as typeof candidates;
+    return (result.rows as Array<Record<string, unknown>>)
+      .slice(0, safeTopK)
+      .map((r) => ({
+        chunkId:             r["chunk_id"] as string,
+        knowledgeBaseId:     r["kb_id"]    as string,
+        knowledgeDocumentId: r["doc_id"]   as string,
+        assetVersionId:      r["version_id"] as string,
+        chunkText:           r["chunk_text"] as string,
+        score:               Number(r["score_text"]),
+        scoreVector:         0,
+        scoreLexical:        Number(r["score_text"]),
+        retrievalChannel:    "lexical" as const,
+      }));
   } finally {
     await client.end();
   }
-
-  if (candidates.length === 0) return [];
-
-  // ── Step 3: Rerank with real embeddings if available ─────────────────────
-  let queryVector: number[] | null = null;
-  try {
-    queryVector = await generateQueryEmbedding(queryText);
-  } catch {}
-
-  let results: KbSearchResult[];
-
-  if (queryVector && candidates.length > 0) {
-    results = await rerankByEmbedding(tenantId, queryVector, candidates, safeTopK);
-  } else {
-    // Fall back to text-only scoring
-    results = candidates.slice(0, safeTopK).map((c) => ({
-      chunkId:             c.chunk_id,
-      knowledgeBaseId:     c.kb_id,
-      knowledgeDocumentId: c.doc_id,
-      assetVersionId:      c.version_id,
-      chunkText:           c.chunk_text,
-      score:               c.score_text,
-      scoreText:           c.score_text,
-      scoreVector:         0,
-    }));
-  }
-
-  return results.sort((a, b) => b.score - a.score).slice(0, safeTopK);
-}
-
-// ── rerankByEmbedding ─────────────────────────────────────────────────────────
-// Fetches stored embedding vectors for candidates and reranks by cosine similarity.
-
-async function rerankByEmbedding(
-  tenantId:    string,
-  queryVector: number[],
-  candidates:  Array<{ chunk_id: string; kb_id: string; doc_id: string; version_id: string; chunk_text: string; score_text: number }>,
-  topK:        number,
-): Promise<KbSearchResult[]> {
-  const chunkIds = candidates.map((c) => c.chunk_id);
-
-  const client = getClient();
-  await client.connect();
-
-  let embRows: Array<{ chunk_id: string; embedding_vector: number[] }> = [];
-  try {
-    const result = await client.query(
-      `SELECT knowledge_chunk_id AS chunk_id, embedding_vector
-       FROM knowledge_embeddings
-       WHERE tenant_id = $1
-         AND knowledge_chunk_id = ANY($2::text[])
-         AND embedding_status = 'completed'
-         AND embedding_vector IS NOT NULL`,
-      [tenantId, chunkIds],
-    );
-    embRows = result.rows as typeof embRows;
-  } finally {
-    await client.end();
-  }
-
-  const vectorMap = new Map(embRows.map((r) => [r.chunk_id, r.embedding_vector]));
-
-  return candidates.map((c) => {
-    const vec = vectorMap.get(c.chunk_id);
-    const scoreVector = vec ? cosineSimilarity(queryVector, vec) : 0;
-    const combined    = vec
-      ? scoreVector * 0.7 + c.score_text * 0.3
-      : c.score_text;
-
-    return {
-      chunkId:             c.chunk_id,
-      knowledgeBaseId:     c.kb_id,
-      knowledgeDocumentId: c.doc_id,
-      assetVersionId:      c.version_id,
-      chunkText:           c.chunk_text,
-      score:               combined,
-      scoreText:           c.score_text,
-      scoreVector,
-    };
-  });
 }
 
 // ── resolveExpertKbs ──────────────────────────────────────────────────────────
-// Part F: returns knowledge base IDs linked to an expert.
 
 async function resolveExpertKbs(tenantId: string, expertId: string): Promise<string[]> {
   const client = getClient();

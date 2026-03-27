@@ -178,10 +178,17 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
-      // Start knowledge processing background worker (Storage 1.2)
-      import("./lib/knowledge/kb-worker")
-        .then(({ startKbWorker }) => startKbWorker())
-        .catch((err) => log(`[kb-worker] failed to start: ${String(err)}`));
+      // Part A (Storage 1.3): Worker is NOT auto-started in web process.
+      // Run as a dedicated process: tsx server/worker.ts
+      // Or enable in-process mode with env flag: KB_WORKER=true
+      if (process.env.KB_WORKER === "true") {
+        import("./lib/knowledge/kb-worker")
+          .then(({ startKbWorker }) => {
+            log("[kb-worker] starting in-process (KB_WORKER=true)");
+            startKbWorker();
+          })
+          .catch((err) => log(`[kb-worker] failed to start: ${String(err)}`));
+      }
     },
   );
 })();

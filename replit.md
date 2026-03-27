@@ -165,3 +165,41 @@ tenant_member_permissions / tenant_member_departments → RBAC
 ### Dansk UX (Part 11)
 - `tenant/usage.tsx`: overskrift, periode-knapper, kort-labels → dansk
 - `tenant/settings.tsx`: overskrift, gem-knap, sektionsnavne → dansk
+
+## Knowledge Base Storage — Storage 1.2 + 1.3
+
+### Arkitektur
+- **Upload pipeline**: multipart → R2 (Cloudflare) → knowledgeStorageObjects → knowledgeDocuments → knowledgeDocumentVersions → knowledgeProcessingJobs
+- **Job pipeline pr. filtype**:
+  - Dokument (PDF/tekst): `parse → chunk → embedding_generate → index`
+  - Billede: `ocr_parse → chunk → embedding_generate → index`
+  - Video: `transcript_parse → chunk → embedding_generate → index`
+
+### Worker (Storage 1.3 — Dedikeret process)
+- Worker kører **IKKE** automatisk i web-processen
+- Start dedikeret: `tsx server/worker.ts`
+- Start in-process (Replit/dev): sæt `KB_WORKER=true` env var
+- Env vars: `KB_WORKER_POLL_INTERVAL_MS` (default 5000), `KB_WORKER_MAX_CONCURRENT` (default 3)
+- Deployment: web = Vercel/Fly web service, worker = Railway/Fly worker service
+
+### OCR (Storage 1.3)
+- Provider: OpenAI Vision (gpt-4o-mini via chat completions API)
+- Adapter: `server/lib/knowledge/kb-ocr-adapter.ts` — swappable (Tesseract/Azure/Google Vision)
+- Understøtter: jpeg, jpg, png, gif, webp
+
+### Embeddings
+- Provider: OpenAI text-embedding-3-small (1536 dims)
+- Service: `server/lib/knowledge/kb-embeddings.ts`
+- Lagring: `knowledge_embeddings.embedding_vector` som `real[]`
+- Note: Cosine similarity beregnes application-side. Fremtidig pgvector HNSW-index kræver schema migration til `vector(1536)` type
+
+### Retrieval (Storage 1.3 — Vector-first)
+- `server/lib/knowledge/kb-retrieval.ts`
+- Rækkefølge: 1) Embed query (OpenAI) → 2) Cosine similarity på stored embeddings → 3) Supplement med pg_trgm hvis færre end topK resultater
+- Fallback: lexical-only hvis OpenAI ikke er tilgængelig
+- Expert-aware: filtrerer via `expert_knowledge_bases` relation
+- Returfelter: `chunkId`, `knowledgeBaseId`, `knowledgeDocumentId`, `assetVersionId`, `chunkText`, `score`, `scoreVector`, `scoreLexical`, `retrievalChannel`
+
+### API
+- `POST /api/kb/search` — knowledge søgning (tenant-scoped, expert-aware, topK ≤ 100)
+- `GET /api/kb/:id/assets` — returnerer `chunkCount`, `embeddingCount`, `pipeline[]`, `ocrStatus`, `parseStatus`, `transcriptStatus`

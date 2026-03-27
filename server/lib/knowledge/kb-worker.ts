@@ -1,16 +1,18 @@
 /**
- * KB Worker — Storage 1.2
+ * KB Worker — Storage 1.3
  *
  * Background polling worker for knowledgeProcessingJobs.
- * Runs inside the Express process on a setInterval — suitable for single-server
- * deployments. For horizontal scale, replace startKbWorker() with a queue consumer.
+ *
+ * NOT auto-started from the web process.
+ * Start via: tsx server/worker.ts  (or KB_WORKER=true tsx server/index.ts)
  *
  * Safety invariants:
  *  - Picks jobs with FOR UPDATE SKIP LOCKED (no double-processing)
- *  - Max 3 concurrent jobs per poll cycle
- *  - Max 3 retry attempts with exponential backoff
+ *  - Env-configurable concurrency and poll interval (Part G)
+ *  - Max 3 retry attempts per job
  *  - Never marks "indexed" unless real searchable units exist
- *  - OCR / transcript: explicit provider-unavailable failure (no fake success)
+ *  - OCR: uses OpenAI Vision adapter (Part D)
+ *  - Transcript: explicit failure — no provider yet
  */
 
 import { db } from "../../db";
@@ -21,26 +23,30 @@ import {
 } from "@shared/schema";
 import { eq, and, count, sql } from "drizzle-orm";
 import { generateChunkEmbeddings, embeddingCount } from "./kb-embeddings";
+import { fetchImageFromR2AndOcr, OcrProviderError } from "./kb-ocr-adapter";
 
-const POLL_INTERVAL_MS    = 5_000;
-const MAX_CONCURRENT_JOBS = 3;
-const MAX_ATTEMPTS        = 3;
+const MAX_ATTEMPTS = 3;
 
 let _workerRunning = false;
 let _intervalId: ReturnType<typeof setInterval> | null = null;
+let _maxConcurrent = 3;
 
 // ── startKbWorker ──────────────────────────────────────────────────────────────
+// Accepts optional config so server/worker.ts can pass env-driven values.
 
-export function startKbWorker(): void {
+export function startKbWorker(opts?: { pollIntervalMs?: number; maxConcurrent?: number }): void {
   if (_intervalId) return;
-  console.log("[kb-worker] starting — polling every", POLL_INTERVAL_MS, "ms");
+  const pollMs = opts?.pollIntervalMs ?? parseInt(process.env.KB_WORKER_POLL_INTERVAL_MS ?? "5000", 10);
+  _maxConcurrent = opts?.maxConcurrent ?? parseInt(process.env.KB_WORKER_MAX_CONCURRENT ?? "3", 10);
+
+  console.log(`[kb-worker] starting — poll=${pollMs}ms  maxConcurrent=${_maxConcurrent}`);
   _intervalId = setInterval(() => {
     if (_workerRunning) return;
     _workerRunning = true;
     runWorkerCycle()
       .catch((err) => console.error("[kb-worker] cycle error:", err))
       .finally(() => { _workerRunning = false; });
-  }, POLL_INTERVAL_MS);
+  }, pollMs);
 }
 
 export function stopKbWorker(): void {
@@ -69,12 +75,12 @@ async function runWorkerCycle(): Promise<void> {
       ORDER BY priority DESC, created_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT $1
-    `, [MAX_CONCURRENT_JOBS]);
+    `, [_maxConcurrent]);
     jobs = result.rows;
 
     if (jobs.length === 0) return;
 
-    // Mark all as running before releasing lock
+    // Mark all as running before releasing lock (Part F: observability)
     for (const job of jobs) {
       await client.query(
         `UPDATE knowledge_processing_jobs SET status = 'running', started_at = NOW(), attempt_count = attempt_count + 1 WHERE id = $1`,
@@ -85,7 +91,7 @@ async function runWorkerCycle(): Promise<void> {
     await client.end();
   }
 
-  // Process jobs concurrently (up to MAX_CONCURRENT_JOBS)
+  // Process jobs concurrently (up to _maxConcurrent)
   await Promise.all(jobs.map((job) => processJob(job).catch((err) => {
     console.error(`[kb-worker] job ${job["id"] as string} unhandled crash:`, err);
   })));
@@ -109,7 +115,7 @@ async function processJob(job: Record<string, unknown>): Promise<void> {
         await handleParse({ tenantId, docId, versionId, payload });
         break;
       case "ocr_parse":
-        await handleOcrParse({ tenantId, docId, versionId });
+        await handleOcrParse({ tenantId, docId, versionId, payload });
         break;
       case "transcript_parse":
         await handleTranscriptParse({ tenantId, docId, versionId });
@@ -208,14 +214,64 @@ async function handleParse(params: {
     ));
 }
 
-async function handleOcrParse(params: { tenantId: string; docId: string; versionId: string | null }): Promise<void> {
-  // Part H — No fake success. OCR provider not yet integrated.
-  if (params.versionId) {
-    await db.update(knowledgeDocumentVersions)
-      .set({ ocrStatus: "failed", ocrFailureReason: "OCR provider not configured — integrate Tesseract or cloud OCR to enable" })
-      .where(eq(knowledgeDocumentVersions.id, params.versionId));
+async function handleOcrParse(params: {
+  tenantId: string; docId: string; versionId: string | null; payload: Record<string, unknown>;
+}): Promise<void> {
+  const { tenantId, docId, versionId, payload } = params;
+  const storageKey = payload["storageKey"] as string | undefined;
+  const mimeType   = payload["mimeType"]   as string | undefined;
+
+  if (!storageKey || !mimeType) {
+    throw new Error("OCR job missing storageKey or mimeType in payload");
   }
-  throw new Error("OCR provider not available — asset remains pending until OCR integration is configured");
+
+  // Part D — Real OCR via OpenAI Vision (kb-ocr-adapter.ts)
+  let extractedText: string;
+  try {
+    extractedText = await fetchImageFromR2AndOcr(storageKey, mimeType);
+  } catch (err) {
+    const reason = (err as Error).message;
+    if (versionId) {
+      await db.update(knowledgeDocumentVersions)
+        .set({ ocrStatus: "failed", ocrFailureReason: reason })
+        .where(eq(knowledgeDocumentVersions.id, versionId));
+    }
+    throw err;
+  }
+
+  if (!extractedText || extractedText.trim().length === 0) {
+    // Image had no readable text — mark OCR completed with 0 chars (valid outcome)
+    if (versionId) {
+      await db.update(knowledgeDocumentVersions)
+        .set({ ocrStatus: "completed", ocrCompletedAt: new Date(), ocrEngineName: "openai-gpt4o-mini", characterCount: 0 })
+        .where(eq(knowledgeDocumentVersions.id, versionId));
+    }
+    throw new Error("OCR completed but no text was extracted from image — cannot chunk/embed");
+  }
+
+  // Update version with OCR result
+  if (versionId) {
+    await db.update(knowledgeDocumentVersions)
+      .set({
+        ocrStatus:      "completed",
+        ocrCompletedAt: new Date(),
+        ocrEngineName:  "openai-gpt4o-mini",
+        characterCount:  extractedText.length,
+        metadata: { extractedTextPreview: extractedText.slice(0, 500), fullLength: extractedText.length } as any,
+      })
+      .where(eq(knowledgeDocumentVersions.id, versionId));
+  }
+
+  // Pass extracted text to pending chunk job (same as parse handler)
+  await db.update(knowledgeProcessingJobs)
+    .set({ payload: { ...payload, extractedText: extractedText.slice(0, 100_000) } as any })
+    .where(and(
+      eq(knowledgeProcessingJobs.knowledgeDocumentId, docId),
+      eq(knowledgeProcessingJobs.jobType, "chunk"),
+      eq(knowledgeProcessingJobs.status, "queued"),
+    ));
+
+  console.log(`[kb-worker] OCR completed doc=${docId} chars=${extractedText.length}`);
 }
 
 async function handleTranscriptParse(params: { tenantId: string; docId: string; versionId: string | null }): Promise<void> {
