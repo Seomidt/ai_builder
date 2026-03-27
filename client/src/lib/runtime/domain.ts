@@ -67,6 +67,10 @@ export function getAuthCookieDomain(hostname = window.location.hostname): string
   const h = hostname.toLowerCase().replace(/:\d+$/, "");
   if (h === "localhost" || h === "127.0.0.1") return "";
   if (h.endsWith(".localhost")) return ""; // app.localhost / admin.localhost
+  // Replit preview domains (.replit.dev, .riker.replit.dev, .repl.co etc.)
+  // are public suffixes — browsers reject domain-scoped cookies on them.
+  // Return empty string so cookie is scoped to the exact origin instead.
+  if (h.includes(".replit.dev") || h.includes(".repl.co") || h.includes(".replit.app")) return "";
   const parts = h.split(".");
   if (parts.length <= 2) return `.${h}`;               // already a root domain
   return `.${parts.slice(-2).join(".")}`;              // e.g. .blissops.com

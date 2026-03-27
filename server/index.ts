@@ -28,6 +28,11 @@ import { lockdownGuard } from "./middleware/lockdown";
 const app = express();
 const httpServer = createServer(app);
 
+// Trust the first proxy hop (Replit/Vercel/Render reverse proxy).
+// Required so express-rate-limit can read X-Forwarded-For correctly
+// without throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
+app.set("trust proxy", 1);
+
 // Phase Next: www → apex redirect — FIRST so no other middleware runs on www requests
 app.use(wwwRedirectMiddleware);
 
