@@ -2649,7 +2649,8 @@ Generate names and content in ${langNote}.`;
       const docIds = assets.map((a) => a.id);
 
       // Fetch versions, jobs and chunk counts in parallel
-      const [versions, jobs, chunkCounts] = await Promise.all([
+      const { knowledgeEmbeddings } = await import("../shared/schema");
+      const [versions, jobs, chunkCounts, embeddingCounts] = await Promise.all([
         // current versions for file size / MIME
         (async () => {
           const versionIds = assets.map((a) => a.currentVersionId).filter(Boolean) as string[];
@@ -2665,10 +2666,16 @@ Generate names and content in ${langNote}.`;
           .from(knowledgeChunks)
           .where(and(eq(knowledgeChunks.tenantId, orgId), inArray(knowledgeChunks.knowledgeDocumentId, docIds), eq(knowledgeChunks.chunkActive, true)))
           .groupBy(knowledgeChunks.knowledgeDocumentId),
+        // embedding counts per document (Part G: observability)
+        db.select({ docId: knowledgeEmbeddings.knowledgeDocumentId, cnt: count() })
+          .from(knowledgeEmbeddings)
+          .where(and(eq(knowledgeEmbeddings.tenantId, orgId), inArray(knowledgeEmbeddings.knowledgeDocumentId, docIds), eq(knowledgeEmbeddings.embeddingStatus, "completed")))
+          .groupBy(knowledgeEmbeddings.knowledgeDocumentId),
       ]);
 
       const versionMap = Object.fromEntries(versions.map((v) => [v.id, v]));
       const chunkCountMap = Object.fromEntries(chunkCounts.map((c) => [c.docId, Number(c.cnt)]));
+      const embeddingCountMap = Object.fromEntries(embeddingCounts.map((c) => [c.docId, Number(c.cnt)]));
 
       // Group jobs by document — build pipeline status map
       type JobSummary = { jobType: string; status: string; failureReason: string | null; createdAt: Date };
@@ -2706,6 +2713,7 @@ Generate names and content in ${langNote}.`;
           fileSizeBytes: ver?.fileSizeBytes ?? null,
           versionNumber: a.latestVersionNumber,
           chunkCount: chunkCountMap[a.id] ?? 0,
+          embeddingCount: embeddingCountMap[a.id] ?? 0,
           pipeline: docJobs.map((j) => ({ jobType: j.jobType, status: j.status, failureReason: j.failureReason })),
           latestJobType: latestJob?.jobType ?? null,
           latestJobStatus: latestJob?.status ?? null,
@@ -3167,6 +3175,37 @@ Generate names and content in ${langNote}.`;
         ));
 
       return res.json(links);
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // POST /api/kb/search — search knowledge chunks (Storage 1.2 Part D+F)
+  // Supports expert-aware filtering and real embedding reranking.
+  app.post("/api/kb/search", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { queryText, topK, kbIds, expertId, sourceIds } = req.body as {
+        queryText?: string;
+        topK?: number;
+        kbIds?: string[];
+        expertId?: string;
+        sourceIds?: string[];
+      };
+
+      if (!queryText?.trim()) return res.status(400).json({ error: "queryText is required" });
+
+      const { searchKnowledge } = await import("./lib/knowledge/kb-retrieval");
+      const results = await searchKnowledge({
+        tenantId: orgId,
+        queryText: queryText.trim(),
+        topK:      Math.min(Number(topK ?? 10), 100),
+        kbIds:     kbIds?.length ? kbIds : undefined,
+        expertId:  expertId ?? undefined,
+        sourceIds: sourceIds?.length ? sourceIds : undefined,
+      });
+
+      return res.json({ results, total: results.length });
     } catch (err) {
       return handleError(res, err);
     }

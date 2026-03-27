@@ -178,6 +178,10 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      // Start knowledge processing background worker (Storage 1.2)
+      import("./lib/knowledge/kb-worker")
+        .then(({ startKbWorker }) => startKbWorker())
+        .catch((err) => log(`[kb-worker] failed to start: ${String(err)}`));
     },
   );
 })();
