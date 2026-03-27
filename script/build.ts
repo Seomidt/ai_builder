@@ -18,6 +18,7 @@ const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
   { name: "admin",         entry: "api/_src/admin.ts",         out: "api/admin.js"         },
   { name: "chat",          entry: "api/_src/chat.ts",          out: "api/chat.js"          },
   { name: "extract",       entry: "api/_src/extract.ts",       out: "api/extract.js"       },
+  { name: "early-access", entry: "api/_src/early-access.ts",  out: "api/early-access.js"  },
 ];
 
 

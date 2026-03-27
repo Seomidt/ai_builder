@@ -235,6 +235,7 @@ function getDemoUser(): AuthUser {
 const PUBLIC_PATHS = [
   "/api/auth/config",
   "/api/waitlist",
+  "/api/early-access",
   "/api/admin/platform/deploy-health",
   // Phase 29: Recovery & backup admin endpoints (internal tooling — CI/CD, runbooks, monitoring)
   "/api/admin/recovery/backup-status",
