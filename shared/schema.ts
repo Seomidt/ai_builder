@@ -6736,3 +6736,34 @@ export const chatMessages = pgTable(
     index("chat_msgs_org_conv_idx").on(t.organizationId, t.conversationId, t.createdAt),
   ],
 );
+
+// ─── expert_knowledge_bases ───────────────────────────────────────────────────
+// Part D (Storage 1.1): explicit DB-backed expert ↔ knowledge base relation.
+// Enables retrieval filtering: "which knowledge bases does this expert draw from?"
+// unique on (tenant_id, expert_id, knowledge_base_id) — one link per pair.
+
+export const expertKnowledgeBases = pgTable(
+  "expert_knowledge_bases",
+  {
+    id:              varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId:        varchar("tenant_id").notNull(),
+    expertId:        text("expert_id").notNull(),
+    knowledgeBaseId: varchar("knowledge_base_id")
+      .notNull()
+      .references(() => knowledgeBases.id, { onDelete: "cascade" }),
+    createdAt:       timestamp("created_at").notNull().defaultNow(),
+    createdBy:       text("created_by"),
+  },
+  (t) => [
+    uniqueIndex("ekb_tenant_expert_kb_unique").on(t.tenantId, t.expertId, t.knowledgeBaseId),
+    index("ekb_tenant_kb_idx").on(t.tenantId, t.knowledgeBaseId),
+    index("ekb_tenant_expert_idx").on(t.tenantId, t.expertId),
+  ],
+);
+
+export const insertExpertKnowledgeBaseSchema = createInsertSchema(expertKnowledgeBases).omit({
+  id: true,
+  createdAt: true,
+});
+export type InsertExpertKnowledgeBase = z.infer<typeof insertExpertKnowledgeBaseSchema>;
+export type ExpertKnowledgeBase = typeof expertKnowledgeBases.$inferSelect;
