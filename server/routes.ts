@@ -2701,15 +2701,14 @@ Generate names and content in ${langNote}.`;
       const Busboy = (await import("busboy")).default;
       const bb = Busboy({ headers: req.headers as Record<string, string>, limits: { fileSize: 100 * 1024 * 1024 } });
 
-      let fileResult: { filename: string; mimeType: string; sizeBytes: number } | null = null;
+      let fileResult: { filename: string; mimeType: string; buffer: Buffer } | null = null;
 
       await new Promise<void>((resolve, reject) => {
         bb.on("file", (_field: string, stream: NodeJS.ReadableStream, info: { filename: string; mimeType: string }) => {
           const chunks: Buffer[] = [];
           stream.on("data", (c: Buffer) => chunks.push(c));
           stream.on("end", () => {
-            const buf = Buffer.concat(chunks);
-            fileResult = { filename: info.filename, mimeType: info.mimeType, sizeBytes: buf.length };
+            fileResult = { filename: info.filename, mimeType: info.mimeType, buffer: Buffer.concat(chunks) };
           });
           stream.on("error", reject);
         });
@@ -2722,7 +2721,8 @@ Generate names and content in ${langNote}.`;
         return res.status(400).json({ error_code: "NO_FILE", message: "Ingen fil modtaget" });
       }
 
-      const { filename, mimeType, sizeBytes } = fileResult;
+      const { filename, mimeType, buffer } = fileResult;
+      const sizeBytes = buffer.length;
 
       // Determine asset type from mime type
       let documentType = "other";
@@ -2733,8 +2733,24 @@ Generate names and content in ${langNote}.`;
       // Determine job type based on document type
       const jobType = documentType === "video" ? "transcript_parse" : documentType === "image" ? "ocr_parse" : "parse";
 
-      // Storage key placeholder (no R2 configured)
-      const storageKey = `${orgId}/${kbId}/${Date.now()}-${filename}`;
+      // Build R2 storage key and upload
+      const safeFilename = filename.replace(/[^a-zA-Z0-9._\-]/g, "-").slice(0, 200);
+      const storageKey = `tenants/${orgId}/uploads/${kbId}/${Date.now()}-${safeFilename}`;
+
+      const { R2_CONFIGURED, R2_BUCKET, r2Client } = await import("./lib/r2/r2-client");
+      if (R2_CONFIGURED) {
+        const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+        await r2Client.send(new PutObjectCommand({
+          Bucket:      R2_BUCKET,
+          Key:         storageKey,
+          Body:        buffer,
+          ContentType: mimeType,
+          Metadata:    { tenantId: orgId, kbId, originalFilename: filename },
+        }));
+        console.log(`[kb-upload] R2 upload OK: ${storageKey} (${sizeBytes} bytes)`);
+      } else {
+        console.warn("[kb-upload] R2 ikke konfigureret — gemmer kun metadata");
+      }
 
       // Create document
       const [doc] = await db.insert(knowledgeDocuments).values({
