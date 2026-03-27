@@ -133,7 +133,7 @@ function isAdminRole(role?: string) {
 
 const FIELD_CLS  = [
   "bg-white border-zinc-400",
-  "text-zinc-900 placeholder:text-zinc-500",
+  "text-zinc-900 placeholder:text-slate-600",
   "focus:border-cyan-500 focus-visible:ring-2 focus-visible:ring-cyan-500/30 focus-visible:ring-offset-0",
   "transition-colors duration-150",
 ].join(" ");
