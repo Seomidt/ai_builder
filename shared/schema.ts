@@ -6767,3 +6767,54 @@ export const insertExpertKnowledgeBaseSchema = createInsertSchema(expertKnowledg
 });
 export type InsertExpertKnowledgeBase = z.infer<typeof insertExpertKnowledgeBaseSchema>;
 export type ExpertKnowledgeBase = typeof expertKnowledgeBases.$inferSelect;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Phase 2.2 — Tenant Insights Engine
+// tenant_insights: machine-readable intelligence layer per tenant.
+// Each insight has a stable code, severity, category, i18n-ready keys, metadata.
+// Lifecycle: active → dismissed (tenant action) | resolved (rule no longer fires).
+// ─────────────────────────────────────────────────────────────────────────────
+
+export const tenantInsights = pgTable(
+  "tenant_insights",
+  {
+    id:                text("id").primaryKey().default(sql`gen_random_uuid()::text`),
+    tenantId:          text("tenant_id").notNull(),
+    code:              text("code").notNull(),
+    category:          text("category").notNull(),
+    severity:          text("severity").notNull(),
+    status:            text("status").notNull().default("active"),
+    titleKey:          text("title_key").notNull(),
+    descriptionKey:    text("description_key").notNull(),
+    recommendationKey: text("recommendation_key").notNull(),
+    metadata:          jsonb("metadata"),
+    firstDetectedAt:   timestamp("first_detected_at", { withTimezone: true }).notNull().defaultNow(),
+    lastDetectedAt:    timestamp("last_detected_at", { withTimezone: true }).notNull().defaultNow(),
+    dismissedAt:       timestamp("dismissed_at", { withTimezone: true }),
+    dismissedBy:       text("dismissed_by"),
+    resolvedAt:        timestamp("resolved_at", { withTimezone: true }),
+    createdAt:         timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt:         timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("ti_tenant_code_active_uq")
+      .on(t.tenantId, t.code)
+      .where(sql`status = 'active'`),
+    index("ti_tenant_status_idx").on(t.tenantId, t.status),
+    index("ti_tenant_severity_idx").on(t.tenantId, t.severity),
+    index("ti_tenant_category_idx").on(t.tenantId, t.category),
+    check("ti_severity_check", sql`${t.severity} IN ('low', 'moderate', 'high')`),
+    check("ti_status_check", sql`${t.status} IN ('active', 'dismissed', 'resolved')`),
+    check("ti_category_check", sql`${t.category} IN ('security', 'performance', 'cost', 'configuration', 'retrieval')`),
+  ],
+);
+
+export const insertTenantInsightSchema = createInsertSchema(tenantInsights).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+  firstDetectedAt: true,
+  lastDetectedAt: true,
+});
+export type InsertTenantInsight = z.infer<typeof insertTenantInsightSchema>;
+export type TenantInsight = typeof tenantInsights.$inferSelect;

@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { registerAdminRoutes } from "./routes/admin";
+import { registerInsightRoutes } from "./routes/insights";
 import { aiRouteChain } from "./middleware/ai-guards";
 import {
   getSecurityHealth,
@@ -2337,6 +2338,9 @@ Generate names and content in ${langNote}.`;
 
   // Phase 4P — Admin Pricing & Plan Management routes
   registerAdminRoutes(app);
+
+  // Phase 2.2 — Tenant Insights Engine routes
+  registerInsightRoutes(app);
 
   // Phase 37 — Secure Authentication Platform routes
   const { registerAuthPlatformRoutes } = await import("./routes/auth-platform");

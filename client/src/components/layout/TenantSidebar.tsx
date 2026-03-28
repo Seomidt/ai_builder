@@ -12,6 +12,7 @@ import {
   MessageSquare,
   Database,
   SlidersHorizontal,
+  Lightbulb,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/hooks/use-auth";
@@ -29,6 +30,7 @@ const CORE_ITEMS = [
 
 const ADMIN_ITEMS = [
   { href: "/team",          label: "Team",                  icon: Users2            },
+  { href: "/insights",      label: "Insights",              icon: Lightbulb         },
   { href: "/workspace/ai",  label: "Ekspertindstillinger",  icon: SlidersHorizontal },
   { href: "/brug",          label: "Usage",                 icon: BarChart2         },
   { href: "/indstillinger", label: "Indstillinger",         icon: Settings          },

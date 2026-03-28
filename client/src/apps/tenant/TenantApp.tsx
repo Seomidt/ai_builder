@@ -31,6 +31,9 @@ const AiEkspertDetail  = lazy(() => import("@/pages/ai-ekspert-detail"));
 const AiEkspertEditor  = lazy(() => import("@/pages/ai-ekspert-editor"));
 const StorageDetail   = lazy(() => import("@/pages/storage-detail"));
 
+// ── Lazy: Insights ────────────────────────────────────────────────────────────
+const InsightsPage = lazy(() => import("@/pages/tenant/insights"));
+
 // ── Lazy: workspace surface ───────────────────────────────────────────────────
 const WorkspaceDashboard    = lazy(() => import("@/pages/tenant/dashboard"));
 const WorkspaceData         = lazy(() => import("@/pages/tenant/data"));
@@ -99,6 +102,7 @@ export function TenantApp() {
             <Route path="/ai-chat"      component={AiChat} />
 
             {/* ── Direct top-level shortcuts for nav items ─────────────── */}
+            <Route path="/insights"      component={InsightsPage} />
             <Route path="/brug"         component={WorkspaceUsage} />
             <Route path="/indstillinger" component={WorkspaceSettings} />
 
