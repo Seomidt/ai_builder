@@ -204,7 +204,7 @@ async function handleFinalize(
 
     // Scanned PDF → async OCR pipeline
     if (result.code === "SCANNED_PDF") {
-      return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, routing });
+      return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, sizeBytes: size, routing });
     }
 
     if (result.status === "error" || result.status === "unsupported") {
@@ -262,7 +262,7 @@ async function handleFinalize(
 
   // Scanned PDF or large PDF → async OCR
   if (result.code === "SCANNED_PDF") {
-    return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, routing });
+    return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, sizeBytes: size, routing });
   }
 
   if (result.status === "ok") {
@@ -285,7 +285,7 @@ async function handleFinalize(
     log("upload.finalize.mode_b.pdf_error_ocr_fallback", {
       tenantId, objectKey, parseError: result.message ?? result.status,
     });
-    return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, routing });
+    return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, sizeBytes: size, routing });
   }
 
   // Non-PDF extraction failure
@@ -308,6 +308,7 @@ interface OcrPendingContext {
   objectKey:   string;
   filename:    string;
   contentType: string;
+  sizeBytes?:  number;
   routing:     { reason: string };
 }
 
@@ -318,27 +319,34 @@ async function handleOcrPending(
   const { createOcrTask } = await import("./_lib/ocr-queue");
   try {
     // ── Compute SHA-256 of file content for idempotent deduplication ──────────
-    // We fetch the file from R2 here (it is already uploaded).
-    // If R2 fetch fails we fall back to hash=undefined (still enqueues, just no dedup).
+    // Skip download for large files (> 5 MB) to avoid double-download timeout:
+    // processDirectAttachment already skips R2 for large PDFs, so downloading
+    // here would be the only (and expensive) network call in the function.
+    // Without a hash the job is still created, just without content-based dedup.
+    const LARGE_PDF_HASH_SKIP = 5 * 1024 * 1024;
     let fileHash: string | undefined;
-    try {
-      const { r2Client, R2_BUCKET, R2_CONFIGURED } = await import("../../server/lib/r2/r2-client");
-      if (R2_CONFIGURED) {
-        const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-        const r2Res = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: ctx.objectKey }));
-        if (r2Res.Body) {
-          const chunks: Buffer[] = [];
-          for await (const chunk of r2Res.Body as AsyncIterable<Uint8Array>) {
-            chunks.push(Buffer.from(chunk));
+    if (!ctx.sizeBytes || ctx.sizeBytes <= LARGE_PDF_HASH_SKIP) {
+      try {
+        const { r2Client, R2_BUCKET, R2_CONFIGURED } = await import("../../server/lib/r2/r2-client");
+        if (R2_CONFIGURED) {
+          const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+          const r2Res = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: ctx.objectKey }));
+          if (r2Res.Body) {
+            const chunks: Buffer[] = [];
+            for await (const chunk of r2Res.Body as AsyncIterable<Uint8Array>) {
+              chunks.push(Buffer.from(chunk));
+            }
+            const buf   = Buffer.concat(chunks);
+            const { createHash } = await import("crypto");
+            fileHash = createHash("sha256").update(buf).digest("hex");
           }
-          const buf   = Buffer.concat(chunks);
-          const { createHash } = await import("crypto");
-          fileHash = createHash("sha256").update(buf).digest("hex");
         }
+      } catch {
+        // Non-fatal — hash omitted, job will be created without dedup
+        fileHash = undefined;
       }
-    } catch {
-      // Non-fatal — hash omitted, job will be created without dedup
-      fileHash = undefined;
+    } else {
+      console.log(`[ocr-pending] sizeBytes=${ctx.sizeBytes} > ${LARGE_PDF_HASH_SKIP} — skipping SHA-256 download`);
     }
 
     const result = await createOcrTask({
