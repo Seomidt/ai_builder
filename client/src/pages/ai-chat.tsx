@@ -670,6 +670,7 @@ export default function AiChatPage() {
                 if (pollData.status === "completed") { ocrResult = pollData; break; }
                 if (pollData.status === "dead_letter") {
                   setOcrStatusLabel(null);
+                  console.error(`[OCR-FAIL][${traceId}] PATH=dead_letter reason="${pollData.errorReason}" attempts=${pollData.attemptCount}/${pollData.maxAttempts}`);
                   throw Object.assign(
                     new Error(pollData.errorReason ?? "PDF kan ikke læses — for mange fejlede forsøg"),
                     { errorCode: "DOCUMENT_UNREADABLE" },
@@ -682,6 +683,7 @@ export default function AiChatPage() {
                     continue;
                   }
                   setOcrStatusLabel(null);
+                  console.error(`[OCR-FAIL][${traceId}] PATH=failed_no_retry reason="${pollData.errorReason}" attempts=${pollData.attemptCount}/${pollData.maxAttempts}`);
                   throw Object.assign(new Error(pollData.errorReason ?? "PDF OCR fejlede"), { errorCode: "DOCUMENT_UNREADABLE" });
                 }
               }
@@ -689,6 +691,7 @@ export default function AiChatPage() {
               setOcrStatusLabel(null);
 
               if (!ocrResult) {
+                console.error(`[OCR-FAIL][${traceId}] PATH=timeout elapsed=180s task never completed`);
                 throw Object.assign(new Error("OCR tog for lang tid. Prøv igen med en kortere fil."), { errorCode: "DOCUMENT_UNREADABLE" });
               }
 
@@ -718,7 +721,7 @@ export default function AiChatPage() {
             // Brug den konkrete fejlbesked fra extract hvis tilgængelig
             const errorEntry = documentContext.find((r: any) => r.status === "error" && r.message);
             const specificMsg = errorEntry?.message ?? "Dokument kunne ikke læses. Kontrollér at filen er en valid PDF eller tekstfil.";
-            console.error(`[HARD-STOP][${traceId}] DOCUMENT_CONTEXT_MISSING: 0 valid entries — ${specificMsg}`);
+            console.error(`[OCR-FAIL][${traceId}] PATH=empty_extracted_text entries=${documentContext.length} chars=[${documentContext.map((r:any)=>r.extracted_text?.length??0).join(",")}] statuses=[${documentContext.map((r:any)=>r.status).join(",")}] — ${specificMsg}`);
             throw Object.assign(new Error(specificMsg), { errorCode: "DOCUMENT_UNREADABLE" });
           }
         } catch (e: any) {
