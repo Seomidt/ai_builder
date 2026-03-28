@@ -632,8 +632,11 @@ export default function AiChatPage() {
           // HARD STOP: ingen gyldige dokumenter
           const validEntries = documentContext.filter((r: any) => r.status === "ok" && r.extracted_text?.trim());
           if (validEntries.length === 0) {
-            console.error(`[HARD-STOP][${traceId}] DOCUMENT_CONTEXT_MISSING: 0 valid entries after finalize`);
-            throw Object.assign(new Error("Dokument kunne ikke læses. Kontrollér at filen er en valid PDF eller tekstfil."), { errorCode: "DOCUMENT_UNREADABLE" });
+            // Brug den konkrete fejlbesked fra extract hvis tilgængelig
+            const errorEntry = documentContext.find((r: any) => r.status === "error" && r.message);
+            const specificMsg = errorEntry?.message ?? "Dokument kunne ikke læses. Kontrollér at filen er en valid PDF eller tekstfil.";
+            console.error(`[HARD-STOP][${traceId}] DOCUMENT_CONTEXT_MISSING: 0 valid entries — ${specificMsg}`);
+            throw Object.assign(new Error(specificMsg), { errorCode: "DOCUMENT_UNREADABLE" });
           }
         } catch (e: any) {
           if (e?.errorCode) throw e; // re-throw hard-stops

@@ -393,6 +393,9 @@ async function _checkCloudflare(): Promise<PartialProviderResult> {
   if (!accessKey)  missingEnv.push("CF_R2_ACCESS_KEY_ID");
   if (!secretKey)  missingEnv.push("CF_R2_SECRET_ACCESS_KEY");
 
+  // R2 lager-kredentialer (S3-kompatibel API) er det kritiske for faktisk storage
+  const r2CredsPresent = missingEnv.length === 0;
+
   if (apiToken) {
     const t0 = Date.now();
     const res = await fetchWithTimeout("https://api.cloudflare.com/client/v4/user/tokens/verify", {
@@ -403,15 +406,19 @@ async function _checkCloudflare(): Promise<PartialProviderResult> {
     const body = await res.json().catch(() => ({})) as { success?: boolean; result?: { status?: string } };
 
     if (res.status === 200 && body.success && body.result?.status === "active") {
-      const partial = missingEnv.length > 0;
-      return { ...meta, missingEnv, status: partial ? "partial" : latencyClass === "poor" ? "degraded" : "connected", latencyMs, latencyClass, details: { tokenActive: true, r2CredsPresent: !partial }, message: partial ? "API token valid but R2 credentials incomplete." : "Connected and operational." };
+      return { ...meta, missingEnv, status: r2CredsPresent ? (latencyClass === "poor" ? "degraded" : "connected") : "partial", latencyMs, latencyClass, details: { tokenActive: true, r2CredsPresent }, message: r2CredsPresent ? "Connected and operational." : "API token valid but R2 credentials incomplete." };
     }
-    if (res.status === 401) return { ...meta, missingEnv, status: "invalid", latencyMs, latencyClass, details: {}, message: "Cloudflare API token is invalid." };
-    return { ...meta, missingEnv, status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Unexpected response: HTTP ${res.status}.` };
+    // CF_API_TOKEN er kun til admin-tjek — ugyldig token ≠ R2 storage nede
+    // R2 storage bruger S3-kredentialer (CF_R2_ACCESS_KEY_ID + CF_R2_SECRET_ACCESS_KEY)
+    if (res.status === 401) {
+      if (r2CredsPresent) return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { tokenActive: false, r2CredsPresent: true }, message: "R2 lager er konfigureret. Admin API-token er udløbet (påvirker ikke lager)." };
+      return { ...meta, missingEnv, status: "partial", latencyMs, latencyClass, details: { tokenActive: false, r2CredsPresent: false }, message: "Admin API-token er udløbet og R2-kredentialer mangler." };
+    }
+    return { ...meta, missingEnv, status: r2CredsPresent ? "partial" : "missing", latencyMs, latencyClass, details: { httpStatus: res.status }, message: r2CredsPresent ? `R2 konfigureret. Admin API-tjek returnerede HTTP ${res.status}.` : `R2 ikke fuldt konfigureret. HTTP ${res.status}.` };
   }
 
-  if (missingEnv.length > 0) return { ...meta, missingEnv, status: "missing", latencyMs: null, latencyClass: null, details: {}, message: "R2 credentials are not fully configured." };
-  return { ...meta, missingEnv: [], status: "connected", latencyMs: null, latencyClass: null, details: { r2CredsPresent: true }, message: "R2 credentials configured (live check requires CF_API_TOKEN)." };
+  if (!r2CredsPresent) return { ...meta, missingEnv, status: "missing", latencyMs: null, latencyClass: null, details: {}, message: "R2 credentials are not fully configured." };
+  return { ...meta, missingEnv: [], status: "connected", latencyMs: null, latencyClass: null, details: { r2CredsPresent: true }, message: "R2 lager-kredentialer konfigureret og operationelle." };
 }
 
 function _checkEmail(): PartialProviderResult {
