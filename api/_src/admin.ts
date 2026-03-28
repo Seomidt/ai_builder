@@ -331,6 +331,21 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         return json(res, { data: rows });
       }
 
+      // POST /api/admin/governance/alerts/generate/budget
+      if (sub === "alerts" && segs[2] === "generate" && segs[3] === "budget" && method === "POST") {
+        try {
+          const { checkAllTenantBudgets } = await import("../../server/lib/ai-governance/budget-checker");
+          const body = await readBody<{ periodType?: string }>(req);
+          const periodType = (body.periodType ?? "monthly") as "daily"|"weekly"|"monthly"|"annual";
+          const { results, errors } = await checkAllTenantBudgets(periodType);
+          return json(res, {
+            data: { results, errors, tenantsChecked: results.length, errored: errors.length },
+          });
+        } catch (e) {
+          return json(res, { error_code: "INTERNAL_ERROR", message: (e as Error).message }, 500);
+        }
+      }
+
       if (sub === "alerts" && method === "GET") {
         const limit  = Math.min(parseInt(u.searchParams.get("limit") ?? "50", 10), 200);
         const orgId  = u.searchParams.get("organizationId");
