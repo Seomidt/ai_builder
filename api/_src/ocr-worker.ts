@@ -39,7 +39,8 @@ import {
 
 const CLAIM_LIMIT        = 3;
 const SCANNED_THRESHOLD  = 100;   // chars — below = scanned PDF
-const OCR_TIMEOUT_MS     = 90_000;
+const OCR_TIMEOUT_MS     = 120_000; // 120 s — allows larger PDFs via File API
+const GEMINI_INLINE_LIMIT = 4 * 1024 * 1024; // 4 MB — use File API above this
 const EMBED_BATCH_SIZE   = 20;
 const QUALITY_FAIL_SCORE = 0.10;  // below = unreadable → dead-letter
 const QUALITY_RETRY_SCORE = 0.35; // below = try fallback provider
@@ -105,17 +106,55 @@ async function parsePdf(buf: Buffer): Promise<{ text: string; numpages: number }
 
 // ── OCR providers ─────────────────────────────────────────────────────────────
 
+/**
+ * Upload a buffer to Gemini File API and return the file URI.
+ * Used for PDFs > GEMINI_INLINE_LIMIT (4 MB) where inlineData is unreliable.
+ * The File API supports PDFs up to 2 GB and is more stable for large files.
+ */
+async function uploadToGeminiFileApi(buf: Buffer, apiKey: string): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { GoogleAIFileManager } = require("@google/generative-ai/server");
+  const fileManager = new GoogleAIFileManager(apiKey);
+  const uploadResult = await fileManager.uploadFile(buf, {
+    mimeType:    "application/pdf",
+    displayName: "ocr_target.pdf",
+  });
+  const file = uploadResult.file;
+
+  // For PDFs, state should be ACTIVE immediately. Poll briefly if not.
+  if (file.state !== "ACTIVE") {
+    for (let i = 0; i < 8; i++) {
+      await new Promise<void>((r) => setTimeout(r, 2_000));
+      const status = await fileManager.getFile(file.name);
+      if (status.state === "ACTIVE") return status.uri;
+      if (status.state === "FAILED") throw new Error(`Gemini File API: file processing failed (${status.name})`);
+    }
+    throw new Error("Gemini File API: file never became ACTIVE after 16 s");
+  }
+  return file.uri;
+}
+
 async function ocrWithGemini(buf: Buffer): Promise<{ text: string; promptTokens: number; completionTokens: number }> {
   const apiKey = (process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "").trim();
   if (!apiKey) throw new Error("GOOGLE_GENERATIVE_AI_API_KEY ikke sat");
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { GoogleGenerativeAI } = require("@google/generative-ai");
   const model  = new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: "gemini-1.5-flash" });
+
+  // For large PDFs (> 4 MB), use the Gemini File API instead of inline base64.
+  // inlineData is limited to ~4 MB and causes HTTP 413 or truncation for larger files.
+  let contentPart: unknown;
+  if (buf.length > GEMINI_INLINE_LIMIT) {
+    console.log(`[ocr-worker] PDF ${(buf.length / 1024 / 1024).toFixed(1)} MB > ${GEMINI_INLINE_LIMIT / 1024 / 1024} MB limit — using Gemini File API`);
+    const fileUri = await uploadToGeminiFileApi(buf, apiKey);
+    contentPart = { fileData: { fileUri, mimeType: "application/pdf" } };
+  } else {
+    contentPart = { inlineData: { data: buf.toString("base64"), mimeType: "application/pdf" } };
+  }
+
   const result = await withTimeout(
-    model.generateContent([
-      { inlineData: { data: buf.toString("base64"), mimeType: "application/pdf" } },
-      OCR_PROMPT,
-    ]),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    model.generateContent([contentPart as any, OCR_PROMPT]),
     OCR_TIMEOUT_MS,
     "Gemini OCR",
   );
