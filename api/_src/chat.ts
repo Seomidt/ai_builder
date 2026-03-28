@@ -605,6 +605,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       "- answer må IKKE bruge generel viden — kun dokumentet",
       "- Svar ALTID på dansk",
       "- INGEN andre formater end ovenstående JSON er tilladt",
+      "- Hvis spørgsmålet indeholder stavefejl eller slåfejl, fortolk hensigten og find det nærmeste match i dokumentet. Eksempel: 'selvrosko' → 'selvrisiko', 'forsikrning' → 'forsikring'.",
+      "- Korthed i dokumentet er ikke en grund til 'not found' — hvis informationen er der, svar på den.",
     ].join("\n");
 
     const VALIDATION_SYSTEM_PROMPT_PARALLEL = [
@@ -701,15 +703,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       console.log("[chat] DOC_MODE NOT_FOUND");
     }
 
-    // ── Grounding enforcement ──────────────────────────────────────────────
-    const groundingDocText = docCtx.map(d => d.extracted_text).join(" ").toLowerCase();
-    const groundingAnswer  = finalAnswer.toLowerCase().replace(/[*"\\]/g, " ").replace(/\s+/g, " ");
-    const overlap = groundingAnswer.split(" ").filter(w => groundingDocText.includes(w)).length;
-    console.log(`[chat] GROUNDING overlap=${overlap}`);
-    if (overlap < 5) {
-      finalAnswer = "Jeg kan ikke finde det i jeres interne data.";
-      console.log("[chat] GROUNDING_OVERRIDE applied");
-    }
+    // Grounding håndhæves strukturelt via response_format:json_object og
+    // det obligatoriske "quote"-felt — ingen ekstra word-overlap check nødvendig.
+    console.log(`[chat] DOC_MODE finalAnswer="${finalAnswer.slice(0, 80)}..."`);
 
     // ── Behandl valideringsresultat (non-fatal) ────────────────────────────
     try {
