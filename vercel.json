@@ -6,91 +6,314 @@
     {
       "path": "/api/admin/platform/deploy-health",
       "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/ocr-worker",
+      "schedule": "* * * * *"
     }
   ],
   "functions": {
-    "api/auth.js":          { "memory": 256, "maxDuration": 10 },
-    "api/dashboard.js":     { "memory": 256, "maxDuration": 15 },
-    "api/projects.js":      { "memory": 256, "maxDuration": 15 },
-    "api/architectures.js": { "memory": 256, "maxDuration": 15 },
-    "api/runs.js":          { "memory": 256, "maxDuration": 20 },
-    "api/integrations.js":  { "memory": 256, "maxDuration": 15 },
-    "api/config.js":        { "memory": 128, "maxDuration": 5  },
-    "api/analytics.js":     { "memory": 128, "maxDuration": 5  },
-    "api/storage.js":       { "memory": 256, "maxDuration": 15 },
-    "api/waitlist.js":      { "memory": 128, "maxDuration": 10 },
-    "api/tenant.js":        { "memory": 256, "maxDuration": 15 },
-    "api/admin.js":         { "memory": 512, "maxDuration": 30 },
-    "api/chat.js":          { "memory": 512, "maxDuration": 60 },
-    "api/extract.js":       { "memory": 1024, "maxDuration": 60 },
-    "api/early-access.js":  { "memory": 128, "maxDuration": 10 },
-    "api/kb.js":            { "memory": 512, "maxDuration": 30 },
-    "api/insights.js":      { "memory": 256, "maxDuration": 30 },
-    "api/experts.js":       { "memory": 512, "maxDuration": 60 },
-    "api/upload.js":        { "memory": 512, "maxDuration": 60 },
-    "api/usage.js":         { "memory": 256, "maxDuration": 15 }
+    "api/auth.js": {
+      "memory": 256,
+      "maxDuration": 10
+    },
+    "api/dashboard.js": {
+      "memory": 256,
+      "maxDuration": 15
+    },
+    "api/projects.js": {
+      "memory": 256,
+      "maxDuration": 15
+    },
+    "api/architectures.js": {
+      "memory": 256,
+      "maxDuration": 15
+    },
+    "api/runs.js": {
+      "memory": 256,
+      "maxDuration": 20
+    },
+    "api/integrations.js": {
+      "memory": 256,
+      "maxDuration": 15
+    },
+    "api/config.js": {
+      "memory": 128,
+      "maxDuration": 5
+    },
+    "api/analytics.js": {
+      "memory": 128,
+      "maxDuration": 5
+    },
+    "api/storage.js": {
+      "memory": 256,
+      "maxDuration": 15
+    },
+    "api/waitlist.js": {
+      "memory": 128,
+      "maxDuration": 10
+    },
+    "api/tenant.js": {
+      "memory": 256,
+      "maxDuration": 15
+    },
+    "api/admin.js": {
+      "memory": 512,
+      "maxDuration": 30
+    },
+    "api/chat.js": {
+      "memory": 512,
+      "maxDuration": 60
+    },
+    "api/extract.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    },
+    "api/early-access.js": {
+      "memory": 128,
+      "maxDuration": 10
+    },
+    "api/kb.js": {
+      "memory": 512,
+      "maxDuration": 30
+    },
+    "api/insights.js": {
+      "memory": 256,
+      "maxDuration": 30
+    },
+    "api/experts.js": {
+      "memory": 512,
+      "maxDuration": 60
+    },
+    "api/upload.js": {
+      "memory": 512,
+      "maxDuration": 60
+    },
+    "api/usage.js": {
+      "memory": 256,
+      "maxDuration": 15
+    },
+    "api/ocr-worker.js": {
+      "memory": 1024,
+      "maxDuration": 300
+    },
+    "api/ocr-status.js": {
+      "memory": 128,
+      "maxDuration": 10
+    }
   },
   "rewrites": [
-    { "source": "/api/auth",        "destination": "/api/auth"          },
-    { "source": "/api/auth/(.*)",   "destination": "/api/auth"          },
-    { "source": "/api/dashboard",   "destination": "/api/dashboard"     },
-    { "source": "/api/projects",    "destination": "/api/projects"      },
-    { "source": "/api/projects/(.*)", "destination": "/api/projects"    },
-    { "source": "/api/architectures",      "destination": "/api/architectures" },
-    { "source": "/api/architectures/(.*)", "destination": "/api/architectures" },
-    { "source": "/api/runs",        "destination": "/api/runs"          },
-    { "source": "/api/runs/(.*)",   "destination": "/api/runs"          },
-    { "source": "/api/integrations",      "destination": "/api/integrations" },
-    { "source": "/api/integrations/(.*)", "destination": "/api/integrations" },
-    { "source": "/api/config",      "destination": "/api/config"        },
-    { "source": "/api/config/(.*)", "destination": "/api/config"        },
-    { "source": "/api/analytics",      "destination": "/api/analytics"  },
-    { "source": "/api/analytics/(.*)", "destination": "/api/analytics"  },
-    { "source": "/api/storage",     "destination": "/api/storage"       },
-    { "source": "/api/waitlist",    "destination": "/api/waitlist"      },
-    { "source": "/api/tenant",      "destination": "/api/tenant"        },
-    { "source": "/api/tenant/(.*)", "destination": "/api/tenant"        },
-    { "source": "/api/admin",       "destination": "/api/admin"         },
-    { "source": "/api/admin/(.*)",  "destination": "/api/admin"         },
-    { "source": "/api/chat",        "destination": "/api/chat"          },
-    { "source": "/api/chat/(.*)",   "destination": "/api/chat"          },
-    { "source": "/api/extract",       "destination": "/api/extract"        },
-    { "source": "/api/extract/(.*)",  "destination": "/api/extract"        },
-    { "source": "/api/early-access",  "destination": "/api/early-access"   },
-    { "source": "/api/kb",            "destination": "/api/kb"              },
-    { "source": "/api/kb/(.*)",       "destination": "/api/kb"              },
-    { "source": "/api/insights",      "destination": "/api/insights"        },
-    { "source": "/api/insights/(.*)", "destination": "/api/insights"        },
-    { "source": "/api/experts",       "destination": "/api/experts"         },
-    { "source": "/api/experts/(.*)",  "destination": "/api/experts"         },
-    { "source": "/api/upload",        "destination": "/api/upload"          },
-    { "source": "/api/upload/(.*)",   "destination": "/api/upload"          },
-    { "source": "/api/usage",         "destination": "/api/usage"           },
-    { "source": "/api/usage/(.*)",    "destination": "/api/usage"           },
-    { "source": "/api/budget",        "destination": "/api/usage"           },
-    { "source": "/api/budget/(.*)",   "destination": "/api/usage"           },
-    { "source": "/(.*)",              "destination": "/index.html"          }
+    {
+      "source": "/api/auth",
+      "destination": "/api/auth"
+    },
+    {
+      "source": "/api/auth/(.*)",
+      "destination": "/api/auth"
+    },
+    {
+      "source": "/api/dashboard",
+      "destination": "/api/dashboard"
+    },
+    {
+      "source": "/api/projects",
+      "destination": "/api/projects"
+    },
+    {
+      "source": "/api/projects/(.*)",
+      "destination": "/api/projects"
+    },
+    {
+      "source": "/api/architectures",
+      "destination": "/api/architectures"
+    },
+    {
+      "source": "/api/architectures/(.*)",
+      "destination": "/api/architectures"
+    },
+    {
+      "source": "/api/runs",
+      "destination": "/api/runs"
+    },
+    {
+      "source": "/api/runs/(.*)",
+      "destination": "/api/runs"
+    },
+    {
+      "source": "/api/integrations",
+      "destination": "/api/integrations"
+    },
+    {
+      "source": "/api/integrations/(.*)",
+      "destination": "/api/integrations"
+    },
+    {
+      "source": "/api/config",
+      "destination": "/api/config"
+    },
+    {
+      "source": "/api/config/(.*)",
+      "destination": "/api/config"
+    },
+    {
+      "source": "/api/analytics",
+      "destination": "/api/analytics"
+    },
+    {
+      "source": "/api/analytics/(.*)",
+      "destination": "/api/analytics"
+    },
+    {
+      "source": "/api/storage",
+      "destination": "/api/storage"
+    },
+    {
+      "source": "/api/waitlist",
+      "destination": "/api/waitlist"
+    },
+    {
+      "source": "/api/tenant",
+      "destination": "/api/tenant"
+    },
+    {
+      "source": "/api/tenant/(.*)",
+      "destination": "/api/tenant"
+    },
+    {
+      "source": "/api/admin",
+      "destination": "/api/admin"
+    },
+    {
+      "source": "/api/admin/(.*)",
+      "destination": "/api/admin"
+    },
+    {
+      "source": "/api/chat",
+      "destination": "/api/chat"
+    },
+    {
+      "source": "/api/chat/(.*)",
+      "destination": "/api/chat"
+    },
+    {
+      "source": "/api/extract",
+      "destination": "/api/extract"
+    },
+    {
+      "source": "/api/extract/(.*)",
+      "destination": "/api/extract"
+    },
+    {
+      "source": "/api/early-access",
+      "destination": "/api/early-access"
+    },
+    {
+      "source": "/api/kb",
+      "destination": "/api/kb"
+    },
+    {
+      "source": "/api/kb/(.*)",
+      "destination": "/api/kb"
+    },
+    {
+      "source": "/api/insights",
+      "destination": "/api/insights"
+    },
+    {
+      "source": "/api/insights/(.*)",
+      "destination": "/api/insights"
+    },
+    {
+      "source": "/api/experts",
+      "destination": "/api/experts"
+    },
+    {
+      "source": "/api/experts/(.*)",
+      "destination": "/api/experts"
+    },
+    {
+      "source": "/api/ocr-worker",
+      "destination": "/api/ocr-worker"
+    },
+    {
+      "source": "/api/ocr-worker/(.*)",
+      "destination": "/api/ocr-worker"
+    },
+    {
+      "source": "/api/ocr-status",
+      "destination": "/api/ocr-status"
+    },
+    {
+      "source": "/api/ocr-status/(.*)",
+      "destination": "/api/ocr-status"
+    },
+    {
+      "source": "/api/upload",
+      "destination": "/api/upload"
+    },
+    {
+      "source": "/api/upload/(.*)",
+      "destination": "/api/upload"
+    },
+    {
+      "source": "/api/usage",
+      "destination": "/api/usage"
+    },
+    {
+      "source": "/api/usage/(.*)",
+      "destination": "/api/usage"
+    },
+    {
+      "source": "/api/budget",
+      "destination": "/api/usage"
+    },
+    {
+      "source": "/api/budget/(.*)",
+      "destination": "/api/usage"
+    },
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
   ],
   "headers": [
     {
       "source": "/assets/(.*)",
       "headers": [
-        { "key": "Cache-Control", "value": "public, max-age=31536000, immutable" },
-        { "key": "Access-Control-Allow-Origin", "value": "*" }
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        },
+        {
+          "key": "Access-Control-Allow-Origin",
+          "value": "*"
+        }
       ]
     },
     {
       "source": "/",
       "headers": [
-        { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" },
-        { "key": "Pragma",        "value": "no-cache" }
+        {
+          "key": "Cache-Control",
+          "value": "no-cache, no-store, must-revalidate"
+        },
+        {
+          "key": "Pragma",
+          "value": "no-cache"
+        }
       ]
     },
     {
       "source": "/index.html",
       "headers": [
-        { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" },
-        { "key": "Pragma",        "value": "no-cache" }
+        {
+          "key": "Cache-Control",
+          "value": "no-cache, no-store, must-revalidate"
+        },
+        {
+          "key": "Pragma",
+          "value": "no-cache"
+        }
       ]
     }
   ]

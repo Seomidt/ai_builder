@@ -507,6 +507,7 @@ export default function AiChatPage() {
   const [input, setInput]                 = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [attachments, setAttachments]     = useState<AttachedFile[]>([]);
+  const [ocrStatusLabel, setOcrStatusLabel] = useState<string | null>(null);
   const bottomRef   = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -615,10 +616,57 @@ export default function AiChatPage() {
               console.error(`[HARD-STOP][${traceId}] finalize failed HTTP ${finalRes.status}`, errBody);
               throw Object.assign(new Error(errBody?.message ?? "Dokument kunne ikke behandles."), { errorCode: "FINALIZE_FAILED" });
             }
-            const finalData = await finalRes.json() as { mode: string; results?: any[]; message?: string };
+            const finalData = await finalRes.json() as { mode: string; results?: any[]; message?: string; taskId?: string };
             console.log(`[TRACE-2f][${traceId}] finalize OK mode=${finalData.mode} results=${finalData.results?.length ?? 0}`);
 
-            if (finalData.results && finalData.results.length > 0) {
+            // ── OCR_PENDING: scanned PDF → poll async OCR job ─────────────
+            if (finalData.mode === "OCR_PENDING" && finalData.taskId) {
+              const taskId = finalData.taskId;
+              console.log(`[TRACE-2ocr][${traceId}] OCR_PENDING taskId=${taskId} polling...`);
+
+              const OCR_POLL_MS   = 2500;
+              const OCR_TIMEOUT   = 120_000;
+              const ocrStart      = Date.now();
+              let ocrResult: any  = null;
+
+              setOcrStatusLabel(`Læser scannet PDF: ${file.name}`);
+
+              while (Date.now() - ocrStart < OCR_TIMEOUT) {
+                await new Promise<void>((r) => setTimeout(r, OCR_POLL_MS));
+                const elapsed = Math.round((Date.now() - ocrStart) / 1000);
+                setOcrStatusLabel(`Læser scannet PDF: ${file.name} (${elapsed}s)`);
+
+                const pollRes = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch((e: any) => {
+                  console.warn(`[TRACE-2ocr][${traceId}] poll error: ${e?.message}`);
+                  return null;
+                });
+                if (!pollRes) continue;
+                const pollData = await pollRes.json() as any;
+                console.log(`[TRACE-2ocr][${traceId}] poll status=${pollData.status} elapsed=${elapsed}s`);
+
+                if (pollData.status === "completed") { ocrResult = pollData; break; }
+                if (pollData.status === "failed") {
+                  setOcrStatusLabel(null);
+                  throw Object.assign(new Error(pollData.errorReason ?? "PDF OCR fejlede"), { errorCode: "DOCUMENT_UNREADABLE" });
+                }
+              }
+
+              setOcrStatusLabel(null);
+
+              if (!ocrResult) {
+                throw Object.assign(new Error("OCR tog for lang tid. Prøv igen med en kortere fil."), { errorCode: "DOCUMENT_UNREADABLE" });
+              }
+
+              finalizeResults.push({
+                filename:       file.name,
+                mime_type:      file.type || "application/pdf",
+                char_count:     ocrResult.charCount ?? 0,
+                extracted_text: (ocrResult.ocrText ?? "").slice(0, 80_000),
+                status:         "ok",
+                source:         "r2_ocr_async",
+              });
+              console.log(`[TRACE-2ocr][${traceId}] OCR complete chars=${ocrResult.charCount} quality=${ocrResult.qualityScore}`);
+            } else if (finalData.results && finalData.results.length > 0) {
               finalizeResults.push(...finalData.results);
             }
           }
@@ -686,6 +734,7 @@ export default function AiChatPage() {
       }]);
     },
     onError: (err: any) => {
+      setOcrStatusLabel(null);
       const code = err?.errorCode ?? err?.code ?? "";
       const serverMsg = err?.message ?? "";
 
@@ -785,7 +834,16 @@ export default function AiChatPage() {
           ) : (
             <div className="pt-6">
               {messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)}
-              {chatMutation.isPending && <TypingIndicator />}
+              {chatMutation.isPending && !ocrStatusLabel && <TypingIndicator />}
+              {ocrStatusLabel && (
+                <div className="flex items-center gap-2 px-4 py-2 text-sm text-muted-foreground animate-pulse" data-testid="status-ocr-pending">
+                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  {ocrStatusLabel}
+                </div>
+              )}
             </div>
           )}
           <div ref={bottomRef} />

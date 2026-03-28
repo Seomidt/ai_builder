@@ -22,8 +22,10 @@ const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
   { name: "kb",           entry: "api/_src/kb.ts",            out: "api/kb.js"            },
   { name: "insights",     entry: "api/_src/insights.ts",      out: "api/insights.js"      },
   { name: "experts",      entry: "api/_src/experts.ts",       out: "api/experts.js"       },
-  { name: "upload",       entry: "api/_src/upload.ts",        out: "api/upload.js"        },
-  { name: "usage",        entry: "api/_src/usage.ts",         out: "api/usage.js"         },
+  { name: "upload",      entry: "api/_src/upload.ts",      out: "api/upload.js"      },
+  { name: "usage",       entry: "api/_src/usage.ts",       out: "api/usage.js"       },
+  { name: "ocr-worker",  entry: "api/_src/ocr-worker.ts",  out: "api/ocr-worker.js"  },
+  { name: "ocr-status",  entry: "api/_src/ocr-status.ts",  out: "api/ocr-status.js"  },
 ];
 
 

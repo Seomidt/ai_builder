@@ -13,6 +13,11 @@
  *   Browser → POST /api/upload/finalize     (small JSON request to Vercel)
  *   Vercel  ← reads from R2 for extraction  (server-side, not through request body)
  *
+ * Scanned PDF flow (async OCR):
+ *   finalize → SCANNED_PDF detected → createOcrTask → return { mode: "OCR_PENDING", taskId }
+ *   Cron /api/ocr-worker runs every minute → OCR → chunk → embed → store
+ *   Frontend polls GET /api/ocr-status?id=<taskId> until completed/failed
+ *
  * This handler does NOT receive file bytes. Ever.
  */
 
@@ -138,7 +143,8 @@ async function handleUrl(
 //   1. Verify object belongs to tenant (key prefix check)
 //   2. Route A/B
 //   3. Extract content (Mode A) or acknowledge pipeline start (Mode B)
-//   4. Return document context for chat OR asset info for storage
+//   4. For scanned PDFs: create async OCR task → return OCR_PENDING immediately
+//   5. Return document context for chat OR asset info for storage
 
 interface FinalizeRequestBody {
   objectKey:    string;
@@ -196,12 +202,16 @@ async function handleFinalize(
     const { processDirectAttachment } = await import("../../server/lib/chat/direct-attachment-processor");
     const result = await processDirectAttachment({ objectKey, filename, contentType, sizeBytes: size });
 
+    // Scanned PDF → async OCR pipeline
+    if (result.code === "SCANNED_PDF") {
+      return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, routing });
+    }
+
     if (result.status === "error" || result.status === "unsupported") {
       // Fallback to B if direct processing fails
       log("upload.finalize.fallback_to_b", {
         tenantId, objectKey, reason: result.message ?? result.status,
       });
-      // Return a special status so frontend shows appropriate message
       return json(res, {
         mode:    "B_FALLBACK",
         routing: routing.reason,
@@ -222,13 +232,7 @@ async function handleFinalize(
   }
 
   // ── Mode B: large/complex file — extract from R2 with full-doc handling ───
-  // For chat context with Mode B: we still extract from R2 (no Vercel body limit
-  // because we read server-side), but allow larger text budgets.
-  // For storage context: create KB asset and trigger ingestion pipeline.
-
   if (context === "storage" && sourceId) {
-    // Storage context: hand off to KB upload service using existing pipeline.
-    // We don't re-upload to R2 (it's already there) — we just register the asset.
     log("upload.finalize.mode_b.storage", { tenantId, sourceId, objectKey });
 
     try {
@@ -253,10 +257,13 @@ async function handleFinalize(
   }
 
   // ── Mode B chat: extract from R2 with larger budget for full document ─────
-  // Large files are read server-side from R2 (no Vercel request body limit).
-  // Text is capped at a safe token budget for the chat API.
   const { processDirectAttachment } = await import("../../server/lib/chat/direct-attachment-processor");
   const result = await processDirectAttachment({ objectKey, filename, contentType, sizeBytes: size });
+
+  // Scanned PDF in Mode B → async OCR too
+  if (result.code === "SCANNED_PDF") {
+    return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, routing });
+  }
 
   if (result.status === "ok") {
     log("upload.finalize.mode_b.chat.ok", {
@@ -278,6 +285,83 @@ async function handleFinalize(
     routing: routing.reason,
     message: result.message ?? "Dokumentet kunne ikke behandles.",
     results: [],
+  });
+}
+
+// ── OCR_PENDING helper ────────────────────────────────────────────────────────
+
+interface OcrPendingContext {
+  tenantId:    string;
+  userId:      string;
+  objectKey:   string;
+  filename:    string;
+  contentType: string;
+  routing:     { reason: string };
+}
+
+async function handleOcrPending(
+  res: ServerResponse,
+  ctx: OcrPendingContext,
+): Promise<void> {
+  const { createOcrTask } = await import("./_lib/ocr-queue");
+  try {
+    const taskId = await createOcrTask({
+      tenantId:    ctx.tenantId,
+      userId:      ctx.userId,
+      r2Key:       ctx.objectKey,
+      filename:    ctx.filename,
+      contentType: ctx.contentType,
+    });
+
+    log("upload.finalize.ocr_pending", {
+      tenantId:  ctx.tenantId,
+      userId:    ctx.userId,
+      objectKey: ctx.objectKey,
+      taskId,
+    });
+
+    // Best-effort: trigger the worker immediately (won't block response).
+    // If this fails the cron will pick it up within a minute.
+    triggerWorker(ctx.tenantId).catch(() => {});
+
+    return json(res, {
+      mode:    "OCR_PENDING",
+      routing: ctx.routing.reason,
+      taskId,
+      pollUrl: `/api/ocr-status?id=${taskId}`,
+      message: "PDF er scannet — OCR er sat i gang. Dokumentet vil være klar om få øjeblikke.",
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    log("upload.finalize.ocr_task_error", { tenantId: ctx.tenantId, error: msg });
+    return json(res, {
+      mode:    "B_FALLBACK",
+      routing: ctx.routing.reason,
+      message: "PDF er scannet og kunne ikke behandles automatisk.",
+      results: [],
+    });
+  }
+}
+
+// ── Fire-and-forget worker trigger ────────────────────────────────────────────
+// Best-effort. Vercel cron provides reliability guarantee.
+
+async function triggerWorker(tenantId: string): Promise<void> {
+  const secret  = (process.env.CRON_SECRET ?? "").trim();
+  const baseUrl = process.env.VERCEL_URL
+    ? `https://${process.env.VERCEL_URL}`
+    : process.env.NEXT_PUBLIC_APP_URL
+    ?? "";
+  if (!baseUrl) return;
+
+  await fetch(`${baseUrl}/api/ocr-worker`, {
+    method:  "POST",
+    headers: {
+      "Content-Type":  "application/json",
+      "Authorization": secret ? `Bearer ${secret}` : "",
+      "X-Tenant-Id":   tenantId,
+    },
+    signal: AbortSignal.timeout(5_000),
   });
 }
 

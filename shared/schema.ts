@@ -6832,3 +6832,64 @@ export const insertTenantInsightSchema = createInsertSchema(tenantInsights).omit
 });
 export type InsertTenantInsight = z.infer<typeof insertTenantInsightSchema>;
 export type TenantInsight = typeof tenantInsights.$inferSelect;
+
+// ─── chat_ocr_tasks ───────────────────────────────────────────────────────────
+// Async OCR job queue for chat-context scanned PDFs.
+// A task is created when a scanned/image-based PDF is uploaded via chat.
+// The ocr-worker cron processes pending tasks: fetch R2 → OCR → chunk → embed.
+
+export const chatOcrTasks = pgTable(
+  "chat_ocr_tasks",
+  {
+    id:           varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId:     text("tenant_id").notNull(),
+    userId:       text("user_id").notNull(),
+    r2Key:        text("r2_key").notNull(),
+    filename:     text("filename").notNull(),
+    contentType:  text("content_type").notNull().default("application/pdf"),
+    status:       text("status").notNull().default("pending"),
+    provider:     text("provider"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    maxAttempts:  integer("max_attempts").notNull().default(3),
+    ocrText:      text("ocr_text"),
+    qualityScore: numeric("quality_score", { precision: 5, scale: 4 }),
+    charCount:    integer("char_count"),
+    pageCount:    integer("page_count"),
+    chunkCount:   integer("chunk_count"),
+    errorReason:  text("error_reason"),
+    createdAt:    timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt:    timestamp("started_at", { withTimezone: true }),
+    completedAt:  timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("cot_status_created_idx").on(t.status, t.createdAt),
+    index("cot_tenant_created_idx").on(t.tenantId, t.createdAt),
+    check("cot_status_check", sql`${t.status} IN ('pending','running','completed','failed')`),
+  ],
+);
+export const insertChatOcrTaskSchema = createInsertSchema(chatOcrTasks).omit({ id: true, createdAt: true });
+export type InsertChatOcrTask = z.infer<typeof insertChatOcrTaskSchema>;
+export type ChatOcrTask = typeof chatOcrTasks.$inferSelect;
+
+// ─── chat_ocr_chunks ──────────────────────────────────────────────────────────
+// Chunked + embedded text for completed OCR tasks.
+// embedding: JSON-serialised float[] (1536 dims, text-embedding-3-small).
+
+export const chatOcrChunks = pgTable(
+  "chat_ocr_chunks",
+  {
+    id:         varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    taskId:     varchar("task_id").notNull().references(() => chatOcrTasks.id, { onDelete: "cascade" }),
+    tenantId:   text("tenant_id").notNull(),
+    chunkIndex: integer("chunk_index").notNull(),
+    content:    text("content").notNull(),
+    charCount:  integer("char_count").notNull(),
+    pageRef:    text("page_ref"),
+    embedding:  text("embedding"),
+  },
+  (t) => [
+    index("coc_task_idx").on(t.taskId),
+    index("coc_tenant_idx").on(t.tenantId),
+    uniqueIndex("coc_task_chunk_uq").on(t.taskId, t.chunkIndex),
+  ],
+);
