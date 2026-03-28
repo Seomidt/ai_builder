@@ -81,10 +81,22 @@ export interface SimilarCasesDebug {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const MAX_CHUNKS_PER_ASSET  = 2;    // max chunks from same asset in results
-const DEFAULT_MIN_SCORE     = 0.10; // below this → excluded
 const DEFAULT_TOP_K         = 10;
 const MAX_TOP_K             = 50;
-const SNIPPET_CHARS         = 500;
+
+// ── Min-score thresholds by retrieval mode ──────────────────────────────────
+// Different retrieval channels have different score semantics:
+//   - vector_pgvector: 0.0–1.0 cosine (1.0 = perfect match)
+//   - vector_appside: same as pgvector, slightly less optimized
+//   - lexical: combines pg_trgm similarity + ts_rank (0.0–1.0 but rarer to exceed 0.5)
+// Defaults are conservative; favor precision over recall for chat context.
+const MIN_SCORE_THRESHOLDS = {
+  vector:  0.35,   // vector-first results (requires reasonable similarity)
+  hybrid:  0.30,   // mixed vector + lexical
+  lexical: 0.15,   // lexical fallback (lower bar since it's last resort)
+} as const;
+
+const SNIPPET_CHARS = 500;  // max chars in snippet
 
 // ─── DB client ───────────────────────────────────────────────────────────────
 
@@ -159,11 +171,61 @@ const RICH_JOINS = `
          AND kb.tenant_id = kc.tenant_id
 `;
 
+/**
+ * Extract a smart snippet that highlights relevant context.
+ * If queryText is available, try to center around it.
+ * Otherwise fall back to first N chars.
+ */
+function extractSmartSnippet(
+  fullText: string,
+  queryText?: string,
+): string {
+  if (!fullText) return "";
+
+  const text = String(fullText);
+  if (text.length <= SNIPPET_CHARS) return text;
+
+  // If we have a query, try to find it in the text and build snippet around it
+  if (queryText && queryText.trim().length > 0) {
+    const searchTerms = queryText.trim().toLowerCase().split(/\s+/).filter(t => t.length > 3);
+    if (searchTerms.length > 0) {
+      const lowerText = text.toLowerCase();
+      for (const term of searchTerms) {
+        const idx = lowerText.indexOf(term);
+        if (idx !== -1) {
+          // Center snippet around this match
+          const start = Math.max(0, idx - 150);
+          const end = Math.min(text.length, start + SNIPPET_CHARS);
+          const snippet = text.slice(start, end).trim();
+          // Prefix "..." if truncated at start
+          return (start > 0 ? "..." : "") + snippet + (end < text.length ? "..." : "");
+        }
+      }
+    }
+  }
+
+  // Fallback: first 500 chars with "..." if truncated
+  const snippet = text.slice(0, SNIPPET_CHARS).trim();
+  return snippet + (text.length > SNIPPET_CHARS ? "..." : "");
+}
+
+/**
+ * Apply smart minScore thresholding based on retrieval channel.
+ */
+function shouldIncludeResult(
+  score: number,
+  channel: "vector" | "lexical" | "hybrid",
+): boolean {
+  const threshold = MIN_SCORE_THRESHOLDS[channel] ?? MIN_SCORE_THRESHOLDS.vector;
+  return score >= threshold;
+}
+
 function rowToSimilarCase(
   r: Record<string, unknown>,
   scoreVector: number,
   scoreLexical: number,
   channel: "vector" | "lexical" | "hybrid",
+  queryText?: string,
 ): SimilarCase {
   const score = channel === "lexical" ? scoreLexical : scoreVector;
 
@@ -180,11 +242,14 @@ function rowToSimilarCase(
     channel === "vector"  ? "vektor-lighed" :
     channel === "lexical" ? "tekstmatch"    : "hybrid";
 
+  const chunkText = String(r["chunk_text"] ?? "");
+  const snippet = extractSmartSnippet(chunkText, queryText);
+
   return {
     chunkId:          r["chunk_id"]    as string,
     score:            Math.max(0, Math.min(1, score)),
     retrievalChannel: channel,
-    snippet:          String(r["chunk_text"] ?? "").slice(0, SNIPPET_CHARS),
+    snippet,
     whyMatched,
     sourceLabel,
     assetId:          r["doc_id"]      as string,
@@ -259,8 +324,8 @@ async function findSimilarByText(params: {
     );
 
     const cases = (r.rows as Array<Record<string, unknown>>)
-      .map((row) => rowToSimilarCase(row, Number(row["score_vector"]), 0, "vector"))
-      .filter((c) => c.score >= minScore);
+      .map((row) => rowToSimilarCase(row, Number(row["score_vector"]), 0, "vector", queryText))
+      .filter((c) => shouldIncludeResult(c.score, c.retrievalChannel));
 
     return { cases, path: "vector_pgvector", pgvUsed: true, hasVec: true };
   }
@@ -287,11 +352,11 @@ async function findSimilarByText(params: {
     const cases = (r.rows as Array<Record<string, unknown>>)
       .map((row) => {
         const sim = cosineSimilarity(queryVec, row["embedding_vector"] as number[]);
-        return rowToSimilarCase(row, sim, 0, "vector");
+        return rowToSimilarCase(row, sim, 0, "vector", queryText);
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, safeTopK * 3)
-      .filter((c) => c.score >= minScore);
+      .filter((c) => shouldIncludeResult(c.score, c.retrievalChannel));
 
     return { cases, path: "vector_appside", pgvUsed: false, hasVec: true };
   }
@@ -322,8 +387,8 @@ async function findSimilarByText(params: {
   );
 
   const cases = (r.rows as Array<Record<string, unknown>>)
-    .map((row) => rowToSimilarCase(row, 0, Number(row["score_text"]), "lexical"))
-    .filter((c) => c.score >= minScore);
+    .map((row) => rowToSimilarCase(row, 0, Number(row["score_text"]), "lexical", queryText))
+    .filter((c) => shouldIncludeResult(c.score, c.retrievalChannel));
 
   return { cases, path: "lexical", pgvUsed: false, hasVec: false };
 }
@@ -390,7 +455,7 @@ async function findSimilarByAsset(params: {
 
     const cases = (r.rows as Array<Record<string, unknown>>)
       .map((row) => rowToSimilarCase(row, Number(row["score_vector"]), 0, "vector"))
-      .filter((c) => c.score >= minScore);
+      .filter((c) => shouldIncludeResult(c.score, c.retrievalChannel));
 
     return { cases, path: "vector_pgvector", pgvUsed: true, hasVec: true };
   }
@@ -475,7 +540,7 @@ async function findSimilarByChunk(params: {
 
     const cases = (r.rows as Array<Record<string, unknown>>)
       .map((row) => rowToSimilarCase(row, Number(row["score_vector"]), 0, "vector"))
-      .filter((c) => c.score >= minScore);
+      .filter((c) => shouldIncludeResult(c.score, c.retrievalChannel));
 
     return { cases, path: "vector_pgvector", pgvUsed: true, hasVec: true };
   }
@@ -523,12 +588,12 @@ export async function findSimilarCases(params: SimilarCasesParams): Promise<Simi
     tenantId, mode,
     queryText, assetId, chunkId,
     kbId, kbIds, expertId,
-    topK     = DEFAULT_TOP_K,
-    minScore = DEFAULT_MIN_SCORE,
+    topK = DEFAULT_TOP_K,
+    minScore = 0,  // Kept for API compat; actual thresholds are per-channel via shouldIncludeResult()
   } = params;
 
-  const safeTopK  = Math.min(Math.max(1, topK), MAX_TOP_K);
-  const safeScore = Math.max(0, Math.min(1, minScore));
+  const safeTopK = Math.min(Math.max(1, topK), MAX_TOP_K);
+  const safeScore = Math.max(0, Math.min(1, minScore)); // For API compat only
 
   const client = getClient();
   await client.connect();
