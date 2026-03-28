@@ -2,18 +2,22 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { authenticate }                         from "./_lib/auth";
 import { json, err }                            from "./_lib/response";
 import Busboy                                   from "busboy";
-// pdf-parse — supports both v1 (function) and v2 (class-based) API.
-// v2 with PDFParse class is fast even on scanned PDFs (returns empty text quickly).
-const PDF_PARSE_TIMEOUT_MS = 25_000;
 
-function withPdfTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+// ── Timeouts + thresholds ─────────────────────────────────────────────────────
+const PDF_PARSE_TIMEOUT_MS = 25_000;
+const OCR_TIMEOUT_MS       = 50_000;
+const SCANNED_THRESHOLD    = 100; // chars — below this = treat as scanned PDF
+
+function withRaceTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
     p,
     new Promise<never>((_, r) =>
-      setTimeout(() => r(new Error(`PDF-parsing overskred ${ms / 1000}s`)), ms),
+      setTimeout(() => r(new Error(`${label} overskred ${ms / 1000}s`)), ms),
     ),
   ]);
 }
+
+// ── PDF text extraction (pdf-parse v1 + v2) ───────────────────────────────────
 
 async function parsePdfBuffer(buf: Buffer): Promise<{ text: string; numpages: number }> {
   const g = globalThis as any;
@@ -24,18 +28,83 @@ async function parsePdfBuffer(buf: Buffer): Promise<{ text: string; numpages: nu
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const pdfMod = require("pdf-parse");
 
-  // v2: class API
   if (pdfMod.PDFParse) {
     const parser = new pdfMod.PDFParse({ data: buf });
-    const result = await withPdfTimeout(parser.getText(), PDF_PARSE_TIMEOUT_MS);
+    const result = await withRaceTimeout(parser.getText(), PDF_PARSE_TIMEOUT_MS, "PDF-parsing (v2)");
     return { text: typeof result.text === "string" ? result.text : "", numpages: result.total ?? 0 };
   }
-  // v1: function API
   if (typeof pdfMod === "function") {
-    const result = await withPdfTimeout(pdfMod(buf, { max: 50 }), PDF_PARSE_TIMEOUT_MS);
+    const result = await withRaceTimeout(pdfMod(buf, { max: 50 }), PDF_PARSE_TIMEOUT_MS, "PDF-parsing (v1)");
     return { text: result.text ?? "", numpages: result.numpages ?? 0 };
   }
   throw new Error("pdf-parse: ukendt API");
+}
+
+// ── OCR fallback via vision model (Gemini 1.5 Flash primary, GPT-4o secondary) ─
+
+const OCR_PROMPT =
+  "Extract ALL text from this scanned PDF document verbatim. " +
+  "Begin each page's content with '[Side N]' on its own line (N = page number). " +
+  "Preserve the original text structure and line breaks as closely as possible. " +
+  "If a page has no readable text, write '[Side N — ingen tekst]' and continue. " +
+  "Do not summarize, paraphrase, translate, or add any commentary.";
+
+async function ocrWithGemini(buf: Buffer, apiKey: string): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { GoogleGenerativeAI } = require("@google/generative-ai");
+  const model = new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: "gemini-1.5-flash" });
+  const result = await withRaceTimeout(
+    model.generateContent([
+      { inlineData: { data: buf.toString("base64"), mimeType: "application/pdf" } },
+      OCR_PROMPT,
+    ]),
+    OCR_TIMEOUT_MS,
+    "Gemini OCR",
+  );
+  return result.response.text().trim();
+}
+
+async function ocrWithOpenAI(buf: Buffer, filename: string, apiKey: string): Promise<string> {
+  const base64 = buf.toString("base64");
+  const resp = await withRaceTimeout(
+    fetch("https://api.openai.com/v1/chat/completions", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "file", file: { filename, file_data: `data:application/pdf;base64,${base64}` } },
+            { type: "text", text: OCR_PROMPT },
+          ],
+        }],
+        max_tokens: 16000,
+      }),
+    }),
+    OCR_TIMEOUT_MS,
+    "OpenAI OCR",
+  );
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`OpenAI OCR HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+  }
+  const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+  return (data.choices?.[0]?.message?.content ?? "").trim();
+}
+
+async function ocrPdfWithVision(buf: Buffer, filename: string): Promise<string> {
+  const geminiKey = (process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "").trim();
+  if (geminiKey) {
+    console.log("[extract] ocr=gemini");
+    return ocrWithGemini(buf, geminiKey);
+  }
+  const openaiKey = (process.env.OPENAI_API_KEY ?? "").trim();
+  if (openaiKey) {
+    console.log("[extract] ocr=openai");
+    return ocrWithOpenAI(buf, filename, openaiKey);
+  }
+  throw new Error("Ingen OCR-udbyder — GOOGLE_GENERATIVE_AI_API_KEY eller OPENAI_API_KEY kræves");
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -78,13 +147,28 @@ async function extractFromBuffer(
   // ── PDF ────────────────────────────────────────────────────────────────────
   if (isPdfMime(mime, filename)) {
     try {
-      const { text: rawText } = await parsePdfBuffer(buf);
-      const text = (rawText ?? "").trim().slice(0, 80_000);
-      if (!text) return {
-        text: "", status: "error",
-        message: "PDF indeholder ingen læsbar tekst. Dokumentet er sandsynligvis scannet (billede-baseret PDF). Kopiér teksten manuelt og indsæt den i chatten.",
-      };
-      return { text, status: "ok" };
+      const { text: rawText, numpages } = await parsePdfBuffer(buf);
+      const textTrimmed = (rawText ?? "").trim();
+
+      if (textTrimmed.length >= SCANNED_THRESHOLD) {
+        // Normal text-layer PDF
+        return { text: textTrimmed.slice(0, 80_000), status: "ok" };
+      }
+
+      // Scanned/image-based PDF → OCR fallback
+      console.log(`[extract] pdf=scanned pages=${numpages} raw_chars=${textTrimmed.length} — starting OCR`);
+      try {
+        const ocrText = await ocrPdfWithVision(buf, filename);
+        if (!ocrText || ocrText.length < 20) {
+          return { text: "", status: "error", message: "PDF er scannet/billede-baseret og OCR fandt ingen læsbar tekst." };
+        }
+        console.log(`[extract] pdf=ocr chars=${ocrText.length}`);
+        return { text: ocrText.slice(0, 80_000), status: "ok" };
+      } catch (ocrErr) {
+        const ocrMsg = (ocrErr as Error).message;
+        console.error("[extract] ocr failed:", ocrMsg);
+        return { text: "", status: "error", message: `PDF er scannet og OCR fejlede: ${ocrMsg}` };
+      }
     } catch (e) {
       console.error("[extract] pdf-parse error:", (e as Error).message);
       return { text: "", status: "error", message: "PDF-parsing fejlede: " + (e as Error).message };

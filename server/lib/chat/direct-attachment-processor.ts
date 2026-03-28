@@ -37,13 +37,11 @@ export interface DirectProcessResult {
   source:         "r2_direct";
 }
 
-// ── PDF extraction — supports pdf-parse v2 (class API) ────────────────────────
-//
-// pdf-parse v2 uses a class-based API: new PDFParse({ data: buf }).getText()
-// The getText() call completes quickly even for scanned PDFs (returns empty text).
-// We wrap in a timeout to guard against truly pathological cases.
+// ── Timeouts ──────────────────────────────────────────────────────────────────
 
-const PDF_PARSE_TIMEOUT_MS = 25_000; // 25s — safe within Vercel 60s limit
+const PDF_PARSE_TIMEOUT_MS = 25_000;
+const OCR_TIMEOUT_MS       = 50_000;
+const SCANNED_THRESHOLD    = 100; // chars below this = treat as scanned/image-based
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
@@ -54,35 +52,98 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
   ]);
 }
 
+// ── PDF text extraction — supports pdf-parse v1 + v2 ─────────────────────────
+
 async function extractPdfText(buf: Buffer): Promise<{ text: string; numpages: number }> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const pdfMod = require("pdf-parse");
 
-  // pdf-parse v2: class-based API
   if (pdfMod.PDFParse) {
     const parser = new pdfMod.PDFParse({ data: buf });
-    const result = await withTimeout(
-      parser.getText(),
-      PDF_PARSE_TIMEOUT_MS,
-      "PDF-parsing (v2)",
-    );
-    // getText() returns { text: string, total: number, pages: [...] }
-    const text   = typeof result.text === "string" ? result.text : "";
-    const npages = typeof result.total === "number" ? result.total : 0;
-    return { text, numpages: npages };
+    const result = await withTimeout(parser.getText(), PDF_PARSE_TIMEOUT_MS, "PDF-parsing (v2)");
+    return {
+      text:     typeof result.text === "string" ? result.text : "",
+      numpages: typeof result.total === "number" ? result.total : 0,
+    };
   }
 
-  // pdf-parse v1: function-based API (legacy fallback)
   if (typeof pdfMod === "function") {
-    const result = await withTimeout(
-      pdfMod(buf, { max: 50 }),
-      PDF_PARSE_TIMEOUT_MS,
-      "PDF-parsing (v1)",
-    );
+    const result = await withTimeout(pdfMod(buf, { max: 50 }), PDF_PARSE_TIMEOUT_MS, "PDF-parsing (v1)");
     return { text: result.text ?? "", numpages: result.numpages ?? 0 };
   }
 
-  throw new Error("pdf-parse modul har ukendt API — understøtter hverken v1 (function) eller v2 (class)");
+  throw new Error("pdf-parse modul har ukendt API");
+}
+
+// ── OCR via vision model (Gemini 1.5 Flash primary, OpenAI GPT-4o fallback) ──
+//
+// Called when pdf-parse returns < SCANNED_THRESHOLD chars — indicates a
+// scanned/image-based PDF. Both providers support sending the raw PDF bytes
+// without any page-to-image conversion.
+
+const OCR_PROMPT =
+  "Extract ALL text from this scanned PDF document verbatim. " +
+  "Begin each page's content with '[Side N]' on its own line (N = page number). " +
+  "Preserve the original text structure and line breaks as closely as possible. " +
+  "If a page has no readable text, write '[Side N — ingen tekst]' and continue. " +
+  "Do not summarize, paraphrase, translate, or add any commentary.";
+
+async function ocrWithGemini(buf: Buffer, apiKey: string): Promise<string> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { GoogleGenerativeAI } = require("@google/generative-ai");
+  const model = new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: "gemini-1.5-flash" });
+  const result = await withTimeout(
+    model.generateContent([
+      { inlineData: { data: buf.toString("base64"), mimeType: "application/pdf" } },
+      OCR_PROMPT,
+    ]),
+    OCR_TIMEOUT_MS,
+    "Gemini OCR",
+  );
+  return result.response.text().trim();
+}
+
+async function ocrWithOpenAI(buf: Buffer, filename: string, apiKey: string): Promise<string> {
+  const base64 = buf.toString("base64");
+  const resp = await withTimeout(
+    fetch("https://api.openai.com/v1/chat/completions", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify({
+        model: "gpt-4o",
+        messages: [{
+          role: "user",
+          content: [
+            { type: "file", file: { filename, file_data: `data:application/pdf;base64,${base64}` } },
+            { type: "text", text: OCR_PROMPT },
+          ],
+        }],
+        max_tokens: 16000,
+      }),
+    }),
+    OCR_TIMEOUT_MS,
+    "OpenAI OCR",
+  );
+  if (!resp.ok) {
+    const errText = await resp.text().catch(() => "");
+    throw new Error(`OpenAI OCR HTTP ${resp.status}: ${errText.slice(0, 200)}`);
+  }
+  const data = await resp.json() as { choices?: Array<{ message?: { content?: string } }> };
+  return (data.choices?.[0]?.message?.content ?? "").trim();
+}
+
+async function ocrPdfWithVision(buf: Buffer, filename: string): Promise<string> {
+  const geminiKey = (process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "").trim();
+  if (geminiKey) {
+    console.log("[direct-processor] ocr=gemini");
+    return ocrWithGemini(buf, geminiKey);
+  }
+  const openaiKey = (process.env.OPENAI_API_KEY ?? "").trim();
+  if (openaiKey) {
+    console.log("[direct-processor] ocr=openai");
+    return ocrWithOpenAI(buf, filename, openaiKey);
+  }
+  throw new Error("Ingen OCR-udbyder konfigureret — GOOGLE_GENERATIVE_AI_API_KEY eller OPENAI_API_KEY kræves");
 }
 
 // ── Text MIME check ───────────────────────────────────────────────────────────
@@ -157,22 +218,44 @@ export async function processDirectAttachment(
     return { filename, mime_type: contentType, char_count: text.length, extracted_text: text, status: "ok", source: "r2_direct" };
   }
 
-  // PDF — extract text with timeout guard
+  // PDF — try text extraction, OCR fallback for scanned/image-based PDFs
   if (isPdfMime(contentType, filename)) {
     try {
       const { text: rawText, numpages } = await extractPdfText(buf);
-      const text = (rawText ?? "").trim();
-      if (!text) {
+      const textTrimmed = (rawText ?? "").trim();
+
+      if (textTrimmed.length >= SCANNED_THRESHOLD) {
+        // Normal text-layer PDF — use as-is
+        const capped = textTrimmed.slice(0, 80_000);
+        console.log(`[direct-processor] pdf=text pages=${numpages} chars_raw=${textTrimmed.length} chars_used=${capped.length}`);
+        return { filename, mime_type: contentType, char_count: capped.length, extracted_text: capped, status: "ok", source: "r2_direct" };
+      }
+
+      // Scanned/image-based PDF — attempt OCR via vision model
+      console.log(`[direct-processor] pdf=scanned pages=${numpages} raw_chars=${textTrimmed.length} — starting OCR`);
+      try {
+        const ocrText = await ocrPdfWithVision(buf, filename);
+        if (!ocrText || ocrText.length < 20) {
+          return {
+            filename, mime_type: contentType, char_count: 0, extracted_text: "",
+            status: "error",
+            message: "PDF er scannet/billede-baseret og OCR kunne ikke finde læsbar tekst.",
+            source: "r2_direct",
+          };
+        }
+        const capped = ocrText.slice(0, 80_000);
+        console.log(`[direct-processor] pdf=ocr chars=${capped.length}`);
+        return { filename, mime_type: contentType, char_count: capped.length, extracted_text: capped, status: "ok", source: "r2_direct" };
+      } catch (ocrErr) {
+        const ocrMsg = ocrErr instanceof Error ? ocrErr.message : String(ocrErr);
+        console.error(`[direct-processor] ocr failed: ${ocrMsg}`);
         return {
           filename, mime_type: contentType, char_count: 0, extracted_text: "",
           status: "error",
-          message: "PDF indeholder ingen læsbar tekst. Dokumentet er sandsynligvis scannet (billede-baseret PDF). Kopiér teksten manuelt og indsæt den direkte i chatten.",
+          message: `PDF er scannet og OCR fejlede: ${ocrMsg}`,
           source: "r2_direct",
         };
       }
-      const capped = text.slice(0, 80_000);
-      console.log(`[direct-processor] pdf extracted pages=${numpages} chars_raw=${text.length} chars_used=${capped.length}`);
-      return { filename, mime_type: contentType, char_count: capped.length, extracted_text: capped, status: "ok", source: "r2_direct" };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`[direct-processor] pdf-parse error: ${msg}`);
