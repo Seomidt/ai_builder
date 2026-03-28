@@ -88,31 +88,46 @@ export async function enqueueOcrJob(
       }
     }
 
-    // 2. Insert new job
-    const insertRes = await client.query<{ id: string }>(
-      `INSERT INTO chat_ocr_tasks
-         (tenant_id, user_id, r2_key, filename, content_type,
-          status, attempt_count, max_attempts, retry_count, file_hash)
-       VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0, $6)
-       ON CONFLICT (tenant_id, file_hash)
-         WHERE file_hash IS NOT NULL
-       DO NOTHING
-       RETURNING id`,
-      [
-        payload.tenantId,
-        payload.userId,
-        payload.r2Key,
-        payload.filename,
-        payload.contentType,
-        payload.fileHash ?? null,
-      ],
-    );
+    // 2. Insert new job — no ON CONFLICT clause to avoid dependency on
+    //    the optional partial unique index (cot_tenant_hash_uidx).
+    //    Dedup is handled by the SELECT-first check above (step 1).
+    //    For null file_hash (large files), no dedup is needed.
+    let insertRes: { rows: { id: string }[] };
+    try {
+      insertRes = await client.query<{ id: string }>(
+        `INSERT INTO chat_ocr_tasks
+           (tenant_id, user_id, r2_key, filename, content_type,
+            status, attempt_count, max_attempts, retry_count, file_hash)
+         VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0, $6)
+         RETURNING id`,
+        [
+          payload.tenantId,
+          payload.userId,
+          payload.r2Key,
+          payload.filename,
+          payload.contentType,
+          payload.fileHash ?? null,
+        ],
+      );
+    } catch (insertErr: unknown) {
+      // Unique constraint violation (23505): race — another request inserted
+      // the same hash between our SELECT and INSERT. Fetch existing row.
+      const pgCode = (insertErr as any)?.code;
+      if (pgCode === "23505" && payload.fileHash) {
+        const race = await client.query<{ id: string }>(
+          `SELECT id FROM chat_ocr_tasks WHERE tenant_id = $1 AND file_hash = $2 LIMIT 1`,
+          [payload.tenantId, payload.fileHash],
+        );
+        if (race.rows[0]) return { id: race.rows[0].id, reused: true };
+      }
+      throw insertErr;
+    }
 
     if (insertRes.rows[0]) {
       return { id: insertRes.rows[0].id, reused: false };
     }
 
-    // 3. Race: another worker inserted the same hash concurrently — fetch it
+    // 3. Race fallback (should be unreachable, but keep for safety)
     if (payload.fileHash) {
       const race = await client.query<{ id: string }>(
         `SELECT id FROM chat_ocr_tasks WHERE tenant_id = $1 AND file_hash = $2 LIMIT 1`,
@@ -121,7 +136,7 @@ export async function enqueueOcrJob(
       if (race.rows[0]) return { id: race.rows[0].id, reused: true };
     }
 
-    throw new Error("enqueueOcrJob: INSERT returned no rows and no conflict found");
+    throw new Error("enqueueOcrJob: INSERT returned no rows");
   } finally {
     await client.end().catch(() => {});
   }
