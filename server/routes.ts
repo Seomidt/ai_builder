@@ -2477,43 +2477,54 @@ Generate names and content in ${langNote}.`;
   // ─── Knowledge Bases (Storage Data Sources) ─────────────────────────────────
 
   // GET /api/kb — list all knowledge bases for tenant
+  // Query params: ?status=active|archived|all (default: active)
   app.get("/api/kb", async (req: Request, res: Response) => {
     try {
       const orgId = getOrgId(req);
+      const statusFilter = (req.query.status as string | undefined) ?? "active";
       const { db } = await import("./db");
-      const { knowledgeBases, knowledgeDocuments } = await import("../shared/schema");
-      const { eq, and, count, desc } = await import("drizzle-orm");
+      const { knowledgeBases, knowledgeDocuments, expertKnowledgeBases } = await import("../shared/schema");
+      const { eq, and, count, desc, or } = await import("drizzle-orm");
+
+      const baseWhere = statusFilter === "all"
+        ? eq(knowledgeBases.tenantId, orgId)
+        : statusFilter === "archived"
+          ? and(eq(knowledgeBases.tenantId, orgId), eq(knowledgeBases.lifecycleState, "archived"))
+          : and(eq(knowledgeBases.tenantId, orgId), eq(knowledgeBases.lifecycleState, "active"));
 
       const bases = await db
         .select()
         .from(knowledgeBases)
-        .where(and(
-          eq(knowledgeBases.tenantId, orgId),
-          eq(knowledgeBases.lifecycleState, "active"),
-        ))
-        .orderBy(desc(knowledgeBases.createdAt));
+        .where(baseWhere)
+        .orderBy(desc(knowledgeBases.updatedAt));
 
-      // Get asset counts per base
-      const counts = await db
-        .select({ knowledgeBaseId: knowledgeDocuments.knowledgeBaseId, cnt: count() })
-        .from(knowledgeDocuments)
-        .where(and(
-          eq(knowledgeDocuments.tenantId, orgId),
-          eq(knowledgeDocuments.lifecycleState, "active"),
-        ))
-        .groupBy(knowledgeDocuments.knowledgeBaseId);
+      if (bases.length === 0) return res.json([]);
 
-      const countMap = Object.fromEntries(counts.map((c) => [c.knowledgeBaseId, Number(c.cnt)]));
+      // Get asset counts, expert counts in parallel
+      const [counts, expertCounts] = await Promise.all([
+        db.select({ knowledgeBaseId: knowledgeDocuments.knowledgeBaseId, cnt: count() })
+          .from(knowledgeDocuments)
+          .where(and(eq(knowledgeDocuments.tenantId, orgId), eq(knowledgeDocuments.lifecycleState, "active")))
+          .groupBy(knowledgeDocuments.knowledgeBaseId),
+        db.select({ knowledgeBaseId: expertKnowledgeBases.knowledgeBaseId, cnt: count() })
+          .from(expertKnowledgeBases)
+          .where(eq(expertKnowledgeBases.tenantId, orgId))
+          .groupBy(expertKnowledgeBases.knowledgeBaseId),
+      ]);
+
+      const countMap  = Object.fromEntries(counts.map((c) => [c.knowledgeBaseId, Number(c.cnt)]));
+      const expertMap = Object.fromEntries(expertCounts.map((c) => [c.knowledgeBaseId, Number(c.cnt)]));
 
       return res.json(bases.map((b) => ({
-        id: b.id,
-        name: b.name,
-        slug: b.slug,
-        description: b.description,
-        status: b.lifecycleState,
-        assetCount: countMap[b.id] ?? 0,
-        createdAt: b.createdAt,
-        updatedAt: b.updatedAt,
+        id:           b.id,
+        name:         b.name,
+        slug:         b.slug,
+        description:  b.description,
+        status:       b.lifecycleState,
+        assetCount:   countMap[b.id]  ?? 0,
+        expertCount:  expertMap[b.id] ?? 0,
+        createdAt:    b.createdAt,
+        updatedAt:    b.updatedAt,
       })));
     } catch (err) {
       return handleError(res, err);
@@ -2620,6 +2631,65 @@ Generate names and content in ${langNote}.`;
       const [updated] = await db
         .update(knowledgeBases)
         .set({ lifecycleState: "archived", updatedAt: new Date() })
+        .where(and(eq(knowledgeBases.id, req.params.id), eq(knowledgeBases.tenantId, orgId)))
+        .returning();
+      if (!updated) return res.status(404).json({ error_code: "NOT_FOUND", message: "Datakilde ikke fundet" });
+
+      return res.json({ id: updated.id, status: updated.lifecycleState });
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // PATCH /api/kb/:id — edit knowledge base name/description (slug is immutable)
+  app.patch("/api/kb/:id", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { db } = await import("./db");
+      const { knowledgeBases } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const bodySchema = z.object({
+        name:        z.string().min(1).max(200).optional(),
+        description: z.string().max(1000).nullable().optional(),
+      });
+      const body = bodySchema.parse(req.body);
+
+      const updateSet: Record<string, unknown> = { updatedAt: new Date() };
+      if (body.name        !== undefined) updateSet.name        = body.name;
+      if (body.description !== undefined) updateSet.description = body.description;
+
+      const [updated] = await db
+        .update(knowledgeBases)
+        .set(updateSet as any)
+        .where(and(eq(knowledgeBases.id, req.params.id), eq(knowledgeBases.tenantId, orgId)))
+        .returning();
+      if (!updated) return res.status(404).json({ error_code: "NOT_FOUND", message: "Datakilde ikke fundet" });
+
+      return res.json({
+        id:          updated.id,
+        name:        updated.name,
+        slug:        updated.slug,
+        description: updated.description,
+        status:      updated.lifecycleState,
+        updatedAt:   updated.updatedAt,
+      });
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // PATCH /api/kb/:id/reactivate — reactivate an archived knowledge base
+  app.patch("/api/kb/:id/reactivate", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { db } = await import("./db");
+      const { knowledgeBases } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const [updated] = await db
+        .update(knowledgeBases)
+        .set({ lifecycleState: "active", updatedAt: new Date() })
         .where(and(eq(knowledgeBases.id, req.params.id), eq(knowledgeBases.tenantId, orgId)))
         .returning();
       if (!updated) return res.status(404).json({ error_code: "NOT_FOUND", message: "Datakilde ikke fundet" });
@@ -3060,28 +3130,40 @@ Generate names and content in ${langNote}.`;
     }
   });
 
-  // GET /api/kb/:id/experts — list experts linked to knowledge base (Part D)
+  // GET /api/kb/:id/experts — list experts linked to knowledge base (with names)
   app.get("/api/kb/:id/experts", async (req: Request, res: Response) => {
     try {
       const orgId = getOrgId(req);
       const kbId = req.params.id;
       const { db } = await import("./db");
-      const { expertKnowledgeBases } = await import("../shared/schema");
+      const { expertKnowledgeBases, architectureProfiles } = await import("../shared/schema");
       const { eq, and } = await import("drizzle-orm");
 
       const links = await db
-        .select()
+        .select({
+          id:              expertKnowledgeBases.id,
+          expertId:        expertKnowledgeBases.expertId,
+          knowledgeBaseId: expertKnowledgeBases.knowledgeBaseId,
+          createdAt:       expertKnowledgeBases.createdAt,
+          expertName:      architectureProfiles.name,
+          expertSlug:      architectureProfiles.slug,
+          expertStatus:    architectureProfiles.status,
+        })
         .from(expertKnowledgeBases)
+        .leftJoin(architectureProfiles, eq(expertKnowledgeBases.expertId as any, architectureProfiles.id as any))
         .where(and(
           eq(expertKnowledgeBases.knowledgeBaseId, kbId),
           eq(expertKnowledgeBases.tenantId, orgId),
         ));
 
       return res.json(links.map((l) => ({
-        id: l.id,
-        expertId: l.expertId,
+        id:              l.id,
+        expertId:        l.expertId,
         knowledgeBaseId: l.knowledgeBaseId,
-        createdAt: l.createdAt,
+        expertName:      l.expertName ?? l.expertId,
+        expertSlug:      l.expertSlug ?? null,
+        expertStatus:    l.expertStatus ?? null,
+        createdAt:       l.createdAt,
       })));
     } catch (err) {
       return handleError(res, err);
@@ -3148,6 +3230,50 @@ Generate names and content in ${langNote}.`;
       ));
 
       return res.status(204).send();
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // POST /api/kb/:id/assets/:assetId/retry — retry/reprocess a failed asset
+  app.post("/api/kb/:id/assets/:assetId/retry", async (req: Request, res: Response) => {
+    try {
+      const orgId    = getOrgId(req);
+      const kbId     = req.params.id;
+      const assetId  = req.params.assetId;
+      const { db }   = await import("./db");
+      const { knowledgeDocuments, knowledgeProcessingJobs } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const [doc] = await db
+        .select()
+        .from(knowledgeDocuments)
+        .where(and(
+          eq(knowledgeDocuments.id, assetId),
+          eq(knowledgeDocuments.knowledgeBaseId, kbId),
+          eq(knowledgeDocuments.tenantId, orgId),
+        ))
+        .limit(1);
+
+      if (!doc) return res.status(404).json({ error_code: "NOT_FOUND", message: "Asset ikke fundet" });
+
+      // Create a new parse job (restarts the pipeline)
+      const [job] = await db.insert(knowledgeProcessingJobs).values({
+        tenantId:                   orgId,
+        knowledgeDocumentId:        assetId,
+        knowledgeDocumentVersionId: doc.currentVersionId ?? undefined,
+        jobType:                    "parse",
+        status:                     "queued",
+        priority:                   50,
+        payload:                    { retry: true, triggeredBy: "tenant_ui" },
+      }).returning();
+
+      // Reset document status so UI reflects "processing" immediately
+      await db.update(knowledgeDocuments)
+        .set({ documentStatus: "processing", updatedAt: new Date() })
+        .where(eq(knowledgeDocuments.id, assetId));
+
+      return res.status(201).json({ jobId: job.id, status: "queued" });
     } catch (err) {
       return handleError(res, err);
     }
