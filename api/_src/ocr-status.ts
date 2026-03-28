@@ -4,13 +4,17 @@
  * GET /api/ocr-status?id=<taskId>
  *
  * Response (completed):
- *   { status: "completed", ocrText, charCount, chunkCount, qualityScore, pageCount, provider }
+ *   { status, taskId, ocrText, charCount, chunkCount, qualityScore, pageCount, provider, completedAt }
  *
  * Response (pending/running):
- *   { status: "pending" | "running", createdAt, startedAt }
+ *   { status, taskId, stage, pagesProcessed, chunksProcessed, attemptCount,
+ *     createdAt, startedAt }
  *
  * Response (failed):
- *   { status: "failed", errorReason }
+ *   { status, taskId, errorReason, attemptCount, maxAttempts, nextRetryAt, retryCount }
+ *
+ * Response (dead_letter):
+ *   { status, taskId, errorReason, attemptCount, maxAttempts }
  */
 
 import "../../server/lib/env";
@@ -68,21 +72,38 @@ export default async function handler(
     });
   }
 
-  if (task.status === "failed") {
+  if (task.status === "dead_letter") {
     return json(res, {
-      status:      "failed",
-      taskId:      task.id,
-      errorReason: task.errorReason ?? "Ukendt fejl",
-      attempt:     task.attemptCount,
+      status:       "dead_letter",
+      taskId:       task.id,
+      errorReason:  task.lastError ?? task.errorReason ?? "Permanent fejl — manuelt gennemsyn krævet",
+      attemptCount: task.attemptCount,
+      maxAttempts:  task.maxAttempts,
     });
   }
 
-  // pending or running
+  if (task.status === "failed") {
+    return json(res, {
+      status:       "failed",
+      taskId:       task.id,
+      errorReason:  task.lastError ?? task.errorReason ?? "Ukendt fejl",
+      attemptCount: task.attemptCount,
+      maxAttempts:  task.maxAttempts,
+      nextRetryAt:  task.nextRetryAt,
+      retryCount:   task.retryCount,
+    });
+  }
+
+  // pending or running — include stage + progress for live UI feedback
   return json(res, {
-    status:      task.status,
-    taskId:      task.id,
-    createdAt:   task.createdAt,
-    startedAt:   task.startedAt,
-    attemptCount: task.attemptCount,
+    status:          task.status,        // "pending" | "running"
+    taskId:          task.id,
+    stage:           task.stage ?? null, // "ocr" | "chunking" | "embedding" | "storing" | null
+    pagesProcessed:  task.pagesProcessed  ?? 0,
+    chunksProcessed: task.chunksProcessed ?? 0,
+    attemptCount:    task.attemptCount,
+    maxAttempts:     task.maxAttempts,
+    createdAt:       task.createdAt,
+    startedAt:       task.startedAt,
   });
 }
