@@ -21,6 +21,13 @@
 
 import pg from "pg";
 import { generateQueryEmbedding } from "./kb-embeddings";
+import {
+  resolveMinScore,
+  deriveWhyMatchedCode,
+  deriveConfidenceCode,
+  type WhyMatchedCode,
+  type SimilarConfidenceCode,
+} from "./similarity-control";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -35,7 +42,8 @@ export interface SimilarCase {
 
   // ── Chat-ready fields ───────────────────────────────────────────────────────
   snippet:          string;             // first 500 chars of chunk text
-  whyMatched:       string;             // "vector similarity" | "lexical match" | "hybrid"
+  whyMatchedCode:   WhyMatchedCode;     // locale-safe: "vector_match" | "lexical_match" | "hybrid_match"
+  confidenceCode:   SimilarConfidenceCode; // locale-safe: "high" | "medium" | "low" | "unknown"
   sourceLabel:      string;             // human-readable: "<kbName> / <assetTitle>"
 
   // ── Asset attribution ───────────────────────────────────────────────────────
@@ -84,17 +92,9 @@ const MAX_CHUNKS_PER_ASSET  = 2;    // max chunks from same asset in results
 const DEFAULT_TOP_K         = 10;
 const MAX_TOP_K             = 50;
 
-// ── Min-score thresholds by retrieval mode ──────────────────────────────────
-// Different retrieval channels have different score semantics:
-//   - vector_pgvector: 0.0–1.0 cosine (1.0 = perfect match)
-//   - vector_appside: same as pgvector, slightly less optimized
-//   - lexical: combines pg_trgm similarity + ts_rank (0.0–1.0 but rarer to exceed 0.5)
-// Defaults are conservative; favor precision over recall for chat context.
-const MIN_SCORE_THRESHOLDS = {
-  vector:  0.35,   // vector-first results (requires reasonable similarity)
-  hybrid:  0.30,   // mixed vector + lexical
-  lexical: 0.15,   // lexical fallback (lower bar since it's last resort)
-} as const;
+// ── Min-score thresholds ─────────────────────────────────────────────────────
+// Thresholds are now owned by similarity-control.ts (resolveMinScore).
+// Do NOT re-declare defaults here — use resolveMinScore(channel) directly.
 
 const SNIPPET_CHARS = 500;  // max chars in snippet
 
@@ -210,14 +210,14 @@ function extractSmartSnippet(
 }
 
 /**
- * Apply smart minScore thresholding based on retrieval channel.
+ * Apply minScore thresholding — delegates to control layer.
+ * Tenant overrides can be passed as the optional third argument.
  */
 function shouldIncludeResult(
   score: number,
   channel: "vector" | "lexical" | "hybrid",
 ): boolean {
-  const threshold = MIN_SCORE_THRESHOLDS[channel] ?? MIN_SCORE_THRESHOLDS.vector;
-  return score >= threshold;
+  return score >= resolveMinScore(channel);
 }
 
 function rowToSimilarCase(
@@ -236,21 +236,22 @@ function rowToSimilarCase(
 
   const kbName     = (r["kb_name"]    as string | null) ?? null;
   const assetTitle = (r["asset_title"] as string | null) ?? null;
-  const sourceLabel = [kbName, assetTitle].filter(Boolean).join(" / ") || "Ukendt kilde";
+  const sourceLabel = [kbName, assetTitle].filter(Boolean).join(" / ") || "";
 
-  const whyMatched =
-    channel === "vector"  ? "vektor-lighed" :
-    channel === "lexical" ? "tekstmatch"    : "hybrid";
+  const clampedScore    = Math.max(0, Math.min(1, score));
+  const whyMatchedCode  = deriveWhyMatchedCode(channel);
+  const confidenceCode  = deriveConfidenceCode(clampedScore, channel);
 
   const chunkText = String(r["chunk_text"] ?? "");
   const snippet = extractSmartSnippet(chunkText, queryText);
 
   return {
     chunkId:          r["chunk_id"]    as string,
-    score:            Math.max(0, Math.min(1, score)),
+    score:            clampedScore,
     retrievalChannel: channel,
     snippet,
-    whyMatched,
+    whyMatchedCode,
+    confidenceCode,
     sourceLabel,
     assetId:          r["doc_id"]      as string,
     assetVersionId:   r["version_id"]  as string,
