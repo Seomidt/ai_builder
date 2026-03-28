@@ -260,7 +260,7 @@ async function handleFinalize(
   const { processDirectAttachment } = await import("../../server/lib/chat/direct-attachment-processor");
   const result = await processDirectAttachment({ objectKey, filename, contentType, sizeBytes: size });
 
-  // Scanned PDF in Mode B → async OCR too
+  // Scanned PDF or large PDF → async OCR
   if (result.code === "SCANNED_PDF") {
     return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, routing });
   }
@@ -276,7 +276,19 @@ async function handleFinalize(
     });
   }
 
-  // Failed to extract
+  // PDF parse error → fall back to async OCR rather than failing.
+  // Large or corrupted PDFs may cause pdf-parse to crash; OCR is the last resort.
+  const isPdfFallback =
+    contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
+
+  if (isPdfFallback && (result.status === "error" || result.status === "unsupported")) {
+    log("upload.finalize.mode_b.pdf_error_ocr_fallback", {
+      tenantId, objectKey, parseError: result.message ?? result.status,
+    });
+    return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, routing });
+  }
+
+  // Non-PDF extraction failure
   log("upload.finalize.mode_b.chat.error", {
     tenantId, objectKey, status: result.status, message: result.message,
   });

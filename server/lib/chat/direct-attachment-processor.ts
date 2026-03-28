@@ -155,6 +155,21 @@ export async function processDirectAttachment(
 
   // PDF — extract text layer only. Scanned PDFs hand off to async OCR.
   if (isPdfMime(contentType, filename)) {
+    // Large PDFs (> 5 MB) are almost always scanned/complex — skip parse overhead
+    // and go directly to async OCR. pdf-parse routinely times out on files > 5 MB.
+    const LARGE_PDF_BYTES = 5 * 1024 * 1024;
+    if (sizeBytes > LARGE_PDF_BYTES) {
+      const mb = (sizeBytes / 1024 / 1024).toFixed(1);
+      console.log(`[direct-processor] pdf=large size=${mb}MB — skipping parse, routing to async OCR`);
+      return {
+        filename, mime_type: contentType, char_count: 0, extracted_text: "",
+        status:  "scanned_pdf",
+        code:    "SCANNED_PDF",
+        message: `PDF er stor (${mb} MB) — afventer asynkron OCR`,
+        source:  "r2_direct",
+      };
+    }
+
     try {
       const { text: rawText, numpages } = await extractPdfText(buf);
       const textTrimmed = (rawText ?? "").trim();
