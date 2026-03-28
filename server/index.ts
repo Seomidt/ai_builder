@@ -24,9 +24,16 @@ import { robotsRouter } from "./routes/robots";
 import { adminGuardMiddleware } from "./middleware/ai-guards";
 // Emergency single-email production lockdown
 import { lockdownGuard } from "./middleware/lockdown";
+// Storage 1.4: pgvector migration
+import { runPgvectorMigration } from "./lib/knowledge/migrate-pgvector";
 
 const app = express();
 const httpServer = createServer(app);
+
+// Trust the first proxy hop (Replit/Vercel/Render reverse proxy).
+// Required so express-rate-limit can read X-Forwarded-For correctly
+// without throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
+app.set("trust proxy", 1);
 
 // Phase Next: www → apex redirect — FIRST so no other middleware runs on www requests
 app.use(wwwRedirectMiddleware);
@@ -160,6 +167,9 @@ app.use((req, res, next) => {
     await setupVite(httpServer, app);
   }
 
+  // Storage 1.4: Run pgvector migration (idempotent, safe to run on every boot)
+  runPgvectorMigration().catch((err) => log(`[pgvector] migration failed: ${String(err)}`));
+
   // ALWAYS serve the app on the port specified in the environment variable PORT
   // Other ports are firewalled. Default to 5000 if not specified.
   // this serves both the API and the client.
@@ -173,6 +183,17 @@ app.use((req, res, next) => {
     },
     () => {
       log(`serving on port ${port}`);
+      // Part A (Storage 1.3): Worker is NOT auto-started in web process.
+      // Run as a dedicated process: tsx server/worker.ts
+      // Or enable in-process mode with env flag: KB_WORKER=true
+      if (process.env.KB_WORKER === "true") {
+        import("./lib/knowledge/kb-worker")
+          .then(({ startKbWorker }) => {
+            log("[kb-worker] starting in-process (KB_WORKER=true)");
+            startKbWorker();
+          })
+          .catch((err) => log(`[kb-worker] failed to start: ${String(err)}`));
+      }
     },
   );
 })();
