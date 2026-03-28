@@ -420,7 +420,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       // ── VALIDATION MODE: structured JSON output ────────────────────────────
 
       // Readable detection — MUST happen before any classification
-      const isReadable = docText.trim().length > 50;
+      const isReadable = docText.trim().length > 5;
       console.log(`[chat] VALIDATION isReadable=${isReadable} docTextLen=${docText.trim().length}`);
 
       // Helper: does an issue string suggest a technical parse/format failure?

@@ -650,8 +650,9 @@ export default function AiChatPage() {
     const text = input.trim();
     if ((!text && attachments.length === 0) || chatMutation.isPending) return;
     const displayText = text || (attachments.length === 1 ? `[${attachments[0].file.name}]` : `[${attachments.length} filer vedhæftet]`);
-    // Auto-detect: any document attachment → validation pipeline
-    const useCase = attachments.some(a => a.type === "document") ? "validation" : "grounded_chat";
+    // Dokument-upload → grounded_chat: svarer spørgsmål direkte fra dokumentindholdet.
+    // "validation" bruges kun hvis eksperten eksplicit er en valideringsekspert.
+    const useCase = "grounded_chat";
     console.log(`[TRACE-SEND] use_case="${useCase}" attachments=${attachments.length}`);
     setMessages(prev => [...prev, {
       id: crypto.randomUUID(),
