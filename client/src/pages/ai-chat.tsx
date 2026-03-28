@@ -308,7 +308,11 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
       <div className="space-y-2.5">
         <div className="flex items-center justify-between gap-2">
           <span className="text-xs font-semibold text-muted-foreground">
-            {isExpert ? (response.source?.name ?? response.expert.name) : "Systemsvar"}
+            {docValidation
+              ? "Dokumentsvar"
+              : isExpert
+                ? (response.source?.name ?? response.expert.name)
+                : "Systemsvar"}
           </span>
           <StatusBadge response={response} />
         </div>
