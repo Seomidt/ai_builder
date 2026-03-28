@@ -16,8 +16,8 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Upload, FileText, Image, Video, File, Loader2,
   Database, CheckCircle2, Clock, AlertTriangle, RefreshCw,
-  Link2, ChevronRight, Brain, Plus, X, Search, SlidersHorizontal,
-  Pencil, RotateCcw, Archive, MoreHorizontal, CheckCheck,
+  Link2, Brain, Plus, X, Search, SlidersHorizontal,
+  Pencil, RotateCcw, Archive,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
