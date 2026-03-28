@@ -2470,6 +2470,811 @@ Generate names and content in ${langNote}.`;
     }
   });
 
+  // ─── Knowledge Bases (Storage Data Sources) ─────────────────────────────────
+
+  // GET /api/kb — list all knowledge bases for tenant
+  app.get("/api/kb", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { db } = await import("./db");
+      const { knowledgeBases, knowledgeDocuments } = await import("../shared/schema");
+      const { eq, and, count, desc } = await import("drizzle-orm");
+
+      const bases = await db
+        .select()
+        .from(knowledgeBases)
+        .where(and(
+          eq(knowledgeBases.tenantId, orgId),
+          eq(knowledgeBases.lifecycleState, "active"),
+        ))
+        .orderBy(desc(knowledgeBases.createdAt));
+
+      // Get asset counts per base
+      const counts = await db
+        .select({ knowledgeBaseId: knowledgeDocuments.knowledgeBaseId, cnt: count() })
+        .from(knowledgeDocuments)
+        .where(and(
+          eq(knowledgeDocuments.tenantId, orgId),
+          eq(knowledgeDocuments.lifecycleState, "active"),
+        ))
+        .groupBy(knowledgeDocuments.knowledgeBaseId);
+
+      const countMap = Object.fromEntries(counts.map((c) => [c.knowledgeBaseId, Number(c.cnt)]));
+
+      return res.json(bases.map((b) => ({
+        id: b.id,
+        name: b.name,
+        slug: b.slug,
+        description: b.description,
+        status: b.lifecycleState,
+        assetCount: countMap[b.id] ?? 0,
+        createdAt: b.createdAt,
+        updatedAt: b.updatedAt,
+      })));
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // POST /api/kb — create knowledge base
+  app.post("/api/kb", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const userId = getUserId(req);
+      const { db } = await import("./db");
+      const { knowledgeBases } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const bodySchema = z.object({
+        name: z.string().min(1).max(200),
+        slug: z.string().min(1).max(80).regex(/^[a-z0-9-]+$/),
+        description: z.string().max(1000).optional(),
+      });
+      const body = bodySchema.parse(req.body);
+
+      // Check slug uniqueness
+      const [existing] = await db
+        .select({ id: knowledgeBases.id })
+        .from(knowledgeBases)
+        .where(and(eq(knowledgeBases.tenantId, orgId), eq(knowledgeBases.slug, body.slug)));
+      if (existing) {
+        return res.status(409).json({ error_code: "SLUG_CONFLICT", message: "Slug er allerede i brug" });
+      }
+
+      const [kb] = await db.insert(knowledgeBases).values({
+        tenantId: orgId,
+        name: body.name,
+        slug: body.slug,
+        description: body.description ?? null,
+        lifecycleState: "active",
+        visibility: "private",
+        createdBy: userId,
+        updatedBy: userId,
+      }).returning();
+
+      return res.status(201).json({
+        id: kb.id,
+        name: kb.name,
+        slug: kb.slug,
+        description: kb.description,
+        status: kb.lifecycleState,
+        assetCount: 0,
+        createdAt: kb.createdAt,
+        updatedAt: kb.updatedAt,
+      });
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // GET /api/kb/:id — knowledge base detail
+  app.get("/api/kb/:id", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { db } = await import("./db");
+      const { knowledgeBases, knowledgeDocuments } = await import("../shared/schema");
+      const { eq, and, count } = await import("drizzle-orm");
+
+      const [kb] = await db
+        .select()
+        .from(knowledgeBases)
+        .where(and(eq(knowledgeBases.id, req.params.id), eq(knowledgeBases.tenantId, orgId)));
+      if (!kb) return res.status(404).json({ error_code: "NOT_FOUND", message: "Datakilde ikke fundet" });
+
+      const [{ cnt }] = await db
+        .select({ cnt: count() })
+        .from(knowledgeDocuments)
+        .where(and(
+          eq(knowledgeDocuments.knowledgeBaseId, kb.id),
+          eq(knowledgeDocuments.tenantId, orgId),
+          eq(knowledgeDocuments.lifecycleState, "active"),
+        ));
+
+      return res.json({
+        id: kb.id,
+        name: kb.name,
+        slug: kb.slug,
+        description: kb.description,
+        status: kb.lifecycleState,
+        assetCount: Number(cnt),
+        createdAt: kb.createdAt,
+        updatedAt: kb.updatedAt,
+      });
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // PATCH /api/kb/:id/archive — archive knowledge base
+  app.patch("/api/kb/:id/archive", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { db } = await import("./db");
+      const { knowledgeBases } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const [updated] = await db
+        .update(knowledgeBases)
+        .set({ lifecycleState: "archived", updatedAt: new Date() })
+        .where(and(eq(knowledgeBases.id, req.params.id), eq(knowledgeBases.tenantId, orgId)))
+        .returning();
+      if (!updated) return res.status(404).json({ error_code: "NOT_FOUND", message: "Datakilde ikke fundet" });
+
+      return res.json({ id: updated.id, status: updated.lifecycleState });
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // GET /api/kb/:id/assets — list assets in a knowledge base
+  app.get("/api/kb/:id/assets", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { db } = await import("./db");
+      const { knowledgeDocuments, knowledgeDocumentVersions, knowledgeProcessingJobs, knowledgeChunks } = await import("../shared/schema");
+      const { eq, and, desc, inArray, count } = await import("drizzle-orm");
+
+      const assets = await db
+        .select()
+        .from(knowledgeDocuments)
+        .where(and(
+          eq(knowledgeDocuments.knowledgeBaseId, req.params.id),
+          eq(knowledgeDocuments.tenantId, orgId),
+          eq(knowledgeDocuments.lifecycleState, "active"),
+        ))
+        .orderBy(desc(knowledgeDocuments.createdAt));
+
+      if (assets.length === 0) return res.json([]);
+
+      const docIds = assets.map((a) => a.id);
+
+      // Fetch versions, jobs and chunk counts in parallel
+      const { knowledgeEmbeddings } = await import("../shared/schema");
+      const [versions, jobs, chunkCounts, embeddingCounts] = await Promise.all([
+        // current versions for file size / MIME
+        (async () => {
+          const versionIds = assets.map((a) => a.currentVersionId).filter(Boolean) as string[];
+          if (versionIds.length === 0) return [] as (typeof knowledgeDocumentVersions.$inferSelect)[];
+          return db.select().from(knowledgeDocumentVersions).where(inArray(knowledgeDocumentVersions.id, versionIds));
+        })(),
+        // latest processing job per document (Part F: full pipeline visibility)
+        db.select().from(knowledgeProcessingJobs)
+          .where(and(eq(knowledgeProcessingJobs.tenantId, orgId), inArray(knowledgeProcessingJobs.knowledgeDocumentId, docIds)))
+          .orderBy(desc(knowledgeProcessingJobs.createdAt)),
+        // chunk counts per document (Part C: traceability)
+        db.select({ docId: knowledgeChunks.knowledgeDocumentId, cnt: count() })
+          .from(knowledgeChunks)
+          .where(and(eq(knowledgeChunks.tenantId, orgId), inArray(knowledgeChunks.knowledgeDocumentId, docIds), eq(knowledgeChunks.chunkActive, true)))
+          .groupBy(knowledgeChunks.knowledgeDocumentId),
+        // embedding counts per document (Part G: observability)
+        db.select({ docId: knowledgeEmbeddings.knowledgeDocumentId, cnt: count() })
+          .from(knowledgeEmbeddings)
+          .where(and(eq(knowledgeEmbeddings.tenantId, orgId), inArray(knowledgeEmbeddings.knowledgeDocumentId, docIds), eq(knowledgeEmbeddings.embeddingStatus, "completed")))
+          .groupBy(knowledgeEmbeddings.knowledgeDocumentId),
+      ]);
+
+      const versionMap = Object.fromEntries(versions.map((v) => [v.id, v]));
+      const chunkCountMap = Object.fromEntries(chunkCounts.map((c) => [c.docId, Number(c.cnt)]));
+      const embeddingCountMap = Object.fromEntries(embeddingCounts.map((c) => [c.docId, Number(c.cnt)]));
+
+      // Group jobs by document — build pipeline status map
+      type JobSummary = { jobType: string; status: string; failureReason: string | null; createdAt: Date };
+      const jobsByDoc: Record<string, JobSummary[]> = {};
+      for (const j of jobs) {
+        if (!jobsByDoc[j.knowledgeDocumentId]) jobsByDoc[j.knowledgeDocumentId] = [];
+        jobsByDoc[j.knowledgeDocumentId].push({
+          jobType: j.jobType,
+          status: j.status,
+          failureReason: j.failureReason ?? null,
+          createdAt: j.createdAt,
+        });
+      }
+
+      return res.json(assets.map((a) => {
+        const ver = a.currentVersionId ? versionMap[a.currentVersionId] : undefined;
+        const docJobs = jobsByDoc[a.id] ?? [];
+        const latestJob = docJobs[0] ?? null;
+        const hasFailed = docJobs.some((j) => j.status === "failed");
+        const allDone  = docJobs.length > 0 && docJobs.every((j) => j.status === "completed");
+
+        // Derive processing stage label (Part F)
+        let processingStage: string = a.documentStatus;
+        if (allDone) processingStage = "indexed";
+        else if (hasFailed) processingStage = "failed";
+        else if (latestJob?.status === "running") processingStage = "processing";
+        else if (docJobs.some((j) => j.status === "queued")) processingStage = "queued";
+
+        return {
+          id: a.id,
+          title: a.title,
+          documentType: a.documentType,
+          status: processingStage,
+          mimeType: ver?.mimeType ?? null,
+          fileSizeBytes: ver?.fileSizeBytes ?? null,
+          versionNumber: a.latestVersionNumber,
+          chunkCount: chunkCountMap[a.id] ?? 0,
+          embeddingCount: embeddingCountMap[a.id] ?? 0,
+          pipeline: docJobs.map((j) => ({ jobType: j.jobType, status: j.status, failureReason: j.failureReason })),
+          latestJobType: latestJob?.jobType ?? null,
+          latestJobStatus: latestJob?.status ?? null,
+          parseStatus: ver?.parseStatus ?? null,
+          ocrStatus: ver?.ocrStatus ?? null,
+          transcriptStatus: ver?.transcriptStatus ?? null,
+          createdAt: a.createdAt,
+          updatedAt: a.updatedAt,
+        };
+      }));
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // POST /api/kb/:id/upload — upload asset to knowledge base (Storage 1.1 hardened)
+  app.post("/api/kb/:id/upload", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const userId = getUserId(req);
+      const kbId = req.params.id;
+
+      const contentType = req.headers["content-type"] ?? "";
+      if (!contentType.includes("multipart/form-data")) {
+        return res.status(400).json({ error_code: "INVALID_CONTENT_TYPE", message: "Forventet multipart/form-data" });
+      }
+
+      // ── Part E: MIME type whitelist per asset category ────────────────────
+      const ALLOWED_MIME: Record<string, string> = {
+        // documents
+        "application/pdf": "document",
+        "application/msword": "document",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document",
+        "text/plain": "document",
+        "text/csv": "document",
+        "application/vnd.ms-excel": "document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "document",
+        "application/vnd.oasis.opendocument.text": "document",
+        "application/rtf": "document",
+        "text/html": "document",
+        "text/markdown": "document",
+        // images
+        "image/jpeg": "image",
+        "image/png": "image",
+        "image/gif": "image",
+        "image/webp": "image",
+        "image/tiff": "image",
+        "image/bmp": "image",
+        // video
+        "video/mp4": "video",
+        "video/quicktime": "video",
+        "video/x-msvideo": "video",
+        "video/webm": "video",
+        "video/mpeg": "video",
+      };
+
+      const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100 MB
+
+      // Verify knowledge base belongs to tenant
+      const { db } = await import("./db");
+      const {
+        knowledgeBases, knowledgeDocuments, knowledgeDocumentVersions,
+        knowledgeProcessingJobs, knowledgeStorageObjects,
+      } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const [kb] = await db
+        .select({ id: knowledgeBases.id })
+        .from(knowledgeBases)
+        .where(and(eq(knowledgeBases.id, kbId), eq(knowledgeBases.tenantId, orgId)));
+      if (!kb) return res.status(404).json({ error_code: "NOT_FOUND", message: "Datakilde ikke fundet" });
+
+      const Busboy = (await import("busboy")).default;
+      const bb = Busboy({ headers: req.headers as Record<string, string>, limits: { fileSize: MAX_FILE_SIZE } });
+
+      let fileResult: { filename: string; mimeType: string; buffer: Buffer; truncated: boolean } | null = null;
+
+      await new Promise<void>((resolve, reject) => {
+        bb.on("file", (_field: string, stream: NodeJS.ReadableStream & { truncated?: boolean }, info: { filename: string; mimeType: string }) => {
+          const chunks: Buffer[] = [];
+          stream.on("data", (c: Buffer) => chunks.push(c));
+          stream.on("end", () => {
+            fileResult = {
+              filename: info.filename,
+              mimeType: info.mimeType,
+              buffer: Buffer.concat(chunks),
+              truncated: !!(stream as any).truncated,
+            };
+          });
+          stream.on("error", reject);
+        });
+        bb.on("finish", resolve);
+        bb.on("error", reject);
+        req.pipe(bb);
+      });
+
+      if (!fileResult) {
+        return res.status(400).json({ error_code: "NO_FILE", message: "Ingen fil modtaget" });
+      }
+
+      const { filename, mimeType, buffer, truncated } = fileResult;
+
+      // ── Part E: reject files exceeding size limit ─────────────────────────
+      if (truncated) {
+        return res.status(413).json({ error_code: "FILE_TOO_LARGE", message: `Filen overstiger den maksimale størrelse på ${MAX_FILE_SIZE / 1024 / 1024} MB` });
+      }
+
+      // ── Part E: MIME type validation ──────────────────────────────────────
+      const documentType: string = ALLOWED_MIME[mimeType] ?? "";
+      if (!documentType) {
+        return res.status(415).json({
+          error_code: "UNSUPPORTED_FILE_TYPE",
+          message: `Filtypen "${mimeType}" understøttes ikke. Upload PDF, Word, Excel, billede eller video.`,
+        });
+      }
+
+      const sizeBytes = buffer.length;
+
+      // ── Part E: idempotency key — prevents duplicate uploads in quick replay ─
+      const { createHash } = await import("crypto");
+      const idempotencyKey = createHash("sha256")
+        .update(`${orgId}:${kbId}:${filename}:${sizeBytes}:${mimeType}`)
+        .digest("hex");
+
+      const existingJob = await db
+        .select({ id: knowledgeProcessingJobs.id, knowledgeDocumentId: knowledgeProcessingJobs.knowledgeDocumentId })
+        .from(knowledgeProcessingJobs)
+        .where(eq(knowledgeProcessingJobs.idempotencyKey, idempotencyKey))
+        .limit(1);
+
+      if (existingJob[0]) {
+        const [existingDoc] = await db.select().from(knowledgeDocuments)
+          .where(eq(knowledgeDocuments.id, existingJob[0].knowledgeDocumentId));
+        if (existingDoc) {
+          return res.status(200).json({
+            id: existingDoc.id,
+            title: existingDoc.title,
+            documentType: existingDoc.documentType,
+            status: existingDoc.documentStatus,
+            mimeType,
+            fileSizeBytes: sizeBytes,
+            versionNumber: 1,
+            createdAt: existingDoc.createdAt,
+            idempotent: true,
+          });
+        }
+      }
+
+      // ── R2 upload ─────────────────────────────────────────────────────────
+      const safeFilename = filename.replace(/[^a-zA-Z0-9._\-]/g, "-").slice(0, 200);
+      const storageKey = `tenants/${orgId}/uploads/${kbId}/${Date.now()}-${safeFilename}`;
+      let r2Uploaded = false;
+
+      const { R2_CONFIGURED, R2_BUCKET, r2Client } = await import("./lib/r2/r2-client");
+      if (R2_CONFIGURED) {
+        const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+        await r2Client.send(new PutObjectCommand({
+          Bucket:      R2_BUCKET,
+          Key:         storageKey,
+          Body:        buffer,
+          ContentType: mimeType,
+          Metadata:    { tenantId: orgId, kbId, originalFilename: filename },
+        }));
+        r2Uploaded = true;
+        console.log(`[kb-upload] R2 upload OK: ${storageKey} (${sizeBytes} bytes)`);
+      } else {
+        console.warn("[kb-upload] R2 ikke konfigureret — gemmer kun metadata");
+      }
+
+      // ── Part A: inline text extraction for documents ──────────────────────
+      let extractedText: string | null = null;
+      if (documentType === "document" && mimeType === "application/pdf") {
+        try {
+          const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string }>;
+          const parsed = await pdfParse(buffer);
+          extractedText = parsed.text?.trim() || null;
+        } catch (pdfErr) {
+          console.warn("[kb-upload] pdf-parse fejlede:", (pdfErr as Error).message);
+        }
+      } else if (documentType === "document" && ["text/plain", "text/csv", "text/html", "text/markdown"].includes(mimeType)) {
+        extractedText = buffer.toString("utf-8").trim();
+      }
+
+      // ── Create document record ────────────────────────────────────────────
+      const [doc] = await db.insert(knowledgeDocuments).values({
+        tenantId: orgId,
+        knowledgeBaseId: kbId,
+        title: filename,
+        documentType,
+        sourceType: "upload",
+        lifecycleState: "active",
+        documentStatus: "processing",
+        latestVersionNumber: 1,
+        createdBy: userId,
+        updatedBy: userId,
+        metadata: { storageKey, originalFilename: filename } as any,
+      }).returning();
+
+      // ── Create version record ─────────────────────────────────────────────
+      const [ver] = await db.insert(knowledgeDocumentVersions).values({
+        tenantId: orgId,
+        knowledgeDocumentId: doc.id,
+        versionNumber: 1,
+        mimeType,
+        fileSizeBytes: sizeBytes,
+        isCurrent: true,
+        versionStatus: "uploaded",
+        sourceLabel: filename,
+        uploadedAt: new Date(),
+        createdBy: userId,
+        // Part F: set type-specific status fields
+        parseStatus:       documentType === "document" ? "pending" : null,
+        ocrStatus:         documentType === "image"    ? "pending" : null,
+        transcriptStatus:  documentType === "video"    ? "pending" : null,
+        metadata: {
+          storageKey,
+          r2Uploaded,
+          extractedText: extractedText ? extractedText.slice(0, 500) : null,
+        } as any,
+      }).returning();
+
+      await db.update(knowledgeDocuments)
+        .set({ currentVersionId: ver.id, updatedAt: new Date() })
+        .where(eq(knowledgeDocuments.id, doc.id));
+
+      // ── Part B + G: register storage object (traceable to source) ─────────
+      await db.insert(knowledgeStorageObjects).values({
+        tenantId: orgId,
+        knowledgeDocumentVersionId: ver.id,
+        storageProvider: r2Uploaded ? "r2" : "local",
+        bucketName: r2Uploaded ? R2_BUCKET : null,
+        objectKey: storageKey,
+        originalFilename: filename,
+        mimeType,
+        fileSizeBytes: sizeBytes,
+        uploadStatus: r2Uploaded ? "uploaded" : "pending",
+        uploadedAt: r2Uploaded ? new Date() : null,
+        metadata: { kbId, extractedLength: extractedText?.length ?? 0 } as any,
+      });
+
+      // ── Part A: enqueue type-specific processing pipeline ─────────────────
+      // document: parse → chunk → embed → index
+      // image:    ocr_parse → chunk → embed → index  (OCR is placeholder-ready)
+      // video:    transcript_parse → chunk → embed → index  (transcript is placeholder)
+      const primaryJobType =
+        documentType === "video" ? "transcript_parse" :
+        documentType === "image" ? "ocr_parse" :
+        "parse";
+
+      const pipelineJobs = [
+        { jobType: primaryJobType,        priority: 100, payload: { documentType, mimeType, storageKey, stage: "extract" } },
+        { jobType: "chunk",               priority: 90,  payload: { documentType, mimeType, storageKey, stage: "chunk", dependsOn: primaryJobType } },
+        { jobType: "embedding_generate",  priority: 80,  payload: { documentType, mimeType, storageKey, stage: "embed", dependsOn: "chunk" } },
+        { jobType: "index",               priority: 70,  payload: { documentType, mimeType, storageKey, stage: "index", dependsOn: "embedding_generate" } },
+      ];
+
+      // For documents where text was already extracted: skip parse step, start with chunk
+      const startIdx = (documentType === "document" && extractedText) ? 1 : 0;
+      const jobsToEnqueue = pipelineJobs.slice(startIdx);
+
+      for (const j of jobsToEnqueue) {
+        await db.insert(knowledgeProcessingJobs).values({
+          tenantId: orgId,
+          knowledgeDocumentId: doc.id,
+          knowledgeDocumentVersionId: ver.id,
+          jobType: j.jobType,
+          status: "queued",
+          priority: j.priority,
+          idempotencyKey: j === jobsToEnqueue[0] ? idempotencyKey : null,
+          payload: {
+            ...j.payload,
+            extractedText: j.jobType === "chunk" && extractedText ? extractedText : undefined,
+          } as any,
+        });
+      }
+
+      // ── Part C: inline chunking for small documents with extracted text ────
+      // If text was extracted synchronously, create chunks immediately for fast indexing.
+      if (extractedText && extractedText.length > 0 && extractedText.length < 50_000) {
+        try {
+          const { knowledgeChunks } = await import("../shared/schema");
+          const CHUNK_SIZE = 1000;
+          const OVERLAP = 100;
+          const words = extractedText.split(/\s+/).filter(Boolean);
+          const chunkTexts: string[] = [];
+          for (let i = 0; i < words.length; i += CHUNK_SIZE - OVERLAP) {
+            chunkTexts.push(words.slice(i, i + CHUNK_SIZE).join(" "));
+            if (i + CHUNK_SIZE >= words.length) break;
+          }
+
+          for (let idx = 0; idx < chunkTexts.length; idx++) {
+            const text = chunkTexts[idx];
+            const chunkKey = `${doc.id}:${idx}`;
+            const chunkHash = createHash("sha256").update(text).digest("hex").slice(0, 32);
+            await db.insert(knowledgeChunks).values({
+              tenantId: orgId,
+              knowledgeBaseId: kbId,
+              knowledgeDocumentId: doc.id,
+              knowledgeDocumentVersionId: ver.id,
+              chunkIndex: idx,
+              chunkKey,
+              chunkText: text,
+              chunkHash,
+              chunkActive: true,
+              tokenEstimate: Math.ceil(text.length / 4),
+              chunkStrategy: "word-window",
+              chunkVersion: "1.0",
+              overlapCharacters: OVERLAP,
+            }).onConflictDoNothing();
+          }
+
+          // Update doc status to reflect chunks are ready (awaiting embedding)
+          await db.update(knowledgeDocuments)
+            .set({ documentStatus: "processing", updatedAt: new Date() })
+            .where(eq(knowledgeDocuments.id, doc.id));
+
+          console.log(`[kb-upload] ${chunkTexts.length} chunks oprettet for doc ${doc.id}`);
+        } catch (chunkErr) {
+          console.warn("[kb-upload] Chunking fejlede (ikke kritisk):", (chunkErr as Error).message);
+        }
+      }
+
+      console.log(`[kb-upload] ${orgId}/${kbId}: "${filename}" (${documentType}, ${sizeBytes} bytes) → pipeline: ${jobsToEnqueue.map((j) => j.jobType).join(" → ")}`);
+
+      return res.status(201).json({
+        id: doc.id,
+        title: doc.title,
+        documentType: doc.documentType,
+        status: doc.documentStatus,
+        mimeType,
+        fileSizeBytes: sizeBytes,
+        versionNumber: 1,
+        storageKey,
+        pipeline: jobsToEnqueue.map((j) => j.jobType),
+        chunksCreated: extractedText ? true : false,
+        createdAt: doc.createdAt,
+      });
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // GET /api/kb/:id/experts — list experts linked to knowledge base (Part D)
+  app.get("/api/kb/:id/experts", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const kbId = req.params.id;
+      const { db } = await import("./db");
+      const { expertKnowledgeBases } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const links = await db
+        .select()
+        .from(expertKnowledgeBases)
+        .where(and(
+          eq(expertKnowledgeBases.knowledgeBaseId, kbId),
+          eq(expertKnowledgeBases.tenantId, orgId),
+        ));
+
+      return res.json(links.map((l) => ({
+        id: l.id,
+        expertId: l.expertId,
+        knowledgeBaseId: l.knowledgeBaseId,
+        createdAt: l.createdAt,
+      })));
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // POST /api/kb/:id/experts — link an expert to a knowledge base (Part D)
+  app.post("/api/kb/:id/experts", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const userId = getUserId(req);
+      const kbId = req.params.id;
+      const { expertId } = req.body ?? {};
+
+      if (!expertId || typeof expertId !== "string") {
+        return res.status(400).json({ error_code: "MISSING_EXPERT_ID", message: "expertId er påkrævet" });
+      }
+
+      const { db } = await import("./db");
+      const { expertKnowledgeBases, knowledgeBases } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const [kb] = await db.select({ id: knowledgeBases.id }).from(knowledgeBases)
+        .where(and(eq(knowledgeBases.id, kbId), eq(knowledgeBases.tenantId, orgId)));
+      if (!kb) return res.status(404).json({ error_code: "NOT_FOUND", message: "Datakilde ikke fundet" });
+
+      const [link] = await db.insert(expertKnowledgeBases).values({
+        tenantId: orgId,
+        expertId,
+        knowledgeBaseId: kbId,
+        createdBy: userId,
+      }).onConflictDoNothing().returning();
+
+      if (!link) {
+        const [existing] = await db.select().from(expertKnowledgeBases)
+          .where(and(
+            eq(expertKnowledgeBases.tenantId, orgId),
+            eq(expertKnowledgeBases.expertId, expertId),
+            eq(expertKnowledgeBases.knowledgeBaseId, kbId),
+          ));
+        return res.status(200).json({ ...existing, idempotent: true });
+      }
+
+      return res.status(201).json(link);
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // DELETE /api/kb/:id/experts/:expertId — unlink expert from knowledge base (Part D)
+  app.delete("/api/kb/:id/experts/:expertId", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const kbId = req.params.id;
+      const expertId = req.params.expertId;
+      const { db } = await import("./db");
+      const { expertKnowledgeBases } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      await db.delete(expertKnowledgeBases).where(and(
+        eq(expertKnowledgeBases.tenantId, orgId),
+        eq(expertKnowledgeBases.expertId, expertId),
+        eq(expertKnowledgeBases.knowledgeBaseId, kbId),
+      ));
+
+      return res.status(204).send();
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // GET /api/experts/:expertId/sources — list KBs linked to an expert (Part D)
+  app.get("/api/experts/:expertId/sources", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const expertId = req.params.expertId;
+      const { db } = await import("./db");
+      const { expertKnowledgeBases, knowledgeBases } = await import("../shared/schema");
+      const { eq, and } = await import("drizzle-orm");
+
+      const links = await db
+        .select({
+          id:              expertKnowledgeBases.id,
+          expertId:        expertKnowledgeBases.expertId,
+          knowledgeBaseId: expertKnowledgeBases.knowledgeBaseId,
+          createdAt:       expertKnowledgeBases.createdAt,
+          kbName:          knowledgeBases.name,
+          kbSlug:          knowledgeBases.slug,
+        })
+        .from(expertKnowledgeBases)
+        .innerJoin(knowledgeBases, eq(expertKnowledgeBases.knowledgeBaseId, knowledgeBases.id))
+        .where(and(
+          eq(expertKnowledgeBases.tenantId, orgId),
+          eq(expertKnowledgeBases.expertId, expertId),
+        ));
+
+      return res.json(links);
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // POST /api/kb/search — search knowledge chunks (Storage 1.2 Part D+F)
+  // Supports expert-aware filtering and real embedding reranking.
+  app.post("/api/kb/search", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { queryText, topK, kbIds, expertId, sourceIds } = req.body as {
+        queryText?: string;
+        topK?: number;
+        kbIds?: string[];
+        expertId?: string;
+        sourceIds?: string[];
+      };
+
+      if (!queryText?.trim()) return res.status(400).json({ error: "queryText is required" });
+
+      const { searchKnowledge } = await import("./lib/knowledge/kb-retrieval");
+      const results = await searchKnowledge({
+        tenantId: orgId,
+        queryText: queryText.trim(),
+        topK:      Math.min(Number(topK ?? 10), 100),
+        kbIds:     kbIds?.length ? kbIds : undefined,
+        expertId:  expertId ?? undefined,
+        sourceIds: sourceIds?.length ? sourceIds : undefined,
+      });
+
+      return res.json({ results, total: results.length });
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  // POST /api/kb/similar — Similar Cases API (Storage 1.5)
+  //
+  // Modes:
+  //   text  — { query, topK?, kbId?, kbIds?, expertId?, minScore? }
+  //   asset — { assetId, topK?, kbId?, kbIds?, expertId?, minScore? }
+  //   chunk — { chunkId, topK?, kbId?, kbIds?, expertId?, minScore? }
+  //
+  // Response:
+  //   { cases: SimilarCase[], total, debug }
+  //   Each SimilarCase includes: snippet, score, sourceLabel, assetTitle,
+  //   assetType, kbName, mimeType, fileName, chunkId, assetId, kbId,
+  //   pageNumber, timestampSec, whyMatched, retrievalChannel
+  app.post("/api/kb/similar", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+
+      const {
+        query, assetId, chunkId,
+        topK, kbId, kbIds, expertId, minScore,
+      } = req.body as {
+        query?:     string;
+        assetId?:   string;
+        chunkId?:   string;
+        topK?:      number;
+        kbId?:      string;
+        kbIds?:     string[];
+        expertId?:  string;
+        minScore?:  number;
+      };
+
+      // Determine mode from input
+      let mode: "text" | "asset" | "chunk";
+      if (assetId?.trim()) {
+        mode = "asset";
+      } else if (chunkId?.trim()) {
+        mode = "chunk";
+      } else if (query?.trim()) {
+        mode = "text";
+      } else {
+        return res.status(400).json({
+          error: "Provide one of: query (text mode), assetId (asset mode), or chunkId (chunk mode)",
+        });
+      }
+
+      const { findSimilarCases } = await import("./lib/knowledge/kb-similar");
+      const result = await findSimilarCases({
+        tenantId:  orgId,
+        mode,
+        queryText: query?.trim(),
+        assetId:   assetId?.trim(),
+        chunkId:   chunkId?.trim(),
+        kbId:      kbId?.trim(),
+        kbIds:     kbIds?.length ? kbIds : undefined,
+        expertId:  expertId?.trim(),
+        topK:      topK ? Math.min(Number(topK), 50) : undefined,
+        minScore:  minScore !== undefined ? Number(minScore) : undefined,
+      });
+
+      return res.json(result);
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
   return httpServer;
 }
 
