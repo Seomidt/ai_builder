@@ -365,7 +365,8 @@ async function listAssets(orgId: string, kbId: string, res: ServerResponse): Pro
 }
 
 // ── Route: POST /api/kb/:id/upload ────────────────────────────────────────────
-// Lazy-loads busboy + R2 only when this path is hit.
+// Thin HTTP adapter: parse multipart form, delegate all business logic to
+// kb-upload-service. Lazy-loads busboy only for this route.
 
 async function uploadAsset(
   orgId: string,
@@ -381,53 +382,10 @@ async function uploadAsset(
       return;
     }
 
-    const ALLOWED_MIME: Record<string, string> = {
-      "application/pdf": "document",
-      "application/msword": "document",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document",
-      "text/plain": "document",
-      "text/csv": "document",
-      "application/vnd.ms-excel": "document",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "document",
-      "application/vnd.oasis.opendocument.text": "document",
-      "application/rtf": "document",
-      "text/html": "document",
-      "text/markdown": "document",
-      "image/jpeg": "image",
-      "image/png": "image",
-      "image/gif": "image",
-      "image/webp": "image",
-      "image/tiff": "image",
-      "image/bmp": "image",
-      "video/mp4": "video",
-      "video/quicktime": "video",
-      "video/x-msvideo": "video",
-      "video/webm": "video",
-      "video/mpeg": "video",
-    };
-
-    const MAX_FILE_SIZE = 100 * 1024 * 1024;
-
-    const db = await getDb();
-    const {
-      knowledgeBases, knowledgeDocuments, knowledgeDocumentVersions,
-      knowledgeProcessingJobs, knowledgeStorageObjects, knowledgeChunks,
-    } = await getSchema();
-    const { eq, and } = await getOrm();
-
-    const [kb] = await db
-      .select({ id: knowledgeBases.id })
-      .from(knowledgeBases)
-      .where(and(eq(knowledgeBases.id, kbId), eq(knowledgeBases.tenantId, orgId)));
-
-    if (!kb) {
-      json(res, 404, { error_code: "NOT_FOUND", message: "Datakilde ikke fundet" });
-      return;
-    }
-
-    // Lazy-load busboy — only needed for multipart upload requests
+    // Lazy-load busboy — HTTP-specific, only needed here
+    const { MAX_UPLOAD_BYTES } = await import("../../server/lib/knowledge/kb-upload-service");
     const Busboy = (await import("busboy")).default;
-    const bb = Busboy({ headers: req.headers as Record<string, string>, limits: { fileSize: MAX_FILE_SIZE } });
+    const bb = Busboy({ headers: req.headers as Record<string, string>, limits: { fileSize: MAX_UPLOAD_BYTES } });
 
     let fileResult: { filename: string; mimeType: string; buffer: Buffer; truncated: boolean } | null = null;
 
@@ -460,225 +418,42 @@ async function uploadAsset(
     if (truncated) {
       json(res, 413, {
         error_code: "FILE_TOO_LARGE",
-        message: `Filen overstiger den maksimale størrelse på ${MAX_FILE_SIZE / 1024 / 1024} MB`,
+        message: `Filen overstiger den maksimale størrelse på ${MAX_UPLOAD_BYTES / 1024 / 1024} MB`,
       });
       return;
     }
 
-    const documentType: string = ALLOWED_MIME[mimeType] ?? "";
-    if (!documentType) {
-      json(res, 415, {
-        error_code: "UNSUPPORTED_FILE_TYPE",
-        message: `Filtypen "${mimeType}" understøttes ikke. Upload PDF, Word, Excel, billede eller video.`,
-      });
-      return;
-    }
+    // Delegate all business logic to the upload service
+    const { uploadAssetToKb, UploadServiceError, UPLOAD_ERRORS } =
+      await import("../../server/lib/knowledge/kb-upload-service");
 
-    const sizeBytes = buffer.length;
-    const { createHash } = await import("crypto");
-    const idempotencyKey = createHash("sha256")
-      .update(`${orgId}:${kbId}:${filename}:${sizeBytes}:${mimeType}`)
-      .digest("hex");
-
-    const existingJob = await db
-      .select({ id: knowledgeProcessingJobs.id, knowledgeDocumentId: knowledgeProcessingJobs.knowledgeDocumentId })
-      .from(knowledgeProcessingJobs)
-      .where(eq(knowledgeProcessingJobs.idempotencyKey, idempotencyKey))
-      .limit(1);
-
-    if (existingJob[0]) {
-      const [existingDoc] = await db.select().from(knowledgeDocuments)
-        .where(eq(knowledgeDocuments.id, existingJob[0].knowledgeDocumentId));
-      if (existingDoc) {
-        json(res, 200, {
-          id: existingDoc.id,
-          title: existingDoc.title,
-          documentType: existingDoc.documentType,
-          status: existingDoc.documentStatus,
-          mimeType,
-          fileSizeBytes: sizeBytes,
-          versionNumber: 1,
-          createdAt: existingDoc.createdAt,
-          idempotent: true,
-        });
-        return;
-      }
-    }
-
-    const safeFilename = filename.replace(/[^a-zA-Z0-9._\-]/g, "-").slice(0, 200);
-    const storageKey = `tenants/${orgId}/uploads/${kbId}/${Date.now()}-${safeFilename}`;
-    let r2Uploaded = false;
-    let R2_BUCKET = "";
-
-    // Lazy-load R2 client — only needed for upload requests
-    const { R2_CONFIGURED, R2_BUCKET: bucket, r2Client } = await import("../../server/lib/r2/r2-client");
-    R2_BUCKET = bucket;
-    if (R2_CONFIGURED) {
-      const { PutObjectCommand } = await import("@aws-sdk/client-s3");
-      await r2Client.send(new PutObjectCommand({
-        Bucket: R2_BUCKET,
-        Key: storageKey,
-        Body: buffer,
-        ContentType: mimeType,
-        Metadata: { tenantId: orgId, kbId, originalFilename: filename },
-      }));
-      r2Uploaded = true;
-      console.log(`[kb-upload] R2 upload OK: ${storageKey} (${sizeBytes} bytes)`);
-    } else {
-      console.warn("[kb-upload] R2 ikke konfigureret — gemmer kun metadata");
-    }
-
-    let extractedText: string | null = null;
-    if (documentType === "document" && mimeType === "application/pdf") {
-      try {
-        const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string }>;
-        const parsed = await pdfParse(buffer);
-        extractedText = parsed.text?.trim() || null;
-      } catch (pdfErr) {
-        console.warn("[kb-upload] pdf-parse fejlede:", (pdfErr as Error).message);
-      }
-    } else if (documentType === "document" && ["text/plain", "text/csv", "text/html", "text/markdown"].includes(mimeType)) {
-      extractedText = buffer.toString("utf-8").trim();
-    }
-
-    const [doc] = await db.insert(knowledgeDocuments).values({
+    const result = await uploadAssetToKb({
       tenantId: orgId,
       knowledgeBaseId: kbId,
-      title: filename,
-      documentType,
-      sourceType: "upload",
-      lifecycleState: "active",
-      documentStatus: "processing",
-      latestVersionNumber: 1,
-      createdBy: userId,
-      updatedBy: userId,
-      metadata: { storageKey, originalFilename: filename } as never,
-    }).returning();
-
-    const [ver] = await db.insert(knowledgeDocumentVersions).values({
-      tenantId: orgId,
-      knowledgeDocumentId: doc.id,
-      versionNumber: 1,
+      uploadedBy: userId,
+      filename,
       mimeType,
-      fileSizeBytes: sizeBytes,
-      isCurrent: true,
-      versionStatus: "uploaded",
-      sourceLabel: filename,
-      uploadedAt: new Date(),
-      createdBy: userId,
-      parseStatus: documentType === "document" ? "pending" : null,
-      ocrStatus: documentType === "image" ? "pending" : null,
-      transcriptStatus: documentType === "video" ? "pending" : null,
-      metadata: {
-        storageKey,
-        r2Uploaded,
-        extractedText: extractedText ? extractedText.slice(0, 500) : null,
-      } as never,
-    }).returning();
-
-    await db.update(knowledgeDocuments)
-      .set({ currentVersionId: ver.id, updatedAt: new Date() })
-      .where(eq(knowledgeDocuments.id, doc.id));
-
-    await db.insert(knowledgeStorageObjects).values({
-      tenantId: orgId,
-      knowledgeDocumentVersionId: ver.id,
-      storageProvider: r2Uploaded ? "r2" : "local",
-      bucketName: r2Uploaded ? R2_BUCKET : null,
-      objectKey: storageKey,
-      originalFilename: filename,
-      mimeType,
-      fileSizeBytes: sizeBytes,
-      uploadStatus: r2Uploaded ? "uploaded" : "pending",
-      uploadedAt: r2Uploaded ? new Date() : null,
-      metadata: { kbId, extractedLength: extractedText?.length ?? 0 } as never,
+      buffer,
     });
 
-    const primaryJobType =
-      documentType === "video" ? "transcript_parse" :
-      documentType === "image" ? "ocr_parse" :
-      "parse";
-
-    const pipelineJobs = [
-      { jobType: primaryJobType, priority: 100, payload: { documentType, mimeType, storageKey, stage: "extract" } },
-      { jobType: "chunk", priority: 90, payload: { documentType, mimeType, storageKey, stage: "chunk", dependsOn: primaryJobType } },
-      { jobType: "embedding_generate", priority: 80, payload: { documentType, mimeType, storageKey, stage: "embed", dependsOn: "chunk" } },
-      { jobType: "index", priority: 70, payload: { documentType, mimeType, storageKey, stage: "index", dependsOn: "embedding_generate" } },
-    ];
-
-    const startIdx = documentType === "document" && extractedText ? 1 : 0;
-    const jobsToEnqueue = pipelineJobs.slice(startIdx);
-
-    for (const j of jobsToEnqueue) {
-      await db.insert(knowledgeProcessingJobs).values({
-        tenantId: orgId,
-        knowledgeDocumentId: doc.id,
-        knowledgeDocumentVersionId: ver.id,
-        jobType: j.jobType,
-        status: "queued",
-        priority: j.priority,
-        idempotencyKey: j === jobsToEnqueue[0] ? idempotencyKey : null,
-        payload: {
-          ...j.payload,
-          extractedText: j.jobType === "chunk" && extractedText ? extractedText : undefined,
-        } as never,
-      });
-    }
-
-    if (extractedText && extractedText.length > 0 && extractedText.length < 50_000) {
-      try {
-        const CHUNK_SIZE = 1000;
-        const OVERLAP = 100;
-        const words = extractedText.split(/\s+/).filter(Boolean);
-        const chunkTexts: string[] = [];
-        for (let i = 0; i < words.length; i += CHUNK_SIZE - OVERLAP) {
-          chunkTexts.push(words.slice(i, i + CHUNK_SIZE).join(" "));
-          if (i + CHUNK_SIZE >= words.length) break;
-        }
-        for (let idx = 0; idx < chunkTexts.length; idx++) {
-          const text = chunkTexts[idx];
-          const chunkHash = createHash("sha256").update(text).digest("hex").slice(0, 32);
-          await db.insert(knowledgeChunks).values({
-            tenantId: orgId,
-            knowledgeBaseId: kbId,
-            knowledgeDocumentId: doc.id,
-            knowledgeDocumentVersionId: ver.id,
-            chunkIndex: idx,
-            chunkKey: `${doc.id}:${idx}`,
-            chunkText: text,
-            chunkHash,
-            chunkActive: true,
-            tokenEstimate: Math.ceil(text.length / 4),
-            chunkStrategy: "word-window",
-            chunkVersion: "1.0",
-            overlapCharacters: OVERLAP,
-          }).onConflictDoNothing();
-        }
-        await db.update(knowledgeDocuments)
-          .set({ documentStatus: "processing", updatedAt: new Date() })
-          .where(eq(knowledgeDocuments.id, doc.id));
-        console.log(`[kb-upload] ${chunkTexts.length} chunks oprettet for doc ${doc.id}`);
-      } catch (chunkErr) {
-        console.warn("[kb-upload] Chunking fejlede (ikke kritisk):", (chunkErr as Error).message);
-      }
-    }
-
-    console.log(`[kb-upload] ${orgId}/${kbId}: "${filename}" (${documentType}, ${sizeBytes} bytes) → pipeline: ${jobsToEnqueue.map((j) => j.jobType).join(" → ")}`);
-
-    json(res, 201, {
-      id: doc.id,
-      title: doc.title,
-      documentType: doc.documentType,
-      status: doc.documentStatus,
-      mimeType,
-      fileSizeBytes: sizeBytes,
-      versionNumber: 1,
-      storageKey,
-      pipeline: jobsToEnqueue.map((j) => j.jobType),
-      chunksCreated: !!extractedText,
-      createdAt: doc.createdAt,
-    });
+    json(res, result.idempotent ? 200 : 201, result);
   } catch (err) {
+    // Map typed service errors to HTTP status codes
+    const { UploadServiceError, UPLOAD_ERRORS } =
+      await import("../../server/lib/knowledge/kb-upload-service");
+
+    if (err instanceof UploadServiceError) {
+      if (err.errorCode === UPLOAD_ERRORS.KB_NOT_FOUND) {
+        json(res, 404, { error_code: "NOT_FOUND", message: err.message });
+      } else if (err.errorCode === UPLOAD_ERRORS.UNSUPPORTED_MIME) {
+        json(res, 415, { error_code: "UNSUPPORTED_FILE_TYPE", message: err.message });
+      } else if (err.errorCode === UPLOAD_ERRORS.FILE_TOO_LARGE) {
+        json(res, 413, { error_code: "FILE_TOO_LARGE", message: err.message });
+      } else {
+        handleError(res, err);
+      }
+      return;
+    }
     handleError(res, err);
   }
 }
