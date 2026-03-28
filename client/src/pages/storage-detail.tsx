@@ -265,7 +265,7 @@ export default function StorageDetail() {
       <div className="space-y-3">
         <button
           className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          onClick={() => navigate("/viden-data")}
+          onClick={() => navigate("/storage")}
           data-testid="button-back"
         >
           <ArrowLeft className="w-3.5 h-3.5" />

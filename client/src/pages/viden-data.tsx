@@ -254,7 +254,7 @@ export default function VidenData() {
             <SourceCard
               key={s.id}
               source={s}
-              onOpen={() => navigate(`/viden-data/${s.id}`)}
+              onOpen={() => navigate(`/storage/${s.id}`)}
               onArchive={() => archiveMutation.mutate(s.id)}
             />
           ))}

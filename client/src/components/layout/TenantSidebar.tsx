@@ -25,7 +25,7 @@ import { BrandMark } from "@/components/brand/BrandMark";
 const CORE_ITEMS = [
   { href: "/ai-chat",      label: "AI Chat",    icon: MessageSquare },
   { href: "/ai-eksperter", label: "Eksperter",  icon: Brain         },
-  { href: "/viden-data",   label: "Storage",    icon: Database      },
+  { href: "/storage",      label: "Storage",    icon: Database      },
 ] as const;
 
 const ADMIN_ITEMS = [

@@ -91,8 +91,8 @@ export function TenantApp() {
             <Route path="/ai-eksperter/opret" component={AiEkspertEditor} />
             <Route path="/ai-eksperter/:id/rediger" component={AiEkspertEditor} />
             <Route path="/ai-eksperter/:id" component={AiEkspertDetail} />
-            <Route path="/viden-data"      component={VidenData} />
-            <Route path="/viden-data/:id"  component={StorageDetail} />
+            <Route path="/storage"      component={VidenData} />
+            <Route path="/storage/:id"  component={StorageDetail} />
             <Route path="/regler"          component={Regler} />
             <Route path="/koerseler"    component={Runs} />
             <Route path="/koerseler/:id" component={RunDetail} />
@@ -124,7 +124,10 @@ export function TenantApp() {
               <Redirect to="/ai-eksperter" />
             </Route>
             <Route path="/projects">
-              <Redirect to="/viden-data" />
+              <Redirect to="/storage" />
+            </Route>
+            <Route path="/viden-data">
+              <Redirect to="/storage" />
             </Route>
             <Route path="/runs">
               <Redirect to="/koerseler" />

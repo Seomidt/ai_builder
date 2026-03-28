@@ -95,7 +95,7 @@ export default function Dashboard() {
             </p>
           )}
         </div>
-        <Link href="/viden-data">
+        <Link href="/storage">
           <Button size="sm" variant="outline" className="h-6 px-2 text-xs" data-testid="btn-new-project">
             <Plus className="w-3 h-3 mr-1" /> Tilføj datakilde
           </Button>
@@ -127,7 +127,7 @@ export default function Dashboard() {
               Seneste datakilder
             </CardTitle>
             <Link
-              href="/viden-data"
+              href="/storage"
               className="flex items-center gap-0.5 text-[11px] text-muted-foreground/60 hover:text-muted-foreground transition-colors"
               data-testid="link-all-projects"
             >
@@ -141,7 +141,7 @@ export default function Dashboard() {
               <div className="text-center py-3">
                 <BookOpen className="w-5 h-5 text-muted-foreground/20 mx-auto mb-1" />
                 <p className="text-xs text-muted-foreground mb-1.5">Ingen datakilder endnu</p>
-                <Link href="/viden-data">
+                <Link href="/storage">
                   <Button size="sm" variant="outline" className="h-6 text-xs px-2.5" data-testid="btn-create-first-project">
                     <Plus className="w-2.5 h-2.5 mr-1" /> Tilføj datakilde
                   </Button>
@@ -149,7 +149,7 @@ export default function Dashboard() {
               </div>
             ) : (
               data.recentProjects.map((p) => (
-                <Link key={p.id} href={`/viden-data`}>
+                <Link key={p.id} href="/storage">
                   <div
                     data-testid={`project-row-${p.id}`}
                     className="flex items-center justify-between py-2 px-2.5 rounded-md bg-muted/30 hover:bg-muted/60 border border-transparent hover:border-border/50 transition-all duration-150 cursor-pointer"
