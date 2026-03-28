@@ -413,7 +413,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     // validation / analysis / classification med dokument:
     // Kald model med expert-prompt + dokument appendet — ingen grounding-check, ingen NOT_FOUND fallback.
     console.log(`[chat] DOC_ANALYSIS_MODE useCase=${useCase} docCtx=${docCtx.length}`);
-    const docText  = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
+    const docTextFull = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
+    const docText = docTextFull.length > 40_000
+      ? docTextFull.slice(0, 40_000) + "\n\n[... dokument afkortet ...]"
+      : docTextFull;
     const model    = resolveVercelModel();
     const t0       = Date.now();
 
@@ -587,8 +590,18 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     // Doc QA → finalAnswer (grounded svar på brugerens spørgsmål)
     // Validering → validationText (troværdighedsvurdering af dokumentet)
 
-    const docText = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
-    console.log(`[chat] DOC_MODE chars=${docText.length} first200="${docText.slice(0,200).replace(/\n/g," ")}"`);
+    const docTextRaw = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
+    // Store dokumenter trimmes: doc QA behøver maks 40K tegn, validering 20K.
+    // 40K tegn ≈ 10K tokens — rigeligt til GPT-4o's kontekstvindue.
+    const DOC_QA_LIMIT  = 40_000;
+    const DOC_VAL_LIMIT = 20_000;
+    const docText    = docTextRaw.length > DOC_QA_LIMIT
+      ? docTextRaw.slice(0, DOC_QA_LIMIT) + "\n\n[... dokument afkortet pga. størrelse ...]"
+      : docTextRaw;
+    const docTextVal = docTextRaw.length > DOC_VAL_LIMIT
+      ? docTextRaw.slice(0, DOC_VAL_LIMIT) + "\n\n[... afkortet ...]"
+      : docTextRaw;
+    console.log(`[chat] DOC_MODE chars_raw=${docTextRaw.length} chars_qa=${docText.length} chars_val=${docTextVal.length} first200="${docTextRaw.slice(0,200).replace(/\n/g," ")}"`);
 
     const docSystemPrompt = [
       "Du er et præcisionssystem der KUN besvarer spørgsmål ud fra det vedlagte dokument.",
@@ -663,7 +676,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           response_format: { type: "json_object" },
           messages: [
             { role: "system", content: VALIDATION_SYSTEM_PROMPT_PARALLEL },
-            { role: "user",   content: `DOKUMENT:\n\n${docText}` },
+            { role: "user",   content: `DOKUMENT:\n\n${docTextVal}` },
           ],
         }),
       }),
