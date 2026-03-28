@@ -3211,6 +3211,70 @@ Generate names and content in ${langNote}.`;
     }
   });
 
+  // POST /api/kb/similar — Similar Cases API (Storage 1.5)
+  //
+  // Modes:
+  //   text  — { query, topK?, kbId?, kbIds?, expertId?, minScore? }
+  //   asset — { assetId, topK?, kbId?, kbIds?, expertId?, minScore? }
+  //   chunk — { chunkId, topK?, kbId?, kbIds?, expertId?, minScore? }
+  //
+  // Response:
+  //   { cases: SimilarCase[], total, debug }
+  //   Each SimilarCase includes: snippet, score, sourceLabel, assetTitle,
+  //   assetType, kbName, mimeType, fileName, chunkId, assetId, kbId,
+  //   pageNumber, timestampSec, whyMatched, retrievalChannel
+  app.post("/api/kb/similar", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+
+      const {
+        query, assetId, chunkId,
+        topK, kbId, kbIds, expertId, minScore,
+      } = req.body as {
+        query?:     string;
+        assetId?:   string;
+        chunkId?:   string;
+        topK?:      number;
+        kbId?:      string;
+        kbIds?:     string[];
+        expertId?:  string;
+        minScore?:  number;
+      };
+
+      // Determine mode from input
+      let mode: "text" | "asset" | "chunk";
+      if (assetId?.trim()) {
+        mode = "asset";
+      } else if (chunkId?.trim()) {
+        mode = "chunk";
+      } else if (query?.trim()) {
+        mode = "text";
+      } else {
+        return res.status(400).json({
+          error: "Provide one of: query (text mode), assetId (asset mode), or chunkId (chunk mode)",
+        });
+      }
+
+      const { findSimilarCases } = await import("./lib/knowledge/kb-similar");
+      const result = await findSimilarCases({
+        tenantId:  orgId,
+        mode,
+        queryText: query?.trim(),
+        assetId:   assetId?.trim(),
+        chunkId:   chunkId?.trim(),
+        kbId:      kbId?.trim(),
+        kbIds:     kbIds?.length ? kbIds : undefined,
+        expertId:  expertId?.trim(),
+        topK:      topK ? Math.min(Number(topK), 50) : undefined,
+        minScore:  minScore !== undefined ? Number(minScore) : undefined,
+      });
+
+      return res.json(result);
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
   return httpServer;
 }
 
