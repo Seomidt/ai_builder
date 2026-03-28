@@ -3489,6 +3489,115 @@ Generate names and content in ${langNote}.`;
     }
   });
 
+  // ── GET /api/usage/summary — dev parity (Vercel: api/usage.js) ──────────────
+  app.get("/api/usage/summary", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const { checkBudget } = await import("./lib/ai/budget-guard");
+      const { getCurrentAiUsageForPeriod } = await import("./lib/ai/guards");
+      const { getCurrentPeriod } = await import("./lib/ai/usage-periods");
+      const { db: database } = await import("./db");
+      const { aiUsage: aiUsageTable } = await import("../shared/schema");
+      const { eq, and, gte, lt, count: drmCount } = await import("drizzle-orm");
+      const { periodStart, periodEnd } = getCurrentPeriod();
+      const [budgetResult, currentCostUsd] = await Promise.all([
+        checkBudget(orgId),
+        getCurrentAiUsageForPeriod(orgId),
+      ]);
+      const countRows = await database
+        .select({ cnt: drmCount() })
+        .from(aiUsageTable)
+        .where(and(eq(aiUsageTable.tenantId, orgId), gte(aiUsageTable.createdAt, periodStart), lt(aiUsageTable.createdAt, periodEnd)));
+      const requestCount = Number(countRows[0]?.cnt ?? 0);
+      const budgetUsd   = budgetResult.budgetUsd;
+      const remainingUsd = budgetUsd !== null ? Math.max(0, budgetUsd - currentCostUsd) : null;
+      return res.json({
+        tenantId: orgId,
+        period: { start: periodStart.toISOString(), end: periodEnd.toISOString() },
+        usedUsd: parseFloat(currentCostUsd.toFixed(6)),
+        budgetUsd, remainingUsd,
+        usagePercent:     budgetResult.usagePercent,
+        requestCount,
+        usageState:       budgetResult.usageState,
+        isSoftExceeded:   budgetResult.isSoftExceeded,
+        isHardExceeded:   budgetResult.isHardExceeded,
+        softLimitPercent: budgetResult.softLimitPercent,
+        hardLimitPercent: budgetResult.hardLimitPercent,
+        retrievedAt:      new Date().toISOString(),
+      });
+    } catch (err) { return handleError(res, err); }
+  });
+
+  // ── GET /api/usage/history — dev parity ────────────────────────────────────
+  app.get("/api/usage/history", async (req: Request, res: Response) => {
+    try {
+      const orgId  = getOrgId(req);
+      const limit  = Math.min(parseInt(String(req.query.limit ?? "50"), 10), 200);
+      const cursor = req.query.cursor ? String(req.query.cursor) : null;
+      const period = String(req.query.period ?? "30d");
+      const days   = period === "7d" ? 7 : period === "90d" ? 90 : 30;
+      const since  = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      const { db: database } = await import("./db");
+      const { aiUsage: aiUsageTable } = await import("../shared/schema");
+      const { eq, and, gte, lt, desc } = await import("drizzle-orm");
+      const conditions: ReturnType<typeof eq>[] = [
+        eq(aiUsageTable.tenantId, orgId),
+        gte(aiUsageTable.createdAt, since),
+      ];
+      if (cursor) conditions.push(lt(aiUsageTable.createdAt, new Date(cursor)));
+      const rows = await database
+        .select({
+          id: aiUsageTable.id, feature: aiUsageTable.feature, model: aiUsageTable.model,
+          provider: aiUsageTable.provider, promptTokens: aiUsageTable.promptTokens,
+          completionTokens: aiUsageTable.completionTokens, totalTokens: aiUsageTable.totalTokens,
+          estimatedCostUsd: aiUsageTable.estimatedCostUsd, status: aiUsageTable.status,
+          latencyMs: aiUsageTable.latencyMs, createdAt: aiUsageTable.createdAt,
+        })
+        .from(aiUsageTable)
+        .where(and(...conditions))
+        .orderBy(desc(aiUsageTable.createdAt))
+        .limit(limit + 1);
+      const hasMore    = rows.length > limit;
+      const page       = hasMore ? rows.slice(0, limit) : rows;
+      const nextCursor = hasMore ? (page[page.length - 1]?.createdAt?.toISOString() ?? null) : null;
+      return res.json({ tenantId: orgId, period, events: page, nextCursor, hasMore, retrievedAt: new Date().toISOString() });
+    } catch (err) { return handleError(res, err); }
+  });
+
+  // ── POST /api/budget/update — dev parity ───────────────────────────────────
+  app.post("/api/budget/update", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const body = req.body as {
+        monthlyBudgetUsd?: number;
+        warningThresholdPercent?: number;
+        hardLimitPercent?: number;
+        hardStopEnabled?: boolean;
+        budgetModeEnabled?: boolean;
+      };
+      const { db: database } = await import("./db");
+      const { aiUsageLimits: aiUsageLimitsTable } = await import("../shared/schema");
+      const { eq } = await import("drizzle-orm");
+      const updates: Record<string, unknown> = {};
+      if (body.monthlyBudgetUsd !== undefined)        updates.monthlyAiBudgetUsd      = String(body.monthlyBudgetUsd);
+      if (body.warningThresholdPercent !== undefined)  updates.warningThresholdPercent = body.warningThresholdPercent;
+      if (body.hardLimitPercent !== undefined)         updates.hardLimitPercent        = body.hardLimitPercent;
+      if (body.hardStopEnabled !== undefined)          updates.hardStopEnabled         = body.hardStopEnabled;
+      if (body.budgetModeEnabled !== undefined)        updates.budgetModeEnabled       = body.budgetModeEnabled;
+      if (Object.keys(updates).length === 0) return res.status(400).json({ error: "Ingen felter at opdatere" });
+      const existing = await database.select({ id: aiUsageLimitsTable.id }).from(aiUsageLimitsTable).where(eq(aiUsageLimitsTable.tenantId, orgId)).limit(1);
+      let result;
+      if (existing.length > 0) {
+        const rows = await database.update(aiUsageLimitsTable).set({ ...updates, updatedAt: new Date() } as any).where(eq(aiUsageLimitsTable.tenantId, orgId)).returning();
+        result = rows[0];
+      } else {
+        const rows = await database.insert(aiUsageLimitsTable).values({ tenantId: orgId, ...updates } as any).returning();
+        result = rows[0];
+      }
+      return res.json({ tenantId: orgId, budget: result, updatedAt: new Date().toISOString() });
+    } catch (err) { return handleError(res, err); }
+  });
+
   return httpServer;
 }
 

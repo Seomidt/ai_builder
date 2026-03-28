@@ -63,6 +63,11 @@ export interface LogAiUsagePayload {
   /** Estimated USD cost from token usage × pricing — null if pricing unknown */
   estimatedCostUsd?: number | null;
   /**
+   * Actual USD cost derived from provider-returned token counts × active pricing config.
+   * Set after the provider responds. Preferred for billing. Null on failure or unknown pricing.
+   */
+  actualCostUsd?: number | null;
+  /**
    * Pricing source used for cost calculation.
    * "db_override"  — active row from ai_model_pricing table
    * "code_default" — fallback from AI_MODEL_PRICING_DEFAULTS in costs.ts
@@ -151,6 +156,12 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
           estimatedCostUsd: payload.estimatedCostUsd != null
             ? String(payload.estimatedCostUsd)
             : null,
+          // actualCostUsd: only included when explicitly set (column may not exist before migration)
+          ...(payload.actualCostUsd !== undefined ? {
+            actualCostUsd: payload.actualCostUsd != null
+              ? String(payload.actualCostUsd)
+              : (payload.estimatedCostUsd != null ? String(payload.estimatedCostUsd) : null),
+          } : {}),
           pricingSource: payload.pricingSource ?? null,
           pricingVersion: payload.pricingVersion ?? null,
           inputTokensBillable: payload.inputTokensBillable ?? null,
@@ -176,7 +187,8 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
       // Only aggregate successful calls with a known tenant — inside same transaction
       if (payload.status === "success" && payload.tenantId) {
         const { periodStart, periodEnd } = getCurrentPeriod();
-        const cost = payload.estimatedCostUsd ?? 0;
+        // Prefer actual cost for period aggregate; fall back to estimated
+        const cost = payload.actualCostUsd ?? payload.estimatedCostUsd ?? 0;
         const inputTokens = payload.promptTokens ?? 0;
         const outputTokens = payload.completionTokens ?? 0;
         const tokens = payload.totalTokens ?? 0;
@@ -192,6 +204,7 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
             totalInputTokens: inputTokens,
             totalOutputTokens: outputTokens,
             totalTokens: tokens,
+            // reservedCostUsd starts at 0 for new rows — managed separately by reserveBudget/releaseBudgetReservation
           })
           .onConflictDoUpdate({
             target: [
@@ -206,6 +219,7 @@ export async function logAiUsage(payload: LogAiUsagePayload): Promise<void> {
               totalOutputTokens: sql`${tenantAiUsagePeriods.totalOutputTokens} + excluded.total_output_tokens`,
               totalTokens: sql`${tenantAiUsagePeriods.totalTokens} + excluded.total_tokens`,
               updatedAt: sql`now()`,
+              // NOTE: reservedCostUsd is NOT updated here — managed by budget-guard reservation
             },
           });
       }

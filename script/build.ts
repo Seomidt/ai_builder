@@ -23,6 +23,7 @@ const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
   { name: "insights",     entry: "api/_src/insights.ts",      out: "api/insights.js"      },
   { name: "experts",      entry: "api/_src/experts.ts",       out: "api/experts.js"       },
   { name: "upload",       entry: "api/_src/upload.ts",        out: "api/upload.js"        },
+  { name: "usage",        entry: "api/_src/usage.ts",         out: "api/usage.js"         },
 ];
 
 

@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
+import { AiUsageCard } from "@/components/ai-usage-card";
 
 interface ConfigStatus {
   database: { provider: string; label: string; projectRef: string | null };
@@ -102,6 +103,8 @@ export default function Settings() {
           Organisation and platform configuration
         </p>
       </div>
+
+      <AiUsageCard />
 
       <SettingsSection title="Organisation" icon={Building2}>
         <div className="divide-y divide-border/50">

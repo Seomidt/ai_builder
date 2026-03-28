@@ -266,6 +266,36 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   const useCase: AiUseCase = body.context?.use_case ?? "grounded_chat";
 
+  // ── Stable idempotency key — generated BEFORE any AI call ─────────────────
+  // Derived from tenant + conversation + message so retries of the same request
+  // share the same key. This prevents double-logging on network retries.
+  // Uses SHA-256 digest of "tenantId|conversationId|messagePrefix" → hex prefix.
+  const idempotencyKey = await (async () => {
+    try {
+      const raw = `${orgId}|${body.conversation_id ?? "new"}|${message.slice(0, 512)}`;
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+      return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 36);
+    } catch {
+      return crypto.randomUUID();
+    }
+  })();
+
+  // ── Atomic budget reservation ─────────────────────────────────────────────
+  // Uses DB-level atomic UPDATE to prevent concurrent requests from jointly
+  // exceeding the budget. Fail-safe: allows on DB error.
+  let budgetReservedAmount = 0;
+  try {
+    const { reserveBudget } = await import("../../server/lib/ai/budget-guard");
+    const reservation = await reserveBudget(orgId, 0.001);
+    if (!reservation.allowed) {
+      return err(res, 402, "BUDGET_EXCEEDED",
+        "AI-budgettet er opbrugt. Kontakt din administrator.");
+    }
+    budgetReservedAmount = reservation.reservedAmount;
+  } catch {
+    // Fail-safe: do not block on guard error
+  }
+
   const token = (req.headers.authorization ?? "").slice(7);
 
   // ── Step 1: Hent tilgængelige eksperter via bruger-JWT + RLS ──────────────
@@ -403,7 +433,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   // ── Step 5+6: Kald OpenAI ─────────────────────────────────────────────────
   let finalAnswer: string;
   let validationText: string | null = null;
-  let aiLatencyMs: number;
+  let aiLatencyMs = 0;
   let aiPromptTokens   = 0;
   let aiComplTokens    = 0;
   const warnings: string[] = [];
@@ -821,6 +851,57 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const combinedDocText = docCtx.map(d => d.extracted_text).join(" ");
   const confidence  = deriveConfidence(finalAnswer, warnings, docCtx.length > 0 ? combinedDocText : undefined);
   const needsManual = confidence === "low";
+
+  // ── Step 5.5: Log AI usage + release budget reservation (fire-and-forget) ──
+  // Uses idempotencyKey generated BEFORE the call — retries share the same key.
+  // actualCostUsd is derived from provider-returned token counts × active pricing.
+  // releaseBudgetReservation always runs so reserved_cost_usd stays accurate.
+  {
+    const route = resolveVercelModel();
+    void (async () => {
+      try {
+        const { logAiUsage } = await import("../../server/lib/ai/usage");
+        const { loadPricing } = await import("../../server/lib/ai/pricing");
+        const { estimateAiCost } = await import("../../server/lib/ai/costs");
+        const { pricing, source: pricingSource, version: pricingVersion } = await loadPricing(route.provider, route.model);
+        const actualCostUsd = estimateAiCost({
+          usage: { input_tokens: aiPromptTokens, output_tokens: aiComplTokens, total_tokens: aiPromptTokens + aiComplTokens },
+          pricing,
+        }) ?? 0;
+        await logAiUsage({
+          tenantId:         orgId,
+          userId,
+          requestId:        idempotencyKey,
+          feature:          "expert.chat",
+          routeKey:         route.key,
+          provider:         route.provider,
+          model:            route.model,
+          promptTokens:     aiPromptTokens,
+          completionTokens: aiComplTokens,
+          totalTokens:      aiPromptTokens + aiComplTokens,
+          status:           "success",
+          latencyMs:        aiLatencyMs,
+          estimatedCostUsd: actualCostUsd,
+          actualCostUsd,
+          pricingSource,
+          pricingVersion,
+          inputPreview:     message.slice(0, 200),
+        });
+      } catch (loggingErr) {
+        console.warn("[chat] usage logging failed (non-fatal):", (loggingErr as Error).message);
+      } finally {
+        // Always release reservation — even on logging failure
+        if (budgetReservedAmount > 0) {
+          try {
+            const { releaseBudgetReservation } = await import("../../server/lib/ai/budget-guard");
+            await releaseBudgetReservation(orgId, budgetReservedAmount);
+          } catch {
+            // Non-fatal — reservation leaks self-heal at period reset
+          }
+        }
+      }
+    })();
+  }
 
   // ── Step 6: Gem i DB (non-fatal) ──────────────────────────────────────────
   let conversationId: string = body.conversation_id ?? crypto.randomUUID();

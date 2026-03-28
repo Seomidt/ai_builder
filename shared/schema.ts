@@ -2017,6 +2017,12 @@ export const aiUsage = pgTable(
     /** Estimated USD cost calculated from token usage × pricing — null if pricing unknown */
     estimatedCostUsd: numeric("estimated_cost_usd", { precision: 12, scale: 8 }),
     /**
+     * Actual USD cost calculated from provider-returned token usage × active pricing config.
+     * Set after the provider responds. Preferred for billing/accounting over estimatedCostUsd.
+     * Null when the call failed or pricing is unknown.
+     */
+    actualCostUsd: numeric("actual_cost_usd", { precision: 12, scale: 8 }),
+    /**
      * Which pricing source resolved pricing for this call.
      * "db_override" = active row from ai_model_pricing table
      * "code_default" = fallback from AI_MODEL_PRICING_DEFAULTS in costs.ts
@@ -2070,8 +2076,9 @@ export const aiUsage = pgTable(
     uniqueIndex("ai_usage_tenant_request_id_idx")
       .on(t.tenantId, t.requestId)
       .where(sql`request_id IS NOT NULL`),
-    // Cost sanity: estimated cost must be non-negative if present
+    // Cost sanity: both cost columns must be non-negative if present
     check("ai_usage_cost_non_negative_check", sql`estimated_cost_usd IS NULL OR estimated_cost_usd >= 0`),
+    check("ai_usage_actual_cost_non_negative_check", sql`actual_cost_usd IS NULL OR actual_cost_usd >= 0`),
   ],
 );
 
@@ -2210,8 +2217,15 @@ export const tenantAiUsagePeriods = pgTable(
     periodStart: timestamp("period_start").notNull(),
     /** Exclusive end of this billing/usage period (calendar month start of next month) */
     periodEnd: timestamp("period_end").notNull(),
-    /** Running sum of estimated_cost_usd for successful calls in this period */
+    /** Running sum of actual_cost_usd (or estimated_cost_usd) for successful calls in this period */
     totalCostUsd: numeric("total_cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
+    /**
+     * Sum of in-flight budget reservations for concurrent requests.
+     * Incremented atomically before each AI call, decremented after logging.
+     * Prevents concurrent requests from jointly exceeding the budget.
+     * Never negative — clamped to 0 on release.
+     */
+    reservedCostUsd: numeric("reserved_cost_usd", { precision: 14, scale: 8 }).notNull().default("0"),
     /** Count of successful AI calls in this period */
     totalRequests: integer("total_requests").notNull().default(0),
     totalInputTokens: integer("total_input_tokens").notNull().default(0),
