@@ -377,6 +377,54 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       }
     }
 
+    // ── Security routes ──────────────────────────────────────────────────────
+
+    if (segs[0] === "security") {
+      const sub  = segs[1];
+      const sub2 = segs[2];
+
+      if (sub === "health" && method === "GET") {
+        try {
+          const { getSecurityHealth } = await import("../../server/lib/security/security-health");
+          const health = await getSecurityHealth();
+          return json(res, health);
+        } catch { return json(res, { status: "unknown", checks: {}, retrievedAt: new Date().toISOString() }); }
+      }
+
+      if (sub === "events" && !sub2 && method === "GET") {
+        try {
+          const { listSecurityEventsByTenant } = await import("../../server/lib/security/security-events");
+          const tenantId  = auth.user.organizationId;
+          const limit     = Math.min(parseInt(u.searchParams.get("limit") ?? "50", 10), 200);
+          const eventType = u.searchParams.get("event_type") as any ?? undefined;
+          const events = await listSecurityEventsByTenant(tenantId, { limit, eventType });
+          return json(res, { events, count: events.length });
+        } catch { return json(res, { events: [], count: 0 }); }
+      }
+
+      if (sub === "events" && sub2 === "recent" && method === "GET") {
+        try {
+          const { listRecentSecurityEvents } = await import("../../server/lib/security/security-events");
+          const limit  = Math.min(parseInt(u.searchParams.get("limit") ?? "100", 10), 500);
+          const events = await listRecentSecurityEvents({ limit });
+          return json(res, { events, count: events.length });
+        } catch { return json(res, { events: [], count: 0 }); }
+      }
+
+      if (sub === "preview" && sub2 === "sanitize" && method === "POST") {
+        const body   = await readBody<{ input?: unknown }>(req);
+        const input  = body.input;
+        try {
+          const { sanitizeInput, explainSanitization } = await import("../../server/lib/security/sanitize");
+          if (typeof input === "string") {
+            const sanitized = sanitizeInput(input);
+            return json(res, { original: input, sanitized, changed: input !== sanitized, explanation: explainSanitization(input, sanitized), writes: false });
+          }
+          return json(res, { error_code: "INVALID_INPUT", message: "input must be a string" }, 400);
+        } catch { return json(res, { error_code: "INTERNAL_ERROR", message: "Security preview unavailable" }, 500); }
+      }
+    }
+
     return err(res, 404, "NOT_FOUND", "Route not found");
   } catch (e) {
     console.error("[admin handler]", (e as Error).message);
