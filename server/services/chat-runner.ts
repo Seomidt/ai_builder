@@ -20,6 +20,7 @@ import type { AccessibleExpert } from "./chat-routing";
 import { AI_MODEL_ROUTES } from "../lib/ai/config";
 import {
   shouldRunSimilarity,
+  shouldAllowSimilarityByBudget,
   similarityCache,
   similarityRateLimiter,
   logSimilarityEvent,
@@ -341,16 +342,30 @@ export async function runChatMessage(params: {
   let totalSimilarCases: number | undefined;
   let simStatusCode: SimilarCasesStatusCode   = "not_triggered";
   let simCacheHit                             = false;
+  let simBudgetSkipped                        = false;
   let simDebug: { pgvectorUsed: boolean; retrievalPath: string; candidateCount: number } = {
     pgvectorUsed: false, retrievalPath: "empty", candidateCount: 0,
   };
   const simStart = Date.now();
+
+  let shouldDoRetrieval = false;
 
   if (!decision.shouldRun) {
     simStatusCode = "not_triggered";
   } else if (!similarityRateLimiter.allow(organizationId)) {
     simStatusCode = "rate_limited";
   } else {
+    // Budget guard — skip when tenant AI budget is fully exhausted
+    const budgetCheck = await shouldAllowSimilarityByBudget(organizationId);
+    if (!budgetCheck.allowed) {
+      simStatusCode    = "skipped_budget_guard";
+      simBudgetSkipped = true;
+    } else {
+      shouldDoRetrieval = true;
+    }
+  }
+
+  if (shouldDoRetrieval) {
     const SIMILAR_TOP_K = 5;
     const cacheKey = similarityCache.buildKey({
       tenantId: organizationId,
@@ -415,19 +430,20 @@ export async function runChatMessage(params: {
 
   // Structured observability — no PII (query text not logged)
   logSimilarityEvent({
-    tenantId:          organizationId,
-    expertId:          expert.id,
-    mode:              "text",
-    decisionReason:    decision.decisionReason,
-    statusCode:        simStatusCode,
-    cacheHit:          simCacheHit,
-    pgvectorUsed:      simDebug.pgvectorUsed,
-    retrievalPath:     simDebug.retrievalPath,
-    candidateCount:    simDebug.candidateCount,
-    returnedCount:     similarCases.length,
-    latencyMs:         Date.now() - simStart,
-    topK:              5,
-    rateLimitRemaining: similarityRateLimiter.remaining(organizationId),
+    tenantId:            organizationId,
+    expertId:            expert.id,
+    mode:                "text",
+    decisionReason:      decision.decisionReason,
+    statusCode:          simStatusCode,
+    cacheHit:            simCacheHit,
+    budgetGuardSkipped:  simBudgetSkipped,
+    pgvectorUsed:        simDebug.pgvectorUsed,
+    retrievalPath:       simDebug.retrievalPath,
+    candidateCount:      simDebug.candidateCount,
+    returnedCount:       similarCases.length,
+    latencyMs:           Date.now() - simStart,
+    topK:                5,
+    rateLimitRemaining:  similarityRateLimiter.remaining(organizationId),
   });
 
   const result: ChatRunResult = {
