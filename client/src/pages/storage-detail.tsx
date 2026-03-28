@@ -62,17 +62,19 @@ function AssetTypeIcon({ type }: { type: string }) {
 }
 
 function StatusBadge({ status }: { status: string }) {
-  const map: Record<string, { label: string; cls: string; icon: typeof CheckCircle2 }> = {
+  const map: Record<string, { label: string; cls: string; icon: typeof CheckCircle2; spin?: boolean }> = {
+    indexed:    { label: "Indekseret",  cls: "text-green-400 border-green-500/30 bg-green-500/8",   icon: CheckCircle2 },
     ready:      { label: "Klar",        cls: "text-green-400 border-green-500/30 bg-green-500/8",   icon: CheckCircle2 },
-    processing: { label: "Behandler",   cls: "text-amber-400 border-amber-500/30 bg-amber-500/8",   icon: Clock },
-    draft:      { label: "Uploading",   cls: "text-sky-400 border-sky-500/30 bg-sky-500/8",         icon: Loader2 },
+    processing: { label: "Behandler",   cls: "text-amber-400 border-amber-500/30 bg-amber-500/8",   icon: Loader2,     spin: true },
+    queued:     { label: "I kø",        cls: "text-slate-400 border-slate-500/30 bg-slate-500/8",   icon: Clock },
+    draft:      { label: "Uploader",    cls: "text-sky-400 border-sky-500/30 bg-sky-500/8",         icon: Loader2,     spin: true },
     failed:     { label: "Fejlet",      cls: "text-rose-400 border-rose-500/30 bg-rose-500/8",      icon: AlertTriangle },
   };
-  const meta = map[status] ?? { label: status, cls: "text-muted-foreground", icon: Clock };
+  const meta = map[status] ?? { label: status, cls: "text-muted-foreground border-border", icon: Clock };
   const Icon = meta.icon;
   return (
     <Badge variant="outline" className={`text-xs gap-1 ${meta.cls}`}>
-      <Icon className="w-2.5 h-2.5" />
+      <Icon className={`w-2.5 h-2.5 ${meta.spin ? "animate-spin" : ""}`} />
       {meta.label}
     </Badge>
   );
