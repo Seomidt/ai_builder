@@ -16,6 +16,13 @@ import "@/i18n/i18n";
   } catch (_) {}
 })();
 
+// Vite chunk preload error handler: when a lazy-loaded chunk can't be found
+// after a Vercel redeployment (new hashes), force a full page reload so the
+// browser fetches the new index.html and correct chunk URLs.
+window.addEventListener("vite:preloadError", () => {
+  window.location.reload();
+});
+
 // Supabase client is initialised synchronously in @/lib/supabase using
 // baked-in public values — no boot-blocking network call needed.
 createRoot(document.getElementById("root")!).render(<App />);

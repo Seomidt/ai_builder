@@ -94,41 +94,50 @@ function handleError(res: ServerResponse, err: unknown): void {
 
 // ── Route: GET /api/kb ────────────────────────────────────────────────────────
 
-async function listKnowledgeBases(orgId: string, res: ServerResponse): Promise<void> {
+async function listKnowledgeBases(orgId: string, statusFilter: string, res: ServerResponse): Promise<void> {
   try {
     const db = await getDb();
-    const { knowledgeBases, knowledgeDocuments } = await getSchema();
+    const { knowledgeBases, knowledgeDocuments, expertKnowledgeBases } = await getSchema();
     const { eq, and, count, desc } = await getOrm();
+
+    const baseWhere = statusFilter === "all"
+      ? eq(knowledgeBases.tenantId, orgId)
+      : statusFilter === "archived"
+        ? and(eq(knowledgeBases.tenantId, orgId), eq(knowledgeBases.lifecycleState, "archived"))
+        : and(eq(knowledgeBases.tenantId, orgId), eq(knowledgeBases.lifecycleState, "active"));
 
     const bases = await db
       .select()
       .from(knowledgeBases)
-      .where(and(
-        eq(knowledgeBases.tenantId, orgId),
-        eq(knowledgeBases.lifecycleState, "active"),
-      ))
-      .orderBy(desc(knowledgeBases.createdAt));
+      .where(baseWhere)
+      .orderBy(desc(knowledgeBases.updatedAt));
 
-    const counts = await db
-      .select({ knowledgeBaseId: knowledgeDocuments.knowledgeBaseId, cnt: count() })
-      .from(knowledgeDocuments)
-      .where(and(
-        eq(knowledgeDocuments.tenantId, orgId),
-        eq(knowledgeDocuments.lifecycleState, "active"),
-      ))
-      .groupBy(knowledgeDocuments.knowledgeBaseId);
+    if (bases.length === 0) { json(res, 200, []); return; }
 
-    const countMap = Object.fromEntries(counts.map((c) => [c.knowledgeBaseId, Number(c.cnt)]));
+    const [counts, expertCounts] = await Promise.all([
+      db.select({ knowledgeBaseId: knowledgeDocuments.knowledgeBaseId, cnt: count() })
+        .from(knowledgeDocuments)
+        .where(and(eq(knowledgeDocuments.tenantId, orgId), eq(knowledgeDocuments.lifecycleState, "active")))
+        .groupBy(knowledgeDocuments.knowledgeBaseId),
+      db.select({ knowledgeBaseId: expertKnowledgeBases.knowledgeBaseId, cnt: count() })
+        .from(expertKnowledgeBases)
+        .where(eq(expertKnowledgeBases.tenantId, orgId))
+        .groupBy(expertKnowledgeBases.knowledgeBaseId),
+    ]);
+
+    const countMap  = Object.fromEntries(counts.map((c) => [c.knowledgeBaseId, Number(c.cnt)]));
+    const expertMap = Object.fromEntries(expertCounts.map((c) => [c.knowledgeBaseId, Number(c.cnt)]));
 
     json(res, 200, bases.map((b) => ({
-      id: b.id,
-      name: b.name,
-      slug: b.slug,
+      id:          b.id,
+      name:        b.name,
+      slug:        b.slug,
       description: b.description,
-      status: b.lifecycleState,
-      assetCount: countMap[b.id] ?? 0,
-      createdAt: b.createdAt,
-      updatedAt: b.updatedAt,
+      status:      b.lifecycleState,
+      assetCount:  countMap[b.id]  ?? 0,
+      expertCount: expertMap[b.id] ?? 0,
+      createdAt:   b.createdAt,
+      updatedAt:   b.updatedAt,
     })));
   } catch (err) {
     handleError(res, err);
@@ -251,6 +260,108 @@ async function archiveKnowledgeBase(orgId: string, kbId: string, res: ServerResp
     }
 
     json(res, 200, { id: updated.id, status: updated.lifecycleState });
+  } catch (err) {
+    handleError(res, err);
+  }
+}
+
+// ── Route: PATCH /api/kb/:id — edit name/description ─────────────────────────
+
+async function editKnowledgeBase(orgId: string, kbId: string, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  try {
+    const body = await readJson(req);
+    const { z } = await import("zod");
+    const schema = z.object({
+      name:        z.string().min(1).max(200).optional(),
+      description: z.string().max(1000).nullable().optional(),
+    });
+    const parsed = schema.parse(body);
+    const db = await getDb();
+    const { knowledgeBases } = await getSchema();
+    const { eq, and } = await getOrm();
+
+    const updateSet: Record<string, unknown> = { updatedAt: new Date() };
+    if (parsed.name        !== undefined) updateSet.name        = parsed.name;
+    if (parsed.description !== undefined) updateSet.description = parsed.description;
+
+    const [updated] = await db
+      .update(knowledgeBases)
+      .set(updateSet as any)
+      .where(and(eq(knowledgeBases.id, kbId), eq(knowledgeBases.tenantId, orgId)))
+      .returning();
+
+    if (!updated) { json(res, 404, { error_code: "NOT_FOUND", message: "Datakilde ikke fundet" }); return; }
+
+    json(res, 200, {
+      id:          updated.id,
+      name:        updated.name,
+      slug:        updated.slug,
+      description: updated.description,
+      status:      updated.lifecycleState,
+      updatedAt:   updated.updatedAt,
+    });
+  } catch (err) {
+    handleError(res, err);
+  }
+}
+
+// ── Route: PATCH /api/kb/:id/reactivate ───────────────────────────────────────
+
+async function reactivateKnowledgeBase(orgId: string, kbId: string, res: ServerResponse): Promise<void> {
+  try {
+    const db = await getDb();
+    const { knowledgeBases } = await getSchema();
+    const { eq, and } = await getOrm();
+
+    const [updated] = await db
+      .update(knowledgeBases)
+      .set({ lifecycleState: "active", updatedAt: new Date() })
+      .where(and(eq(knowledgeBases.id, kbId), eq(knowledgeBases.tenantId, orgId)))
+      .returning();
+
+    if (!updated) { json(res, 404, { error_code: "NOT_FOUND", message: "Datakilde ikke fundet" }); return; }
+
+    json(res, 200, { id: updated.id, status: updated.lifecycleState });
+  } catch (err) {
+    handleError(res, err);
+  }
+}
+
+// ── Route: POST /api/kb/:id/assets/:assetId/retry ────────────────────────────
+
+async function retryAsset(orgId: string, kbId: string, assetId: string, res: ServerResponse): Promise<void> {
+  try {
+    const db = await getDb();
+    const { knowledgeDocuments, knowledgeProcessingJobs } = await getSchema();
+    const { eq, and } = await getOrm();
+
+    const [doc] = await db
+      .select()
+      .from(knowledgeDocuments)
+      .where(and(
+        eq(knowledgeDocuments.id, assetId),
+        eq(knowledgeDocuments.knowledgeBaseId, kbId),
+        eq(knowledgeDocuments.tenantId, orgId),
+      ))
+      .limit(1);
+
+    if (!doc) { json(res, 404, { error_code: "NOT_FOUND", message: "Asset ikke fundet" }); return; }
+
+    const [job] = await db.insert(knowledgeProcessingJobs).values({
+      tenantId:                   orgId,
+      knowledgeDocumentId:        assetId,
+      knowledgeDocumentVersionId: doc.currentVersionId ?? undefined,
+      jobType:                    "parse",
+      status:                     "queued",
+      priority:                   50,
+      payload:                    { retry: true, triggeredBy: "tenant_ui" },
+    }).returning();
+
+    await db.update(knowledgeDocuments)
+      .set({ documentStatus: "processing", updatedAt: new Date() })
+      .where(eq(knowledgeDocuments.id, assetId));
+
+    json(res, 201, { jobId: job.id, status: "queued" });
   } catch (err) {
     handleError(res, err);
   }
@@ -463,19 +574,31 @@ async function uploadAsset(
 async function listExperts(orgId: string, kbId: string, res: ServerResponse): Promise<void> {
   try {
     const db = await getDb();
-    const { expertKnowledgeBases } = await getSchema();
+    const { expertKnowledgeBases, architectureProfiles } = await getSchema();
     const { eq, and } = await getOrm();
 
     const links = await db
-      .select()
+      .select({
+        id:              expertKnowledgeBases.id,
+        expertId:        expertKnowledgeBases.expertId,
+        knowledgeBaseId: expertKnowledgeBases.knowledgeBaseId,
+        createdAt:       expertKnowledgeBases.createdAt,
+        expertName:      architectureProfiles.name,
+        expertSlug:      architectureProfiles.slug,
+        expertStatus:    architectureProfiles.status,
+      })
       .from(expertKnowledgeBases)
+      .leftJoin(architectureProfiles, eq(expertKnowledgeBases.expertId as any, architectureProfiles.id as any))
       .where(and(eq(expertKnowledgeBases.knowledgeBaseId, kbId), eq(expertKnowledgeBases.tenantId, orgId)));
 
     json(res, 200, links.map((l) => ({
-      id: l.id,
-      expertId: l.expertId,
+      id:              l.id,
+      expertId:        l.expertId,
       knowledgeBaseId: l.knowledgeBaseId,
-      createdAt: l.createdAt,
+      expertName:      l.expertName ?? l.expertId,
+      expertSlug:      l.expertSlug ?? null,
+      expertStatus:    l.expertStatus ?? null,
+      createdAt:       l.createdAt,
     })));
   } catch (err) {
     handleError(res, err);
@@ -701,7 +824,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   // ── /api/kb (root) ────────────────────────────────────────────────────────
   if (path === "" || path === "/") {
-    if (method === "GET") return listKnowledgeBases(orgId, res);
+    const qs = new URLSearchParams(rawUrl.includes("?") ? rawUrl.slice(rawUrl.indexOf("?") + 1) : "");
+    const statusFilter = qs.get("status") ?? "active";
+    if (method === "GET") return listKnowledgeBases(orgId, statusFilter, res);
     if (method === "POST") return createKnowledgeBase(orgId, userId, req, res);
     return methodNotAllowed(res);
   }
@@ -722,7 +847,15 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const idMatch = path.match(/^\/([^/]+)$/);
   if (idMatch) {
     const kbId = idMatch[1];
-    if (method === "GET") return getKnowledgeBase(orgId, kbId, res);
+    if (method === "GET")   return getKnowledgeBase(orgId, kbId, res);
+    if (method === "PATCH") return editKnowledgeBase(orgId, kbId, req, res);
+    return methodNotAllowed(res);
+  }
+
+  // ── /api/kb/:id/reactivate ────────────────────────────────────────────────
+  const reactivateMatch = path.match(/^\/([^/]+)\/reactivate$/);
+  if (reactivateMatch) {
+    if (method === "PATCH") return reactivateKnowledgeBase(orgId, reactivateMatch[1], res);
     return methodNotAllowed(res);
   }
 
@@ -744,6 +877,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const uploadMatch = path.match(/^\/([^/]+)\/upload$/);
   if (uploadMatch) {
     if (method === "POST") return uploadAsset(orgId, userId, uploadMatch[1], req, res);
+    return methodNotAllowed(res);
+  }
+
+  // ── /api/kb/:id/assets/:assetId/retry ────────────────────────────────────
+  const retryMatch = path.match(/^\/([^/]+)\/assets\/([^/]+)\/retry$/);
+  if (retryMatch) {
+    if (method === "POST") return retryAsset(orgId, retryMatch[1], retryMatch[2], res);
     return methodNotAllowed(res);
   }
 
