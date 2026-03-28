@@ -10,14 +10,14 @@
  * - Upload zone
  */
 
-import { useState, useRef, useCallback, useMemo } from "react";
-import { useParams, useLocation } from "wouter";
+import { useState, useRef, useCallback, useMemo, useEffect } from "react";
+import { useParams, useLocation, useSearch } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowLeft, Upload, FileText, Image, Video, File, Loader2,
   Database, CheckCircle2, Clock, AlertTriangle, RefreshCw,
   Link2, Brain, Plus, X, Search, SlidersHorizontal,
-  Pencil, RotateCcw, Archive,
+  Pencil, RotateCcw, Archive, Info,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -476,9 +476,24 @@ export default function StorageDetail() {
   usePagePerf("storage-detail");
   const params    = useParams();
   const [, navigate] = useLocation();
+  const search    = useSearch();
   const qc        = useQueryClient();
   const { toast } = useToast();
   const kbId      = params.id ?? "";
+
+  // Detect redirect from "just created" flow
+  const isNew = new URLSearchParams(search).get("new") === "1";
+  const [showNewBanner, setShowNewBanner] = useState(isNew);
+  const uploadSectionRef = useRef<HTMLElement>(null);
+
+  // Auto-scroll to upload zone when arriving from create flow
+  useEffect(() => {
+    if (!isNew) return;
+    const t = setTimeout(() => {
+      uploadSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 400);
+    return () => clearTimeout(t);
+  }, [isNew]);
 
   const [assetSearch, setAssetSearch]     = useState("");
   const [typeFilter,  setTypeFilter]      = useState("all");
@@ -626,8 +641,24 @@ export default function StorageDetail() {
 
       {/* Upload */}
       {!archived && (
-        <section>
+        <section ref={uploadSectionRef}>
           <h2 className="text-sm font-semibold text-foreground mb-3">Upload filer</h2>
+          {showNewBanner && (
+            <div className="mb-3 flex items-start gap-3 rounded-lg border border-sky-500/25 bg-sky-500/8 px-4 py-3"
+              data-testid="banner-new-source">
+              <Info className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+              <p className="text-sm text-sky-300 flex-1">
+                Datakilde oprettet. Upload første fil for at aktivere den.
+              </p>
+              <button
+                className="text-sky-400/60 hover:text-sky-300 transition-colors"
+                onClick={() => setShowNewBanner(false)}
+                aria-label="Luk"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
           <UploadZone kbId={kbId} onUploaded={handleUploaded} />
         </section>
       )}

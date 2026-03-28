@@ -243,11 +243,14 @@ export default function VidenData() {
 
   const createMutation = useMutation({
     mutationFn: (values: CreateValues) => apiRequest("POST", "/api/kb", values),
-    onSuccess: () => {
-      toast({ title: "Datakilde oprettet" });
+    onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/kb"] });
       setShowCreate(false);
       createForm.reset();
+      // Redirect to detail page so tenant can immediately upload files
+      if (data?.id) {
+        navigate(`/storage/${data.id}?new=1`);
+      }
     },
     onError: (err: ApiError | Error) =>
       toast({ title: "Fejl", description: friendlyError(err), variant: "destructive" }),

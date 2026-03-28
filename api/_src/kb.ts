@@ -183,6 +183,40 @@ async function createKnowledgeBase(orgId: string, userId: string, req: IncomingM
       updatedBy: userId,
     }).returning();
 
+    // ── Auto-link: find first active expert in this tenant and link it ─────────
+    // Priority: (1) any active expert, (2) any draft expert, (3) none.
+    // This removes the manual linking requirement for new sources.
+    let autoLinkedExpertId:   string | null = null;
+    let autoLinkedExpertName: string | null = null;
+    try {
+      const { architectureProfiles, expertKnowledgeBases } = await getSchema();
+      const { asc } = await getOrm();
+
+      const candidates = await db
+        .select({ id: architectureProfiles.id, name: architectureProfiles.name, status: architectureProfiles.status })
+        .from(architectureProfiles)
+        .where(eq(architectureProfiles.organizationId, orgId))
+        .orderBy(asc(architectureProfiles.createdAt))
+        .limit(5);
+
+      const expert = candidates.find((e) => e.status === "active") ?? candidates[0] ?? null;
+
+      if (expert) {
+        await db.insert(expertKnowledgeBases).values({
+          tenantId: orgId,
+          expertId: expert.id,
+          knowledgeBaseId: kb.id,
+          createdBy: userId,
+        }).onConflictDoNothing();
+        autoLinkedExpertId   = expert.id;
+        autoLinkedExpertName = expert.name;
+        console.log(`[kb] auto-linked expert ${expert.id} (${expert.name}) to KB ${kb.id}`);
+      }
+    } catch (linkErr) {
+      // Auto-linking is best-effort — never fail the whole create on link error
+      console.warn("[kb] auto-link failed (non-fatal):", linkErr instanceof Error ? linkErr.message : linkErr);
+    }
+
     json(res, 201, {
       id: kb.id,
       name: kb.name,
@@ -192,6 +226,8 @@ async function createKnowledgeBase(orgId: string, userId: string, req: IncomingM
       assetCount: 0,
       createdAt: kb.createdAt,
       updatedAt: kb.updatedAt,
+      autoLinkedExpertId,
+      autoLinkedExpertName,
     });
   } catch (err) {
     handleError(res, err);
