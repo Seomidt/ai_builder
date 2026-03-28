@@ -1268,6 +1268,90 @@ Generate names and content in ${langNote}.`;
     } catch (err) { handleError(res, err); }
   });
 
+  // ─── Direct-to-R2 Upload (dev + prod parity with Vercel /api/upload) ─────────
+  // POST /api/upload/url      — generate presigned PUT URL (no file bytes in Vercel)
+  // POST /api/upload/finalize — post-upload: extract content + route A/B
+
+  app.post("/api/upload/url", async (req: Request, res: Response) => {
+    try {
+      const orgId  = getOrgId(req);
+      const userId = getUserId(req);
+      const { filename, contentType, size, context = "chat" } = req.body as {
+        filename: string; contentType: string; size: number; context?: string;
+      };
+
+      if (!filename || !contentType || typeof size !== "number") {
+        return res.status(400).json({ error_code: "INVALID_INPUT", message: "filename, contentType og size er påkrævet" });
+      }
+
+      const ALLOWED_MIME_TYPES: Record<string, string> = {
+        "application/pdf": "document", "application/msword": "document",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document",
+        "text/plain": "document", "text/csv": "document", "text/markdown": "document",
+        "text/html": "document", "application/vnd.ms-excel": "document",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "document",
+        "application/rtf": "document", "image/jpeg": "image", "image/png": "image",
+        "image/gif": "image", "image/webp": "image", "image/tiff": "image",
+        "image/bmp": "image", "video/mp4": "video", "video/quicktime": "video",
+        "video/x-msvideo": "video", "video/webm": "video", "video/mpeg": "video",
+      };
+      if (!ALLOWED_MIME_TYPES[contentType]) {
+        return res.status(415).json({ error_code: "UNSUPPORTED_MIME", message: `Filtypen "${contentType}" understøttes ikke` });
+      }
+
+      const { r2Client, R2_BUCKET, R2_CONFIGURED } = await import("./lib/r2/r2-client");
+      if (!R2_CONFIGURED) {
+        return res.status(503).json({ error_code: "R2_NOT_CONFIGURED", message: "Filopbevaring er ikke konfigureret" });
+      }
+      const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+      const { getSignedUrl }     = await import("@aws-sdk/s3-request-presigner");
+      const safeFilename = filename.replace(/[^a-zA-Z0-9._\-]/g, "-").slice(0, 200);
+      const objectKey    = `tenants/${orgId}/uploads/${context}/${Date.now()}-${safeFilename}`;
+      const command      = new PutObjectCommand({ Bucket: R2_BUCKET, Key: objectKey, ContentType: contentType });
+      const uploadUrl    = await getSignedUrl(r2Client, command, { expiresIn: 900 });
+      console.log(`[upload/url] tenant=${orgId} user=${userId} key=${objectKey} mime=${contentType} size=${size}`);
+      return res.json({ uploadUrl, objectKey, expiresIn: 900 });
+    } catch (e) {
+      console.error("[upload/url] error:", e);
+      return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Upload URL kunne ikke genereres" });
+    }
+  });
+
+  app.post("/api/upload/finalize", async (req: Request, res: Response) => {
+    try {
+      const orgId  = getOrgId(req);
+      const userId = getUserId(req);
+      const { objectKey, filename, contentType, size, context = "chat", fileCount = 1 } = req.body as {
+        objectKey: string; filename: string; contentType: string; size: number;
+        context?: string; fileCount?: number; sourceId?: string;
+      };
+
+      if (!objectKey || !filename || !contentType || typeof size !== "number") {
+        return res.status(400).json({ error_code: "INVALID_INPUT", message: "objectKey, filename, contentType og size er påkrævet" });
+      }
+      if (!objectKey.startsWith(`tenants/${orgId}/`)) {
+        return res.status(403).json({ error_code: "FORBIDDEN", message: "Ugyldig object key" });
+      }
+
+      const { decideAttachmentProcessingMode } = await import("./lib/chat/attachment-router");
+      const routing = decideAttachmentProcessingMode({
+        mimeType: contentType, sizeBytes: size, fileCount: fileCount ?? 1, context: context as "chat" | "storage",
+      });
+      console.log(`[upload/finalize] tenant=${orgId} key=${objectKey} mode=${routing.mode} reason=${routing.reason}`);
+
+      const { processDirectAttachment } = await import("./lib/chat/direct-attachment-processor");
+      const result = await processDirectAttachment({ objectKey, filename, contentType, sizeBytes: size });
+
+      if (result.status === "ok") {
+        return res.json({ mode: routing.mode, routing: routing.reason, results: [result] });
+      }
+      return res.json({ mode: "B_FALLBACK", routing: routing.reason, message: result.message, results: [] });
+    } catch (e) {
+      console.error("[upload/finalize] error:", e);
+      return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Finalisering fejlede" });
+    }
+  });
+
   // ─── AI Chat ──────────────────────────────────────────────────────────────────
 
   app.post("/api/chat", async (req: Request, res: Response) => {

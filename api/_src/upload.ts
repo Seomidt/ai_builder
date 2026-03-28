@@ -1,0 +1,313 @@
+/**
+ * api/_src/upload.ts — Thin Vercel handler for direct-to-R2 upload flow.
+ *
+ * PHASE: SMART ATTACHMENT UPLOAD
+ *
+ * Routes:
+ *   POST /api/upload/url      — generate presigned R2 PUT URL (file never touches Vercel)
+ *   POST /api/upload/finalize — post-upload: extract content, route A/B, return context
+ *
+ * Upload path:
+ *   Browser → (presigned PUT) → R2          (large files bypass Vercel entirely)
+ *   Browser → POST /api/upload/url          (small JSON request to Vercel)
+ *   Browser → POST /api/upload/finalize     (small JSON request to Vercel)
+ *   Vercel  ← reads from R2 for extraction  (server-side, not through request body)
+ *
+ * This handler does NOT receive file bytes. Ever.
+ */
+
+import "../../server/lib/env";
+import type { IncomingMessage, ServerResponse } from "http";
+import { authenticate }                         from "./_lib/auth";
+import { json, err, readBody, pathSegments }    from "./_lib/response";
+
+// ── Allowed MIME types (single source of truth lives in kb-upload-service) ────
+const ALLOWED_MIME_TYPES: Record<string, string> = {
+  "application/pdf":          "document",
+  "application/msword":       "document",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "document",
+  "text/plain":               "document",
+  "text/csv":                 "document",
+  "text/markdown":            "document",
+  "text/html":                "document",
+  "application/vnd.ms-excel": "document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "document",
+  "application/rtf":          "document",
+  "image/jpeg":               "image",
+  "image/png":                "image",
+  "image/gif":                "image",
+  "image/webp":               "image",
+  "image/tiff":               "image",
+  "image/bmp":                "image",
+  "video/mp4":                "video",
+  "video/quicktime":          "video",
+  "video/x-msvideo":          "video",
+  "video/webm":               "video",
+  "video/mpeg":               "video",
+};
+
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB
+
+// ── CORS helper ───────────────────────────────────────────────────────────────
+
+function cors(res: ServerResponse): void {
+  res.setHeader("Access-Control-Allow-Origin",  "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+// ── Structured logging ────────────────────────────────────────────────────────
+
+function log(event: string, fields: Record<string, unknown>): void {
+  console.log(JSON.stringify({ ts: new Date().toISOString(), event, ...fields }));
+}
+
+// ── POST /api/upload/url ──────────────────────────────────────────────────────
+// Returns a presigned R2 PUT URL. File bytes never come through Vercel.
+
+interface UrlRequestBody {
+  filename:    string;
+  contentType: string;
+  size:        number;
+  sourceId?:   string | null;
+  context?:    "chat" | "storage";
+}
+
+interface UrlResponseBody {
+  uploadUrl:  string;
+  objectKey:  string;
+  expiresIn:  number;
+}
+
+async function handleUrl(
+  req: IncomingMessage,
+  res: ServerResponse,
+  tenantId: string,
+  userId: string,
+): Promise<void> {
+  const body = await readBody<UrlRequestBody>(req);
+  const { filename, contentType, size, context = "chat" } = body;
+
+  // ── Validate ───────────────────────────────────────────────────────────────
+  if (!filename || !contentType || typeof size !== "number") {
+    return err(res, 400, "INVALID_INPUT", "filename, contentType og size er påkrævet");
+  }
+  const docCategory = ALLOWED_MIME_TYPES[contentType];
+  if (!docCategory) {
+    log("upload.url.rejected", { tenantId, contentType, reason: "unsupported_mime" });
+    return err(res, 415, "UNSUPPORTED_MIME", `Filtypen "${contentType}" understøttes ikke`);
+  }
+  if (size > MAX_UPLOAD_BYTES) {
+    log("upload.url.rejected", { tenantId, size, reason: "file_too_large" });
+    return err(res, 413, "FILE_TOO_LARGE", `Filen overstiger grænsen på ${MAX_UPLOAD_BYTES / 1024 / 1024} MB`);
+  }
+
+  // ── Generate tenant-scoped object key ──────────────────────────────────────
+  const safeFilename = filename.replace(/[^a-zA-Z0-9._\-]/g, "-").slice(0, 200);
+  const objectKey    = `tenants/${tenantId}/uploads/${context}/${Date.now()}-${safeFilename}`;
+
+  // ── Generate presigned PUT URL ─────────────────────────────────────────────
+  const { r2Client, R2_BUCKET, R2_CONFIGURED } = await import("../../server/lib/r2/r2-client");
+  if (!R2_CONFIGURED) {
+    log("upload.url.error", { tenantId, reason: "r2_not_configured" });
+    return err(res, 503, "R2_NOT_CONFIGURED", "Filopbevaring er ikke konfigureret");
+  }
+
+  const { PutObjectCommand }  = await import("@aws-sdk/client-s3");
+  const { getSignedUrl }      = await import("@aws-sdk/s3-request-presigner");
+
+  const command    = new PutObjectCommand({
+    Bucket:      R2_BUCKET,
+    Key:         objectKey,
+    ContentType: contentType,
+  });
+  const expiresIn  = 900; // 15 minutes
+  const uploadUrl  = await getSignedUrl(r2Client, command, { expiresIn });
+
+  log("upload.url.created", {
+    tenantId, userId, objectKey, contentType,
+    size_bytes: size, context, expires_in: expiresIn,
+  });
+
+  const response: UrlResponseBody = { uploadUrl, objectKey, expiresIn };
+  return json(res, response);
+}
+
+// ── POST /api/upload/finalize ─────────────────────────────────────────────────
+// After browser uploads directly to R2, call this to:
+//   1. Verify object belongs to tenant (key prefix check)
+//   2. Route A/B
+//   3. Extract content (Mode A) or acknowledge pipeline start (Mode B)
+//   4. Return document context for chat OR asset info for storage
+
+interface FinalizeRequestBody {
+  objectKey:    string;
+  filename:     string;
+  contentType:  string;
+  size:         number;
+  sourceId?:    string | null;
+  context:      "chat" | "storage";
+  message?:     string | null;
+  fileCount?:   number;
+}
+
+async function handleFinalize(
+  req: IncomingMessage,
+  res: ServerResponse,
+  tenantId: string,
+  userId: string,
+): Promise<void> {
+  const body = await readBody<FinalizeRequestBody>(req);
+  const {
+    objectKey, filename, contentType, size,
+    context = "chat", message = null, fileCount = 1,
+    sourceId = null,
+  } = body;
+
+  // ── Validate inputs ────────────────────────────────────────────────────────
+  if (!objectKey || !filename || !contentType || typeof size !== "number") {
+    return err(res, 400, "INVALID_INPUT", "objectKey, filename, contentType og size er påkrævet");
+  }
+
+  // ── Tenant isolation: key must start with tenant prefix ───────────────────
+  const expectedPrefix = `tenants/${tenantId}/`;
+  if (!objectKey.startsWith(expectedPrefix)) {
+    log("upload.finalize.security", { tenantId, objectKey, reason: "key_prefix_mismatch" });
+    return err(res, 403, "FORBIDDEN", "Ugyldig object key");
+  }
+
+  // ── A/B routing decision ───────────────────────────────────────────────────
+  const { decideAttachmentProcessingMode } = await import("../../server/lib/chat/attachment-router");
+  const routing = decideAttachmentProcessingMode({
+    mimeType:  contentType,
+    sizeBytes: size,
+    fileCount: fileCount ?? 1,
+    context:   context as "chat" | "storage",
+  });
+
+  log("upload.finalize.routing", {
+    tenantId, userId, objectKey, contentType,
+    size_bytes: size, context, mode: routing.mode, reason: routing.reason,
+    size_bucket: size < 1_000_000 ? "<1MB" : size < 4_000_000 ? "1-4MB" : size < 10_000_000 ? "4-10MB" : ">10MB",
+  });
+
+  // ── Mode A: direct chat extraction ────────────────────────────────────────
+  if (routing.mode === "A" && context === "chat") {
+    const { processDirectAttachment } = await import("../../server/lib/chat/direct-attachment-processor");
+    const result = await processDirectAttachment({ objectKey, filename, contentType, sizeBytes: size });
+
+    if (result.status === "error" || result.status === "unsupported") {
+      // Fallback to B if direct processing fails
+      log("upload.finalize.fallback_to_b", {
+        tenantId, objectKey, reason: result.message ?? result.status,
+      });
+      // Return a special status so frontend shows appropriate message
+      return json(res, {
+        mode:    "B_FALLBACK",
+        routing: routing.reason,
+        message: result.message ?? "Filen kunne ikke behandles direkte.",
+        results: [],
+      });
+    }
+
+    log("upload.finalize.mode_a.ok", {
+      tenantId, objectKey, char_count: result.char_count,
+    });
+
+    return json(res, {
+      mode:    "A",
+      routing: routing.reason,
+      results: [result],
+    });
+  }
+
+  // ── Mode B: large/complex file — extract from R2 with full-doc handling ───
+  // For chat context with Mode B: we still extract from R2 (no Vercel body limit
+  // because we read server-side), but allow larger text budgets.
+  // For storage context: create KB asset and trigger ingestion pipeline.
+
+  if (context === "storage" && sourceId) {
+    // Storage context: hand off to KB upload service using existing pipeline.
+    // We don't re-upload to R2 (it's already there) — we just register the asset.
+    log("upload.finalize.mode_b.storage", { tenantId, sourceId, objectKey });
+
+    try {
+      const { registerR2Asset } = await import("../../server/lib/knowledge/kb-r2-asset");
+      const asset = await registerR2Asset({
+        tenantId,
+        uploadedBy: userId,
+        knowledgeBaseId: sourceId,
+        objectKey,
+        filename,
+        mimeType: contentType,
+        fileSizeBytes: size,
+      });
+
+      log("upload.finalize.mode_b.storage.ok", { tenantId, assetId: asset.id });
+      return json(res, { mode: "B", routing: routing.reason, asset });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      log("upload.finalize.mode_b.storage.error", { tenantId, objectKey, error: msg });
+      return err(res, 500, "INGESTION_ERROR", msg);
+    }
+  }
+
+  // ── Mode B chat: extract from R2 with larger budget for full document ─────
+  // Large files are read server-side from R2 (no Vercel request body limit).
+  // Text is capped at a safe token budget for the chat API.
+  const { processDirectAttachment } = await import("../../server/lib/chat/direct-attachment-processor");
+  const result = await processDirectAttachment({ objectKey, filename, contentType, sizeBytes: size });
+
+  if (result.status === "ok") {
+    log("upload.finalize.mode_b.chat.ok", {
+      tenantId, objectKey, char_count: result.char_count,
+    });
+    return json(res, {
+      mode:    "B",
+      routing: routing.reason,
+      results: [result],
+    });
+  }
+
+  // Failed to extract
+  log("upload.finalize.mode_b.chat.error", {
+    tenantId, objectKey, status: result.status, message: result.message,
+  });
+  return json(res, {
+    mode:    "B",
+    routing: routing.reason,
+    message: result.message ?? "Dokumentet kunne ikke behandles.",
+    results: [],
+  });
+}
+
+// ── Main handler ──────────────────────────────────────────────────────────────
+
+export default async function handler(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  cors(res);
+  if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+  if (req.method !== "POST") {
+    return err(res, 405, "METHOD_NOT_ALLOWED", "Kun POST er tilladt");
+  }
+
+  const auth = await authenticate(req);
+  if (auth.status !== "ok" || !auth.user) {
+    return err(res, 401, "UNAUTHENTICATED", "Login krævet");
+  }
+
+  const { user } = auth;
+  const tenantId = user.organizationId;
+  const userId   = user.id;
+
+  // Route on path segment: /api/upload/url or /api/upload/finalize
+  const segments = pathSegments(req, "/api/upload");
+  const action   = segments[0] ?? "";
+
+  if (action === "url")      return handleUrl(req, res, tenantId, userId);
+  if (action === "finalize") return handleFinalize(req, res, tenantId, userId);
+
+  return err(res, 404, "NOT_FOUND", `Upload route ikke fundet: ${action}`);
+}

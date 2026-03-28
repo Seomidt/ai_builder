@@ -8,7 +8,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { apiRequest, apiRequestForm } from "@/lib/queryClient";
+import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -557,39 +557,91 @@ export default function AiChatPage() {
       const imgFiles = payload.attachments.filter(a => a.type === "image");
       console.log(`[TRACE-1][${traceId}] use_case="${payload.useCase ?? "grounded_chat"}" attachments_total=${payload.attachments.length} doc_files=${docFiles.length} img_files=${imgFiles.length} names=[${docFiles.map(a=>a.file.name).join(",")}]`);
 
-      // ── Step A: Ekstraher dokumentindhold ──────────────────────────────────
+      // ── Step A: Ekstraher dokumentindhold via direkte R2-upload ───────────
+      // Filer uploades ALDRIG igennem Vercel — Browser → R2 direkte via presigned URL.
+      // Vercel modtager kun lille JSON (presign-request + finalize-request).
       let documentContext: any[] = [];
 
       if (docFiles.length > 0) {
-        const form = new FormData();
-        docFiles.forEach(a => form.append("file", a.file, a.file.name));
         try {
-          console.log(`[TRACE-2a][${traceId}] calling /api/extract for ${docFiles.length} file(s)`);
-          const extractRes = await apiRequestForm("POST", "/api/extract", form);
-          console.log(`[TRACE-2b][${traceId}] extract HTTP status=${extractRes.status}`);
-          if (!extractRes.ok) {
-            console.error(`[HARD-STOP][${traceId}] EXTRACT_FAILED HTTP ${extractRes.status}`);
-            throw Object.assign(new Error("Dokument kunne ikke læses."), { errorCode: "DOCUMENT_UNREADABLE" });
+          console.log(`[TRACE-2a][${traceId}] starting direct-to-R2 upload for ${docFiles.length} file(s)`);
+
+          // Upload alle doc-filer direkte til R2 og finaliser
+          const finalizeResults: any[] = [];
+
+          for (const af of docFiles) {
+            const file = af.file;
+
+            // ── 1. Hent presigned URL ─────────────────────────────────────
+            console.log(`[TRACE-2b][${traceId}] requesting presigned URL for ${file.name} (${file.size}b)`);
+            const urlRes = await apiRequest("POST", "/api/upload/url", {
+              filename:    file.name,
+              contentType: file.type || "application/octet-stream",
+              size:        file.size,
+              context:     "chat",
+            });
+            if (!urlRes.ok) {
+              const errBody = await urlRes.json().catch(() => ({})) as any;
+              console.error(`[HARD-STOP][${traceId}] presign failed HTTP ${urlRes.status}`, errBody);
+              throw Object.assign(new Error(errBody?.message ?? "Fil kunne ikke klargøres til upload."), { errorCode: "PRESIGN_FAILED" });
+            }
+            const { uploadUrl, objectKey } = await urlRes.json() as { uploadUrl: string; objectKey: string; expiresIn: number };
+
+            // ── 2. Upload fil direkte fra browser til R2 (bypasser Vercel) ─
+            console.log(`[TRACE-2c][${traceId}] uploading directly to R2 key=${objectKey}`);
+            const r2Res = await fetch(uploadUrl, {
+              method:  "PUT",
+              body:    file,
+              headers: { "Content-Type": file.type || "application/octet-stream" },
+            });
+            if (!r2Res.ok) {
+              console.error(`[HARD-STOP][${traceId}] R2 PUT failed HTTP ${r2Res.status}`);
+              throw Object.assign(new Error("Fil upload til lager fejlede. Prøv igen."), { errorCode: "R2_UPLOAD_FAILED" });
+            }
+            console.log(`[TRACE-2d][${traceId}] R2 upload OK for ${file.name}`);
+
+            // ── 3. Finaliser upload — ekstraher tekst server-side fra R2 ──
+            console.log(`[TRACE-2e][${traceId}] finalizing upload for ${file.name}`);
+            const finalRes = await apiRequest("POST", "/api/upload/finalize", {
+              objectKey,
+              filename:    file.name,
+              contentType: file.type || "application/octet-stream",
+              size:        file.size,
+              context:     "chat",
+              fileCount:   docFiles.length,
+            });
+            if (!finalRes.ok) {
+              const errBody = await finalRes.json().catch(() => ({})) as any;
+              console.error(`[HARD-STOP][${traceId}] finalize failed HTTP ${finalRes.status}`, errBody);
+              throw Object.assign(new Error(errBody?.message ?? "Dokument kunne ikke behandles."), { errorCode: "FINALIZE_FAILED" });
+            }
+            const finalData = await finalRes.json() as { mode: string; results?: any[]; message?: string };
+            console.log(`[TRACE-2f][${traceId}] finalize OK mode=${finalData.mode} results=${finalData.results?.length ?? 0}`);
+
+            if (finalData.results && finalData.results.length > 0) {
+              finalizeResults.push(...finalData.results);
+            }
           }
-          const extractData = await extractRes.json() as { results: any[] };
-          documentContext = extractData.results ?? [];
-          console.log(`[TRACE-2c][${traceId}] extract results=${documentContext.length} statuses=[${documentContext.map((r:any)=>r.status).join(",")}] chars=[${documentContext.map((r:any)=>r.extracted_text?.length??0).join(",")}]`);
+
+          documentContext = finalizeResults;
+          console.log(`[TRACE-2g][${traceId}] total context entries=${documentContext.length} statuses=[${documentContext.map((r:any)=>r.status).join(",")}] chars=[${documentContext.map((r:any)=>r.extracted_text?.length??0).join(",")}]`);
           if (documentContext.length > 0) {
-            console.log(`[TRACE-2d][${traceId}] first200="${(documentContext[0] as any).extracted_text?.slice(0,200)?.replace(/\n/g," ")}"`);
+            console.log(`[TRACE-2h][${traceId}] first200="${(documentContext[0] as any).extracted_text?.slice(0,200)?.replace(/\n/g," ")}"`);
           }
-          // HARD STOP: extract returnerede 0 gyldige dokumenter
+
+          // HARD STOP: ingen gyldige dokumenter
           const validEntries = documentContext.filter((r: any) => r.status === "ok" && r.extracted_text?.trim());
           if (validEntries.length === 0) {
-            console.error(`[HARD-STOP][${traceId}] DOCUMENT_CONTEXT_MISSING: 0 valid entries after extract`);
-            throw Object.assign(new Error("Dokument kunne ikke læses."), { errorCode: "DOCUMENT_UNREADABLE" });
+            console.error(`[HARD-STOP][${traceId}] DOCUMENT_CONTEXT_MISSING: 0 valid entries after finalize`);
+            throw Object.assign(new Error("Dokument kunne ikke læses. Kontrollér at filen er en valid PDF eller tekstfil."), { errorCode: "DOCUMENT_UNREADABLE" });
           }
         } catch (e: any) {
           if (e?.errorCode) throw e; // re-throw hard-stops
-          console.error(`[HARD-STOP][${traceId}] EXTRACT_FAILED:`, e);
-          throw Object.assign(new Error("Dokument kunne ikke læses."), { errorCode: "DOCUMENT_UNREADABLE" });
+          console.error(`[HARD-STOP][${traceId}] UPLOAD_PIPELINE_FAILED:`, e);
+          throw Object.assign(new Error("Upload fejlede. Prøv igen."), { errorCode: "DOCUMENT_UNREADABLE" });
         }
       } else {
-        console.log(`[TRACE-2-SKIP][${traceId}] no doc files — skipping extract`);
+        console.log(`[TRACE-2-SKIP][${traceId}] no doc files — skipping upload`);
       }
 
       // ── Step B: Byg besked-tekst ───────────────────────────────────────────
