@@ -68,8 +68,8 @@ export default function TenantUsage() {
     queryKey: [`/api/tenant/usage?period=${period}`],
   });
 
-  const maxRequests = Math.max(...(data?.daily.map((d) => d.requests) ?? [1]), 1);
-  const maxCost     = Math.max(...(data?.daily.map((d) => d.costUsd)  ?? [1]), 0.01);
+  const maxRequests = Math.max(...(data?.daily?.map((d) => d.requests) ?? [1]), 1);
+  const maxCost     = Math.max(...(data?.daily?.map((d) => d.costUsd)  ?? [1]), 0.01);
 
   return (
     <div className="flex flex-col h-full">
