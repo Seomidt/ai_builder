@@ -25,7 +25,8 @@
     "api/extract.js":       { "memory": 512, "maxDuration": 30 },
     "api/early-access.js":  { "memory": 128, "maxDuration": 10 },
     "api/kb.js":            { "memory": 512, "maxDuration": 30 },
-    "api/insights.js":      { "memory": 256, "maxDuration": 30 }
+    "api/insights.js":      { "memory": 256, "maxDuration": 30 },
+    "api/experts.js":       { "memory": 512, "maxDuration": 60 }
   },
   "rewrites": [
     { "source": "/api/auth",        "destination": "/api/auth"          },
@@ -58,6 +59,8 @@
     { "source": "/api/kb/(.*)",       "destination": "/api/kb"              },
     { "source": "/api/insights",      "destination": "/api/insights"        },
     { "source": "/api/insights/(.*)", "destination": "/api/insights"        },
+    { "source": "/api/experts",       "destination": "/api/experts"         },
+    { "source": "/api/experts/(.*)",  "destination": "/api/experts"         },
     { "source": "/(.*)",              "destination": "/index.html"          }
   ],
   "headers": [
