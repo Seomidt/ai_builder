@@ -507,32 +507,31 @@ export default function StorageDetail() {
   });
 
   // ── Derived metrics ───────────────────────────────────────────────────────────
-  const metrics = useMemo(() => {
-    if (!assets) return { total: 0, indexed: 0, processing: 0, failed: 0 };
-    return {
-      total:      assets.length,
-      indexed:    assets.filter((a) => ["indexed","ready"].includes(a.status)).length,
-      processing: assets.filter((a) => ["processing","queued","draft"].includes(a.status)).length,
-      failed:     assets.filter((a) => a.status === "failed").length,
-    };
-  }, [assets]);
+  const safeAssets: AssetRow[] = Array.isArray(assets) ? assets : [];
+
+  const metrics = useMemo(() => ({
+    total:      safeAssets.length,
+    indexed:    safeAssets.filter((a) => ["indexed","ready"].includes(a.status)).length,
+    processing: safeAssets.filter((a) => ["processing","queued","draft"].includes(a.status)).length,
+    failed:     safeAssets.filter((a) => a.status === "failed").length,
+  }), [safeAssets]);
 
   // ── Filtered + sorted assets ─────────────────────────────────────────────────
   const displayed = useMemo(() => {
-    let list = assets ?? [];
+    let list: AssetRow[] = [...safeAssets];
     if (assetSearch.trim()) {
       const q = assetSearch.toLowerCase();
       list = list.filter((a) => a.title.toLowerCase().includes(q));
     }
     if (typeFilter !== "all")   list = list.filter((a) => a.documentType === typeFilter);
     if (statusFilter !== "all") list = list.filter((a) => a.status === statusFilter);
-    return [...list].sort((a, b) => {
+    return list.sort((a, b) => {
       if (assetSort === "oldest") return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
       if (assetSort === "name")   return a.title.localeCompare(b.title, "da");
       if (assetSort === "status") return a.status.localeCompare(b.status);
       return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
     });
-  }, [assets, assetSearch, typeFilter, statusFilter, assetSort]);
+  }, [safeAssets, assetSearch, typeFilter, statusFilter, assetSort]);
 
   const handleUploaded = useCallback(() => {
     qc.invalidateQueries({ queryKey: ["/api/kb", kbId, "assets"] });
@@ -588,7 +587,7 @@ export default function StorageDetail() {
                 <Database className="w-4 h-4 text-amber-400" />
               </div>
               <h1 className="text-xl font-bold text-foreground">{kb.name}</h1>
-              <HealthBadge assets={assets} archived={archived} />
+              <HealthBadge assets={safeAssets} archived={archived} />
             </div>
             <p className="text-xs text-muted-foreground font-mono mt-1 ml-10">{kb.slug}</p>
             {kb.description && (
@@ -708,7 +707,7 @@ export default function StorageDetail() {
         ) : displayed.length === 0 ? (
           <div className="rounded-lg border border-border bg-muted/20 px-4 py-8 text-center">
             <p className="text-sm text-muted-foreground">
-              {assets?.length === 0
+              {safeAssets.length === 0
                 ? "Ingen filer endnu — upload din første fil ovenfor."
                 : `Ingen filer matcher dine filtre.`}
             </p>

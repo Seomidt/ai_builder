@@ -300,7 +300,7 @@ export default function VidenData() {
 
   // ── Client-side filter + sort ────────────────────────────────────────────────
   const displayed = useMemo(() => {
-    let list = sources ?? [];
+    let list: KnowledgeBaseRow[] = Array.isArray(sources) ? sources : [];
     if (search.trim()) {
       const q = search.toLowerCase();
       list = list.filter(
