@@ -402,6 +402,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   // ── Step 5+6: Kald OpenAI ─────────────────────────────────────────────────
   let finalAnswer: string;
+  let validationText: string | null = null;
   let aiLatencyMs: number;
   let aiPromptTokens   = 0;
   let aiComplTokens    = 0;
@@ -574,11 +575,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       console.log(`[chat] DOC_ANALYSIS_ANSWER len=${finalAnswer.length}`);
     }
   } else if (docCtx.length > 0) {
-    // ── DOKUMENT-MODE: Structured JSON output (100% grounded) ─────────────
-    // Modellen TVINGES via response_format:json_object til at returnere enten:
-    //   {"found":true,  "quote":"<exact excerpt>",      "answer":"<direct answer>"}
-    //   {"found":false, "answer":"Jeg kan ikke finde det i det uploadede dokument."}
-    // Ingen prompt-engineering kan slå dette — det er strukturelt håndhævet.
+    // ── DOKUMENT-MODE: Doc QA + Validering kører PARALLELT ────────────────
+    // Begge OpenAI-kald startes samtidigt for minimal latenstid.
+    // Doc QA → finalAnswer (grounded svar på brugerens spørgsmål)
+    // Validering → validationText (troværdighedsvurdering af dokumentet)
 
     const docText = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
     console.log(`[chat] DOC_MODE chars=${docText.length} first200="${docText.slice(0,200).replace(/\n/g," ")}"`);
@@ -600,34 +600,61 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       "- INGEN andre formater end ovenstående JSON er tilladt",
     ].join("\n");
 
-    const docMessages = [
-      { role: "system", content: docSystemPrompt },
-      { role: "user",   content: `DOKUMENT:\n\n${docText}\n\nSPØRGSMÅL: ${message}` },
-    ];
+    const VALIDATION_SYSTEM_PROMPT_PARALLEL = [
+      "You are a document validation engine.",
+      "",
+      "Analyze the provided document.",
+      "",
+      "Return ONLY valid JSON with:",
+      '- status ("ok", "warning", or "review_required")',
+      "- completeness_summary (string)",
+      "- trust_summary (string)",
+      "- issues (array of strings)",
+      "- recommendation (string)",
+      "",
+      "Do NOT return explanations outside JSON.",
+      "Do NOT hallucinate missing data.",
+      "Base everything ONLY on the provided document.",
+    ].join("\n");
+
     const docRoute = resolveVercelModel("default");
-    console.log(`[ai:router] model=${docRoute.model} provider=${docRoute.provider} key=${docRoute.key} use_case=doc_mode`);
-    console.log("FINAL_PAYLOAD:", JSON.stringify({
-      model: docRoute.model, temperature: 0.0, response_format: "json_object",
-      messages: [
-        { role: "system", content: docSystemPrompt.slice(0, 100) + "..." },
-        { role: "user",   content: `DOKUMENT (${docText.length} chars)... SPØRGSMÅL: ${message}` },
-      ],
-    }));
+    console.log(`[ai:router] model=${docRoute.model} provider=${docRoute.provider} use_case=doc_mode+validation`);
 
     const t0 = Date.now();
-    const docRes = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: JSON.stringify({
-        model: docRoute.model,
-        temperature: 0.0,
-        max_tokens: 600,
-        response_format: { type: "json_object" },
-        messages: docMessages,
+
+    // ── Parallel: doc QA + validering ─────────────────────────────────────
+    const [docRes, valRes] = await Promise.all([
+      fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: JSON.stringify({
+          model: docRoute.model,
+          temperature: 0.0,
+          max_tokens: 600,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: docSystemPrompt },
+            { role: "user",   content: `DOKUMENT:\n\n${docText}\n\nSPØRGSMÅL: ${message}` },
+          ],
+        }),
       }),
-    });
+      fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+        body: JSON.stringify({
+          model: docRoute.model,
+          temperature: 0.0,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: VALIDATION_SYSTEM_PROMPT_PARALLEL },
+            { role: "user",   content: `DOKUMENT:\n\n${docText}` },
+          ],
+        }),
+      }),
+    ]);
     aiLatencyMs = Date.now() - t0;
 
+    // ── Behandl doc QA-svar ───────────────────────────────────────────────
     if (!docRes.ok) {
       const txt = await docRes.text().catch(() => docRes.statusText);
       console.error(`[chat] DOC_MODE OpenAI error ${docRes.status}: ${txt}`);
@@ -668,6 +695,74 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     if (overlap < 5) {
       finalAnswer = "Jeg kan ikke finde det i jeres interne data.";
       console.log("[chat] GROUNDING_OVERRIDE applied");
+    }
+
+    // ── Behandl valideringsresultat (non-fatal) ────────────────────────────
+    try {
+      if (valRes.ok) {
+        const vData = await valRes.json() as {
+          choices?: { message?: { content?: string } }[];
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
+        };
+        const isReadable = docText.trim().length > 5;
+        const isTechnicalIssue = (s: string) => {
+          const t = s.toLowerCase();
+          return t.includes("format") || t.includes("behandles") || t.includes("parse") || t.includes("kunne ikke læses");
+        };
+        interface ValResult {
+          status: "ok" | "warning" | "review_required";
+          completeness_summary: string;
+          trust_summary: string;
+          issues: string[];
+          recommendation: string;
+        }
+        let vParsed: ValResult;
+        let classificationCode: string | null = null;
+        try {
+          vParsed = JSON.parse(vData.choices?.[0]?.message?.content ?? "{}") as ValResult;
+          if (!vParsed.status) throw new Error("missing status");
+          if (isReadable && (vParsed.issues ?? []).some(isTechnicalIssue)) classificationCode = "LOW_CONFIDENCE";
+          if (!vParsed.recommendation || vParsed.recommendation.toLowerCase().includes("upload dokumentet igen")) {
+            vParsed.recommendation = isReadable ? "Send til manuel gennemgang." : "Kontrollér dokumentets format eller send til manuel gennemgang.";
+          }
+        } catch {
+          classificationCode = isReadable ? "LOW_CONFIDENCE" : "PARSE_ERROR";
+          vParsed = isReadable ? {
+            status: "review_required",
+            completeness_summary: "Dokumentet er læsbart, men kan ikke verificeres som autentisk.",
+            trust_summary: "Ingen verificerbar afsender eller signatur fundet.",
+            issues: ["Ingen verificerbar afsender", "Ingen signatur eller metadata"],
+            recommendation: "Send til manuel gennemgang.",
+          } : {
+            status: "review_required",
+            completeness_summary: "Dokumentet kunne ikke analyseres.",
+            trust_summary: "Kunne ikke vurderes.",
+            issues: ["Dokumentets indhold kunne ikke behandles korrekt"],
+            recommendation: "Kontrollér dokumentets format eller send til manuel gennemgang.",
+          };
+        }
+        const STATUS_LABELS: Record<ValResult["status"], string> = {
+          ok: "✅ OK", warning: "⚠️ Advarsel", review_required: "🔍 Kræver gennemgang",
+        };
+        const issueLines = vParsed.issues.length > 0
+          ? vParsed.issues.map(i => `  • ${i}`).join("\n")
+          : "  Ingen problemer fundet.";
+        validationText = [
+          `**Valideringsstatus:** ${STATUS_LABELS[vParsed.status] ?? vParsed.status}`,
+          "",
+          ...(classificationCode ? [`**ClassificationCode:** ${classificationCode}`, ""] : []),
+          `**Fuldstændighed:** ${vParsed.completeness_summary}`,
+          "",
+          `**Troværdighed:** ${vParsed.trust_summary}`,
+          "",
+          `**Problemer:**\n${issueLines}`,
+          "",
+          `**Anbefaling:** ${vParsed.recommendation}`,
+        ].join("\n");
+        console.log(`[chat] PARALLEL_VALIDATION status=${vParsed.status} code=${classificationCode}`);
+      }
+    } catch (e) {
+      console.warn("[chat] Parallel validation failed (non-fatal):", (e as Error).message);
     }
   } else if (isGroundedUseCase(useCase)) {
     // ── INTERNAL-ONLY GATE: grounded use case + ingen intern data → blokér ─
@@ -733,6 +828,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   return json(res, {
     answer:              finalAnswer,
+    document_validation: validationText,
     conversation_id:     conversationId,
     expert:              { id: expert.id, name: expert.name, category: expert.category ?? null },
     source:              responseSource,

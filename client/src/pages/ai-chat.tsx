@@ -19,6 +19,7 @@ type ConfidenceBand  = "high" | "medium" | "low" | "unknown";
 
 interface ChatResponse {
   answer: string;
+  document_validation?: string | null;
   conversation_id: string;
   expert: { id: string; name: string; category: string | null };
   source?: { type: "expert" | "system"; name?: string };
@@ -283,34 +284,46 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
   const [expanded, setExpanded] = useState(false);
   const isExpert = response.source?.type === "expert";
 
-  // Validation: parse text → view-model → dedicated structured card
-  const parsedValidation = parseValidationText(text);
-  if (parsedValidation) {
-    return <ValidationCard vm={mapValidationToViewModel(parsedValidation)} warnings={response.warnings} />;
+  // Ny arkitektur: document_validation-feltet bærer valideringsresultat separat fra svaret.
+  // Legacy: text starter med "**Valideringsstatus:**" (gamle beskeder uden doc QA).
+  const docValidation = response.document_validation
+    ? parseValidationText(response.document_validation)
+    : null;
+  const legacyValidation = !docValidation ? parseValidationText(text) : null;
+
+  // Legacy: kun validering, intet svar → vis kun ValidationCard
+  if (legacyValidation) {
+    return <ValidationCard vm={mapValidationToViewModel(legacyValidation)} warnings={response.warnings} />;
   }
 
-  // Normal grounded Q&A card
+  // Normal grounded Q&A card (med evt. validering ovenover)
   const hasDetails = response.used_sources.length > 0 || response.used_rules.length > 0;
   return (
-    <div className="space-y-2.5">
-      <div className="flex items-center justify-between gap-2">
-        <span className="text-xs font-semibold text-muted-foreground">
-          {isExpert ? (response.source?.name ?? response.expert.name) : "Systemsvar"}
-        </span>
-        <StatusBadge response={response} />
-      </div>
+    <div className="space-y-3">
+      {/* Valideringskort — vises øverst når dokumentet er valideret */}
+      {docValidation && (
+        <ValidationCard vm={mapValidationToViewModel(docValidation)} warnings={[]} />
+      )}
 
-      {response.warnings.map((w, i) => (
-        <div key={i} className="flex items-start gap-2 text-xs text-amber-300 bg-amber-400/5 border border-amber-400/20 rounded-lg p-2">
-          <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />{w}
+      <div className="space-y-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs font-semibold text-muted-foreground">
+            {isExpert ? (response.source?.name ?? response.expert.name) : "Systemsvar"}
+          </span>
+          <StatusBadge response={response} />
         </div>
-      ))}
 
-      <div className="text-sm leading-relaxed whitespace-pre-wrap text-foreground" data-testid="text-chat-answer">
-        {text}
-      </div>
+        {response.warnings.map((w, i) => (
+          <div key={i} className="flex items-start gap-2 text-xs text-amber-300 bg-amber-400/5 border border-amber-400/20 rounded-lg p-2">
+            <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />{w}
+          </div>
+        ))}
 
-      {(hasDetails || response.used_sources.length > 0) && (
+        <div className="text-sm leading-relaxed whitespace-pre-wrap text-foreground" data-testid="text-chat-answer">
+          {text}
+        </div>
+
+        {(hasDetails || response.used_sources.length > 0) && (
         <div className="flex items-center justify-between pt-0.5">
           {response.used_sources.length > 0 && (
             <p className="text-xs text-muted-foreground flex items-center gap-1">
@@ -362,6 +375,7 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
           )}
         </div>
       )}
+      </div>
     </div>
   );
 }
