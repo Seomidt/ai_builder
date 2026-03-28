@@ -110,9 +110,10 @@ export async function enqueueOcrJob(
         ],
       );
     } catch (insertErr: unknown) {
-      // Unique constraint violation (23505): race — another request inserted
-      // the same hash between our SELECT and INSERT. Fetch existing row.
       const pgCode = (insertErr as any)?.code;
+
+      // 23505 — unique constraint violation (race): another request inserted
+      // the same hash between our SELECT and INSERT. Fetch existing row.
       if (pgCode === "23505" && payload.fileHash) {
         const race = await client.query<{ id: string }>(
           `SELECT id FROM chat_ocr_tasks WHERE tenant_id = $1 AND file_hash = $2 LIMIT 1`,
@@ -120,6 +121,22 @@ export async function enqueueOcrJob(
         );
         if (race.rows[0]) return { id: race.rows[0].id, reused: true };
       }
+
+      // 42703 — column does not exist: file_hash column not yet migrated in prod.
+      // Retry without file_hash column — job created without dedup, but works.
+      if (pgCode === "42703") {
+        console.warn("[enqueueOcrJob] file_hash column missing — retrying without it");
+        const fallback = await client.query<{ id: string }>(
+          `INSERT INTO chat_ocr_tasks
+             (tenant_id, user_id, r2_key, filename, content_type,
+              status, attempt_count, max_attempts, retry_count)
+           VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0)
+           RETURNING id`,
+          [payload.tenantId, payload.userId, payload.r2Key, payload.filename, payload.contentType],
+        );
+        if (fallback.rows[0]) return { id: fallback.rows[0].id, reused: false };
+      }
+
       throw insertErr;
     }
 
