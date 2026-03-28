@@ -190,7 +190,7 @@ function mapValidationToViewModel(parsed: ParsedValidation): ValidationCardViewM
 const VALIDATION_STATUS_CONFIG: Record<ValidationCardViewModel["status"], { label: string; color: string; Icon: typeof CheckCircle2 }> = {
   ok:               { label: "Godkendt",         color: "text-green-400 border-green-400/30 bg-green-400/10",    Icon: CheckCircle2 },
   warning:          { label: "Advarsel",          color: "text-yellow-400 border-yellow-400/30 bg-yellow-400/10", Icon: AlertTriangle },
-  review_required:  { label: "Kræver gennemgang", color: "text-amber-400 border-amber-400/30 bg-amber-400/10",   Icon: ShieldAlert   },
+  review_required:  { label: "Kræver gennemgang", color: "text-red-400 border-red-400/30 bg-red-400/10",     Icon: ShieldAlert   },
 };
 
 function ValidationCard({ vm, warnings }: { vm: ValidationCardViewModel; warnings: string[] }) {
