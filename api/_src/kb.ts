@@ -657,8 +657,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   if (path === "/healthz" && method === "GET") {
     const steps: Record<string, unknown> = {};
     try {
-      steps.env_db = !!(process.env.SUPABASE_DB_POOL_URL || process.env.DATABASE_URL);
-      steps.env_url = process.env.SUPABASE_DB_POOL_URL?.slice(0, 30) ?? "MISSING";
+      steps.env_blissops = process.env.BLISSOPS_PG_URL?.slice(0, 30) ?? "MISSING";
+      steps.env_supabase_db = process.env.SUPABASE_DATABASE_URL?.slice(0, 30) ?? "MISSING";
+      steps.env_pool_url = process.env.SUPABASE_DB_POOL_URL?.slice(0, 30) ?? "MISSING";
+      steps.env_db = !!(process.env.BLISSOPS_PG_URL || process.env.SUPABASE_DATABASE_URL || process.env.DATABASE_URL);
 
       steps.step = "getDb";
       const db = await getDb();

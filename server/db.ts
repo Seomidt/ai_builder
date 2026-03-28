@@ -37,10 +37,16 @@ let _pool: pg.Pool | null = null;
 let _db: ReturnType<typeof drizzle> | null = null;
 
 function getConnectionString(): string {
-  const cs = process.env.SUPABASE_DB_POOL_URL || process.env.DATABASE_URL;
+  // BLISSOPS_PG_URL is our private name — immune to Vercel's Supabase integration
+  // overriding SUPABASE_DB_POOL_URL with the REST URL (https://).
+  // Fallback chain: BLISSOPS_PG_URL → SUPABASE_DATABASE_URL → DATABASE_URL
+  const cs =
+    process.env.BLISSOPS_PG_URL ||
+    process.env.SUPABASE_DATABASE_URL ||
+    process.env.DATABASE_URL;
   if (!cs) {
     throw new Error(
-      "No database connection string found. Set SUPABASE_DB_POOL_URL or DATABASE_URL.",
+      "No database connection string found. Set BLISSOPS_PG_URL or DATABASE_URL.",
     );
   }
   return cs;
@@ -49,9 +55,12 @@ function getConnectionString(): string {
 function initPool(): pg.Pool {
   if (_pool) return _pool;
   const connectionString = getConnectionString();
-  const isSupabase = !!process.env.SUPABASE_DB_POOL_URL;
+  const isSupabase =
+    connectionString.includes("supabase.com") ||
+    connectionString.includes("supabase.co");
   _pool = new Pool({
     connectionString,
+    max: 3,
     ...(isSupabase ? { ssl: { rejectUnauthorized: false } } : {}),
   });
   return _pool;
