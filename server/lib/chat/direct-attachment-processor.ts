@@ -37,16 +37,52 @@ export interface DirectProcessResult {
   source:         "r2_direct";
 }
 
-// ── PDF lazy loader (same pattern as api/_src/extract.ts) ─────────────────────
+// ── PDF extraction — supports pdf-parse v2 (class API) ────────────────────────
+//
+// pdf-parse v2 uses a class-based API: new PDFParse({ data: buf }).getText()
+// The getText() call completes quickly even for scanned PDFs (returns empty text).
+// We wrap in a timeout to guard against truly pathological cases.
 
-function loadPdfParse(): (buf: Buffer) => Promise<{ text: string; numpages: number }> {
-  const g = globalThis as any;
-  if (!g.DOMMatrix)  g.DOMMatrix  = class DOMMatrix  { constructor() { (this as any).a=1;(this as any).b=0;(this as any).c=0;(this as any).d=1;(this as any).e=0;(this as any).f=0; } };
-  if (!g.ImageData)  g.ImageData  = class ImageData  {};
-  if (!g.Path2D)     g.Path2D     = class Path2D     {};
-  if (!g.DOMPoint)   g.DOMPoint   = class DOMPoint   {};
+const PDF_PARSE_TIMEOUT_MS = 25_000; // 25s — safe within Vercel 60s limit
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout: ${label} overskred ${ms / 1000}s`)), ms),
+    ),
+  ]);
+}
+
+async function extractPdfText(buf: Buffer): Promise<{ text: string; numpages: number }> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  return require("pdf-parse");
+  const pdfMod = require("pdf-parse");
+
+  // pdf-parse v2: class-based API
+  if (pdfMod.PDFParse) {
+    const parser = new pdfMod.PDFParse({ data: buf });
+    const result = await withTimeout(
+      parser.getText(),
+      PDF_PARSE_TIMEOUT_MS,
+      "PDF-parsing (v2)",
+    );
+    // getText() returns { text: string, total: number, pages: [...] }
+    const text   = typeof result.text === "string" ? result.text : "";
+    const npages = typeof result.total === "number" ? result.total : 0;
+    return { text, numpages: npages };
+  }
+
+  // pdf-parse v1: function-based API (legacy fallback)
+  if (typeof pdfMod === "function") {
+    const result = await withTimeout(
+      pdfMod(buf, { max: 50 }),
+      PDF_PARSE_TIMEOUT_MS,
+      "PDF-parsing (v1)",
+    );
+    return { text: result.text ?? "", numpages: result.numpages ?? 0 };
+  }
+
+  throw new Error("pdf-parse modul har ukendt API — understøtter hverken v1 (function) eller v2 (class)");
 }
 
 // ── Text MIME check ───────────────────────────────────────────────────────────
@@ -121,19 +157,21 @@ export async function processDirectAttachment(
     return { filename, mime_type: contentType, char_count: text.length, extracted_text: text, status: "ok", source: "r2_direct" };
   }
 
-  // PDF
+  // PDF — extract text with timeout guard
   if (isPdfMime(contentType, filename)) {
     try {
-      const pdfParse = loadPdfParse();
-      const result   = await pdfParse(buf);
-      const text     = (result.text ?? "").trim();
+      const { text: rawText, numpages } = await extractPdfText(buf);
+      const text = (rawText ?? "").trim();
       if (!text) {
-        return { filename, mime_type: contentType, char_count: 0, extracted_text: "", status: "error", message: "PDF indeholder ingen læsbar tekst (muligvis scanned billede)", source: "r2_direct" };
+        return {
+          filename, mime_type: contentType, char_count: 0, extracted_text: "",
+          status: "error",
+          message: "PDF indeholder ingen læsbar tekst. Dokumentet er sandsynligvis scannet (billede-baseret PDF). Kopiér teksten manuelt og indsæt den direkte i chatten.",
+          source: "r2_direct",
+        };
       }
-      // Mode A files are ≤ 4 MB — typical extracted text is well within 40K chars
-      // We still cap at 80K to be safe for API token limits
       const capped = text.slice(0, 80_000);
-      console.log(`[direct-processor] pdf extracted pages=${result.numpages} chars_raw=${text.length} chars_used=${capped.length}`);
+      console.log(`[direct-processor] pdf extracted pages=${numpages} chars_raw=${text.length} chars_used=${capped.length}`);
       return { filename, mime_type: contentType, char_count: capped.length, extracted_text: capped, status: "ok", source: "r2_direct" };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

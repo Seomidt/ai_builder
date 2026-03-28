@@ -2,17 +2,40 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { authenticate }                         from "./_lib/auth";
 import { json, err }                            from "./_lib/response";
 import Busboy                                   from "busboy";
-// pdf-parse 2.x bruger pdfjs-dist som kræver DOMMatrix (browser API).
-// Vi laver et lazy require + global stub FØR load for at undgå crash i Node.js.
-function loadPdfParse(): (buf: Buffer) => Promise<{ text: string; numpages: number }> {
-  // Minimal stubs til DOM-APIs som pdfjs-dist forventer
+// pdf-parse — supports both v1 (function) and v2 (class-based) API.
+// v2 with PDFParse class is fast even on scanned PDFs (returns empty text quickly).
+const PDF_PARSE_TIMEOUT_MS = 25_000;
+
+function withPdfTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<never>((_, r) =>
+      setTimeout(() => r(new Error(`PDF-parsing overskred ${ms / 1000}s`)), ms),
+    ),
+  ]);
+}
+
+async function parsePdfBuffer(buf: Buffer): Promise<{ text: string; numpages: number }> {
   const g = globalThis as any;
-  if (!g.DOMMatrix)    g.DOMMatrix    = class DOMMatrix    { constructor() { (this as any).a=1;(this as any).b=0;(this as any).c=0;(this as any).d=1;(this as any).e=0;(this as any).f=0; } };
-  if (!g.ImageData)    g.ImageData    = class ImageData    {};
-  if (!g.Path2D)       g.Path2D       = class Path2D       {};
-  if (!g.DOMPoint)     g.DOMPoint     = class DOMPoint     {};
+  if (!g.DOMMatrix) g.DOMMatrix = class DOMMatrix { constructor() { (this as any).a=1;(this as any).b=0;(this as any).c=0;(this as any).d=1;(this as any).e=0;(this as any).f=0; } };
+  if (!g.ImageData) g.ImageData = class ImageData {};
+  if (!g.Path2D)    g.Path2D    = class Path2D {};
+  if (!g.DOMPoint)  g.DOMPoint  = class DOMPoint {};
   // eslint-disable-next-line @typescript-eslint/no-var-requires
-  return require("pdf-parse");
+  const pdfMod = require("pdf-parse");
+
+  // v2: class API
+  if (pdfMod.PDFParse) {
+    const parser = new pdfMod.PDFParse({ data: buf });
+    const result = await withPdfTimeout(parser.getText(), PDF_PARSE_TIMEOUT_MS);
+    return { text: typeof result.text === "string" ? result.text : "", numpages: result.total ?? 0 };
+  }
+  // v1: function API
+  if (typeof pdfMod === "function") {
+    const result = await withPdfTimeout(pdfMod(buf, { max: 50 }), PDF_PARSE_TIMEOUT_MS);
+    return { text: result.text ?? "", numpages: result.numpages ?? 0 };
+  }
+  throw new Error("pdf-parse: ukendt API");
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -55,10 +78,12 @@ async function extractFromBuffer(
   // ── PDF ────────────────────────────────────────────────────────────────────
   if (isPdfMime(mime, filename)) {
     try {
-      const pdfParse = loadPdfParse();
-      const result = await pdfParse(buf);
-      const text   = (result.text ?? "").trim().slice(0, 80_000);
-      if (!text) return { text: "", status: "error", message: "PDF indeholder ingen læsbar tekst (muligvis scanned billede)" };
+      const { text: rawText } = await parsePdfBuffer(buf);
+      const text = (rawText ?? "").trim().slice(0, 80_000);
+      if (!text) return {
+        text: "", status: "error",
+        message: "PDF indeholder ingen læsbar tekst. Dokumentet er sandsynligvis scannet (billede-baseret PDF). Kopiér teksten manuelt og indsæt den i chatten.",
+      };
       return { text, status: "ok" };
     } catch (e) {
       console.error("[extract] pdf-parse error:", (e as Error).message);
