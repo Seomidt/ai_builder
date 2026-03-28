@@ -1,13 +1,16 @@
 /**
- * Viden & Data — Tenant Product Page
- *
- * Upload and manage knowledge/data sources used by AI experts.
- * Backed by projects in the database.
+ * Viden & Data — Storage list page
+ * Lists tenant knowledge bases (data sources).
+ * Backed by /api/kb
  */
 
 import { useState, useEffect } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
-import { Plus, BookOpen, MoreHorizontal, FileText, Archive } from "lucide-react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
+import {
+  Plus, Database, MoreHorizontal, FileText, Archive, ChevronRight,
+  BookOpen, AlertCircle,
+} from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -30,16 +33,17 @@ import { apiRequest, ApiError } from "@/lib/queryClient";
 import { friendlyError } from "@/lib/friendlyError";
 import { useToast } from "@/hooks/use-toast";
 import { QUERY_POLICY } from "@/lib/query-policy";
-import { invalidate } from "@/lib/invalidations";
 import { usePagePerf } from "@/lib/perf";
 
-interface DataSourceRow {
+interface KnowledgeBaseRow {
   id: string;
   name: string;
   slug: string;
-  status: string;
   description: string | null;
+  status: string;
+  assetCount: number;
   createdAt: string;
+  updatedAt: string;
 }
 
 const createSchema = z.object({
@@ -53,48 +57,56 @@ const createSchema = z.object({
 
 type CreateValues = z.infer<typeof createSchema>;
 
-function DataSourceCard({
+function genSlug(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[æ]/g, "ae")
+    .replace(/[ø]/g, "oe")
+    .replace(/[å]/g, "aa")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+function SourceCard({
   source,
+  onOpen,
   onArchive,
 }: {
-  source: DataSourceRow;
-  onArchive: (id: string) => void;
+  source: KnowledgeBaseRow;
+  onOpen: () => void;
+  onArchive: () => void;
 }) {
   return (
     <Card
       data-testid={`datasource-card-${source.id}`}
-      className="bg-card border-card-border hover:border-primary/30 transition-all duration-200 hover:-translate-y-0.5 relative overflow-hidden"
+      className="group bg-card border-border hover:border-primary/30 transition-all duration-200 cursor-pointer relative overflow-hidden"
+      onClick={onOpen}
     >
-      <span className="absolute left-0 top-0 bottom-0 w-0.5 rounded-r-full bg-secondary/40" />
-      <CardContent className="pt-4 pb-4 pl-5">
+      <span className="absolute left-0 top-0 bottom-0 w-0.5 rounded-r-full bg-amber-500/40" />
+      <CardContent className="pt-4 pb-4 pl-5 pr-4">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="flex items-center justify-center w-8 h-8 rounded-md bg-secondary/10 shrink-0">
-              <FileText className="w-4 h-4 text-secondary" />
+            <div className="flex items-center justify-center w-8 h-8 rounded-md shrink-0"
+              style={{ background: "rgba(245,158,11,0.10)", border: "1px solid rgba(245,158,11,0.18)" }}>
+              <Database className="w-4 h-4 text-amber-400" />
             </div>
             <div className="min-w-0">
               <p className="text-sm font-semibold text-card-foreground truncate">{source.name}</p>
               <p className="text-xs text-muted-foreground font-mono truncate">{source.slug}</p>
             </div>
           </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <Badge
-              variant="outline"
-              className={`text-xs border capitalize ${
-                source.status === "active"
-                  ? "text-green-400 border-green-500/30 bg-green-500/10"
-                  : "text-muted-foreground"
-              }`}
-            >
-              {source.status === "active" ? "Aktiv" : source.status}
+          <div className="flex items-center gap-1.5 shrink-0">
+            <Badge variant="outline" className="text-xs text-green-400 border-green-500/30 bg-green-500/10">
+              Aktiv
             </Badge>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-6 w-6"
+                  className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
                   data-testid={`datasource-menu-${source.id}`}
+                  onClick={(e) => e.stopPropagation()}
                 >
                   <MoreHorizontal className="w-3.5 h-3.5" />
                 </Button>
@@ -102,7 +114,7 @@ function DataSourceCard({
               <DropdownMenuContent align="end">
                 <DropdownMenuItem
                   className="text-destructive"
-                  onClick={() => onArchive(source.id)}
+                  onClick={(e) => { e.stopPropagation(); onArchive(); }}
                   data-testid={`archive-datasource-${source.id}`}
                 >
                   <Archive className="w-3.5 h-3.5 mr-2" /> Arkivér
@@ -115,9 +127,16 @@ function DataSourceCard({
         {source.description && (
           <p className="text-xs text-muted-foreground mt-3 line-clamp-2">{source.description}</p>
         )}
-        <p className="text-xs text-muted-foreground/40 mt-3">
-          Tilføjet {new Date(source.createdAt).toLocaleDateString("da-DK")}
-        </p>
+
+        <div className="flex items-center justify-between mt-3">
+          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+            <FileText className="w-3 h-3" />
+            <span>{source.assetCount} {source.assetCount === 1 ? "fil" : "filer"}</span>
+          </div>
+          <span className="flex items-center gap-0.5 text-xs text-muted-foreground/60 group-hover:text-primary transition-colors">
+            Åbn <ChevronRight className="w-3 h-3" />
+          </span>
+        </div>
       </CardContent>
     </Card>
   );
@@ -126,11 +145,13 @@ function DataSourceCard({
 export default function VidenData() {
   usePagePerf("viden-data");
   const { toast } = useToast();
+  const [, navigate] = useLocation();
   const [showCreate, setShowCreate] = useState(false);
+  const queryClient = useQueryClient();
 
-  const { data: sources, isLoading } = useQuery<DataSourceRow[]>({
-    queryKey: ["/api/projects"],
-    ...QUERY_POLICY.list,
+  const { data: sources, isLoading, isError } = useQuery<KnowledgeBaseRow[]>({
+    queryKey: ["/api/kb"],
+    ...QUERY_POLICY.staticList,
   });
 
   const form = useForm<CreateValues>({
@@ -141,21 +162,14 @@ export default function VidenData() {
   const watchedName = form.watch("name");
   useEffect(() => {
     if (!watchedName) return;
-    const slug = watchedName
-      .toLowerCase()
-      .replace(/[æ]/g, "ae")
-      .replace(/[ø]/g, "oe")
-      .replace(/[å]/g, "aa")
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "");
-    form.setValue("slug", slug, { shouldValidate: false });
+    form.setValue("slug", genSlug(watchedName), { shouldValidate: false });
   }, [watchedName]);
 
   const createMutation = useMutation({
-    mutationFn: (values: CreateValues) => apiRequest("POST", "/api/projects", values),
+    mutationFn: (values: CreateValues) => apiRequest("POST", "/api/kb", values),
     onSuccess: () => {
-      toast({ title: "Datakilde tilføjet" });
-      invalidate(["/api/projects"]);
+      toast({ title: "Datakilde oprettet" });
+      queryClient.invalidateQueries({ queryKey: ["/api/kb"] });
       setShowCreate(false);
       form.reset();
     },
@@ -164,18 +178,14 @@ export default function VidenData() {
   });
 
   const archiveMutation = useMutation({
-    mutationFn: (id: string) =>
-      apiRequest("POST", `/api/projects/${id}/archive`, {}),
+    mutationFn: (id: string) => apiRequest("PATCH", `/api/kb/${id}/archive`, {}),
     onSuccess: () => {
       toast({ title: "Datakilde arkiveret" });
-      invalidate(["/api/projects"]);
+      queryClient.invalidateQueries({ queryKey: ["/api/kb"] });
     },
     onError: (err: ApiError | Error) =>
       toast({ title: "Fejl", description: friendlyError(err), variant: "destructive" }),
   });
-
-  const active = sources?.filter((s) => s.status === "active") ?? [];
-  const archived = sources?.filter((s) => s.status !== "active") ?? [];
 
   return (
     <div className="p-4 sm:p-6 space-y-6 max-w-4xl" data-testid="page-viden-data">
@@ -185,19 +195,16 @@ export default function VidenData() {
           <div className="flex items-center gap-2.5 mb-1">
             <div
               className="flex items-center justify-center w-8 h-8 rounded-lg shrink-0"
-              style={{
-                background: "rgba(245,158,11,0.10)",
-                border: "1px solid rgba(245,158,11,0.18)",
-              }}
+              style={{ background: "rgba(245,158,11,0.10)", border: "1px solid rgba(245,158,11,0.18)" }}
             >
-              <BookOpen className="w-4 h-4 text-secondary" />
+              <BookOpen className="w-4 h-4 text-amber-400" />
             </div>
             <h1 className="text-xl font-bold text-foreground tracking-tight" data-testid="text-page-title">
-              Viden & Data
+              Storage
             </h1>
           </div>
           <p className="text-sm text-muted-foreground ml-10">
-            Upload dokumenter, billeder og intern viden, som jeres AI eksperter kan arbejde ud fra.
+            Upload dokumenter, billeder og video som AI eksperter arbejder ud fra.
           </p>
         </div>
         <Button
@@ -206,59 +213,51 @@ export default function VidenData() {
           className="shrink-0"
         >
           <Plus className="w-4 h-4 mr-1.5" />
-          Tilføj datakilde
+          Ny datakilde
         </Button>
       </div>
 
-      {/* Source list */}
+      {/* Content */}
       {isLoading ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {Array.from({ length: 3 }).map((_, i) => (
             <Skeleton key={i} className="h-28 rounded-xl" />
           ))}
         </div>
-      ) : active.length === 0 ? (
+      ) : isError ? (
+        <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3">
+          <AlertCircle className="w-4 h-4 text-destructive shrink-0" />
+          <p className="text-sm text-destructive">Kunne ikke hente datakilder. Prøv igen.</p>
+        </div>
+      ) : !sources?.length ? (
         <div className="text-center py-20 space-y-4">
           <div
             className="mx-auto w-14 h-14 rounded-2xl flex items-center justify-center"
             style={{ background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.15)" }}
           >
-            <BookOpen className="w-7 h-7 text-secondary/60" />
+            <Database className="w-7 h-7 text-amber-400/60" />
           </div>
           <div>
             <p className="text-sm font-semibold text-foreground mb-1">Ingen datakilder endnu</p>
-            <p className="text-sm text-muted-foreground">
-              Tilføj din første datakilde — f.eks. en intern vidensbase, et regelsæt eller et dokument.
+            <p className="text-sm text-muted-foreground max-w-xs mx-auto">
+              Opret din første datakilde — upload dokumenter, billeder og video til AI eksperterne.
             </p>
           </div>
           <Button onClick={() => setShowCreate(true)} data-testid="button-empty-add-datasource">
             <Plus className="w-4 h-4 mr-1.5" />
-            Tilføj datakilde
+            Ny datakilde
           </Button>
         </div>
       ) : (
-        <div className="space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {active.map((s) => (
-              <DataSourceCard
-                key={s.id}
-                source={s}
-                onArchive={(id) => archiveMutation.mutate(id)}
-              />
-            ))}
-          </div>
-          {archived.length > 0 && (
-            <div>
-              <p className="text-xs text-muted-foreground/50 uppercase tracking-widest font-bold mb-3">
-                Arkiverede
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 opacity-50">
-                {archived.map((s) => (
-                  <DataSourceCard key={s.id} source={s} onArchive={() => {}} />
-                ))}
-              </div>
-            </div>
-          )}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          {sources.map((s) => (
+            <SourceCard
+              key={s.id}
+              source={s}
+              onOpen={() => navigate(`/viden-data/${s.id}`)}
+              onArchive={() => archiveMutation.mutate(s.id)}
+            />
+          ))}
         </div>
       )}
 
@@ -267,8 +266,8 @@ export default function VidenData() {
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
-              <BookOpen className="w-4 h-4 text-secondary" />
-              Tilføj datakilde
+              <Database className="w-4 h-4 text-amber-400" />
+              Opret datakilde
             </DialogTitle>
           </DialogHeader>
           <Form {...form}>
@@ -301,7 +300,7 @@ export default function VidenData() {
                     <FormLabel>Slug</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="forsikringsvilkar-2024"
+                        placeholder="forsikringsvilkaar-2024"
                         className="font-mono text-sm"
                         data-testid="input-datasource-slug"
                         {...field}
@@ -342,7 +341,7 @@ export default function VidenData() {
                   disabled={createMutation.isPending}
                   data-testid="button-submit-add-datasource"
                 >
-                  {createMutation.isPending ? "Tilføjer..." : "Tilføj datakilde"}
+                  {createMutation.isPending ? "Opretter..." : "Opret datakilde"}
                 </Button>
               </DialogFooter>
             </form>
