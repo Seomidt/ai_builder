@@ -655,15 +655,32 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   // ── /api/kb/healthz — public diagnostic endpoint (no auth) ────────────────
   if (path === "/healthz" && method === "GET") {
+    const steps: Record<string, unknown> = {};
     try {
+      steps.env_db = !!(process.env.SUPABASE_DB_POOL_URL || process.env.DATABASE_URL);
+      steps.env_url = process.env.SUPABASE_DB_POOL_URL?.slice(0, 30) ?? "MISSING";
+
+      steps.step = "getDb";
       const db = await getDb();
+      steps.db_ok = true;
+
+      steps.step = "getSchema";
       const { knowledgeBases } = await getSchema();
+      steps.schema_ok = true;
+
+      steps.step = "getOrm";
       const { count } = await getOrm();
-      const [{ cnt }] = await db.select({ cnt: count() }).from(knowledgeBases);
-      json(res, 200, { ok: true, kb_count: Number(cnt), ts: new Date().toISOString() });
+      steps.orm_ok = true;
+
+      steps.step = "query";
+      const rows = await db.select({ cnt: count() }).from(knowledgeBases);
+      steps.rows = rows;
+      const cnt = rows[0]?.cnt;
+      json(res, 200, { ok: true, kb_count: Number(cnt ?? 0), steps, ts: new Date().toISOString() });
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      json(res, 500, { ok: false, error: message, ts: new Date().toISOString() });
+      const message = err instanceof Error ? err.message : JSON.stringify(err);
+      const stack = err instanceof Error ? err.stack?.slice(0, 500) : undefined;
+      json(res, 500, { ok: false, error: message, stack, steps, ts: new Date().toISOString() });
     }
     return;
   }
