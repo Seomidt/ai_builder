@@ -1,14 +1,16 @@
 /**
- * Similarity Control Layer — Storage 1.7
+ * Similarity Control Layer — Storage 1.7 / 1.7A
  *
  * Central control plane for the Similar Cases engine.
  *
  * Responsibilities:
- *   A. shouldRunSimilarity()   — intent-based decision (NOT keyword-primary)
- *   B. resolveSimilarityThresholds() — configurable per-channel minScore
- *   C. SimilarityCache        — in-memory tenant-safe cache with TTL
- *   D. SimilarityRateLimiter  — per-tenant rate protection
- *   E. logSimilarityEvent()   — structured observability (SOC2-ready)
+ *   A. shouldRunSimilarity()         — intent-based decision (NOT keyword-primary)
+ *   B. resolveMinScore()             — configurable per-channel minScore
+ *   C. ISimilarityCache + impl       — cache abstraction (swap-ready for Redis/Upstash)
+ *   D. SimilarityRateLimiter         — per-tenant rate protection
+ *   E. shouldAllowSimilarityByBudget — budget-aware guard (reuses guards.ts)
+ *   F. resolveSimilarityConfidence() — central confidence mapping (single source of truth)
+ *   G. logSimilarityEvent()          — structured observability (SOC2-ready)
  *
  * Design principles:
  *   - Language-agnostic: no hardcoded Danish/English strings as primary logic
@@ -16,11 +18,12 @@
  *   - Tenant-safe: cache and rate limits are always tenant-scoped
  *   - Non-blocking: errors in this layer must never disrupt the primary chat flow
  *   - Configurable: thresholds and limits are in one place, easy to extend to DB
+ *   - Abstraction-ready: cache layer has interface — Redis/Upstash can plug in cleanly
  */
 
 import type { AiUseCase } from "../ai/types";
 
-// ─── Part C: Locale-safe types (exported for use in kb-similar + chat-runner) ─
+// ─── Locale-safe types ────────────────────────────────────────────────────────
 
 /**
  * Why a result matched — locale-safe code for frontend localisation.
@@ -30,13 +33,13 @@ export type WhyMatchedCode = "vector_match" | "lexical_match" | "hybrid_match";
 
 /**
  * Confidence band for a similar case result.
- * Derived from score + retrieval channel.
+ * Derived from score + retrieval channel via resolveSimilarityConfidence().
  */
 export type SimilarConfidenceCode = "high" | "medium" | "low" | "unknown";
 
 /**
  * Why similarity was (or was not) triggered.
- * Returned in the response meta-structure for frontend/debug transparency.
+ * Returned in response meta-structure for frontend/debug transparency.
  */
 export type SimilarityDecisionReason =
   | "use_case_rule"       // triggered because useCase mandates retrieval
@@ -50,36 +53,25 @@ export type SimilarityDecisionReason =
 /**
  * What happened with similar-cases for a given chat turn.
  * Included in ChatRunResult for frontend/debug.
+ * All values are locale-safe codes — frontend localises to user language.
  */
 export type SimilarCasesStatusCode =
-  | "success"             // found and returned
-  | "no_matches"          // retrieval ran but no results above threshold
-  | "not_triggered"       // decision layer said skip
-  | "rate_limited"        // skipped due to rate limit
-  | "cache_hit"           // served from cache
-  | "below_threshold"     // results existed but all filtered by score
-  | "error_suppressed";   // exception caught, silently suppressed
+  | "success"              // found and returned
+  | "no_matches"           // retrieval ran but no results above threshold
+  | "not_triggered"        // decision layer said skip
+  | "rate_limited"         // skipped due to rate limit
+  | "cache_hit"            // served from cache
+  | "below_threshold"      // results existed but all filtered by score
+  | "skipped_budget_guard" // skipped because tenant AI budget is exhausted/blocked
+  | "error_suppressed";    // exception caught, silently suppressed
 
 // ─── Part A: Intent-based similarity decision ─────────────────────────────────
-
-/**
- * Rules for when similarity search should run.
- *
- * Priority order (evaluated in sequence, first match wins):
- *   1. use_case_rule  — explicit route/use-case mandates retrieval
- *   2. expert_config  — expert routingHints contains similarityMode
- *   3. query_shape    — question structure + length signals retrieval intent
- *   4. fallback_keyword — weak keyword heuristic (secondary, last resort)
- *   5. not_triggered  — default: skip
- *
- * This must work without language-specific hardcoding.
- */
 
 interface ShouldRunParams {
   message:    string;
   useCase?:   AiUseCase | null;
   expertRoutingHints?: Record<string, unknown> | null;
-  hasKnowledgeBases?: boolean;  // skip if expert has no KBs at all
+  hasKnowledgeBases?: boolean;
 }
 
 interface SimilarityDecision {
@@ -93,19 +85,13 @@ const SIMILARITY_USE_CASES = new Set<AiUseCase>([
   "grounded_chat",
 ]);
 
-/**
- * Question-shape heuristics (language-agnostic):
- * - ends with "?"
- * - starts with interrogative char-patterns (wh*, how*, what*, etc. — language-agnostic check: any word < 5 chars at start)
- * - message is longer than MIN_QUERY_CHARS (real question, not a trivial command)
- */
 const MIN_QUERY_CHARS = 20;
-const MAX_QUERY_CHARS = 8_000; // beyond this length, skip (document upload mode)
+const MAX_QUERY_CHARS = 8_000;
 
 /**
- * Weak keyword fallback list — language-agnostic approach using common roots.
- * NOT the primary decision mechanism. Only used if all other rules fail.
- * These are broad enough to catch multiple European languages without brittle exact-match lists.
+ * Weak keyword fallback list — language-agnostic root patterns.
+ * NOT the primary decision mechanism. Only triggers if all structural rules fail.
+ * Covers common European languages without maintaining separate brittle keyword lists.
  */
 const SIMILARITY_KEYWORD_PATTERNS = [
   /\bsimilar\b/i,       // EN
@@ -127,49 +113,45 @@ const SIMILARITY_KEYWORD_PATTERNS = [
   /\bsimilar\w*\b/i,    // ES/PT: similar
 ];
 
+/**
+ * Decide whether similarity search should run for a chat turn.
+ *
+ * Priority (first match wins):
+ *   1. use_case_rule  — explicit useCase mandates retrieval
+ *   2. expert_config  — expert routingHints.similarityMode = "always" | "never"
+ *   3. query_shape    — question structure + sufficient length (language-agnostic)
+ *   4. fallback_keyword — weak cross-language root patterns (last resort)
+ *   5. not_triggered  — default: skip
+ */
 export function shouldRunSimilarity(params: ShouldRunParams): SimilarityDecision {
   const { message, useCase, expertRoutingHints, hasKnowledgeBases } = params;
 
-  // Never run if expert has no knowledge bases
   if (hasKnowledgeBases === false) {
     return { shouldRun: false, decisionReason: "not_triggered" };
   }
 
   const msgLen = message.trim().length;
-
-  // Never run on very short or very long inputs
   if (msgLen < MIN_QUERY_CHARS || msgLen > MAX_QUERY_CHARS) {
     return { shouldRun: false, decisionReason: "not_triggered" };
   }
 
-  // ── Rule 1: Use-case mandates retrieval ─────────────────────────────────
   if (useCase && SIMILARITY_USE_CASES.has(useCase)) {
     return { shouldRun: true, decisionReason: "use_case_rule" };
   }
 
-  // ── Rule 2: Expert routing hint enables similarity ─────────────────────
   const simMode = expertRoutingHints?.["similarityMode"];
-  if (simMode === "always") {
-    return { shouldRun: true, decisionReason: "expert_config" };
-  }
-  if (simMode === "never") {
-    return { shouldRun: false, decisionReason: "not_triggered" };
-  }
+  if (simMode === "always") return { shouldRun: true,  decisionReason: "expert_config" };
+  if (simMode === "never")  return { shouldRun: false, decisionReason: "not_triggered" };
 
-  // ── Rule 3: Query shape (language-agnostic) ─────────────────────────────
-  // A real question is: >= MIN_QUERY_CHARS, contains "?" or starts with
-  // a short word (common interrogative pattern across European languages).
   const trimmed = message.trim();
-  const hasQuestionMark = trimmed.includes("?");
-  const firstWord = trimmed.split(/\s/)[0] ?? "";
-  const startsWithShortWord = firstWord.length <= 5; // wh*, how*, was*, kan*, er*, etc.
+  const hasQuestionMark  = trimmed.includes("?");
+  const firstWord        = trimmed.split(/\s/)[0] ?? "";
+  const startsWithShortWord = firstWord.length <= 5;
 
   if (hasQuestionMark || (startsWithShortWord && msgLen >= MIN_QUERY_CHARS)) {
     return { shouldRun: true, decisionReason: "query_shape" };
   }
 
-  // ── Rule 4: Weak keyword fallback ──────────────────────────────────────
-  // This is the last resort. Language-agnostic root patterns.
   for (const pattern of SIMILARITY_KEYWORD_PATTERNS) {
     if (pattern.test(message)) {
       return { shouldRun: true, decisionReason: "fallback_keyword" };
@@ -181,16 +163,6 @@ export function shouldRunSimilarity(params: ShouldRunParams): SimilarityDecision
 
 // ─── Part B: Configurable minScore resolver ───────────────────────────────────
 
-/**
- * Min-score thresholds by retrieval channel.
- *
- * Semantics differ per channel:
- *   vector  — cosine similarity 0.0–1.0. High threshold = precision-first.
- *   hybrid  — mixed cosine + lexical. Slightly lower OK.
- *   lexical — pg_trgm + ts_rank composite. Much lower ceiling naturally.
- *
- * These are the code-level defaults. Future: override per-tenant from DB.
- */
 export interface SimilarityThresholds {
   vector:  number;
   hybrid:  number;
@@ -206,12 +178,8 @@ const DEFAULT_THRESHOLDS: SimilarityThresholds = {
 /**
  * Resolve min-score threshold for a retrieval channel.
  *
- * Override priority:
- *   1. Caller-supplied override (for future tenant DB config)
- *   2. Code-level defaults above
- *
- * @param channel - retrieval channel
- * @param overrides - optional tenant-specific threshold overrides
+ * Single source of truth for all threshold decisions.
+ * Caller may pass tenant-specific overrides (future: from DB).
  */
 export function resolveMinScore(
   channel: "vector" | "lexical" | "hybrid",
@@ -221,14 +189,32 @@ export function resolveMinScore(
   return merged[channel];
 }
 
+// ─── Part F: Central confidence mapping ──────────────────────────────────────
+
 /**
- * Derive confidence code from score + retrieval channel.
- * Bands are calibrated per channel since scores have different ceilings.
+ * resolveSimilarityConfidence — single source of truth for confidence labels.
  *
- * vector:   high >= 0.80, medium >= 0.55, low >= 0.35
- * lexical:  high >= 0.40, medium >= 0.25, low >= 0.15
+ * Maps score + retrieval channel → SimilarConfidenceCode.
+ * Bands are calibrated per channel because score semantics differ:
+ *
+ *   vector / hybrid (cosine 0.0–1.0):
+ *     high    >= 0.80   — very close match, reliable
+ *     medium  >= 0.55   — plausible match, worth showing
+ *     low     >= 0.35   — weak match, use with caution (at threshold floor)
+ *     unknown  < 0.35   — below threshold, should not normally appear
+ *
+ *   lexical (pg_trgm + ts_rank composite, rarely exceeds 0.5):
+ *     high    >= 0.40   — strong lexical overlap
+ *     medium  >= 0.25   — moderate lexical overlap
+ *     low     >= 0.15   — minimal overlap (at threshold floor)
+ *     unknown  < 0.15   — below threshold, should not normally appear
+ *
+ * Rules:
+ *   - Thresholds must be >= resolveMinScore() for their channel
+ *   - Do NOT add ML scoring here — keep deterministic + explainable
+ *   - If you change thresholds, document why in this comment
  */
-export function deriveConfidenceCode(
+export function resolveSimilarityConfidence(
   score: number,
   channel: "vector" | "lexical" | "hybrid",
 ): SimilarConfidenceCode {
@@ -246,26 +232,78 @@ export function deriveConfidenceCode(
 }
 
 /**
- * Map retrieval channel → locale-safe code for frontend.
+ * @deprecated Use resolveSimilarityConfidence() instead.
+ * Kept for backward compatibility — delegates to canonical function.
+ */
+export const deriveConfidenceCode = resolveSimilarityConfidence;
+
+/**
+ * Map retrieval channel → locale-safe WhyMatchedCode.
+ * Frontend localises these to user-facing language.
  */
 export function deriveWhyMatchedCode(
   channel: "vector" | "lexical" | "hybrid",
 ): WhyMatchedCode {
   if (channel === "lexical") return "lexical_match";
-  if (channel === "hybrid") return "hybrid_match";
+  if (channel === "hybrid")  return "hybrid_match";
   return "vector_match";
 }
 
-// ─── Part C: In-memory tenant-safe cache ─────────────────────────────────────
+// ─── Part C: Cache abstraction layer ─────────────────────────────────────────
+
+/**
+ * ISimilarityCache<T> — provider-agnostic cache interface.
+ *
+ * Current implementation: MemorySimilarityCache (in-process, single instance).
+ *
+ * Future swap path:
+ *   To switch to Redis/Upstash/Valkey for multi-instance deployments:
+ *   1. Implement ISimilarityCache<T> against your chosen client
+ *   2. Replace `similarityCache` export with your new instance
+ *   3. No callers need changes — all depend on this interface, not the class
+ *
+ * Invariants:
+ *   - Cache keys MUST always begin with tenantId (enforced by buildKey)
+ *   - get() must return null on miss or expired entry
+ *   - set() must never throw (fail silently is preferred over disrupting chat)
+ */
+export interface ISimilarityCache<T> {
+  /** Build a deterministic, tenant-safe cache key. */
+  buildKey(parts: {
+    tenantId:  string;
+    expertId?: string;
+    query:     string;
+    topK:      number;
+    kbIds?:    string[];
+  }): string;
+
+  /** Return cached value, or null on miss/expiry. */
+  get(key: string): T | null | Promise<T | null>;
+
+  /** Store a value. Should not throw. */
+  set(key: string, value: T): void | Promise<void>;
+
+  /** Evict all entries for a tenant (e.g. when KB is updated). */
+  invalidateTenant(tenantId: string): void | Promise<void>;
+}
 
 interface CacheEntry<T> {
   value:     T;
   expiresAt: number;
 }
 
-class SimilarityCache<T> {
+/**
+ * MemorySimilarityCache — default ISimilarityCache implementation.
+ *
+ * In-process, single-instance. Suitable for single-server and Vercel serverless.
+ * For multi-instance (Railway/Fly), swap with a Redis-backed ISimilarityCache.
+ *
+ * Eviction: LRU-style (evicts oldest entry when maxSize is reached).
+ * TTL: entries expire after ttlSeconds.
+ */
+class MemorySimilarityCache<T> implements ISimilarityCache<T> {
   private store = new Map<string, CacheEntry<T>>();
-  private readonly ttlMs: number;
+  private readonly ttlMs:   number;
   private readonly maxSize: number;
 
   constructor(ttlSeconds: number = 300, maxSize: number = 500) {
@@ -273,7 +311,6 @@ class SimilarityCache<T> {
     this.maxSize = maxSize;
   }
 
-  /** Build a tenant-safe cache key. tenantId is always the first component. */
   buildKey(parts: {
     tenantId:  string;
     expertId?: string;
@@ -282,7 +319,6 @@ class SimilarityCache<T> {
     kbIds?:    string[];
   }): string {
     const { tenantId, expertId, query, topK, kbIds } = parts;
-    // Normalize query: lowercase + collapse whitespace (language-neutral)
     const normalizedQuery = query.toLowerCase().replace(/\s+/g, " ").trim().slice(0, 500);
     const kbPart = kbIds?.sort().join(",") ?? "";
     return `${tenantId}|${expertId ?? ""}|${topK}|${kbPart}|${normalizedQuery}`;
@@ -299,7 +335,6 @@ class SimilarityCache<T> {
   }
 
   set(key: string, value: T): void {
-    // Evict oldest if at capacity
     if (this.store.size >= this.maxSize) {
       const firstKey = this.store.keys().next().value;
       if (firstKey !== undefined) this.store.delete(firstKey);
@@ -316,8 +351,18 @@ class SimilarityCache<T> {
   get size(): number { return this.store.size; }
 }
 
-/** Module-level cache instance — shared across all requests */
-export const similarityCache = new SimilarityCache(300, 500); // 5min TTL, max 500 entries
+/**
+ * Factory — returns the default in-memory cache instance.
+ *
+ * Swap this factory's return value to change the cache provider globally.
+ * For Redis: return new RedisSimilarityCache(redisClient, { ttlSeconds: 300 })
+ */
+function createDefaultSimilarityCache(): ISimilarityCache<unknown> {
+  return new MemorySimilarityCache(300, 500);
+}
+
+/** Module-level cache — 5min TTL, 500 entries, tenant-safe keys */
+export const similarityCache = createDefaultSimilarityCache() as MemorySimilarityCache<unknown>;
 
 // ─── Part D: Per-tenant rate limiter ─────────────────────────────────────────
 
@@ -326,46 +371,30 @@ interface RateWindow {
   windowStart: number;
 }
 
-/**
- * Simple sliding-window rate limiter.
- * Tenant-safe — each tenantId gets its own counter.
- * In-process only (not distributed). Good enough for single-instance deployments.
- */
 class SimilarityRateLimiter {
   private windows = new Map<string, RateWindow>();
-
   private readonly maxPerMinute: number;
-  private readonly windowMs: number = 60_000;
+  private readonly windowMs = 60_000;
 
   constructor(maxPerMinute: number = 30) {
     this.maxPerMinute = maxPerMinute;
   }
 
-  /**
-   * Returns true if the tenant is within the rate limit.
-   * Increments the counter if allowed.
-   */
   allow(tenantId: string): boolean {
-    const now = Date.now();
+    const now      = Date.now();
     const existing = this.windows.get(tenantId);
 
     if (!existing || now - existing.windowStart > this.windowMs) {
-      // Start new window
       this.windows.set(tenantId, { count: 1, windowStart: now });
       return true;
     }
-
-    if (existing.count >= this.maxPerMinute) {
-      return false;
-    }
-
+    if (existing.count >= this.maxPerMinute) return false;
     existing.count += 1;
     return true;
   }
 
-  /** Get remaining quota for a tenant (for debug/logging). */
   remaining(tenantId: string): number {
-    const now = Date.now();
+    const now      = Date.now();
     const existing = this.windows.get(tenantId);
     if (!existing || now - existing.windowStart > this.windowMs) return this.maxPerMinute;
     return Math.max(0, this.maxPerMinute - existing.count);
@@ -375,22 +404,69 @@ class SimilarityRateLimiter {
 /** Module-level rate limiter — 30 similarity calls/minute per tenant */
 export const similarityRateLimiter = new SimilarityRateLimiter(30);
 
-// ─── Part E: Structured observability logging ─────────────────────────────────
+// ─── Part E: Budget-aware guard ───────────────────────────────────────────────
+
+/**
+ * shouldAllowSimilarityByBudget
+ *
+ * Checks whether the tenant's AI budget allows similarity to run.
+ * Reuses the existing guards.ts infrastructure — no duplicated budget math.
+ *
+ * Decision:
+ *   - "blocked"     → skip similarity (return false). Budget exhausted, margin must be protected.
+ *   - "budget_mode" → allow (similarity is vector retrieval, not a full AI call — minimal cost).
+ *   - "normal"      → allow.
+ *   - No limit configured / DB failure → fail-open (allow). Conservative safe default.
+ *
+ * Never throws — always returns { allowed, reason }.
+ */
+export async function shouldAllowSimilarityByBudget(
+  tenantId: string,
+): Promise<{ allowed: boolean; reason: "ok" | "budget_blocked" | "no_limit" | "guard_error" }> {
+  try {
+    const { loadUsageLimit, getCurrentAiUsageForPeriod, evaluateAiUsageState } =
+      await import("../ai/guards");
+
+    const limit = await loadUsageLimit(tenantId);
+    if (!limit) {
+      return { allowed: true, reason: "no_limit" };
+    }
+
+    const currentUsageUsd = await getCurrentAiUsageForPeriod(tenantId);
+    const state = evaluateAiUsageState({ currentUsageUsd, limit });
+
+    if (state === "blocked") {
+      return { allowed: false, reason: "budget_blocked" };
+    }
+
+    return { allowed: true, reason: "ok" };
+  } catch (err) {
+    console.warn(
+      `[similarity:budget-guard] Error checking budget for tenant=${tenantId}: ${
+        err instanceof Error ? err.message : String(err)
+      } — failing open (allowing similarity)`,
+    );
+    return { allowed: true, reason: "guard_error" };
+  }
+}
+
+// ─── Part G: Structured observability logging ─────────────────────────────────
 
 export interface SimilarityEventLog {
-  tenantId:         string;
-  expertId?:        string;
-  mode:             "text" | "asset" | "chunk";
-  decisionReason:   SimilarityDecisionReason;
-  statusCode:       SimilarCasesStatusCode;
-  cacheHit:         boolean;
-  pgvectorUsed:     boolean;
-  retrievalPath:    string;
-  candidateCount:   number;
-  returnedCount:    number;
-  latencyMs:        number;
-  topK:             number;
-  rateLimitRemaining: number;
+  tenantId:            string;
+  expertId?:           string;
+  mode:                "text" | "asset" | "chunk";
+  decisionReason:      SimilarityDecisionReason;
+  statusCode:          SimilarCasesStatusCode;
+  cacheHit:            boolean;
+  budgetGuardSkipped:  boolean;
+  pgvectorUsed:        boolean;
+  retrievalPath:       string;
+  candidateCount:      number;
+  returnedCount:       number;
+  latencyMs:           number;
+  topK:                number;
+  rateLimitRemaining:  number;
 }
 
 /**
@@ -398,8 +474,8 @@ export interface SimilarityEventLog {
  *
  * Format: [similarity:event] {JSON}
  *
- * Structured so log aggregators (Datadog, CloudWatch, Loki) can parse fields.
- * No PII — query text is NOT logged (privacy-safe, SOC2-compatible).
+ * Structured for log aggregators (Datadog, CloudWatch, Loki, Axiom).
+ * No PII — query text is never logged (privacy-safe, SOC2-compatible).
  */
 export function logSimilarityEvent(event: SimilarityEventLog): void {
   console.log(`[similarity:event] ${JSON.stringify({
@@ -409,6 +485,7 @@ export function logSimilarityEvent(event: SimilarityEventLog): void {
     decision:    event.decisionReason,
     status:      event.statusCode,
     cache_hit:   event.cacheHit,
+    budget_skip: event.budgetGuardSkipped,
     pgv:         event.pgvectorUsed,
     path:        event.retrievalPath,
     candidates:  event.candidateCount,
