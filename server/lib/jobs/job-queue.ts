@@ -53,17 +53,55 @@ const MAX_CONCURRENT_PER_TENANT = 3;
 /** Max days to keep completed/dead_letter jobs before archiving. */
 const ARCHIVE_AFTER_DAYS = 30;
 
-// ── Enqueue (idempotent) ──────────────────────────────────────────────────────
+// ── Schema migration (idempotent) ─────────────────────────────────────────────
 
 /**
- * Enqueue a new OCR job — idempotent when fileHash is provided.
- *
- * If a job with the same (tenant_id, file_hash) already exists, returns the
- * existing task ID instead of creating a duplicate.  This ensures the same
- * physical file is never processed more than once per tenant.
- *
- * Returns { id, reused } where reused=true means an existing job was returned.
+ * Ensure production schema objects exist for OCR task deduplication.
+ * Safe to call on every cold start — CREATE INDEX IF NOT EXISTS is a no-op
+ * when the index already exists.  Two columns are also ensured (file_hash,
+ * stage) in case the ALTER TABLE migrations were not yet applied to Supabase.
  */
+export async function ensureOcrSchema(): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Client } = require("pg");
+  const client = new Client({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  await client.connect();
+  try {
+    // Add file_hash column if missing (nullable, backward compat)
+    await client.query(`
+      ALTER TABLE chat_ocr_tasks
+        ADD COLUMN IF NOT EXISTS file_hash TEXT
+    `).catch(() => {/* table may not support IF NOT EXISTS on old PG — ignore */});
+
+    // Add stage column if missing (reliability layer addition)
+    await client.query(`
+      ALTER TABLE chat_ocr_tasks
+        ADD COLUMN IF NOT EXISTS stage TEXT
+    `).catch(() => {});
+
+    // Create the partial unique index used by ON CONFLICT idempotency
+    await client.query(`
+      CREATE UNIQUE INDEX IF NOT EXISTS cot_tenant_hash_uidx
+        ON chat_ocr_tasks (tenant_id, file_hash)
+        WHERE file_hash IS NOT NULL
+    `);
+
+    // Supporting indexes for performance
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS cot_running_tenant_idx
+        ON chat_ocr_tasks (tenant_id, status)
+        WHERE status = 'running'
+    `).catch(() => {});
+
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS cot_cleanup_idx
+        ON chat_ocr_tasks (status, created_at)
+    `).catch(() => {});
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
 export async function enqueueOcrJob(
   payload: OcrJobPayload,
 ): Promise<{ id: string; reused: boolean }> {
@@ -75,7 +113,7 @@ export async function enqueueOcrJob(
   });
   await client.connect();
   try {
-    // 1. If hash provided: check for existing job first (cheap SELECT)
+    // 1. If hash provided: SELECT-first dedup (fast path, avoids lock contention)
     if (payload.fileHash) {
       const existing = await client.query<{ id: string; status: string }>(
         `SELECT id, status FROM chat_ocr_tasks
@@ -88,17 +126,20 @@ export async function enqueueOcrJob(
       }
     }
 
-    // 2. Insert new job — no ON CONFLICT clause to avoid dependency on
-    //    the optional partial unique index (cot_tenant_hash_uidx).
-    //    Dedup is handled by the SELECT-first check above (step 1).
-    //    For null file_hash (large files), no dedup is needed.
-    let insertRes: { rows: { id: string }[] };
+    // 2. Preferred INSERT path: uses ON CONFLICT for atomic dedup when
+    //    cot_tenant_hash_uidx index exists (the normal production case).
+    //    Catches Postgres error codes for missing index/column and falls
+    //    back gracefully so task creation NEVER fails silently.
+    let insertId: string | undefined;
     try {
-      insertRes = await client.query<{ id: string }>(
+      const res = await client.query<{ id: string }>(
         `INSERT INTO chat_ocr_tasks
            (tenant_id, user_id, r2_key, filename, content_type,
             status, attempt_count, max_attempts, retry_count, file_hash)
          VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0, $6)
+         ON CONFLICT (tenant_id, file_hash)
+           WHERE file_hash IS NOT NULL
+         DO NOTHING
          RETURNING id`,
         [
           payload.tenantId,
@@ -109,24 +150,48 @@ export async function enqueueOcrJob(
           payload.fileHash ?? null,
         ],
       );
-    } catch (insertErr: unknown) {
-      const pgCode = (insertErr as any)?.code;
+      insertId = res.rows[0]?.id;
+    } catch (e: unknown) {
+      const pgCode = (e as any)?.code;
 
-      // 23505 — unique constraint violation (race): another request inserted
-      // the same hash between our SELECT and INSERT. Fetch existing row.
-      if (pgCode === "23505" && payload.fileHash) {
-        const race = await client.query<{ id: string }>(
-          `SELECT id FROM chat_ocr_tasks WHERE tenant_id = $1 AND file_hash = $2 LIMIT 1`,
-          [payload.tenantId, payload.fileHash],
-        );
-        if (race.rows[0]) return { id: race.rows[0].id, reused: true };
+      // 42P10 — no unique constraint matching ON CONFLICT spec:
+      //   The cot_tenant_hash_uidx index is missing in this environment.
+      //   Fallback: plain INSERT without ON CONFLICT (dedup via SELECT-first above).
+      if (pgCode === "42P10") {
+        console.warn("[enqueueOcrJob] 42P10 — cot_tenant_hash_uidx missing; plain INSERT fallback");
+        try {
+          const fb = await client.query<{ id: string }>(
+            `INSERT INTO chat_ocr_tasks
+               (tenant_id, user_id, r2_key, filename, content_type,
+                status, attempt_count, max_attempts, retry_count, file_hash)
+             VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0, $6)
+             RETURNING id`,
+            [payload.tenantId, payload.userId, payload.r2Key, payload.filename,
+             payload.contentType, payload.fileHash ?? null],
+          );
+          insertId = fb.rows[0]?.id;
+        } catch (e2: unknown) {
+          // 42703 inside the fallback: file_hash column also missing
+          if ((e2 as any)?.code === "42703") {
+            console.warn("[enqueueOcrJob] 42703 — file_hash column missing; insert without it");
+            const fb2 = await client.query<{ id: string }>(
+              `INSERT INTO chat_ocr_tasks
+                 (tenant_id, user_id, r2_key, filename, content_type,
+                  status, attempt_count, max_attempts, retry_count)
+               VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0)
+               RETURNING id`,
+              [payload.tenantId, payload.userId, payload.r2Key, payload.filename, payload.contentType],
+            );
+            insertId = fb2.rows[0]?.id;
+          } else {
+            throw e2;
+          }
+        }
       }
-
-      // 42703 — column does not exist: file_hash column not yet migrated in prod.
-      // Retry without file_hash column — job created without dedup, but works.
-      if (pgCode === "42703") {
-        console.warn("[enqueueOcrJob] file_hash column missing — retrying without it");
-        const fallback = await client.query<{ id: string }>(
+      // 42703 — file_hash column missing at the primary INSERT:
+      else if (pgCode === "42703") {
+        console.warn("[enqueueOcrJob] 42703 — file_hash column missing; insert without it");
+        const fb = await client.query<{ id: string }>(
           `INSERT INTO chat_ocr_tasks
              (tenant_id, user_id, r2_key, filename, content_type,
               status, attempt_count, max_attempts, retry_count)
@@ -134,24 +199,33 @@ export async function enqueueOcrJob(
            RETURNING id`,
           [payload.tenantId, payload.userId, payload.r2Key, payload.filename, payload.contentType],
         );
-        if (fallback.rows[0]) return { id: fallback.rows[0].id, reused: false };
+        insertId = fb.rows[0]?.id;
       }
-
-      throw insertErr;
+      // 23505 — unique violation race: another request beat us. Return existing row.
+      else if (pgCode === "23505" && payload.fileHash) {
+        const race = await client.query<{ id: string }>(
+          `SELECT id FROM chat_ocr_tasks WHERE tenant_id = $1 AND file_hash = $2 LIMIT 1`,
+          [payload.tenantId, payload.fileHash],
+        );
+        if (race.rows[0]) return { id: race.rows[0].id, reused: true };
+        throw e;
+      }
+      else {
+        throw e;
+      }
     }
 
-    if (insertRes.rows[0]) {
-      return { id: insertRes.rows[0].id, reused: false };
-    }
-
-    // 3. Race fallback (should be unreachable, but keep for safety)
-    if (payload.fileHash) {
-      const race = await client.query<{ id: string }>(
+    // ON CONFLICT DO NOTHING returned no row: means an existing row with the
+    // same (tenant_id, file_hash) was found. Fetch it.
+    if (!insertId && payload.fileHash) {
+      const existing = await client.query<{ id: string }>(
         `SELECT id FROM chat_ocr_tasks WHERE tenant_id = $1 AND file_hash = $2 LIMIT 1`,
         [payload.tenantId, payload.fileHash],
       );
-      if (race.rows[0]) return { id: race.rows[0].id, reused: true };
+      if (existing.rows[0]) return { id: existing.rows[0].id, reused: true };
     }
+
+    if (insertId) return { id: insertId, reused: false };
 
     throw new Error("enqueueOcrJob: INSERT returned no rows");
   } finally {

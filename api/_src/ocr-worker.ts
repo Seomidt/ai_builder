@@ -488,6 +488,19 @@ export default async function handler(
   const workerStart = Date.now();
   log("worker.started");
 
+  // Ensure schema (idempotent: CREATE IF NOT EXISTS). Runs at every cold start.
+  // This creates the partial unique index cot_tenant_hash_uidx and adds any
+  // missing columns (file_hash, stage) so ON CONFLICT dedup works in production.
+  try {
+    const { ensureOcrSchema } = await import("./_lib/ocr-queue");
+    await ensureOcrSchema();
+    log("worker.schema_ok");
+  } catch (schemaErr) {
+    // Non-fatal: log and continue. Task processing must not be blocked by schema checks.
+    const msg = schemaErr instanceof Error ? schemaErr.message : String(schemaErr);
+    log("worker.schema_warn", { err: msg.slice(0, 300) });
+  }
+
   // Claim jobs atomically
   let tasks: RawOcrTask[] = [];
   try {

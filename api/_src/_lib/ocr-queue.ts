@@ -7,6 +7,7 @@
 
 export {
   enqueueOcrJob     as createOcrTask,
+  ensureOcrSchema,
   getJob            as getOcrTask,
   claimJobs,
   updateStage,
