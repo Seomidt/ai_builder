@@ -8,8 +8,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import {
   Plus, Database, MoreHorizontal, FileText, Archive, ChevronRight,
-  BookOpen, AlertCircle, Search, Brain, RefreshCw, Pencil,
-  RotateCcw, SlidersHorizontal,
+  BookOpen, AlertCircle, Search, Brain, Pencil, RotateCcw,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";

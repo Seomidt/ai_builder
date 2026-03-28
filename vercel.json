@@ -24,7 +24,8 @@
     "api/chat.js":          { "memory": 512, "maxDuration": 30 },
     "api/extract.js":       { "memory": 512, "maxDuration": 30 },
     "api/early-access.js":  { "memory": 128, "maxDuration": 10 },
-    "api/kb.js":            { "memory": 512, "maxDuration": 30 }
+    "api/kb.js":            { "memory": 512, "maxDuration": 30 },
+    "api/insights.js":      { "memory": 256, "maxDuration": 30 }
   },
   "rewrites": [
     { "source": "/api/auth",        "destination": "/api/auth"          },
@@ -55,6 +56,8 @@
     { "source": "/api/early-access",  "destination": "/api/early-access"   },
     { "source": "/api/kb",            "destination": "/api/kb"              },
     { "source": "/api/kb/(.*)",       "destination": "/api/kb"              },
+    { "source": "/api/insights",      "destination": "/api/insights"        },
+    { "source": "/api/insights/(.*)", "destination": "/api/insights"        },
     { "source": "/(.*)",              "destination": "/index.html"          }
   ],
   "headers": [
