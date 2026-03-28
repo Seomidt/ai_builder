@@ -18,6 +18,15 @@ import {
 import { eq, and } from "drizzle-orm";
 import type { AccessibleExpert } from "./chat-routing";
 import { AI_MODEL_ROUTES } from "../lib/ai/config";
+import {
+  shouldRunSimilarity,
+  similarityCache,
+  similarityRateLimiter,
+  logSimilarityEvent,
+  type SimilarCasesStatusCode,
+  type WhyMatchedCode,
+  type SimilarConfidenceCode,
+} from "../lib/knowledge/similarity-control";
 
 export type ConfidenceBand = "high" | "medium" | "low" | "unknown";
 
@@ -32,7 +41,8 @@ export interface SimilarCaseInResponse {
   assetType:        string | null;
   kbId:             string;
   kbName:           string | null;
-  whyMatched:       string;
+  whyMatchedCode:   WhyMatchedCode;
+  confidenceCode:   SimilarConfidenceCode;
   pageNumber:       number | null;
   timestampSec:     number | null;
 }
@@ -53,7 +63,9 @@ export interface ChatRunResult {
   needsManualReview: boolean;
   routingExplanation: string;
   
-  // Storage 1.6: optional similar cases from knowledge bases
+  // Storage 1.6–1.7: similar cases from knowledge bases
+  similarCasesAttempted:  boolean;
+  similarCasesStatusCode: SimilarCasesStatusCode;
   similarCases?: SimilarCaseInResponse[];
   totalSimilarCases?: number;
 }
@@ -311,49 +323,112 @@ export async function runChatMessage(params: {
     existingConversationId: params.conversationId ?? null,
   });
 
-  // ── Storage 1.6: Check if we should fetch similar cases ────────────────────
-  // Keywords that trigger similar case lookup (dansk + engelsk):
-  // "lignende", "sager", "cases", "eksempler", "examples", "relateret", "related"
-  const similarKeywords = /(\blignende\b|\bsager\b|\bcases\b|\beksempler\b|\bexamples\b|\brelateret\b|\brelated\b)/i;
-  const shouldFetchSimilar = similarKeywords.test(message);
+  // ── Storage 1.7: Similar Cases — intent-based, cached, rate-limited ─────────
 
-  let similarCases: SimilarCaseInResponse[] = [];
+  // Resolve expert routing hints for the decision layer
+  const expertRoutingHints = (expert as Record<string, unknown>)["routingHints"] as Record<string, unknown> | null | undefined;
+  const hasKnowledgeBases  = expert.knowledgeBases != null
+    ? (expert.knowledgeBases as unknown[]).length > 0
+    : undefined; // unknown — don't block
+
+  const decision = shouldRunSimilarity({
+    message,
+    expertRoutingHints: expertRoutingHints ?? null,
+    hasKnowledgeBases,
+  });
+
+  let similarCases: SimilarCaseInResponse[]   = [];
   let totalSimilarCases: number | undefined;
+  let simStatusCode: SimilarCasesStatusCode   = "not_triggered";
+  let simCacheHit                             = false;
+  let simDebug: { pgvectorUsed: boolean; retrievalPath: string; candidateCount: number } = {
+    pgvectorUsed: false, retrievalPath: "empty", candidateCount: 0,
+  };
+  const simStart = Date.now();
 
-  if (shouldFetchSimilar) {
-    try {
-      const { findSimilarCases } = await import("../lib/knowledge/kb-similar");
-      const similarResult = await findSimilarCases({
-        tenantId: organizationId,
-        mode: "text",
-        queryText: message,
-        expertId: expert.id,
-        topK: 5,
-      });
-      similarCases = similarResult.cases.map(c => ({
-        chunkId:        c.chunkId,
-        score:          c.score,
-        snippet:        c.snippet,
-        sourceLabel:    c.sourceLabel,
-        assetId:        c.assetId,
-        assetVersionId: c.assetVersionId,
-        assetTitle:     c.assetTitle,
-        assetType:      c.assetType,
-        kbId:           c.kbId,
-        kbName:         c.kbName,
-        whyMatched:     c.whyMatched,
-        pageNumber:     c.pageNumber,
-        timestampSec:   c.timestampSec,
-      }));
-      totalSimilarCases = similarResult.total;
-      if (similarCases.length > 0) {
-        console.log(`[chat-runner] found_similar_cases=${similarCases.length} for query="${message.slice(0, 100)}"`);
+  if (!decision.shouldRun) {
+    simStatusCode = "not_triggered";
+  } else if (!similarityRateLimiter.allow(organizationId)) {
+    simStatusCode = "rate_limited";
+  } else {
+    const SIMILAR_TOP_K = 5;
+    const cacheKey = similarityCache.buildKey({
+      tenantId: organizationId,
+      expertId: expert.id,
+      query:    message,
+      topK:     SIMILAR_TOP_K,
+    });
+
+    const cached = similarityCache.get(cacheKey) as SimilarCaseInResponse[] | null;
+
+    if (cached) {
+      simCacheHit   = true;
+      simStatusCode = cached.length > 0 ? "cache_hit" : "no_matches";
+      similarCases  = cached;
+      totalSimilarCases = cached.length;
+    } else {
+      try {
+        const { findSimilarCases } = await import("../lib/knowledge/kb-similar");
+        const similarResult = await findSimilarCases({
+          tenantId:  organizationId,
+          mode:      "text",
+          queryText: message,
+          expertId:  expert.id,
+          topK:      SIMILAR_TOP_K,
+        });
+
+        simDebug = {
+          pgvectorUsed:   similarResult.debug.pgvectorUsed,
+          retrievalPath:  similarResult.debug.retrievalPath,
+          candidateCount: similarResult.debug.candidateCount,
+        };
+
+        similarCases = similarResult.cases.map(c => ({
+          chunkId:        c.chunkId,
+          score:          c.score,
+          snippet:        c.snippet,
+          sourceLabel:    c.sourceLabel,
+          assetId:        c.assetId,
+          assetVersionId: c.assetVersionId,
+          assetTitle:     c.assetTitle,
+          assetType:      c.assetType,
+          kbId:           c.kbId,
+          kbName:         c.kbName,
+          whyMatchedCode: c.whyMatchedCode,
+          confidenceCode: c.confidenceCode,
+          pageNumber:     c.pageNumber,
+          timestampSec:   c.timestampSec,
+        }));
+
+        totalSimilarCases = similarResult.total;
+        simStatusCode = similarCases.length > 0 ? "success" : "no_matches";
+
+        // Store result in cache (including empty results — so we don't hammer DB)
+        similarityCache.set(cacheKey, similarCases);
+
+      } catch (err) {
+        simStatusCode = "error_suppressed";
+        console.warn(`[chat-runner] similar_cases_error: ${err instanceof Error ? err.message : String(err)}`);
       }
-    } catch (err) {
-      console.warn(`[chat-runner] similar_cases_fetch_error:`, err instanceof Error ? err.message : String(err));
-      // Silent fail — don't disrupt chat if similarity lookup fails
     }
   }
+
+  // Structured observability — no PII (query text not logged)
+  logSimilarityEvent({
+    tenantId:          organizationId,
+    expertId:          expert.id,
+    mode:              "text",
+    decisionReason:    decision.decisionReason,
+    statusCode:        simStatusCode,
+    cacheHit:          simCacheHit,
+    pgvectorUsed:      simDebug.pgvectorUsed,
+    retrievalPath:     simDebug.retrievalPath,
+    candidateCount:    simDebug.candidateCount,
+    returnedCount:     similarCases.length,
+    latencyMs:         Date.now() - simStart,
+    topK:              5,
+    rateLimitRemaining: similarityRateLimiter.remaining(organizationId),
+  });
 
   const result: ChatRunResult = {
     answer: aiText,
@@ -370,11 +445,12 @@ export async function runChatMessage(params: {
     confidenceBand,
     needsManualReview,
     routingExplanation,
+    similarCasesAttempted:  decision.shouldRun,
+    similarCasesStatusCode: simStatusCode,
   };
 
-  // Include similar cases only if found
   if (similarCases.length > 0) {
-    result.similarCases = similarCases;
+    result.similarCases      = similarCases;
     result.totalSimilarCases = totalSimilarCases ?? 0;
   }
 
