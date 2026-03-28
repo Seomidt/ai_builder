@@ -648,6 +648,27 @@ async function similarKb(orgId: string, req: IncomingMessage, res: ServerRespons
 // Fixed paths (search, similar) are matched before /:id patterns.
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  // Strip /api/kb prefix and query string early (needed for healthz check)
+  const rawUrl = req.url ?? "/";
+  const path = rawUrl.replace(/^\/api\/kb/, "").replace(/\?.*$/, "").replace(/\/$/, "") || "/";
+  const method = req.method?.toUpperCase() ?? "GET";
+
+  // ── /api/kb/healthz — public diagnostic endpoint (no auth) ────────────────
+  if (path === "/healthz" && method === "GET") {
+    try {
+      const db = await getDb();
+      const { knowledgeBases } = await getSchema();
+      const { count } = await getOrm();
+      const [{ cnt }] = await db.select({ cnt: count() }).from(knowledgeBases);
+      json(res, 200, { ok: true, kb_count: Number(cnt), ts: new Date().toISOString() });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      json(res, 500, { ok: false, error: message, ts: new Date().toISOString() });
+    }
+    return;
+  }
+
+  try {
   const authResult = await authenticate(req);
   if (authResult.status !== "ok" || !authResult.user) {
     const status = authResult.status === "lockdown" ? 403 : 401;
@@ -658,11 +679,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   const { user } = authResult;
   const orgId = user.organizationId;
   const userId = user.id;
-
-  // Strip /api/kb prefix and query string
-  const rawUrl = req.url ?? "/";
-  const path = rawUrl.replace(/^\/api\/kb/, "").replace(/\?.*$/, "").replace(/\/$/, "") || "/";
-  const method = req.method?.toUpperCase() ?? "GET";
 
   // ── /api/kb (root) ────────────────────────────────────────────────────────
   if (path === "" || path === "/") {
@@ -728,4 +744,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   }
 
   return notFound(res);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error("[vercel/kb] unhandled handler error:", message);
+    if (!res.headersSent) {
+      json(res, 500, { error_code: "INTERNAL_ERROR", message });
+    }
+  }
 }
