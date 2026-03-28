@@ -13,25 +13,31 @@ const SUPABASE_ANON_KEY =
   "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpuZW9pbXFpZG1raGlrdnVzeGFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxMzcxNTgsImV4cCI6MjA4ODcxMzE1OH0.CPdFKA1jfs7OAfHCm49J7_gl3GrA2b7WLmbKWzhoY8M";
 
 /**
- * Cross-subdomain cookie storage adapter for Supabase auth.
+ * Hybrid auth storage adapter for Supabase.
  *
- * Why cookies instead of localStorage:
- *   - localStorage is origin-scoped (blissops.com ≠ admin.blissops.com)
- *   - Cookies with domain=".blissops.com" are shared across all subdomains
- *   - This allows a single login to work on both blissops.com and admin.blissops.com
- *
- * Dev (localhost): no domain attr — cookie scoped to localhost only.
- * Prod (*.blissops.com): domain=".blissops.com" — shared across subdomains.
- *
- * Security:
- *   - SameSite=Lax — CSRF protection, allows redirects from external links
- *   - Secure flag applied on HTTPS (production)
- *   - HTTPOnly NOT used — Supabase JS must read the token client-side
- *   - 7-day max-age (matches Supabase session default)
+ * Strategy:
+ *  - Production (*.blissops.com): cookies with domain=".blissops.com" so a
+ *    single login works across app.blissops.com and admin.blissops.com.
+ *  - Dev/preview (localhost, *.replit.dev, etc.): localStorage.
+ *    Cookies with public-suffix domains (.replit.dev) are rejected by browsers,
+ *    and cross-subdomain sharing is not needed in these environments.
  */
-const cookieDomain = getAuthCookieDomain(
-  typeof window !== "undefined" ? window.location.hostname : "",
-);
+
+const hostname =
+  typeof window !== "undefined" ? window.location.hostname : "";
+const cookieDomain = getAuthCookieDomain(hostname);
+
+// Use cookies only when we have a real blissops.com cross-subdomain domain.
+// On localhost and Replit preview cookieDomain is "" — use localStorage instead.
+const useLocalStorage =
+  typeof window !== "undefined" &&
+  (hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname.endsWith(".localhost") ||
+    hostname.includes(".replit.dev") ||
+    hostname.includes(".repl.co") ||
+    hostname.includes(".replit.app") ||
+    cookieDomain === "");
 
 const isHttps =
   typeof window !== "undefined" && window.location.protocol === "https:";
@@ -72,6 +78,24 @@ const cookieStorage = {
   },
 };
 
+// localStorage adapter — same interface as cookieStorage
+const localStorageAdapter = {
+  getItem(key: string): string | null {
+    if (typeof window === "undefined") return null;
+    try { return window.localStorage.getItem(key); } catch { return null; }
+  },
+  setItem(key: string, value: string): void {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.setItem(key, value); } catch { /* ignore */ }
+  },
+  removeItem(key: string): void {
+    if (typeof window === "undefined") return;
+    try { window.localStorage.removeItem(key); } catch { /* ignore */ }
+  },
+};
+
+const authStorage = useLocalStorage ? localStorageAdapter : cookieStorage;
+
 export const supabase: SupabaseClient = createClient(
   SUPABASE_URL,
   SUPABASE_ANON_KEY,
@@ -81,16 +105,13 @@ export const supabase: SupabaseClient = createClient(
       autoRefreshToken:   true,
       storageKey:         "blissops_auth",
       detectSessionInUrl: true,
-      storage:            cookieStorage,
+      storage:            authStorage,
     },
   },
 );
 
 /**
  * No-op kept for import compatibility.
- * Previously fetched /api/auth/config to initialise the client at boot time,
- * which blocked React render. Client is now initialised synchronously above
- * using baked-in public values (safe — anon key is already public).
  */
 export async function initSupabaseFromConfig(): Promise<void> {
   // intentional no-op

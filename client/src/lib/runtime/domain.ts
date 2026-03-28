@@ -43,7 +43,11 @@ export function getAppContext(hostname: string): AppContext {
   // Any blissops.com variant not already matched (e.g. preview.blissops.com) → marketing
   if (h.includes("blissops.com")) return "marketing";
 
-  // All other hostnames (Replit preview, Vercel preview, CI/staging URLs) → marketing
+  // Replit preview/dev URLs → tenant (development preview surface)
+  // Auth is still enforced by ProtectedRoute — this only controls which shell renders.
+  if (h.includes(".replit.dev") || h.includes(".repl.co") || h.includes(".picard.replit.dev") || h.includes(".id.replit.app")) return "tenant";
+
+  // All other hostnames (Vercel preview, CI/staging URLs) → marketing
   // These environments are used to preview the public marketing surface.
   // Tenant auth flows operate exclusively on app.blissops.com — not on preview URLs.
   return "marketing";
@@ -63,6 +67,10 @@ export function getAuthCookieDomain(hostname = window.location.hostname): string
   const h = hostname.toLowerCase().replace(/:\d+$/, "");
   if (h === "localhost" || h === "127.0.0.1") return "";
   if (h.endsWith(".localhost")) return ""; // app.localhost / admin.localhost
+  // Replit preview domains (.replit.dev, .riker.replit.dev, .repl.co etc.)
+  // are public suffixes — browsers reject domain-scoped cookies on them.
+  // Return empty string so cookie is scoped to the exact origin instead.
+  if (h.includes(".replit.dev") || h.includes(".repl.co") || h.includes(".replit.app")) return "";
   const parts = h.split(".");
   if (parts.length <= 2) return `.${h}`;               // already a root domain
   return `.${parts.slice(-2).join(".")}`;              // e.g. .blissops.com
