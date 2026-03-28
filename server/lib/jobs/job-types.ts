@@ -46,6 +46,8 @@ export interface OcrJobPayload {
   r2Key:       string;
   filename:    string;
   contentType: string;
+  /** SHA-256 of file content — enables idempotent deduplication within a tenant. */
+  fileHash?:   string;
 }
 
 // ── OCR job row (from DB) ─────────────────────────────────────────────────────
@@ -57,6 +59,7 @@ export interface OcrJob {
   r2Key:           string;
   filename:        string;
   contentType:     string;
+  fileHash:        string | null;
   status:          JobStatus;
   provider:        string | null;
   attemptCount:    number;

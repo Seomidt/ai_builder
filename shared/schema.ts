@@ -6847,6 +6847,7 @@ export const chatOcrTasks = pgTable(
     r2Key:        text("r2_key").notNull(),
     filename:     text("filename").notNull(),
     contentType:  text("content_type").notNull().default("application/pdf"),
+    fileHash:        text("file_hash"),
     status:          text("status").notNull().default("pending"),
     provider:        text("provider"),
     attemptCount:    integer("attempt_count").notNull().default(0),

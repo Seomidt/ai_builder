@@ -440,6 +440,155 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       }
     }
 
+    // ── GET /api/admin/jobs/summary ───────────────────────────────────────────
+    // Returns aggregated OCR job stats for the past 7 days.
+    if (segs[0] === "jobs" && segs[1] === "summary" && method === "GET") {
+      const { Client } = require("pg") as typeof import("pg");
+      const dbUrl = (
+        process.env.BLISSOPS_PG_URL ??
+        process.env.SUPABASE_DATABASE_URL ??
+        process.env.DATABASE_URL ?? ""
+      );
+      const pgClient = new Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+      await pgClient.connect();
+      try {
+        const r = await pgClient.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE status = 'pending')                                                      AS pending,
+            COUNT(*) FILTER (WHERE status = 'running')                                                      AS running,
+            COUNT(*) FILTER (WHERE status = 'completed')                                                    AS completed,
+            COUNT(*) FILTER (WHERE status = 'failed')                                                       AS failed,
+            COUNT(*) FILTER (WHERE status = 'dead_letter')                                                  AS dead_letter,
+            COUNT(*)                                                                                         AS total,
+            AVG(EXTRACT(EPOCH FROM (completed_at - started_at)))
+              FILTER (WHERE status = 'completed' AND started_at IS NOT NULL AND completed_at IS NOT NULL)   AS avg_processing_sec,
+            AVG(retry_count)                                                                                 AS avg_retries,
+            MAX(created_at)                                                                                  AS newest_job_at
+          FROM chat_ocr_tasks
+          WHERE created_at > NOW() - INTERVAL '7 days'
+        `);
+        const row = r.rows[0] ?? {};
+        res.setHeader("Cache-Control", "private, max-age=30");
+        return json(res, {
+          window:          "7d",
+          total:           Number(row.total           ?? 0),
+          pending:         Number(row.pending         ?? 0),
+          running:         Number(row.running         ?? 0),
+          completed:       Number(row.completed       ?? 0),
+          failed:          Number(row.failed          ?? 0),
+          dead_letter:     Number(row.dead_letter     ?? 0),
+          avg_processing_sec: row.avg_processing_sec ? parseFloat(Number(row.avg_processing_sec).toFixed(1)) : null,
+          avg_retries:     row.avg_retries ? parseFloat(Number(row.avg_retries).toFixed(2)) : null,
+          newest_job_at:   row.newest_job_at ?? null,
+          generated_at:    new Date().toISOString(),
+        });
+      } finally { await pgClient.end().catch(() => {}); }
+    }
+
+    // ── GET /api/admin/ocr/metrics ────────────────────────────────────────────
+    // OCR success rate, fallback rate, avg times, quality scores — past 30 days.
+    if (segs[0] === "ocr" && segs[1] === "metrics" && method === "GET") {
+      const { Client } = require("pg") as typeof import("pg");
+      const dbUrl = (
+        process.env.BLISSOPS_PG_URL ??
+        process.env.SUPABASE_DATABASE_URL ??
+        process.env.DATABASE_URL ?? ""
+      );
+      const pgClient = new Client({ connectionString: dbUrl, ssl: { rejectUnauthorized: false } });
+      await pgClient.connect();
+      try {
+        const r = await pgClient.query(`
+          SELECT
+            COUNT(*) FILTER (WHERE status = 'completed')                                         AS total_completed,
+            COUNT(*) FILTER (WHERE status IN ('failed','dead_letter'))                           AS total_failed,
+            COUNT(*) FILTER (WHERE provider = 'gemini-1.5-flash' AND status = 'completed')      AS gemini_success,
+            COUNT(*) FILTER (WHERE provider = 'gpt-4o' AND status = 'completed')                AS openai_fallback,
+            COUNT(*) FILTER (WHERE status = 'dead_letter')                                       AS dead_letter,
+            AVG(EXTRACT(EPOCH FROM (completed_at - started_at)))
+              FILTER (WHERE status = 'completed' AND started_at IS NOT NULL)                    AS avg_ocr_sec,
+            AVG(page_count)       FILTER (WHERE status = 'completed')                           AS avg_pages,
+            AVG(char_count)       FILTER (WHERE status = 'completed')                           AS avg_chars,
+            AVG(quality_score::numeric) FILTER (WHERE status = 'completed' AND quality_score IS NOT NULL) AS avg_quality,
+            AVG(attempt_count)    FILTER (WHERE status = 'completed')                           AS avg_attempts
+          FROM chat_ocr_tasks
+          WHERE created_at > NOW() - INTERVAL '30 days'
+        `);
+        const row = r.rows[0] ?? {};
+        const completed = Number(row.total_completed ?? 0);
+        const failed    = Number(row.total_failed    ?? 0);
+        const total     = completed + failed;
+        res.setHeader("Cache-Control", "private, max-age=60");
+        return json(res, {
+          window:              "30d",
+          total_jobs:          total,
+          success_rate_pct:    total > 0 ? parseFloat(((completed / total) * 100).toFixed(1)) : null,
+          gemini_success:      Number(row.gemini_success  ?? 0),
+          openai_fallback:     Number(row.openai_fallback ?? 0),
+          fallback_rate_pct:   completed > 0 ? parseFloat(((Number(row.openai_fallback ?? 0) / completed) * 100).toFixed(1)) : null,
+          dead_letter:         Number(row.dead_letter     ?? 0),
+          avg_ocr_sec:         row.avg_ocr_sec ? parseFloat(Number(row.avg_ocr_sec).toFixed(1)) : null,
+          avg_pages:           row.avg_pages   ? parseFloat(Number(row.avg_pages).toFixed(1))   : null,
+          avg_chars:           row.avg_chars   ? Math.round(Number(row.avg_chars))              : null,
+          avg_quality_score:   row.avg_quality ? parseFloat(Number(row.avg_quality).toFixed(3)) : null,
+          avg_attempts:        row.avg_attempts ? parseFloat(Number(row.avg_attempts).toFixed(2)) : null,
+          generated_at:        new Date().toISOString(),
+        });
+      } finally { await pgClient.end().catch(() => {}); }
+    }
+
+    // ── GET /api/admin/cost/overview ──────────────────────────────────────────
+    // Total AI cost, OCR vs chat breakdown, top 10 tenants — from ai_usage.
+    // Uses Supabase REST API (ai_usage lives on Supabase).
+    if (segs[0] === "cost" && segs[1] === "overview" && method === "GET") {
+      const window = u.searchParams.get("window") ?? "30d";
+      const days   = window === "7d" ? 7 : window === "90d" ? 90 : 30;
+      const since  = new Date(Date.now() - days * 86_400_000).toISOString();
+
+      // Fetch all relevant usage rows via Supabase REST
+      const usageUrl = `${SUPABASE_URL}/rest/v1/ai_usage?select=tenant_id,feature,estimated_cost_usd,actual_cost_usd,created_at&created_at=gte.${encodeURIComponent(since)}&limit=50000`;
+      const usageRes = await fetch(usageUrl, { headers: adminHeaders() });
+      if (!usageRes.ok) {
+        return json(res, { error_code: "COST_QUERY_FAILED", message: `ai_usage HTTP ${usageRes.status}` }, 500);
+      }
+      const rows = await usageRes.json() as Array<{
+        tenant_id: string;
+        feature: string;
+        estimated_cost_usd: string | null;
+        actual_cost_usd: string | null;
+        created_at: string;
+      }>;
+
+      let totalCost = 0;
+      let ocrCost   = 0;
+      let chatCost  = 0;
+      const perTenant: Record<string, number> = {};
+
+      for (const row of rows) {
+        const cost = parseFloat(row.actual_cost_usd ?? row.estimated_cost_usd ?? "0") || 0;
+        totalCost += cost;
+        if (row.feature.startsWith("ocr.")) ocrCost += cost;
+        else                                chatCost += cost;
+        perTenant[row.tenant_id] = (perTenant[row.tenant_id] ?? 0) + cost;
+      }
+
+      const top10 = Object.entries(perTenant)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([tenantId, cost]) => ({ tenantId, costUsd: parseFloat(cost.toFixed(6)) }));
+
+      res.setHeader("Cache-Control", "private, max-age=120");
+      return json(res, {
+        window,
+        total_cost_usd: parseFloat(totalCost.toFixed(6)),
+        ocr_cost_usd:   parseFloat(ocrCost.toFixed(6)),
+        chat_cost_usd:  parseFloat(chatCost.toFixed(6)),
+        ocr_share_pct:  totalCost > 0 ? parseFloat(((ocrCost / totalCost) * 100).toFixed(1)) : null,
+        total_rows:     rows.length,
+        top10_tenants:  top10,
+        generated_at:   new Date().toISOString(),
+      });
+    }
+
     return err(res, 404, "NOT_FOUND", "Route not found");
   } catch (e) {
     console.error("[admin handler]", (e as Error).message);

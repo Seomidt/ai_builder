@@ -30,6 +30,7 @@ import {
   storeOcrChunks,
   logOcrCost,
   estimateOcrCost,
+  archiveOldJobs,
   type RawOcrTask,
   type OcrChunk,
 }                                               from "./_lib/ocr-queue";
@@ -521,6 +522,13 @@ export default async function handler(
     }
     log("worker.task_duration", { task_id: task.id, ms: Date.now() - t0 });
   }
+
+  // ── Best-effort cleanup (archive old terminal-state jobs) ─────────────────
+  archiveOldJobs().then((deleted) => {
+    if (deleted > 0) log("worker.archive.ok", { deleted });
+  }).catch((e: unknown) => {
+    log("worker.archive.error", { err: e instanceof Error ? e.message : String(e) });
+  });
 
   log("worker.done", { processed: tasks.length, duration_ms: Date.now() - workerStart });
   return json(res, {

@@ -305,31 +305,67 @@ async function handleOcrPending(
 ): Promise<void> {
   const { createOcrTask } = await import("./_lib/ocr-queue");
   try {
-    const taskId = await createOcrTask({
+    // ── Compute SHA-256 of file content for idempotent deduplication ──────────
+    // We fetch the file from R2 here (it is already uploaded).
+    // If R2 fetch fails we fall back to hash=undefined (still enqueues, just no dedup).
+    let fileHash: string | undefined;
+    try {
+      const { r2Client, R2_BUCKET, R2_CONFIGURED } = await import("../../server/lib/r2/r2-client");
+      if (R2_CONFIGURED) {
+        const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+        const r2Res = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: ctx.objectKey }));
+        if (r2Res.Body) {
+          const chunks: Buffer[] = [];
+          for await (const chunk of r2Res.Body as AsyncIterable<Uint8Array>) {
+            chunks.push(Buffer.from(chunk));
+          }
+          const buf   = Buffer.concat(chunks);
+          const { createHash } = await import("crypto");
+          fileHash = createHash("sha256").update(buf).digest("hex");
+        }
+      }
+    } catch {
+      // Non-fatal — hash omitted, job will be created without dedup
+      fileHash = undefined;
+    }
+
+    const result = await createOcrTask({
       tenantId:    ctx.tenantId,
       userId:      ctx.userId,
       r2Key:       ctx.objectKey,
       filename:    ctx.filename,
       contentType: ctx.contentType,
+      fileHash,
     });
+
+    const { id: taskId, reused } = result;
 
     log("upload.finalize.ocr_pending", {
       tenantId:  ctx.tenantId,
       userId:    ctx.userId,
       objectKey: ctx.objectKey,
       taskId,
+      reused,
+      hasHash: !!fileHash,
     });
 
-    // Best-effort: trigger the worker immediately (won't block response).
-    // If this fails the cron will pick it up within a minute.
-    triggerWorker(ctx.tenantId).catch(() => {});
+    // If reused=true: the file has already been processed (or is being processed).
+    // Return the existing task ID — frontend polling will pick up the correct status.
+    if (!reused) {
+      // Best-effort: trigger the worker immediately (won't block response).
+      // If this fails the cron will pick it up within a minute.
+      triggerWorker(ctx.tenantId).catch(() => {});
+    }
 
     return json(res, {
       mode:    "OCR_PENDING",
       routing: ctx.routing.reason,
       taskId,
+      reused,
       pollUrl: `/api/ocr-status?id=${taskId}`,
-      message: "PDF er scannet — OCR er sat i gang. Dokumentet vil være klar om få øjeblikke.",
+      message: reused
+        ? "Dette dokument er allerede i systemet. Hentet fra eksisterende behandling."
+        : "PDF er scannet — OCR er sat i gang. Dokumentet vil være klar om få øjeblikke.",
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

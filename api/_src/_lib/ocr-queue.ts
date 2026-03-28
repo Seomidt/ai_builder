@@ -16,6 +16,7 @@ export {
   storeChunks       as storeOcrChunks,
   logOcrCost,
   estimateOcrCost,
+  archiveOldJobs,
   type RawOcrTask,
   type OcrChunkRow  as OcrChunk,
   type OcrCostLog,

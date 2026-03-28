@@ -45,32 +45,86 @@ function adminHeaders(extra: Record<string, string> = {}): Record<string, string
   };
 }
 
-/** Enqueue a new OCR job. Returns the new task ID. */
-export async function enqueueOcrJob(payload: OcrJobPayload): Promise<string> {
-  const url = `${SUPABASE_URL()}/rest/v1/chat_ocr_tasks`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: adminHeaders(),
-    body: JSON.stringify({
-      tenant_id:    payload.tenantId,
-      user_id:      payload.userId,
-      r2_key:       payload.r2Key,
-      filename:     payload.filename,
-      content_type: payload.contentType,
-      status:       "pending",
-      attempt_count: 0,
-      max_attempts:  3,
-      retry_count:   0,
-    }),
+// ── Concurrency constants ─────────────────────────────────────────────────────
+
+/** Max simultaneous running jobs per tenant (fairness guard). */
+const MAX_CONCURRENT_PER_TENANT = 3;
+
+/** Max days to keep completed/dead_letter jobs before archiving. */
+const ARCHIVE_AFTER_DAYS = 30;
+
+// ── Enqueue (idempotent) ──────────────────────────────────────────────────────
+
+/**
+ * Enqueue a new OCR job — idempotent when fileHash is provided.
+ *
+ * If a job with the same (tenant_id, file_hash) already exists, returns the
+ * existing task ID instead of creating a duplicate.  This ensures the same
+ * physical file is never processed more than once per tenant.
+ *
+ * Returns { id, reused } where reused=true means an existing job was returned.
+ */
+export async function enqueueOcrJob(
+  payload: OcrJobPayload,
+): Promise<{ id: string; reused: boolean }> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Client } = require("pg");
+  const client = new Client({
+    connectionString: resolveDbUrl(),
+    ssl: { rejectUnauthorized: false },
   });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`enqueueOcrJob failed: ${res.status} ${txt.slice(0, 200)}`);
+  await client.connect();
+  try {
+    // 1. If hash provided: check for existing job first (cheap SELECT)
+    if (payload.fileHash) {
+      const existing = await client.query<{ id: string; status: string }>(
+        `SELECT id, status FROM chat_ocr_tasks
+         WHERE  tenant_id = $1 AND file_hash = $2
+         LIMIT  1`,
+        [payload.tenantId, payload.fileHash],
+      );
+      if (existing.rows[0]) {
+        return { id: existing.rows[0].id, reused: true };
+      }
+    }
+
+    // 2. Insert new job
+    const insertRes = await client.query<{ id: string }>(
+      `INSERT INTO chat_ocr_tasks
+         (tenant_id, user_id, r2_key, filename, content_type,
+          status, attempt_count, max_attempts, retry_count, file_hash)
+       VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0, $6)
+       ON CONFLICT (tenant_id, file_hash)
+         WHERE file_hash IS NOT NULL
+       DO NOTHING
+       RETURNING id`,
+      [
+        payload.tenantId,
+        payload.userId,
+        payload.r2Key,
+        payload.filename,
+        payload.contentType,
+        payload.fileHash ?? null,
+      ],
+    );
+
+    if (insertRes.rows[0]) {
+      return { id: insertRes.rows[0].id, reused: false };
+    }
+
+    // 3. Race: another worker inserted the same hash concurrently — fetch it
+    if (payload.fileHash) {
+      const race = await client.query<{ id: string }>(
+        `SELECT id FROM chat_ocr_tasks WHERE tenant_id = $1 AND file_hash = $2 LIMIT 1`,
+        [payload.tenantId, payload.fileHash],
+      );
+      if (race.rows[0]) return { id: race.rows[0].id, reused: true };
+    }
+
+    throw new Error("enqueueOcrJob: INSERT returned no rows and no conflict found");
+  } finally {
+    await client.end().catch(() => {});
   }
-  const rows = await res.json() as Array<{ id: string }>;
-  const id   = rows[0]?.id;
-  if (!id) throw new Error("enqueueOcrJob: no id returned");
-  return id;
 }
 
 // ── Claim (FOR UPDATE SKIP LOCKED) ────────────────────────────────────────────
@@ -99,20 +153,36 @@ export async function claimJobs(limit: number): Promise<RawOcrTask[]> {
   try {
     await client.query("BEGIN");
 
+    // CTE-based claim that:
+    // 1. Skips tenants already at MAX_CONCURRENT_PER_TENANT running jobs
+    // 2. Selects oldest eligible jobs (FIFO within each tenant)
+    // 3. Atomically locks selected rows (SKIP LOCKED = no double-processing)
     const res = await client.query<RawOcrTask>(`
-      SELECT id, tenant_id, r2_key, filename, content_type,
-             attempt_count, max_attempts, retry_count
-      FROM   chat_ocr_tasks
-      WHERE  (status = 'pending')
-         OR  (
-               status = 'failed'
-               AND attempt_count < max_attempts
-               AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-             )
-      ORDER  BY created_at ASC
-      LIMIT  $1
-      FOR UPDATE SKIP LOCKED
-    `, [limit]);
+      WITH running_per_tenant AS (
+        SELECT   tenant_id, COUNT(*) AS cnt
+        FROM     chat_ocr_tasks
+        WHERE    status = 'running'
+        GROUP BY tenant_id
+      ),
+      eligible AS (
+        SELECT  cot.id, cot.tenant_id, cot.r2_key, cot.filename, cot.content_type,
+                cot.attempt_count, cot.max_attempts, cot.retry_count
+        FROM    chat_ocr_tasks cot
+        LEFT JOIN running_per_tenant rpt ON rpt.tenant_id = cot.tenant_id
+        WHERE  (
+                  cot.status = 'pending'
+               OR (
+                  cot.status = 'failed'
+                  AND cot.attempt_count < cot.max_attempts
+                  AND (cot.next_retry_at IS NULL OR cot.next_retry_at <= NOW())
+               ))
+          AND COALESCE(rpt.cnt, 0) < $2
+        ORDER  BY cot.created_at ASC
+        LIMIT  $1
+        FOR UPDATE SKIP LOCKED
+      )
+      SELECT * FROM eligible
+    `, [limit, MAX_CONCURRENT_PER_TENANT]);
 
     const tasks = res.rows;
 
@@ -121,11 +191,11 @@ export async function claimJobs(limit: number): Promise<RawOcrTask[]> {
       const nowIso = new Date().toISOString();
       await client.query(`
         UPDATE chat_ocr_tasks
-        SET    status        = 'running',
-               started_at   = $1,
+        SET    status         = 'running',
+               started_at    = $1,
                attempt_count = attempt_count + 1,
-               stage        = 'ocr',
-               last_error   = NULL
+               stage         = 'ocr',
+               last_error    = NULL
         WHERE  id IN (${ids})
       `, [nowIso]);
     }
@@ -360,6 +430,37 @@ export async function logOcrCost(log: OcrCostLog): Promise<void> {
   } catch (e) {
     // Non-fatal — cost logging must never crash the worker
     console.warn(`[job-queue] logOcrCost error: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+// ── Archive / Cleanup ─────────────────────────────────────────────────────────
+
+/**
+ * Delete completed and dead_letter jobs older than ARCHIVE_AFTER_DAYS days.
+ * Safe: only touches terminal-state rows.
+ * Returns the number of rows deleted.
+ */
+export async function archiveOldJobs(): Promise<number> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Client } = require("pg");
+  const client = new Client({
+    connectionString: resolveDbUrl(),
+    ssl: { rejectUnauthorized: false },
+  });
+  await client.connect();
+  try {
+    const res = await client.query<{ count: string }>(`
+      WITH deleted AS (
+        DELETE FROM chat_ocr_tasks
+        WHERE  status IN ('completed', 'dead_letter')
+          AND  created_at < NOW() - INTERVAL '${ARCHIVE_AFTER_DAYS} days'
+        RETURNING id
+      )
+      SELECT COUNT(*) AS count FROM deleted
+    `);
+    return parseInt(res.rows[0]?.count ?? "0", 10);
+  } finally {
+    await client.end().catch(() => {});
   }
 }
 
