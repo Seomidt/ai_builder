@@ -135,8 +135,13 @@ async function uploadToGeminiFileApi(buf: Buffer, apiKey: string): Promise<strin
 }
 
 async function ocrWithGemini(buf: Buffer): Promise<{ text: string; promptTokens: number; completionTokens: number }> {
-  const apiKey = (process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "").trim();
-  if (!apiKey) throw new Error("GOOGLE_GENERATIVE_AI_API_KEY ikke sat");
+  const apiKey = (
+    process.env.GEMINI_API_KEY ??
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ??
+    process.env.GOOGLE_AI_API_KEY ??
+    ""
+  ).trim();
+  if (!apiKey) throw new Error("GEMINI_API_KEY ikke sat (tjek Vercel Environment Variables)");
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { GoogleGenerativeAI } = require("@google/generative-ai");
   const model  = new GoogleGenerativeAI(apiKey).getGenerativeModel({ model: "gemini-1.5-flash" });
@@ -371,7 +376,12 @@ async function processJob(task: RawOcrTask): Promise<void> {
   }
 
   // 4. OCR ───────────────────────────────────────────────────────────────────
-  const geminiKey = (process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "").trim();
+  const geminiKey = (
+    process.env.GEMINI_API_KEY ??
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ??
+    process.env.GOOGLE_AI_API_KEY ??
+    ""
+  ).trim();
   const openaiKey = (process.env.OPENAI_API_KEY ?? "").trim();
 
   let ocrText   = "";
