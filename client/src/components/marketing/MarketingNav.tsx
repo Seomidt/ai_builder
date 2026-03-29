@@ -15,6 +15,7 @@ export function MarketingNav() {
             <a href="#product" className="transition-colors hover:text-white">Product</a>
             <a href="#security" className="transition-colors hover:text-white">Security</a>
             <a href="#contact" className="transition-colors hover:text-white">Contact</a>
+            <Link href="/blog" className="transition-colors hover:text-white" data-testid="link-nav-blog">Blog</Link>
           </nav>
 
           <Link

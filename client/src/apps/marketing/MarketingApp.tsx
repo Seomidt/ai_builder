@@ -20,6 +20,8 @@ import { MarketingCapabilities } from "@/components/marketing/MarketingCapabilit
 import { MarketingEarlyAccessBlock } from "@/components/marketing/MarketingEarlyAccessBlock";
 import { MarketingFooter } from "@/components/marketing/MarketingFooter";
 import EarlyAccessPage from "@/pages/marketing/EarlyAccessPage";
+import BlogPage        from "@/pages/marketing/BlogPage";
+import BlogPostPage    from "@/pages/marketing/BlogPostPage";
 
 const trustItems = ["SOC 2 ready", "GDPR readiness", "EU data residency", "Tenant-isolated"];
 
@@ -130,12 +132,23 @@ function MarketingHome() {
   );
 }
 
+function BlogRoot() {
+  const isBlogDomain =
+    typeof window !== "undefined" &&
+    (window.location.hostname === "blog.blissops.com" ||
+      window.location.hostname === "blog.localhost");
+  if (isBlogDomain) return <BlogPage />;
+  return <MarketingHome />;
+}
+
 export function MarketingApp() {
   return (
     <Switch>
-      <Route path="/auth/:rest*" component={AuthRedirect} />
-      <Route path="/early-access" component={EarlyAccessPage} />
-      <Route component={MarketingHome} />
+      <Route path="/auth/:rest*"    component={AuthRedirect} />
+      <Route path="/early-access"   component={EarlyAccessPage} />
+      <Route path="/blog/:slug"     component={BlogPostPage} />
+      <Route path="/blog"           component={BlogPage} />
+      <Route                        component={BlogRoot} />
     </Switch>
   );
 }
