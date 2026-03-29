@@ -2,8 +2,9 @@ import { QUERY_POLICY } from "@/lib/query-policy";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import {
   BrainCircuit, AlertTriangle, CheckCircle, DollarSign,
-  Bell, RefreshCw, TrendingUp, Shield,
+  Bell, RefreshCw, TrendingUp, Shield, Circle,
 } from "lucide-react";
+import { SiGooglegemini, SiOpenai, SiAnthropic } from "react-icons/si";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -51,6 +52,11 @@ function statusColor(s?: string) {
 export default function OpsAi() {
   const { toast } = useToast();
 
+  const { data: configStatus } = useQuery<{ gemini: boolean; openai: boolean; anthropic: boolean }>({
+    queryKey: ["/api/config/status"],
+    ...QUERY_POLICY.opsSnapshot,
+  });
+
   const { data: alerts, isLoading: alertsLoading } = useQuery<{ alerts?: Alert[] } | Alert[]>({
     queryKey: ["/api/admin/governance/alerts"],
     ...QUERY_POLICY.opsSnapshot,
@@ -95,6 +101,52 @@ export default function OpsAi() {
           {runBudgetCheck.isPending ? "Checking…" : "Run Budget Check"}
         </Button>
       </div>
+
+      {/* Provider Status */}
+      <Card className="bg-card border-card-border" data-testid="ops-ai-providers-card">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm font-medium flex items-center gap-2">
+            <BrainCircuit className="w-4 h-4 text-primary" /> AI Provider Status
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <div className="flex flex-wrap gap-3">
+            {[
+              { key: "gemini",    label: "Google Gemini",      icon: SiGooglegemini, active: configStatus?.gemini,    color: "text-blue-400",    badge: "OCR · Flash" },
+              { key: "openai",    label: "OpenAI",             icon: SiOpenai,       active: configStatus?.openai,    color: "text-emerald-400", badge: undefined },
+              { key: "anthropic", label: "Anthropic / Claude", icon: SiAnthropic,    active: configStatus?.anthropic, color: "text-orange-400",  badge: undefined },
+            ].map(({ key, label, icon: Icon, active, color, badge }) => (
+              <div
+                key={key}
+                className={`flex items-center gap-2.5 rounded-xl border px-4 py-2.5 transition-all ${
+                  active
+                    ? "border-green-500/25 bg-green-500/5"
+                    : "border-border bg-muted/30 opacity-50"
+                }`}
+                data-testid={`provider-status-${key}`}
+              >
+                <Icon className={`w-4 h-4 ${active ? color : "text-muted-foreground"}`} />
+                <div>
+                  <p className="text-xs font-medium text-foreground">{label}</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {active ? "Active" : "Not configured"}
+                  </p>
+                </div>
+                {active && (
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-green-400" style={{ boxShadow: "0 0 5px rgba(74,222,128,0.7)" }} />
+                    {badge && (
+                      <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-green-500/25 text-green-400">
+                        {badge}
+                      </Badge>
+                    )}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Open Alerts */}

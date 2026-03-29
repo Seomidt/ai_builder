@@ -101,10 +101,10 @@ export function getPlatformIntegrationsStatus(): PlatformIntegrationsReport {
       key: "gemini",
       label: "Google Gemini",
       category: "ai",
-      requiredEnvVars: ["GEMINI_API_KEY", "GOOGLE_AI_API_KEY"],
-      message: "API key configured. Available for cost-efficient tasks.",
+      requiredEnvVars: ["GEMINI_API_KEY", "GOOGLE_AI_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"],
+      message: "API key configured. Active for OCR and cost-efficient AI tasks.",
       stubIfAllMissing: true,
-      docsHint: "Set GEMINI_API_KEY or GOOGLE_AI_API_KEY to enable Gemini models.",
+      docsHint: "Set GEMINI_API_KEY to enable Gemini models and OCR.",
     }),
 
     // ── Platform ──────────────────────────────────────────────────────────────
@@ -172,9 +172,13 @@ export function getPlatformIntegrationsStatus(): PlatformIntegrationsReport {
     }),
   ];
 
-  // Gemini: special handling — either key counts as configured
+  // Gemini: special handling — any of the three key names counts as configured
   const geminiEntry = providers.find((p) => p.key === "gemini")!;
-  const geminiOk = !!(process.env.GEMINI_API_KEY || process.env.GOOGLE_AI_API_KEY);
+  const geminiOk = !!(
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_AI_API_KEY ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY
+  );
   if (geminiOk) {
     geminiEntry.configured = true;
     geminiEntry.status = "healthy";

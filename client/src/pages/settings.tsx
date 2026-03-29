@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { Building2, Shield, Database, GitBranch, CheckCircle, Circle } from "lucide-react";
+import { Building2, Shield, Database, GitBranch, CheckCircle, Circle, BrainCircuit } from "lucide-react";
+import { SiGooglegemini, SiOpenai } from "react-icons/si";
 import { useAuth } from "@/hooks/use-auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +13,7 @@ interface ConfigStatus {
   supabase: { url: string | null; connected: boolean; poolConnected: boolean };
   github: { connected: boolean; owner: string | null; repo: string | null };
   openai: { connected: boolean };
+  gemini: boolean;
 }
 
 function SettingsSection({
@@ -210,6 +212,60 @@ export default function Settings() {
           <code className="font-mono bg-muted px-1 rounded">GITHUB_OWNER</code> and{" "}
           <code className="font-mono bg-muted px-1 rounded">GITHUB_REPO</code> as environment
           variables to configure defaults. Projects can override these per-project.
+        </p>
+      </SettingsSection>
+
+      <SettingsSection title="AI Providers" icon={BrainCircuit}>
+        <div className="divide-y divide-border/50">
+          <div className="flex items-center justify-between py-2.5">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <SiGooglegemini className="w-3.5 h-3.5 text-blue-400" />
+              Google Gemini
+            </div>
+            {isLoading ? (
+              <Skeleton className="w-24 h-4" />
+            ) : (
+              <div className="flex items-center gap-1.5">
+                {configStatus?.gemini ? (
+                  <CheckCircle className="w-3.5 h-3.5 text-green-400" />
+                ) : (
+                  <Circle className="w-3.5 h-3.5 text-muted-foreground/30" />
+                )}
+                <span className={`text-xs font-medium ${configStatus?.gemini ? "text-green-400" : "text-muted-foreground/60"}`}>
+                  {configStatus?.gemini ? "Active" : "Not configured"}
+                </span>
+                {configStatus?.gemini && (
+                  <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-blue-400/30 text-blue-400 bg-blue-500/8">
+                    OCR · Flash
+                  </Badge>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="flex items-center justify-between py-2.5">
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <SiOpenai className="w-3.5 h-3.5 text-emerald-400" />
+              OpenAI
+            </div>
+            {isLoading ? (
+              <Skeleton className="w-24 h-4" />
+            ) : (
+              <div className="flex items-center gap-1.5">
+                {configStatus?.openai?.connected ? (
+                  <CheckCircle className="w-3.5 h-3.5 text-green-400" />
+                ) : (
+                  <Circle className="w-3.5 h-3.5 text-muted-foreground/30" />
+                )}
+                <span className={`text-xs font-medium ${configStatus?.openai?.connected ? "text-green-400" : "text-muted-foreground/60"}`}>
+                  {configStatus?.openai?.connected ? "Active" : "Not configured"}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+        <p className="text-xs text-muted-foreground/50 mt-4">
+          API keys are stored in environment secrets and never exposed to the browser.
+          Gemini is used for OCR processing of large PDFs (via File API) and cost-efficient tasks.
         </p>
       </SettingsSection>
 
