@@ -254,11 +254,16 @@ async function _checkGemini(): Promise<PartialProviderResult> {
     description: "Multimodal AI tasks and Google AI model access.",
     category: "ai" as const,
     severity: "optional" as const,
-    requiredEnv: ["GOOGLE_GENERATIVE_AI_API_KEY"],
-    impact: ["Gemini-based tasks unavailable", "Multimodal AI features unavailable"],
+    requiredEnv: ["GEMINI_API_KEY"],
+    impact: ["Gemini-based tasks unavailable", "OCR unavailable for large PDFs"],
   };
-  const key = (process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GEMINI_API_KEY ?? "").trim();
-  if (!key) return { ...meta, missingEnv: ["GOOGLE_GENERATIVE_AI_API_KEY"], status: "missing", latencyMs: null, latencyClass: null, details: {}, message: "GOOGLE_GENERATIVE_AI_API_KEY is not configured." };
+  const key = (
+    process.env.GEMINI_API_KEY ??
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY ??
+    process.env.GOOGLE_AI_API_KEY ??
+    ""
+  ).trim();
+  if (!key) return { ...meta, missingEnv: ["GEMINI_API_KEY"], status: "missing", latencyMs: null, latencyClass: null, details: {}, message: "GEMINI_API_KEY is not configured." };
 
   const t0 = Date.now();
   const res = await fetchWithTimeout(`https://generativelanguage.googleapis.com/v1beta/models?key=${key}`, {});
@@ -566,7 +571,7 @@ export async function getPlatformHealth(forceRefresh = false): Promise<Integrati
     await Promise.allSettled([
       safeCheck("openai",     "OpenAI",            "ai",             "critical",  ["OPENAI_API_KEY"],                            ["AI agents will not run", "Workflow execution will fail"],           _checkOpenAI),
       safeCheck("anthropic",  "Anthropic (Claude)", "ai",             "optional",  ["ANTHROPIC_API_KEY"],                          ["Claude-based tasks unavailable"],                                   _checkAnthropic),
-      safeCheck("gemini",     "Google Gemini",      "ai",             "optional",  ["GOOGLE_GENERATIVE_AI_API_KEY"],               ["Gemini-based tasks unavailable"],                                   _checkGemini),
+      safeCheck("gemini",     "Google Gemini",      "ai",             "optional",  ["GEMINI_API_KEY"],                             ["Gemini-based tasks unavailable", "OCR unavailable for large PDFs"], _checkGemini),
       safeCheck("supabase",   "Supabase",           "platform",       "critical",  ["SUPABASE_URL", "SUPABASE_ANON_KEY"],           ["Authentication may fail", "Data access may be blocked"],           _checkSupabase),
       safeCheck("github",     "GitHub",             "platform",       "important", ["GITHUB_TOKEN"],                               ["Code sync unavailable", "PR automation unavailable"],               _checkGitHub),
       safeCheck("stripe",     "Stripe",             "platform",       "important", ["STRIPE_SECRET_KEY"],                          ["Billing operations may fail"],                                      _checkStripe),
