@@ -41,7 +41,7 @@ function getPlatformIntegrationStatus(): Record<string, { configured: boolean; e
   return {
     openai:     { configured: !!process.env.OPENAI_API_KEY?.trim(),          env: "OPENAI_API_KEY" },
     anthropic:  { configured: !!process.env.ANTHROPIC_API_KEY?.trim(),       env: "ANTHROPIC_API_KEY" },
-    gemini:     { configured: !!process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim(), env: "GOOGLE_GENERATIVE_AI_API_KEY" },
+    gemini:     { configured: !!(process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? process.env.GOOGLE_AI_API_KEY)?.trim(), env: "GEMINI_API_KEY" },
     supabase:   { configured: !!(supabaseUrl && supabaseAnon),               env: "SUPABASE_URL" },
     github:     { configured: !!(process.env.GITHUB_TOKEN?.trim() || process.env.GITHUB_PERSONAL_ACCESS_TOKEN?.trim()), env: "GITHUB_TOKEN" },
     cloudflare: { configured: !!(process.env.CF_R2_ACCOUNT_ID?.trim() || process.env.CF_API_TOKEN?.trim()), env: "CF_R2_ACCOUNT_ID" },
@@ -153,7 +153,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       const PROVIDER_META: Record<string, { label: string; category: "ai" | "platform" | "infra"; requiredEnvVars: string[]; docsHint?: string }> = {
         openai:     { label: "OpenAI",           category: "ai",       requiredEnvVars: ["OPENAI_API_KEY"],                docsHint: "Set OPENAI_API_KEY in your secrets manager." },
         anthropic:  { label: "Anthropic (Claude)",category: "ai",       requiredEnvVars: ["ANTHROPIC_API_KEY"],             docsHint: "Set ANTHROPIC_API_KEY from console.anthropic.com." },
-        gemini:     { label: "Google Gemini",    category: "ai",       requiredEnvVars: ["GOOGLE_GENERATIVE_AI_API_KEY"],  docsHint: "Set GOOGLE_GENERATIVE_AI_API_KEY from Google AI Studio." },
+        gemini:     { label: "Google Gemini",    category: "ai",       requiredEnvVars: ["GEMINI_API_KEY"],                docsHint: "Set GEMINI_API_KEY from Google AI Studio (aistudio.google.com)." },
         supabase:   { label: "Supabase",         category: "platform", requiredEnvVars: ["SUPABASE_URL", "SUPABASE_ANON_KEY"], docsHint: "Set SUPABASE_URL and SUPABASE_ANON_KEY." },
         github:     { label: "GitHub",           category: "platform", requiredEnvVars: ["GITHUB_TOKEN"],                  docsHint: "Set GITHUB_TOKEN or GITHUB_PERSONAL_ACCESS_TOKEN with repo access." },
         cloudflare: { label: "Cloudflare R2",    category: "infra",    requiredEnvVars: ["CF_R2_ACCOUNT_ID", "CF_R2_ACCESS_KEY_ID", "CF_R2_SECRET_ACCESS_KEY"], docsHint: "Set Cloudflare R2 credentials." },
