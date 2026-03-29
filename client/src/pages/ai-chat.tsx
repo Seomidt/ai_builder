@@ -617,7 +617,14 @@ export default function AiChatPage() {
               throw Object.assign(new Error(errBody?.message ?? "Dokument kunne ikke behandles."), { errorCode: "FINALIZE_FAILED" });
             }
             const finalData = await finalRes.json() as { mode: string; results?: any[]; message?: string; taskId?: string };
-            console.log(`[TRACE-2f][${traceId}] finalize OK mode=${finalData.mode} results=${finalData.results?.length ?? 0}`);
+            console.log(`[TRACE-2f][${traceId}] finalize OK mode=${finalData.mode} results=${finalData.results?.length ?? 0} msg=${finalData.message ?? "-"}`);
+
+            // ── B_FALLBACK: OCR-task creation failed (DB/queue error) ─────
+            if (finalData.mode === "B_FALLBACK") {
+              const reason = finalData.message ?? "OCR-systemet er ikke tilgængeligt. Prøv igen om lidt.";
+              console.error(`[OCR-FAIL][${traceId}] PATH=b_fallback reason="${reason}"`);
+              throw Object.assign(new Error(reason), { errorCode: "DOCUMENT_UNREADABLE" });
+            }
 
             // ── OCR_PENDING: scanned PDF → poll async OCR job ─────────────
             if (finalData.mode === "OCR_PENDING" && finalData.taskId) {
@@ -695,11 +702,17 @@ export default function AiChatPage() {
                 throw Object.assign(new Error("OCR tog for lang tid. Prøv igen med en kortere fil."), { errorCode: "DOCUMENT_UNREADABLE" });
               }
 
+              const ocrText = (ocrResult.ocrText ?? "").slice(0, 80_000);
+              if (!ocrText.trim()) {
+                console.error(`[OCR-FAIL][${traceId}] PATH=ocr_empty_text charCount=${ocrResult.charCount} quality=${ocrResult.qualityScore}`);
+                throw Object.assign(new Error("OCR fandt ingen læsbar tekst i dokumentet. Tjek at PDF-filen ikke er krypteret."), { errorCode: "DOCUMENT_UNREADABLE" });
+              }
+
               finalizeResults.push({
                 filename:       file.name,
                 mime_type:      file.type || "application/pdf",
                 char_count:     ocrResult.charCount ?? 0,
-                extracted_text: (ocrResult.ocrText ?? "").slice(0, 80_000),
+                extracted_text: ocrText,
                 status:         "ok",
                 source:         "r2_ocr_async",
               });
@@ -718,10 +731,11 @@ export default function AiChatPage() {
           // HARD STOP: ingen gyldige dokumenter
           const validEntries = documentContext.filter((r: any) => r.status === "ok" && r.extracted_text?.trim());
           if (validEntries.length === 0) {
-            // Brug den konkrete fejlbesked fra extract hvis tilgængelig
             const errorEntry = documentContext.find((r: any) => r.status === "error" && r.message);
-            const specificMsg = errorEntry?.message ?? "Dokument kunne ikke læses. Kontrollér at filen er en valid PDF eller tekstfil.";
-            console.error(`[OCR-FAIL][${traceId}] PATH=empty_extracted_text entries=${documentContext.length} chars=[${documentContext.map((r:any)=>r.extracted_text?.length??0).join(",")}] statuses=[${documentContext.map((r:any)=>r.status).join(",")}] — ${specificMsg}`);
+            const hasOcrSource = documentContext.some((r: any) => r.source === "r2_ocr_async");
+            const specificMsg = errorEntry?.message
+              ?? (hasOcrSource ? "OCR fandt ingen læsbar tekst i dokumentet." : "Dokumentet indeholder ingen læsbar tekst. Kontrollér at filen ikke er krypteret eller tom.");
+            console.error(`[OCR-FAIL][${traceId}] PATH=empty_extracted_text entries=${documentContext.length} chars=[${documentContext.map((r:any)=>r.extracted_text?.length??0).join(",")}] statuses=[${documentContext.map((r:any)=>r.status).join(",")}] hasOcr=${hasOcrSource} — ${specificMsg}`);
             throw Object.assign(new Error(specificMsg), { errorCode: "DOCUMENT_UNREADABLE" });
           }
         } catch (e: any) {

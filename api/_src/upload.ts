@@ -393,7 +393,7 @@ async function handleOcrPending(
     return json(res, {
       mode:    "B_FALLBACK",
       routing: ctx.routing.reason,
-      message: "PDF er scannet og kunne ikke behandles automatisk.",
+      message: `OCR-kø fejlede: ${msg.slice(0, 300)}`,
       results: [],
     });
   }
