@@ -37,7 +37,7 @@ export default function BlogPostPage() {
 
   if (!post) {
     return (
-      <div className="min-h-screen bg-[#030711] text-white">
+      <div className="min-h-screen overflow-x-hidden bg-[#030711] text-white">
         <div className="relative z-10">
           <MarketingNav />
           <div className="mx-auto max-w-2xl px-6 pt-24 text-center md:px-8">
@@ -59,7 +59,7 @@ export default function BlogPostPage() {
   const others = BLOG_POSTS.filter((p) => p.slug !== slug).slice(0, 2);
 
   return (
-    <div className="min-h-screen bg-[#030711] text-white">
+    <div className="min-h-screen overflow-x-hidden bg-[#030711] text-white">
       <div className="pointer-events-none fixed inset-0 z-0" aria-hidden="true">
         <div
           className="absolute inset-0"

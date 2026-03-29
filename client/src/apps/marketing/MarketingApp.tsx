@@ -40,7 +40,7 @@ function AuthRedirect() {
 
 function MarketingHome() {
   return (
-    <div className="min-h-screen bg-[#030711] text-white">
+    <div className="min-h-screen overflow-x-hidden bg-[#030711] text-white">
       {/* ── Fixed background ───────────────────────────────────────────── */}
       <div className="pointer-events-none fixed inset-0 z-0" aria-hidden="true">
         <div
@@ -74,7 +74,7 @@ function MarketingHome() {
             <div className="pointer-events-none absolute inset-0 rounded-[28px] border border-white/10 bg-[#060d1f]/50 backdrop-blur-2xl" />
 
             {/* Content */}
-            <div className="relative z-10 overflow-visible px-6 pt-10 pb-10 md:px-10 md:pt-14">
+            <div className="relative z-10 px-6 pt-10 pb-10 md:px-10 md:pt-14">
 
               {/* Hero */}
               <div className="mx-auto max-w-2xl text-center">

@@ -265,7 +265,7 @@ export default function BlogPage() {
   const rest = BLOG_POSTS.filter((p) => !p.featured);
 
   return (
-    <div className="min-h-screen bg-[#030711] text-white">
+    <div className="min-h-screen overflow-x-hidden bg-[#030711] text-white">
       <div className="pointer-events-none fixed inset-0 z-0" aria-hidden="true">
         <div
           className="absolute inset-0"
