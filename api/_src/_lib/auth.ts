@@ -144,12 +144,40 @@ async function verifyViaSupabaseApi(token: string): Promise<{ id: string; email?
 
 const _memberCache = new Map<string, { orgId: string; role: string; exp: number }>();
 
+/** UUID v4 pattern — must pass before we use a value as a DB UUID column. */
+const _UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function _isUuid(s: string): boolean { return _UUID_RE.test(s); }
+
+/**
+ * Resolve a tenant slug (e.g. "blissops-main") to the org's real UUID via
+ * the Supabase REST API.  Returns null when not found or on network error.
+ */
+async function _resolveSlugToUuid(
+  slug: string,
+  supabaseUrl: string,
+  apikey: string,
+): Promise<string | null> {
+  try {
+    const r = await fetch(
+      `${supabaseUrl}/rest/v1/organizations?slug=eq.${encodeURIComponent(slug)}&select=id&limit=1`,
+      { headers: { apikey, Authorization: `Bearer ${apikey}` } },
+    );
+    const rows = (await r.json()) as Array<{ id: string }>;
+    const id = rows[0]?.id ?? null;
+    return id && _isUuid(id) ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 async function lookupMembership(userId: string): Promise<{ orgId: string; role: string }> {
   const hit = _memberCache.get(userId);
   if (hit && hit.exp > Date.now()) return { orgId: hit.orgId, role: hit.role };
 
   const apikey = SUPABASE_SERVICE_KEY || SUPABASE_ANON_KEY;
-  if (!SUPABASE_URL || !apikey) return { orgId: "blissops-main", role: "member" };
+  if (!SUPABASE_URL || !apikey) {
+    throw new Error("lookupMembership: SUPABASE_URL eller apikey er ikke konfigureret");
+  }
 
   try {
     const res = await fetch(
@@ -157,12 +185,35 @@ async function lookupMembership(userId: string): Promise<{ orgId: string; role: 
       { headers: { apikey, Authorization: `Bearer ${apikey}` } },
     );
     const rows = (await res.json()) as Array<{ organization_id: string; role: string }>;
-    const orgId = rows[0]?.organization_id ?? "blissops-main";
-    const role  = rows[0]?.role             ?? "member";
-    _memberCache.set(userId, { orgId, role, exp: Date.now() + 30_000 });
-    return { orgId, role };
-  } catch {
-    return { orgId: "blissops-main", role: "member" };
+
+    // Happy path: membership row exists and contains a real UUID.
+    if (rows[0]?.organization_id && _isUuid(rows[0].organization_id)) {
+      const orgId = rows[0].organization_id;
+      const role  = rows[0].role ?? "member";
+      _memberCache.set(userId, { orgId, role, exp: Date.now() + 30_000 });
+      return { orgId, role };
+    }
+
+    // No membership row (or the stored value is not a UUID).
+    // Attempt to resolve the default tenant slug to its real UUID.
+    const DEFAULT_SLUG = "blissops-main";
+    const resolvedId = await _resolveSlugToUuid(DEFAULT_SLUG, SUPABASE_URL, apikey);
+    if (resolvedId) {
+      const role = rows[0]?.role ?? "member";
+      console.warn(
+        `[auth] lookupMembership: ingen membership-række for ${userId}; ` +
+        `bruger slug-opslag → org UUID ${resolvedId}`,
+      );
+      _memberCache.set(userId, { orgId: resolvedId, role, exp: Date.now() + 30_000 });
+      return { orgId: resolvedId, role };
+    }
+
+    throw new Error(
+      `lookupMembership: bruger ${userId} har ingen organization_members-række, ` +
+      `og slug '${DEFAULT_SLUG}' kunne ikke resolves til en UUID`,
+    );
+  } catch (err) {
+    throw err instanceof Error ? err : new Error(String(err));
   }
 }
 
@@ -206,16 +257,26 @@ export async function authenticate(req: IncomingMessage): Promise<
   }
 
   if (jwt.email && PLATFORM_ADMIN_EMAILS.has(jwt.email.toLowerCase())) {
-    const { orgId } = await lookupMembership(jwt.id);
-    return {
-      user: { id: jwt.id, email: jwt.email, organizationId: orgId, role: "platform_admin" },
-      status: "ok",
-    };
+    try {
+      const { orgId } = await lookupMembership(jwt.id);
+      return {
+        user: { id: jwt.id, email: jwt.email, organizationId: orgId, role: "platform_admin" },
+        status: "ok",
+      };
+    } catch (err) {
+      console.error("[auth] platform_admin lookupMembership fejlede:", err);
+      return { user: null, status: "unauthenticated" };
+    }
   }
 
-  const { orgId, role } = await lookupMembership(jwt.id);
-  return {
-    user: { id: jwt.id, email: jwt.email, organizationId: orgId, role },
-    status: "ok",
-  };
+  try {
+    const { orgId, role } = await lookupMembership(jwt.id);
+    return {
+      user: { id: jwt.id, email: jwt.email, organizationId: orgId, role },
+      status: "ok",
+    };
+  } catch (err) {
+    console.error("[auth] lookupMembership fejlede:", err);
+    return { user: null, status: "unauthenticated" };
+  }
 }

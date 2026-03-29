@@ -13,7 +13,7 @@ import { randomUUID, createHmac, timingSafeEqual } from "crypto";
 import type { Request, Response, NextFunction } from "express";
 import { supabaseAdmin } from "../lib/supabase";
 import { db } from "../db";
-import { organizationMembers } from "@shared/schema";
+import { organizationMembers, organizations } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import { mapCurrentUserToCanonicalActor } from "../lib/auth/identity-compat";
 import type { ResolvedActor } from "../lib/auth/actor-resolution";
@@ -32,6 +32,34 @@ declare global {
       resolvedActor?: ResolvedActor;
     }
   }
+}
+
+// ── UUID helpers ──────────────────────────────────────────────────────────────
+
+const _AUTH_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function _isUuid(s: string): boolean { return _AUTH_UUID_RE.test(s); }
+
+/**
+ * When `organizationId` came back as a slug (e.g. "blissops-main") rather than
+ * a real UUID, resolve it via the `organizations` table and return the real UUID.
+ * Falls back to the original value when resolution fails so nothing hard-breaks.
+ */
+async function _resolveOrgSlug(slug: string): Promise<string> {
+  if (_isUuid(slug)) return slug;
+  try {
+    const rows = await db
+      .select({ id: organizations.id })
+      .from(organizations)
+      .where(eq(organizations.slug, slug))
+      .limit(1);
+    if (rows[0]?.id && _isUuid(rows[0].id)) {
+      console.warn(`[auth] slug '${slug}' resolved to UUID ${rows[0].id}`);
+      return rows[0].id;
+    }
+  } catch (err) {
+    console.error(`[auth] _resolveOrgSlug('${slug}') fejlede:`, err);
+  }
+  return slug;
 }
 
 // ── Token verification cache ──────────────────────────────────────────────────
@@ -345,7 +373,8 @@ export async function authMiddleware(
   // ── Platform admin whitelist: role = platform_admin, but also look up org ────
   // so platform admins can use the tenant surface (create projects, etc.)
   if (supabaseUser.email && PLATFORM_ADMIN_EMAILS.has(supabaseUser.email.toLowerCase())) {
-    let organizationId = "blissops-main"; // safe fallback — org exists in DB
+    const DEFAULT_SLUG = "blissops-main";
+    let organizationId = DEFAULT_SLUG;
     const cachedAdmin = getCachedMember(supabaseUser.id);
     if (cachedAdmin) {
       organizationId = cachedAdmin.organizationId;
@@ -359,10 +388,12 @@ export async function authMiddleware(
         if (members[0]) {
           organizationId = members[0].organizationId;
         }
-        setCachedMember(supabaseUser.id, organizationId, "platform_admin");
       } catch (dbErr) {
-        console.error("[auth] platform admin org lookup failed (using default):", dbErr);
+        console.error("[auth] platform admin org lookup failed:", dbErr);
       }
+      // If we still have a slug (no membership row), resolve slug → real UUID
+      organizationId = await _resolveOrgSlug(organizationId);
+      setCachedMember(supabaseUser.id, organizationId, "platform_admin");
     }
     req.user = {
       id: supabaseUser.id,
@@ -375,7 +406,8 @@ export async function authMiddleware(
   }
 
   // ── Step 2: look up org membership (cached, non-fatal if DB unavailable) ──
-  let organizationId = "blissops-main";
+  const DEFAULT_SLUG = "blissops-main";
+  let organizationId = DEFAULT_SLUG;
   let role = "member";
   const cached = getCachedMember(supabaseUser.id);
   if (cached) {
@@ -392,11 +424,12 @@ export async function authMiddleware(
         organizationId = members[0].organizationId;
         role = members[0].role;
       }
-      setCachedMember(supabaseUser.id, organizationId, role);
     } catch (dbErr) {
-      console.error("[auth] DB membership lookup failed (using defaults):", dbErr);
-      // JWT is valid — let the user in with safe defaults; don't cache failures
+      console.error("[auth] DB membership lookup failed:", dbErr);
     }
+    // If we still have a slug (no membership row or lookup failed), resolve slug → UUID
+    organizationId = await _resolveOrgSlug(organizationId);
+    setCachedMember(supabaseUser.id, organizationId, role);
   }
 
   req.user = {

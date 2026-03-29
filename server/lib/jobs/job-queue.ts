@@ -102,9 +102,23 @@ export async function ensureOcrSchema(): Promise<void> {
   }
 }
 
+const _JOB_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function enqueueOcrJob(
   payload: OcrJobPayload,
 ): Promise<{ id: string; reused: boolean }> {
+  // Guard: both tenantId and userId must be real UUIDs — never slugs or empty strings.
+  if (!_JOB_UUID_RE.test(payload.tenantId)) {
+    throw new Error(
+      `enqueueOcrJob: tenantId er ikke et gyldigt UUID: '${payload.tenantId}'. ` +
+      `Kontrollér at brugeren har en organisation i databasen.`,
+    );
+  }
+  if (!_JOB_UUID_RE.test(payload.userId)) {
+    throw new Error(
+      `enqueueOcrJob: userId er ikke et gyldigt UUID: '${payload.userId}'.`,
+    );
+  }
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { Client } = require("pg");
   const client = new Client({
