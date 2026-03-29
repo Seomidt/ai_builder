@@ -29,15 +29,15 @@ export default function BlogPage() {
   }, []);
 
   return (
-    <div className="min-h-screen overflow-x-hidden bg-white">
-      {/* Header with nav */}
-      <div className="bg-white border-b border-gray-200">
+    <div className="min-h-screen overflow-x-hidden">
+      {/* Mørk nav-sektion — nav er designet til mørk baggrund */}
+      <div className="bg-[#030711] text-white">
         <div className="relative z-10">
           <MarketingNav />
         </div>
       </div>
 
-      {/* Blog content */}
+      {/* Blog indhold — hvid baggrund */}
       <main className="bg-white text-gray-900">
         <div className="mx-auto max-w-4xl px-6 pb-24 pt-14 md:px-8">
           <div
