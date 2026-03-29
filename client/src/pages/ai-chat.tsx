@@ -799,7 +799,9 @@ export default function AiChatPage() {
         : code === "UNAUTHENTICATED"
         ? "Du er ikke logget ind. Genindlæs siden og log ind igen."
         : code === "DOCUMENT_UNREADABLE" || code === "DOCUMENT_CONTEXT_MISSING"
-        ? "Dokument kunne ikke læses."
+        ? (serverMsg && serverMsg !== "DOCUMENT_UNREADABLE" && serverMsg !== "DOCUMENT_CONTEXT_MISSING"
+            ? serverMsg
+            : "Dokument kunne ikke læses.")
         : serverMsg || "Der opstod en fejl. Prøv igen.";
       setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", text: msg, timestamp: new Date(), isError: true }]);
       toast({ title: "Chat fejl", description: msg, variant: "destructive" });

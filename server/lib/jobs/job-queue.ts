@@ -248,6 +248,9 @@ export interface RawOcrTask {
   retry_count:   number;
 }
 
+/** Minutes a job can stay in 'running' before being considered stale (worker crash). */
+const STALE_RUNNING_MINUTES = 12;
+
 export async function claimJobs(limit: number): Promise<RawOcrTask[]> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { Client } = require("pg");
@@ -258,6 +261,36 @@ export async function claimJobs(limit: number): Promise<RawOcrTask[]> {
   await client.connect();
   try {
     await client.query("BEGIN");
+
+    // ── 0. Recovery: reset stale running jobs (worker crash / Vercel timeout) ─
+    // If a job has been in 'running' for longer than STALE_RUNNING_MINUTES,
+    // the worker function crashed or timed out without marking it failed/completed.
+    // We reset it so it can be re-claimed on this or the next cron tick.
+    const staleResult = await client.query(`
+      UPDATE chat_ocr_tasks
+      SET    status        = CASE
+                               WHEN attempt_count >= max_attempts THEN 'dead_letter'
+                               ELSE 'failed'
+                             END,
+             next_retry_at = CASE
+                               WHEN attempt_count >= max_attempts THEN NULL
+                               ELSE NOW() + INTERVAL '2 minutes'
+                             END,
+             completed_at  = CASE
+                               WHEN attempt_count >= max_attempts THEN NOW()
+                               ELSE NULL
+                             END,
+             retry_count   = retry_count + 1,
+             stage         = NULL,
+             last_error    = 'Worker timeout: jobbet sad fast i running-tilstand i >${STALE_RUNNING_MINUTES} minutter og er nu nulstillet'
+      WHERE  status     = 'running'
+        AND  started_at < NOW() - INTERVAL '${STALE_RUNNING_MINUTES} minutes'
+      RETURNING id, status
+    `);
+    if (staleResult.rowCount && staleResult.rowCount > 0) {
+      console.log(`[job-queue] recovered ${staleResult.rowCount} stale running job(s):`,
+        staleResult.rows.map((r: { id: string; status: string }) => `${r.id.slice(0, 8)}→${r.status}`).join(", "));
+    }
 
     // CTE-based claim that:
     // 1. Skips tenants already at MAX_CONCURRENT_PER_TENANT running jobs
