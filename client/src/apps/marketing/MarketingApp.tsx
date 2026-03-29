@@ -21,7 +21,6 @@ import { MarketingEarlyAccessBlock } from "@/components/marketing/MarketingEarly
 import { MarketingFooter } from "@/components/marketing/MarketingFooter";
 import EarlyAccessPage from "@/pages/marketing/EarlyAccessPage";
 import BlogPage        from "@/pages/marketing/BlogPage";
-import BlogPostPage    from "@/pages/marketing/BlogPostPage";
 
 const trustItems = ["SOC 2 ready", "GDPR readiness", "EU data residency", "Tenant-isolated"];
 
@@ -146,7 +145,6 @@ export function MarketingApp() {
     <Switch>
       <Route path="/auth/:rest*"    component={AuthRedirect} />
       <Route path="/early-access"   component={EarlyAccessPage} />
-      <Route path="/blog/:slug"     component={BlogPostPage} />
       <Route path="/blog"           component={BlogPage} />
       <Route                        component={BlogRoot} />
     </Switch>
