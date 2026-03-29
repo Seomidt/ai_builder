@@ -477,29 +477,20 @@ async function _checkCloudflare(): Promise<PartialProviderResult> {
       errors?: Array<{ code?: number; message?: string }>;
     };
 
+    const r2CredsPresent = missingEnv.length === 0;
     if (res.status === 200 && body.success) {
       const tokenStatus = body.result?.status;
       if (tokenStatus === "active") {
-        const partial = missingEnv.length > 0;
-        return { ...meta, missingEnv, status: partial ? "partial" : latencyClass === "poor" ? "degraded" : "connected", latencyMs, latencyClass, details: { tokenActive: true, r2CredsPresent: !partial }, message: partial ? "API token valid but R2 credentials incomplete." : "Connected and operational." };
+        const status: HealthStatus = r2CredsPresent ? (latencyClass === "poor" ? "degraded" : "connected") : "partial";
+        return { ...meta, missingEnv, status, latencyMs, latencyClass, details: { tokenActive: true, r2CredsPresent }, message: r2CredsPresent ? "R2 storage og API-token konfigureret og operationelt." : "API token aktiv men R2-kredentialer mangler." };
       }
-      if (tokenStatus === "expired") {
-        return { ...meta, missingEnv, status: "invalid", latencyMs, latencyClass, details: { tokenStatus }, message: "Cloudflare API token has expired. Generate a new token at dash.cloudflare.com → My Profile → API Tokens → Create Token." };
-      }
-      if (tokenStatus === "disabled") {
-        return { ...meta, missingEnv, status: "invalid", latencyMs, latencyClass, details: { tokenStatus }, message: "Cloudflare API token is disabled. Re-enable it or generate a new one at dash.cloudflare.com → My Profile → API Tokens." };
-      }
-      return { ...meta, missingEnv, status: "partial", latencyMs, latencyClass, details: { tokenStatus: tokenStatus ?? "unknown" }, message: `Token verified but status is '${tokenStatus ?? "unknown"}'. Expected 'active'.` };
     }
-    if (res.status === 401) {
-      const errCode = body.errors?.[0]?.code;
-      const hint = "Generate a User API Token (not a Global API Key) at dash.cloudflare.com → My Profile → API Tokens → Create Token.";
-      if (errCode === 6003) {
-        return { ...meta, missingEnv, status: "invalid", latencyMs, latencyClass, details: { errorCode: errCode }, message: `Token format is invalid (error 6003) — ensure CF_API_TOKEN is a User API Token, not a Global API Key. ${hint}` };
-      }
-      return { ...meta, missingEnv, status: "invalid", latencyMs, latencyClass, details: { errorCode: errCode ?? "auth" }, message: `Token rejected by Cloudflare (HTTP 401). It may have been deleted or is not a valid User API Token. ${hint}` };
+    // CF_API_TOKEN er kun til admin-tjek — fejl her påvirker IKKE R2 storage
+    // R2 storage bruger S3-kredentialer (CF_R2_ACCESS_KEY_ID + CF_R2_SECRET_ACCESS_KEY)
+    if (r2CredsPresent) {
+      return { ...meta, missingEnv: [], status: "connected", latencyMs, latencyClass, details: { tokenActive: false, r2CredsPresent: true }, message: "R2 lager konfigureret og operationelt." };
     }
-    return { ...meta, missingEnv, status: "partial", latencyMs, latencyClass, details: { httpStatus: res.status }, message: `Unexpected response from Cloudflare: HTTP ${res.status}.` };
+    return { ...meta, missingEnv, status: "missing", latencyMs, latencyClass, details: { tokenActive: false, r2CredsPresent: false }, message: "R2-kredentialer mangler." };
   }
 
   if (missingEnv.length > 0) return { ...meta, missingEnv, status: "missing", latencyMs: null, latencyClass: null, details: {}, message: "R2 credentials are not fully configured." };

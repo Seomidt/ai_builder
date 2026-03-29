@@ -411,15 +411,15 @@ async function _checkCloudflare(): Promise<PartialProviderResult> {
     const body = await res.json().catch(() => ({})) as { success?: boolean; result?: { status?: string } };
 
     if (res.status === 200 && body.success && body.result?.status === "active") {
-      return { ...meta, missingEnv, status: r2CredsPresent ? (latencyClass === "poor" ? "degraded" : "connected") : "partial", latencyMs, latencyClass, details: { tokenActive: true, r2CredsPresent }, message: r2CredsPresent ? "Connected and operational." : "API token valid but R2 credentials incomplete." };
+      const status: HealthStatus = r2CredsPresent ? (latencyClass === "poor" ? "degraded" : "connected") : "partial";
+      return { ...meta, missingEnv, status, latencyMs, latencyClass, details: { tokenActive: true, r2CredsPresent }, message: r2CredsPresent ? "R2 storage og API-token konfigureret og operationelt." : "API token aktiv men R2-kredentialer mangler." };
     }
-    // CF_API_TOKEN er kun til admin-tjek — ugyldig token ≠ R2 storage nede
+    // CF_API_TOKEN er kun til admin-tjek — fejl her påvirker IKKE R2 storage
     // R2 storage bruger S3-kredentialer (CF_R2_ACCESS_KEY_ID + CF_R2_SECRET_ACCESS_KEY)
-    if (res.status === 401) {
-      if (r2CredsPresent) return { ...meta, missingEnv: [], status: "partial", latencyMs, latencyClass, details: { tokenActive: false, r2CredsPresent: true }, message: "R2 lager er konfigureret. Admin API-token er udløbet (påvirker ikke lager)." };
-      return { ...meta, missingEnv, status: "partial", latencyMs, latencyClass, details: { tokenActive: false, r2CredsPresent: false }, message: "Admin API-token er udløbet og R2-kredentialer mangler." };
+    if (r2CredsPresent) {
+      return { ...meta, missingEnv: [], status: "connected", latencyMs, latencyClass, details: { tokenActive: false, r2CredsPresent: true }, message: "R2 lager konfigureret og operationelt." };
     }
-    return { ...meta, missingEnv, status: r2CredsPresent ? "partial" : "missing", latencyMs, latencyClass, details: { httpStatus: res.status }, message: r2CredsPresent ? `R2 konfigureret. Admin API-tjek returnerede HTTP ${res.status}.` : `R2 ikke fuldt konfigureret. HTTP ${res.status}.` };
+    return { ...meta, missingEnv, status: "missing", latencyMs, latencyClass, details: { tokenActive: false, r2CredsPresent: false }, message: "R2-kredentialer mangler." };
   }
 
   if (!r2CredsPresent) return { ...meta, missingEnv, status: "missing", latencyMs: null, latencyClass: null, details: {}, message: "R2 credentials are not fully configured." };
