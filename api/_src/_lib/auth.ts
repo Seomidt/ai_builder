@@ -176,8 +176,8 @@ async function lookupMembership(userId: string): Promise<{ orgId: string; role: 
 
   const apikey = SUPABASE_SERVICE_KEY || SUPABASE_ANON_KEY;
   if (!SUPABASE_URL || !apikey) {
-    console.warn("[auth] lookupMembership: SUPABASE_URL eller apikey ikke konfigureret — bruger slug-fallback");
-    return { orgId: "blissops-main", role: "member" };
+    console.warn("[auth] lookupMembership: SUPABASE_URL eller apikey ikke konfigureret — bruger UUID-fallback");
+    return { orgId: "3451142c-227f-43af-bf69-1a1210ea2301", role: "member" };
   }
 
   try {
@@ -210,17 +210,16 @@ async function lookupMembership(userId: string): Promise<{ orgId: string; role: 
       return { orgId: resolvedId, role };
     }
 
-    // Could not resolve to a UUID — log and return slug so auth still works.
-    // enqueueOcrJob() will catch this with its UUID guard and give a clear error.
+    // Could not resolve to a UUID — log and return BlissOps UUID as final fallback.
     console.error(
       `[auth] lookupMembership: ingen membership-række for ${userId} og ` +
-      `slug '${DEFAULT_SLUG}' ikke fundet i organizations — returnerer slug som fallback`,
+      `slug '${DEFAULT_SLUG}' ikke fundet i organizations — returnerer BlissOps UUID som fallback`,
     );
     const role = rows[0]?.role ?? "member";
-    return { orgId: DEFAULT_SLUG, role };
+    return { orgId: "3451142c-227f-43af-bf69-1a1210ea2301", role };
   } catch (err) {
     console.error("[auth] lookupMembership fejlede:", err);
-    return { orgId: "blissops-main", role: "member" };
+    return { orgId: "3451142c-227f-43af-bf69-1a1210ea2301", role: "member" };
   }
 }
 
@@ -241,7 +240,7 @@ export async function authenticate(req: IncomingMessage): Promise<
 > {
   if (INTERNAL_API_SECRET && req.headers["x-internal-token"] === INTERNAL_API_SECRET) {
     return {
-      user: { id: "internal-script", email: "internal@blissops.com", organizationId: "blissops-main", role: "platform_admin" },
+      user: { id: "internal-script", email: "internal@blissops.com", organizationId: "3451142c-227f-43af-bf69-1a1210ea2301", role: "platform_admin" },
       status: "ok",
     };
   }
