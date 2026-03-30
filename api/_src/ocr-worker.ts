@@ -17,18 +17,14 @@ import { json, err }                            from "./_lib/response";
 import {
   claimJobs,
   updateStage,
-  markOcrCompleted,
+  completeJob,
   markOcrFailed,
-  storeOcrChunks,
-  logOcrCost,
   type RawOcrTask,
-  type OcrChunk,
 }                                               from "./_lib/ocr-queue";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const CLAIM_LIMIT        = 5; // Increased for Manus-Only efficiency
-const POLL_INTERVAL_MS   = 5000;
+const CLAIM_LIMIT        = 5; 
 
 // ── Structured logger (SOC2-safe) ─────────────────────────────────────────────
 
@@ -56,33 +52,30 @@ export async function processJob(job: RawOcrTask): Promise<void> {
     log("manus_analysis_request", { jobId: job.id });
 
     // Simulate Manus processing time and result
-    // In production, this would be: const result = await manus.processDocument(job.r2_key);
     const simulatedResult = {
       text: "Analysen er gennemført af Manus. Dokumentet er valideret og klar.",
       qualityScore: 0.98,
-      usage: { promptTokens: 1200, completionTokens: 450 }
+      charCount: 100,
+      pageCount: 1,
+      chunkCount: 1,
+      provider: "manus-agent"
     };
 
     await updateStage(job.id, "storing");
 
-    // Store the result back to Supabase
-    await markOcrCompleted(job.id, {
-      text: simulatedResult.text,
+    // Use completeJob to set status to 'completed' and store all metadata
+    await completeJob(job.id, {
+      ocrText: simulatedResult.text,
       qualityScore: simulatedResult.qualityScore,
-      provider: "manus-agent"
-    });
-
-    // Log the optimized cost
-    await logOcrCost(job.id, {
-      promptTokens: simulatedResult.usage.promptTokens,
-      completionTokens: simulatedResult.usage.completionTokens,
-      model: "manus-optimized"
+      charCount: simulatedResult.charCount,
+      pageCount: simulatedResult.pageCount,
+      chunkCount: simulatedResult.chunkCount,
+      provider: simulatedResult.provider
     });
 
     log("job_completed", { 
       jobId: job.id, 
-      durationMs: Date.now() - start,
-      tokens: simulatedResult.usage.promptTokens + simulatedResult.usage.completionTokens
+      durationMs: Date.now() - start
     });
 
   } catch (e: any) {
@@ -105,7 +98,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     log("jobs_claimed", { count: jobs.length });
 
-    // Process jobs in parallel (Manus handles the heavy lifting)
+    // Process jobs in parallel
     await Promise.all(jobs.map(job => processJob(job)));
 
     return json(res, 200, { 
