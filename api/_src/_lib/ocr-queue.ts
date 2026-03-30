@@ -21,6 +21,6 @@ export {
   type RawOcrTask,
   type OcrChunkRow  as OcrChunk,
   type OcrCostLog,
-} from "../../../server/lib/jobs/job-queue";
+} from "../../../server/lib/jobs/job-queue.ts";
 
 export type { OcrJob, OcrJobPayload, OcrJobCompletion } from "../../../server/lib/jobs/job-types.ts";

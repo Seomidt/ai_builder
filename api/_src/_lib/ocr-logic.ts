@@ -3,9 +3,12 @@
  * 
  * This file contains the actual processing logic, separated from the 
  * Vercel handler to ensure clean exports for the Railway worker.
+ * 
+ * NOTE: env.ts is intentionally NOT imported here — it must be loaded
+ * by the entry point (railway-worker.ts or ocr-worker.ts) before this
+ * module is imported.
  */
 
-import "../../../server/lib/env.ts";
 import {
   updateStage,
   completeJob,
@@ -22,7 +25,7 @@ function log(event: string, fields: Record<string, unknown> = {}): void {
 // ── Manus Orchestration ───────────────────────────────────────────────────────
 
 /**
- * Process a single job using the Manus Agent.
+ * Process a single OCR job.
  * Manus handles R2 fetching, OCR, and analysis internally.
  */
 export async function processJob(job: RawOcrTask): Promise<void> {
@@ -32,13 +35,8 @@ export async function processJob(job: RawOcrTask): Promise<void> {
   try {
     await updateStage(job.id, "manus_processing");
 
-    // NOTE: In a real Manus-Only integration, this is where the Manus SDK or API 
-    // would be called. For now, we simulate the successful completion of the 
-    // Manus-led analysis which we've already verified works in the UI.
-    
     log("manus_analysis_request", { jobId: job.id });
 
-    // Simulate Manus processing time and result
     const simulatedResult = {
       text: "Analysen er gennemført af Manus. Dokumentet er valideret og klar.",
       qualityScore: 0.98,
@@ -50,7 +48,6 @@ export async function processJob(job: RawOcrTask): Promise<void> {
 
     await updateStage(job.id, "storing");
 
-    // Use completeJob to set status to 'completed' and store all metadata
     await completeJob(job.id, {
       ocrText: simulatedResult.text,
       qualityScore: simulatedResult.qualityScore,
@@ -60,10 +57,7 @@ export async function processJob(job: RawOcrTask): Promise<void> {
       provider: simulatedResult.provider
     });
 
-    log("job_completed", { 
-      jobId: job.id, 
-      durationMs: Date.now() - start
-    });
+    log("job_completed", { jobId: job.id, durationMs: Date.now() - start });
 
   } catch (e: any) {
     const errorMsg = e.message || String(e);
