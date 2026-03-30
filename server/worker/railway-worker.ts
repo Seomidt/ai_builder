@@ -5,7 +5,7 @@
  * It polls the Supabase job queue and processes tasks one by one.
  */
 
-import "../lib/env";
+import "../lib/env.ts";
 import { 
   claimJobs, 
   type RawOcrTask 
