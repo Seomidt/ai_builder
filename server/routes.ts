@@ -1333,6 +1333,40 @@ Generate names and content in ${langNote}.`;
         return res.status(403).json({ error_code: "FORBIDDEN", message: "Ugyldig object key" });
       }
 
+      // ── Manus-Only: Force all PDFs to async OCR pipeline ──────────────────
+      const isPdf = contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
+      if (isPdf) {
+        console.log(`[upload/finalize] PDF — routing to async OCR. tenant=${orgId} key=${objectKey}`);
+        try {
+          const { enqueueOcrJob } = await import("./lib/jobs/job-queue");
+          const ocrResult = await enqueueOcrJob({
+            tenantId:    orgId,
+            userId:      userId,
+            r2Key:       objectKey,
+            filename:    filename,
+            contentType: contentType,
+            fileHash:    undefined,
+          });
+          const { id: taskId, reused } = ocrResult;
+          console.log(`[upload/finalize] OCR task created taskId=${taskId} reused=${reused}`);
+          return res.json({
+            mode:    "OCR_PENDING",
+            routing: "Manus-Only Async Pipeline (Enterprise Security)",
+            taskId,
+            reused,
+            pollUrl: `/api/ocr-status?id=${taskId}`,
+            message: reused
+              ? "Dette dokument er allerede i systemet. Hentet fra eksisterende behandling."
+              : "Dokumentet er modtaget. Manus analyserer det nu i baggrunden.",
+          });
+        } catch (ocrErr) {
+          const msg = ocrErr instanceof Error ? ocrErr.message : String(ocrErr);
+          console.error(`[upload/finalize] OCR task creation failed: ${msg}`);
+          return res.json({ mode: "B_FALLBACK", routing: "ocr_task_error", message: `Fejl ved oprettelse af opgave: ${msg.slice(0, 300)}`, results: [] });
+        }
+      }
+
+      // ── A/B routing for non-PDFs ──────────────────────────────────────────
       const { decideAttachmentProcessingMode } = await import("./lib/chat/attachment-router");
       const routing = decideAttachmentProcessingMode({
         mimeType: contentType, sizeBytes: size, fileCount: fileCount ?? 1, context: context as "chat" | "storage",
@@ -1349,6 +1383,58 @@ Generate names and content in ${langNote}.`;
     } catch (e) {
       console.error("[upload/finalize] error:", e);
       return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Finalisering fejlede" });
+    }
+  });
+
+  // ─── OCR Status ─────────────────────────────────────────────────────────────
+
+  app.get("/api/ocr-status", async (req: Request, res: Response) => {
+    try {
+      const orgId  = getOrgId(req);
+      const taskId = req.query.id as string;
+      if (!taskId) {
+        return res.status(400).json({ error_code: "MISSING_ID", message: "id query parameter krævet" });
+      }
+      const { getJob } = await import("./lib/jobs/job-queue");
+      const task = await getJob(taskId);
+      if (!task) {
+        return res.status(404).json({ error_code: "NOT_FOUND", message: `OCR task ${taskId} ikke fundet` });
+      }
+      // Tenant isolation
+      if (task.tenant_id !== orgId) {
+        return res.status(403).json({ error_code: "FORBIDDEN", message: "Adgang nægtet" });
+      }
+      if (task.status === "completed") {
+        return res.json({
+          status:       "completed",
+          taskId:       task.id,
+          ocrText:      task.ocr_text ?? "",
+          charCount:    task.char_count ?? 0,
+          chunkCount:   task.chunk_count ?? 0,
+          qualityScore: task.quality_score ?? 0,
+          pageCount:    task.page_count ?? 1,
+          provider:     task.provider ?? "manus-agent",
+          completedAt:  task.completed_at,
+        });
+      }
+      if (task.status === "failed" || task.status === "dead") {
+        return res.json({
+          status:       task.status,
+          taskId:       task.id,
+          errorReason:  task.failure_reason ?? "Ukendt fejl",
+          attemptCount: task.attempt_count ?? 0,
+          maxAttempts:  task.max_attempts ?? 3,
+        });
+      }
+      return res.json({
+        status:       task.status ?? "pending",
+        taskId:       task.id,
+        stage:        task.stage ?? null,
+        attemptCount: task.attempt_count ?? 0,
+      });
+    } catch (e) {
+      console.error("[ocr-status] error:", e);
+      return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Status opslag fejlede" });
     }
   });
 
