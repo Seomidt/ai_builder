@@ -6,9 +6,13 @@
  * 
  * All OCR logic is inline here to avoid cross-directory ESM import issues.
  * Imports use no file extensions (tsx resolves them automatically).
+ * 
+ * Health check HTTP server is included so Railway does not kill the process
+ * due to missing port binding / health check failures.
  */
 
 import "../lib/env";
+import http from "http";
 import {
   claimJobs,
   updateStage,
@@ -19,6 +23,30 @@ import {
 
 const POLL_INTERVAL_MS  = 5_000; // 5 seconds
 const CONCURRENCY_LIMIT = 2;
+const HEALTH_PORT       = parseInt(process.env.PORT ?? "8080", 10);
+
+// ── Health check HTTP server ──────────────────────────────────────────────────
+// Railway requires a process to bind to a port and respond to HTTP requests.
+// Without this, Railway sends SIGTERM after ~30s thinking the process crashed.
+
+const healthServer = http.createServer((req, res) => {
+  if (req.url === "/health" || req.url === "/") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok", service: "railway-worker", ts: new Date().toISOString() }));
+  } else {
+    res.writeHead(404);
+    res.end("Not found");
+  }
+});
+
+healthServer.listen(HEALTH_PORT, () => {
+  console.log(JSON.stringify({
+    ts:    new Date().toISOString(),
+    svc:   "railway-worker",
+    event: "health_server_started",
+    port:  HEALTH_PORT,
+  }));
+});
 
 // ── Structured logger (SOC2-safe) ─────────────────────────────────────────────
 
