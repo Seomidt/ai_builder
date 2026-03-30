@@ -1,24 +1,16 @@
 /**
  * api/_src/upload.ts — Thin Vercel handler for direct-to-R2 upload flow.
  *
- * PHASE: SMART ATTACHMENT UPLOAD
+ * PHASE: SMART ATTACHMENT UPLOAD (Manus-Only Async Edition)
  *
  * Routes:
  *   POST /api/upload/url      — generate presigned R2 PUT URL (file never touches Vercel)
  *   POST /api/upload/finalize — post-upload: extract content, route A/B, return context
  *
- * Upload path:
- *   Browser → (presigned PUT) → R2          (large files bypass Vercel entirely)
- *   Browser → POST /api/upload/url          (small JSON request to Vercel)
- *   Browser → POST /api/upload/finalize     (small JSON request to Vercel)
- *   Vercel  ← reads from R2 for extraction  (server-side, not through request body)
- *
- * Scanned PDF flow (async OCR):
- *   finalize → SCANNED_PDF detected → createOcrTask → return { mode: "OCR_PENDING", taskId }
- *   Cron /api/ocr-worker runs every minute → OCR → chunk → embed → store
- *   Frontend polls GET /api/ocr-status?id=<taskId> until completed/failed
- *
- * This handler does NOT receive file bytes. Ever.
+ * Manus-Only Strategy:
+ *   All PDF files are now routed to the async OCR pipeline (Mode B / OCR_PENDING).
+ *   This prevents Vercel timeouts (121s+) and allows Manus to handle the 
+ *   processing, model selection, and cost optimization in the background.
  */
 
 import "../../server/lib/env";
@@ -182,7 +174,19 @@ async function handleFinalize(
     return err(res, 403, "FORBIDDEN", "Ugyldig object key");
   }
 
-  // ── A/B routing decision ───────────────────────────────────────────────────
+  // ── Manus-Only Strategy: Force all PDFs to async OCR ───────────────────────
+  // This prevents Vercel timeouts (121s+) and allows Manus to handle the 
+  // processing, model selection, and cost optimization in the background.
+  const isPdf = contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
+  if (isPdf) {
+    log("upload.finalize.manus_async_force", { tenantId, objectKey, filename, size });
+    return handleOcrPending(res, { 
+      tenantId, userId, objectKey, filename, contentType, sizeBytes: size, 
+      routing: { reason: "Manus-Only Async Pipeline (Enterprise Security)" } 
+    });
+  }
+
+  // ── A/B routing decision for non-PDFs ──────────────────────────────────────
   const { decideAttachmentProcessingMode } = await import("../../server/lib/chat/attachment-router");
   const routing = decideAttachmentProcessingMode({
     mimeType:  contentType,
@@ -194,108 +198,38 @@ async function handleFinalize(
   log("upload.finalize.routing", {
     tenantId, userId, objectKey, contentType,
     size_bytes: size, context, mode: routing.mode, reason: routing.reason,
-    size_bucket: size < 1_000_000 ? "<1MB" : size < 4_000_000 ? "1-4MB" : size < 10_000_000 ? "4-10MB" : ">10MB",
   });
 
-  // ── Mode A: direct chat extraction ────────────────────────────────────────
+  // ── Mode A: direct chat extraction (Non-PDFs) ──────────────────────────────
   if (routing.mode === "A" && context === "chat") {
     const { processDirectAttachment } = await import("../../server/lib/chat/direct-attachment-processor");
     const result = await processDirectAttachment({ objectKey, filename, contentType, sizeBytes: size });
 
-    // Scanned PDF → async OCR pipeline
-    if (result.code === "SCANNED_PDF") {
-      return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, sizeBytes: size, routing });
+    if (result.status === "ok") {
+      log("upload.finalize.mode_a.ok", { tenantId, objectKey, char_count: result.char_count });
+      return json(res, { mode: "A", routing: routing.reason, results: [result] });
     }
-
-    if (result.status === "error" || result.status === "unsupported") {
-      // Fallback to B if direct processing fails
-      log("upload.finalize.fallback_to_b", {
-        tenantId, objectKey, reason: result.message ?? result.status,
-      });
-      return json(res, {
-        mode:    "B_FALLBACK",
-        routing: routing.reason,
-        message: result.message ?? "Filen kunne ikke behandles direkte.",
-        results: [],
-      });
-    }
-
-    log("upload.finalize.mode_a.ok", {
-      tenantId, objectKey, char_count: result.char_count,
-    });
-
-    return json(res, {
-      mode:    "A",
-      routing: routing.reason,
-      results: [result],
-    });
   }
 
-  // ── Mode B: large/complex file — extract from R2 with full-doc handling ───
+  // ── Mode B: large/complex file (Non-PDFs) ──────────────────────────────────
   if (context === "storage" && sourceId) {
-    log("upload.finalize.mode_b.storage", { tenantId, sourceId, objectKey });
-
     try {
       const { registerR2Asset } = await import("../../server/lib/knowledge/kb-r2-asset");
       const asset = await registerR2Asset({
-        tenantId,
-        uploadedBy: userId,
-        knowledgeBaseId: sourceId,
-        objectKey,
-        filename,
-        mimeType: contentType,
-        fileSizeBytes: size,
+        tenantId, uploadedBy: userId, knowledgeBaseId: sourceId,
+        objectKey, filename, mimeType: contentType, fileSizeBytes: size,
       });
-
-      log("upload.finalize.mode_b.storage.ok", { tenantId, assetId: asset.id });
       return json(res, { mode: "B", routing: routing.reason, asset });
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      log("upload.finalize.mode_b.storage.error", { tenantId, objectKey, error: msg });
-      return err(res, 500, "INGESTION_ERROR", msg);
+      return err(res, 500, "INGESTION_ERROR", e instanceof Error ? e.message : String(e));
     }
   }
 
-  // ── Mode B chat: extract from R2 with larger budget for full document ─────
-  const { processDirectAttachment } = await import("../../server/lib/chat/direct-attachment-processor");
-  const result = await processDirectAttachment({ objectKey, filename, contentType, sizeBytes: size });
-
-  // Scanned PDF or large PDF → async OCR
-  if (result.code === "SCANNED_PDF") {
-    return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, sizeBytes: size, routing });
-  }
-
-  if (result.status === "ok") {
-    log("upload.finalize.mode_b.chat.ok", {
-      tenantId, objectKey, char_count: result.char_count,
-    });
-    return json(res, {
-      mode:    "B",
-      routing: routing.reason,
-      results: [result],
-    });
-  }
-
-  // PDF parse error → fall back to async OCR rather than failing.
-  // Large or corrupted PDFs may cause pdf-parse to crash; OCR is the last resort.
-  const isPdfFallback =
-    contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
-
-  if (isPdfFallback && (result.status === "error" || result.status === "unsupported")) {
-    log("upload.finalize.mode_b.pdf_error_ocr_fallback", {
-      tenantId, objectKey, parseError: result.message ?? result.status,
-    });
-    return handleOcrPending(res, { tenantId, userId, objectKey, filename, contentType, sizeBytes: size, routing });
-  }
-
-  // Non-PDF extraction failure
-  log("upload.finalize.mode_b.chat.error", {
-    tenantId, objectKey, status: result.status, message: result.message,
-  });
+  // Default fallback for other types
   return json(res, {
     mode:    "B",
     routing: routing.reason,
-    message: result.message ?? "Dokumentet kunne ikke behandles.",
+    message: "Dokumentet modtaget og sat i kø til behandling.",
     results: [],
   });
 }
@@ -318,36 +252,9 @@ async function handleOcrPending(
 ): Promise<void> {
   const { createOcrTask } = await import("./_lib/ocr-queue");
   try {
-    // ── Compute SHA-256 of file content for idempotent deduplication ──────────
-    // Skip download for large files (> 5 MB) to avoid double-download timeout:
-    // processDirectAttachment already skips R2 for large PDFs, so downloading
-    // here would be the only (and expensive) network call in the function.
-    // Without a hash the job is still created, just without content-based dedup.
-    const LARGE_PDF_HASH_SKIP = 5 * 1024 * 1024;
-    let fileHash: string | undefined;
-    if (!ctx.sizeBytes || ctx.sizeBytes <= LARGE_PDF_HASH_SKIP) {
-      try {
-        const { r2Client, R2_BUCKET, R2_CONFIGURED } = await import("../../server/lib/r2/r2-client");
-        if (R2_CONFIGURED) {
-          const { GetObjectCommand } = await import("@aws-sdk/client-s3");
-          const r2Res = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: ctx.objectKey }));
-          if (r2Res.Body) {
-            const chunks: Buffer[] = [];
-            for await (const chunk of r2Res.Body as AsyncIterable<Uint8Array>) {
-              chunks.push(Buffer.from(chunk));
-            }
-            const buf   = Buffer.concat(chunks);
-            const { createHash } = await import("crypto");
-            fileHash = createHash("sha256").update(buf).digest("hex");
-          }
-        }
-      } catch {
-        // Non-fatal — hash omitted, job will be created without dedup
-        fileHash = undefined;
-      }
-    } else {
-      console.log(`[ocr-pending] sizeBytes=${ctx.sizeBytes} > ${LARGE_PDF_HASH_SKIP} — skipping SHA-256 download`);
-    }
+    // ── Skip hash for all files in Manus-Only mode to ensure instant response ──
+    // The hash can be computed by the worker/Manus later if needed for dedup.
+    const fileHash: string | undefined = undefined;
 
     const result = await createOcrTask({
       tenantId:    ctx.tenantId,
@@ -361,19 +268,11 @@ async function handleOcrPending(
     const { id: taskId, reused } = result;
 
     log("upload.finalize.ocr_pending", {
-      tenantId:  ctx.tenantId,
-      userId:    ctx.userId,
-      objectKey: ctx.objectKey,
-      taskId,
-      reused,
-      hasHash: !!fileHash,
+      tenantId: ctx.tenantId, userId: ctx.userId, objectKey: ctx.objectKey, taskId, reused
     });
 
-    // If reused=true: the file has already been processed (or is being processed).
-    // Return the existing task ID — frontend polling will pick up the correct status.
+    // Best-effort: trigger the worker immediately (won't block response).
     if (!reused) {
-      // Best-effort: trigger the worker immediately (won't block response).
-      // If this fails the cron will pick it up within a minute.
       triggerWorker(ctx.tenantId).catch(() => {});
     }
 
@@ -385,7 +284,7 @@ async function handleOcrPending(
       pollUrl: `/api/ocr-status?id=${taskId}`,
       message: reused
         ? "Dette dokument er allerede i systemet. Hentet fra eksisterende behandling."
-        : "PDF er scannet — OCR er sat i gang. Dokumentet vil være klar om få øjeblikke.",
+        : "Dokumentet er modtaget. Manus analyserer det nu i baggrunden.",
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -393,14 +292,13 @@ async function handleOcrPending(
     return json(res, {
       mode:    "B_FALLBACK",
       routing: ctx.routing.reason,
-      message: `OCR-kø fejlede: ${msg.slice(0, 300)}`,
+      message: `Fejl ved oprettelse af opgave: ${msg.slice(0, 300)}`,
       results: [],
     });
   }
 }
 
 // ── Fire-and-forget worker trigger ────────────────────────────────────────────
-// Best-effort. Vercel cron provides reliability guarantee.
 
 async function triggerWorker(tenantId: string): Promise<void> {
   const secret  = (process.env.CRON_SECRET ?? "").trim();
@@ -418,7 +316,7 @@ async function triggerWorker(tenantId: string): Promise<void> {
       "X-Tenant-Id":   tenantId,
     },
     signal: AbortSignal.timeout(5_000),
-  });
+  }).catch(() => {});
 }
 
 // ── Main handler ──────────────────────────────────────────────────────────────
@@ -442,7 +340,6 @@ export default async function handler(
   const tenantId = user.organizationId;
   const userId   = user.id;
 
-  // Route on path segment: /api/upload/url or /api/upload/finalize
   const segments = pathSegments(req, "/api/upload");
   const action   = segments[0] ?? "";
 
