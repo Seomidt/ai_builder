@@ -203,3 +203,54 @@ tenant_member_permissions / tenant_member_departments → RBAC
 ### API
 - `POST /api/kb/search` — knowledge søgning (tenant-scoped, expert-aware, topK ≤ 100)
 - `GET /api/kb/:id/assets` — returnerer `chunkCount`, `embeddingCount`, `pipeline[]`, `ocrStatus`, `parseStatus`, `transcriptStatus`
+
+## OCR Job Queue & Stale Job Recovery (Phase 4)
+
+### Architecture
+- **Job Queue**: Postgres-baseret (ingen external kø-service)
+- **Tabel**: `chat_ocr_tasks` med status (pending|running|completed|failed|dead_letter) og stage (ocr|chunking|embedding|storing)
+- **Worker**: `api/_src/ocr-worker.ts` på Vercel (serverless function med `maxDuration: 300` + `memory: 1024`)
+- **Cron**: `* * * * *` (hver minut) — kværner hvert minut
+
+### Stale Job Recovery
+- **`claimJobs()`**: Henter pending jobs, markerer som running, returnerer til worker
+- **Stale detection**: Jobs i `running`-status >12 minutter uden `started_at` opdatering → reset til `failed` med `nextRetryAt = NOW() + 2 min`
+- **Max attempts**: Job efter 3 fejlede forsøg → `dead_letter` (kræver manuel review)
+- **Implementation**: `server/lib/jobs/job-queue.ts` (lokal dev) + re-eksporteret via `api/_src/_lib/ocr-queue.ts` (Vercel)
+
+### UUID Validation
+- **Guard i `enqueueOcrJob()`**: Både `tenantId` og `userId` må være gyldige UUIDs (format: `8-4-4-4-12` hex)
+- **Fejl hvis slug**: Hvis `tenantId = "blissops-main"` (slug i stedet for UUID) → throws: `"tenantId er ikke et gyldigt UUID: 'blissops-main'. Kontrollér at brugeren har en organisation i databasen."`
+- **Formål**: Forhindrer at Postgres `chat_ocr_tasks.tenant_id` (UUID-kolonne) modtager tekstslugger
+
+### Authentication & Tenant Resolution
+- **`lookupMembership(userId)`** i `api/_src/_lib/auth.ts`:
+  - Opslag: `organization_members` via Supabase REST API
+  - Hvis ingen membership-række: forsøger sekundært opslag `organizations?slug=blissops-main` → henter org's rigtige UUID
+  - Fallback: returnerer slug hvis begge opsalg fejler (brugeren forbliver logget ind, OCR fejler med præcis UUID-guard-fejl)
+  - Logger alle fallback-stier for debugging
+- **Server-side mirror** i `server/middleware/auth.ts`:
+  - Helper `_resolveOrgSlug()` gør det samme via Drizzle ORM
+  - Brugt i platform admin + regular user auth-flow
+
+### Migration
+- **File**: `migrations/chat_ocr_tasks_full.sql`
+- **Idempotent**: Alle statements har `IF NOT EXISTS` eller `ON CONFLICT DO NOTHING`
+- **Indhold**:
+  - `chat_ocr_tasks` (25 kolonner) + 4 indekser (inkl. `cot_tenant_hash_uidx` for dedup)
+  - `chat_ocr_chunks` (OCR-chunks med foreign key til task)
+  - `ocr_cost_log` (prisberegning per job)
+- **Kørsel**: Kør i Supabase SQL Editor (sikker på eksisterende skemaer)
+
+### Recent Fixes (Commits)
+- `318ee78`: UUID-guard i `enqueueOcrJob()` + slug-to-UUID resolution i auth
+- `3f86a67`: `lookupMembership()` returnerer slug-fallback (ikke throw) så auth aldrig logger brugere ud
+- `718fcd3`: Blog-siden har hvid indholdsbaggrund + mørk nav-bar (nav designet til mørk bg)
+
+## Frontend Updates
+
+### Blog Page (`client/src/pages/marketing/BlogPage.tsx`)
+- **Nav-bar**: Mørk baggrund (`bg-[#030711]`) så `MarketingNav` er læselig
+- **Indhold**: Hvid baggrund (`bg-white`) så Soro-embed tekst er læselig
+- **Footer**: Hvid baggrund med subtil grå top-border
+- **Soro embed**: Farve eksplicit sat til `#111827` (mørkegrå) for kontrastmed hvidt bg
