@@ -1,57 +1,20 @@
 /**
- * extract.ts — Multipart file extraction endpoint.
+ * extract.ts — Multipart file extraction endpoint (Manus-Only Optimized).
  *
  * POST /api/extract  (multipart/form-data, one or more files)
  *
  * Extracts text from uploaded files and returns structured results.
  * Used by legacy/non-R2 flows (e.g. direct browser uploads without presigned URL).
  *
- * NOTE: Scanned PDFs return status="error" with a clear message directing the
- * user to use the /api/upload flow (which supports async OCR via job queue).
- * Sync OCR is intentionally NOT supported here — it would block the request
- * for 30-90 seconds and is not production-safe.
+ * PDF extraction is now disabled in this synchronous endpoint to remove
+ * the 'pdf-parse' dependency. Users are directed to the /api/upload flow
+ * which supports high-quality async OCR via Manus.
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
 import { authenticate }                         from "./_lib/auth";
 import { json, err }                            from "./_lib/response";
 import Busboy                                   from "busboy";
-
-// ── Timeouts + thresholds ─────────────────────────────────────────────────────
-const PDF_PARSE_TIMEOUT_MS = 25_000;
-const SCANNED_THRESHOLD    = 100; // chars — below this = treat as scanned PDF
-
-function withRaceTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    p,
-    new Promise<never>((_, r) =>
-      setTimeout(() => r(new Error(`${label} overskred ${ms / 1000}s`)), ms),
-    ),
-  ]);
-}
-
-// ── PDF text extraction (pdf-parse v1 + v2) ───────────────────────────────────
-
-async function parsePdfBuffer(buf: Buffer): Promise<{ text: string; numpages: number }> {
-  const g = globalThis as any;
-  if (!g.DOMMatrix) g.DOMMatrix = class DOMMatrix { constructor() { (this as any).a=1;(this as any).b=0;(this as any).c=0;(this as any).d=1;(this as any).e=0;(this as any).f=0; } };
-  if (!g.ImageData) g.ImageData = class ImageData {};
-  if (!g.Path2D)    g.Path2D    = class Path2D {};
-  if (!g.DOMPoint)  g.DOMPoint  = class DOMPoint {};
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const pdfMod = require("pdf-parse");
-
-  if (pdfMod.PDFParse) {
-    const parser = new pdfMod.PDFParse({ data: buf });
-    const result = await withRaceTimeout(parser.getText(), PDF_PARSE_TIMEOUT_MS, "PDF-parsing (v2)");
-    return { text: typeof result.text === "string" ? result.text : "", numpages: result.total ?? 0 };
-  }
-  if (typeof pdfMod === "function") {
-    const result = await withRaceTimeout(pdfMod(buf, { max: 50 }), PDF_PARSE_TIMEOUT_MS, "PDF-parsing (v1)");
-    return { text: result.text ?? "", numpages: result.numpages ?? 0 };
-  }
-  throw new Error("pdf-parse: ukendt API");
-}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -90,30 +53,15 @@ async function extractFromBuffer(
     return { text, status: "ok" };
   }
 
-  // ── PDF ────────────────────────────────────────────────────────────────────
+  // ── PDF (Disabled in sync flow) ────────────────────────────────────────────
   if (isPdfMime(mime, filename)) {
-    try {
-      const { text: rawText, numpages } = await parsePdfBuffer(buf);
-      const textTrimmed = (rawText ?? "").trim();
-
-      if (textTrimmed.length >= SCANNED_THRESHOLD) {
-        // Normal text-layer PDF
-        return { text: textTrimmed.slice(0, 80_000), status: "ok" };
-      }
-
-      // Scanned/image-based PDF — no sync OCR (not production-safe)
-      console.log(`[extract] pdf=scanned pages=${numpages} raw_chars=${textTrimmed.length}`);
-      return {
-        text: "",
-        status: "error",
-        message:
-          `PDF er scannet/billede-baseret (${numpages} sider) og kan ikke læses direkte. ` +
-          "Brug venligst upload-knappen i chatten — den understøtter automatisk OCR.",
-      };
-    } catch (e) {
-      console.error("[extract] pdf-parse error:", (e as Error).message);
-      return { text: "", status: "error", message: "PDF-parsing fejlede: " + (e as Error).message };
-    }
+    return {
+      text: "",
+      status: "error",
+      message:
+        "Direkte PDF-læsning er deaktiveret for at sikre maksimal stabilitet. " +
+        "Brug venligst upload-knappen i chatten — den understøtter fuld asynkron analyse via Manus.",
+    };
   }
 
   // ── Unsupported ────────────────────────────────────────────────────────────
