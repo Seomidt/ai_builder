@@ -44,8 +44,18 @@ function _isUuid(s: string): boolean { return _AUTH_UUID_RE.test(s); }
  * a real UUID, resolve it via the `organizations` table and return the real UUID.
  * Falls back to the original value when resolution fails so nothing hard-breaks.
  */
+// Known slug → UUID mapping for production resilience (SOC2: deterministic tenant resolution)
+// This ensures org UUID is always resolved correctly even if DB is unavailable at cold start.
+const KNOWN_SLUG_UUIDS: Record<string, string> = {
+  "blissops-main": "ce883cb4-6466-4d08-815d-30b02aca86bf",
+};
+
 async function _resolveOrgSlug(slug: string): Promise<string> {
   if (_isUuid(slug)) return slug;
+  // Fast path: known slug → UUID mapping (avoids DB round-trip, resilient to cold start)
+  if (KNOWN_SLUG_UUIDS[slug]) {
+    return KNOWN_SLUG_UUIDS[slug];
+  }
   try {
     const rows = await db
       .select({ id: organizations.id })
@@ -59,7 +69,8 @@ async function _resolveOrgSlug(slug: string): Promise<string> {
   } catch (err) {
     console.error(`[auth] _resolveOrgSlug('${slug}') fejlede:`, err);
   }
-  return slug;
+  // Final fallback: return known UUID if available
+  return KNOWN_SLUG_UUIDS[slug] ?? slug;
 }
 
 // ── Token verification cache ──────────────────────────────────────────────────
