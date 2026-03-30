@@ -631,7 +631,7 @@ export default function AiChatPage() {
               const taskId = finalData.taskId;
               console.log(`[TRACE-2ocr][${traceId}] OCR_PENDING taskId=${taskId} polling...`);
 
-              const OCR_TIMEOUT   = 180_000;
+              const OCR_TIMEOUT   = 600_000; // 10 minutes for Enterprise documents
               const ocrStart      = Date.now();
               let ocrResult: any  = null;
 
@@ -699,7 +699,7 @@ export default function AiChatPage() {
 
               if (!ocrResult) {
                 console.error(`[OCR-FAIL][${traceId}] PATH=timeout elapsed=180s task never completed`);
-                throw Object.assign(new Error("OCR tog for lang tid. Prøv igen med en kortere fil."), { errorCode: "DOCUMENT_UNREADABLE" });
+                throw Object.assign(new Error("Analysen af det store dokument tager længere tid end forventet. Prøv igen om et øjeblik, eller tjek status i Storage."), { errorCode: "DOCUMENT_UNREADABLE" });
               }
 
               const ocrText = (ocrResult.ocrText ?? "").slice(0, 80_000);
