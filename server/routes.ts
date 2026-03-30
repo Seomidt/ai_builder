@@ -19,8 +19,8 @@ import { sanitizeInput, sanitizeObject, explainSanitization } from "./lib/securi
 import { getRateLimitConfig } from "./middleware/rate-limit.ts";
 import { createStorageForRequest } from "./storage.ts";
 import { previewCommit } from "./lib/github-commit-format.ts";
-import { runExecutorService } from "./services/run-executor.service";
-import { summarize } from "./features/ai-summarize/summarize.service";
+import { runExecutorService } from "./services/run-executor.service.ts";
+import { summarize } from "./features/ai-summarize/summarize.service.ts";
 import { z, ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
 import { AiError } from "./lib/ai/errors.ts";

@@ -11,8 +11,8 @@
  * GitHub write: NOT active — side-effect free.
  */
 
-import { runsRepository } from "../repositories/runs.repository";
-import { architecturesRepository } from "../repositories/architectures.repository";
+import { runsRepository } from "../repositories/runs.repository.ts";
+import { architecturesRepository } from "../repositories/architectures.repository.ts";
 import { getAgent, DEFAULT_PIPELINE } from "../lib/agents/registry.ts";
 import { NotFoundError, ConflictError, ValidationError } from "../lib/errors.ts";
 import type { RunContext } from "../lib/agents/types.ts";

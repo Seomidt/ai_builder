@@ -33,7 +33,7 @@ import type {
   CreateRunInput, UpdateRunStatusInput, AppendStepInput, AppendArtifactInput,
   AppendToolCallInput, AppendApprovalInput, ResolveApprovalInput,
 } from "../services/runs.service";
-import type { UpsertIntegrationInput } from "../services/integrations.service";
+import type { UpsertIntegrationInput } from "../services/integrations.service.ts";
 import { mapSupabaseError } from "./errors.ts";
 
 // ── Column name conversion ────────────────────────────────────────────────────

@@ -13,11 +13,11 @@
 
 import type { Request } from "express";
 import type { Project, AiRun, AiStep, AiArtifact, AiToolCall, AiApproval, ArchitectureProfile, ArchitectureVersion, Integration, ArtifactDependency } from "@shared/schema";
-import { projectsService, type CreateProjectInput, type UpdateProjectInput } from "./services/projects.service";
-import { architecturesService, type CreateProfileInput, type UpdateProfileInput, type CreateVersionInput, type UpsertAgentConfigInput, type UpsertCapabilityConfigInput } from "./services/architectures.service";
-import { runsService, type CreateRunInput, type UpdateRunStatusInput, type AppendStepInput, type AppendArtifactInput, type AppendToolCallInput, type AppendApprovalInput, type ResolveApprovalInput } from "./services/runs.service";
-import { runsRepository } from "./repositories/runs.repository";
-import { integrationsService, type UpsertIntegrationInput } from "./services/integrations.service";
+import { projectsService, type CreateProjectInput, type UpdateProjectInput } from "./services/projects.service.ts";
+import { architecturesService, type CreateProfileInput, type UpdateProfileInput, type CreateVersionInput, type UpsertAgentConfigInput, type UpsertCapabilityConfigInput } from "./services/architectures.service.ts";
+import { runsService, type CreateRunInput, type UpdateRunStatusInput, type AppendStepInput, type AppendArtifactInput, type AppendToolCallInput, type AppendApprovalInput, type ResolveApprovalInput } from "./services/runs.service.ts";
+import { runsRepository } from "./repositories/runs.repository.ts";
+import { integrationsService, type UpsertIntegrationInput } from "./services/integrations.service.ts";
 import { SupabaseStorage } from "./lib/supabase-runtime-storage.ts";
 
 export interface IStorage {

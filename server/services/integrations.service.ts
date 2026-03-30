@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { integrationsRepository } from "../repositories/integrations.repository";
+import { integrationsRepository } from "../repositories/integrations.repository.ts";
 import type { Integration } from "@shared/schema";
 
 export const upsertIntegrationSchema = z.object({

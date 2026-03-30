@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { projectsRepository } from "../repositories/projects.repository";
+import { projectsRepository } from "../repositories/projects.repository.ts";
 import { NotFoundError, ConflictError } from "../lib/errors.ts";
 import type { Project } from "@shared/schema";
 

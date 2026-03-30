@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { architecturesRepository } from "../repositories/architectures.repository";
+import { architecturesRepository } from "../repositories/architectures.repository.ts";
 import { NotFoundError, ConflictError } from "../lib/errors.ts";
 import type {
   ArchitectureProfile,

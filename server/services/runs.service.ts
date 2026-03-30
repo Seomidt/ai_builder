@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { runsRepository } from "../repositories/runs.repository";
+import { runsRepository } from "../repositories/runs.repository.ts";
 import { NotFoundError } from "../lib/errors.ts";
 import type { AiRun, AiStep, AiArtifact, AiToolCall, AiApproval } from "@shared/schema";
 
