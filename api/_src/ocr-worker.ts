@@ -20,7 +20,7 @@ import {
   completeJob,
   markOcrFailed,
   type RawOcrTask,
-}                                               from "./_lib/ocr-queue";
+}                                               from "./_lib/ocr-queue.ts";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
