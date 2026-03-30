@@ -10,7 +10,7 @@ import {
   claimJobs, 
   type RawOcrTask 
 } from "../lib/jobs/job-queue.ts";
-import { processJob } from "../../api/_src/ocr-worker.ts";
+import { processJob } from "../../api/_src/_lib/ocr-logic.ts";
 
 const POLL_INTERVAL_MS = 5000; // 5 seconds
 const CONCURRENCY_LIMIT = 2;   // Number of jobs to process in parallel per tick
