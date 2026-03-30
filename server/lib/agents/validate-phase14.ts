@@ -15,12 +15,12 @@
  */
 
 import pg from "pg";
-import { createAgent, listAgents, getAgentById, createAgentVersion, getAgentVersion, getLatestAgentVersion, agentMetrics, agentHealth, MAX_ITERATIONS } from "./agent-engine";
-import { createRun, transitionRun, getRun, listRuns, isTerminalStatus } from "./agent-state";
-import { logStep, getRunLogs, getRunLogsByTenant } from "./agent-logger";
-import { createWorkflow, addWorkflowStep, getWorkflowSteps, listWorkflows, validateWorkflow, MAX_WORKFLOW_STEPS } from "./workflow-validator";
-import { executeWorkflow, MAX_RUN_DURATION_MS } from "./workflow-engine";
-import { runAgent, MAX_ITERATIONS as RUNNER_MAX_ITERATIONS } from "./agent-runner";
+import { createAgent, listAgents, getAgentById, createAgentVersion, getAgentVersion, getLatestAgentVersion, agentMetrics, agentHealth, MAX_ITERATIONS } from "./agent-engine.ts";
+import { createRun, transitionRun, getRun, listRuns, isTerminalStatus } from "./agent-state.ts";
+import { logStep, getRunLogs, getRunLogsByTenant } from "./agent-logger.ts";
+import { createWorkflow, addWorkflowStep, getWorkflowSteps, listWorkflows, validateWorkflow, MAX_WORKFLOW_STEPS } from "./workflow-validator.ts";
+import { executeWorkflow, MAX_RUN_DURATION_MS } from "./workflow-engine.ts";
+import { runAgent, MAX_ITERATIONS as RUNNER_MAX_ITERATIONS } from "./agent-runner.ts";
 
 const client = new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
 

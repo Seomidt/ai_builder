@@ -1,9 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate } from "./_lib/auth";
-import { json, err, readBody } from "./_lib/response";
-import { dbList, dbInsert } from "./_lib/db";
-import { AI_MODEL_ROUTES } from "../../server/lib/ai/config";
-import { isGroundedUseCase, type AiUseCase } from "../../server/lib/ai/types";
+import { authenticate } from "./_lib/auth.ts";
+import { json, err, readBody } from "./_lib/response.ts";
+import { dbList, dbInsert } from "./_lib/db.ts";
+import { AI_MODEL_ROUTES } from "../../server/lib/ai/config.ts";
+import { isGroundedUseCase, type AiUseCase } from "../../server/lib/ai/types.ts";
 
 // ── Phase 6I: central model resolution (Vercel path, no DB overrides) ─────────
 // Uses AI_MODEL_ROUTES from the single source-of-truth config.

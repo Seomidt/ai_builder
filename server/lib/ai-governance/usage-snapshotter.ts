@@ -6,10 +6,10 @@
  * anomaly-detector without repeated full-table scans.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { sql } from "drizzle-orm";
-import type { PeriodType } from "./budget-checker";
-import { currentPeriodBounds } from "./budget-checker";
+import type { PeriodType } from "./budget-checker.ts";
+import { currentPeriodBounds } from "./budget-checker.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

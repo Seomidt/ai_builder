@@ -12,10 +12,10 @@
  * - Tenant isolation enforced at query level
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { aiEvalRuns, aiEvalResults, aiEvalRegressions } from "@shared/schema";
 import { eq, desc, and, count, sql as drizzleSql } from "drizzle-orm";
-import { listEvalResults } from "./eval-runs";
+import { listEvalResults } from "./eval-runs.ts";
 
 // ── Eval Metrics ──────────────────────────────────────────────────────────────
 

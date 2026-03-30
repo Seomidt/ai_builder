@@ -3,7 +3,7 @@
  * In-memory violation counters + parser/orchestrator limit config report.
  */
 
-import { MAX_HTML_OUTPUT_CHARS, MAX_RAW_INPUT_BYTES } from "./document-parsers";
+import { MAX_HTML_OUTPUT_CHARS, MAX_RAW_INPUT_BYTES } from "./document-parsers.ts";
 import {
   MAX_CONTEXT_CHUNKS,
   MAX_CONTEXT_CHARS,

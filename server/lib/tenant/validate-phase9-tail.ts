@@ -20,7 +20,7 @@ import {
   requestTenantExport, requestTenantDeletion, listTenantExportRequests,
   listTenantDeletionRequests, listTenantDomains, addTenantDomain, explainTenantGovernanceState,
 } from "./tenant-governance";
-import { explainTenantBootstrapState } from "./tenant-bootstrap";
+import { explainTenantBootstrapState } from "./tenant-bootstrap.ts";
 import {
   ALL_TENANT_AUDIT_ACTION_CODES, isKnownTenantAuditAction, TENANT_AUDIT_ACTIONS,
 } from "./audit-actions-phase9";

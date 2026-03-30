@@ -6,7 +6,7 @@
  * INV-FLAG7: Resolution events must be explainable.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { sql as drizzleSql } from "drizzle-orm";
 
 export interface RolloutMetrics {

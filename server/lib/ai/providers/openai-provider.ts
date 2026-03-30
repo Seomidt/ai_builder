@@ -13,8 +13,8 @@
  *   reasoning_tokens    — usage.output_token_details.reasoning_tokens (0 if absent)
  */
 
-import { getOpenAIClient } from "../../openai-client";
-import type { AiProvider, AiProviderGenerateInput, AiProviderGenerateResult } from "./provider";
+import { getOpenAIClient } from "../../openai-client.ts";
+import type { AiProvider, AiProviderGenerateInput, AiProviderGenerateResult } from "./provider.ts";
 
 export class OpenAiProvider implements AiProvider {
   readonly key = "openai";

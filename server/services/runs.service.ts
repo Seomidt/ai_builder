@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { runsRepository } from "../repositories/runs.repository";
-import { NotFoundError } from "../lib/errors";
+import { NotFoundError } from "../lib/errors.ts";
 import type { AiRun, AiStep, AiArtifact, AiToolCall, AiApproval } from "@shared/schema";
 
 export const createRunSchema = z.object({

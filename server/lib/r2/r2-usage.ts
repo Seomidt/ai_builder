@@ -8,8 +8,8 @@
  */
 
 import { ListObjectsV2Command } from "@aws-sdk/client-s3";
-import { r2Client, R2_BUCKET } from "./r2-client";
-import { TENANT_ROOT, PLATFORM_ROOT } from "./key-builder";
+import { r2Client, R2_BUCKET } from "./r2-client.ts";
+import { TENANT_ROOT, PLATFORM_ROOT } from "./key-builder.ts";
 
 export interface PrefixUsage {
   prefix:       string;

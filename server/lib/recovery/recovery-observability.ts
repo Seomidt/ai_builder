@@ -4,9 +4,9 @@
  * and brownout transitions for diagnostics and audit.
  */
 
-import type { PressureLevel, SystemPressureResult } from "./system-pressure";
-import type { BrownoutLevel, BrownoutTransition }   from "./brownout-mode";
-import { getBrownoutHistory as _getBrownoutHistory } from "./brownout-mode";
+import type { PressureLevel, SystemPressureResult } from "./system-pressure.ts";
+import type { BrownoutLevel, BrownoutTransition }   from "./brownout-mode.ts";
+import { getBrownoutHistory as _getBrownoutHistory } from "./brownout-mode.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

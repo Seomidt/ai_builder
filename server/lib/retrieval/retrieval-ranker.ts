@@ -5,8 +5,8 @@
  * INV-RET9: rank_position must be 1-indexed and contiguous.
  */
 
-import type { VectorHit } from "./retrieval-vector";
-import type { LexicalHit } from "./retrieval-lexical";
+import type { VectorHit } from "./retrieval-vector.ts";
+import type { LexicalHit } from "./retrieval-lexical.ts";
 
 export interface RankedResult {
   chunkId: string;

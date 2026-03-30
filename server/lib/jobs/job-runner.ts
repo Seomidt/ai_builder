@@ -7,11 +7,11 @@
  * INV-JOB4: Each attempt is recorded independently (append-only).
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { jobRuns, jobAttempts } from "@shared/schema";
 import { sql as drizzleSql } from "drizzle-orm";
-import { updateJobStatus } from "./job-dispatcher";
-import { computeBackoffMs } from "./job-retries";
+import { updateJobStatus } from "./job-dispatcher.ts";
+import { computeBackoffMs } from "./job-retries.ts";
 
 export type JobHandler = (payload: Record<string, unknown>, context: JobContext) => Promise<void>;
 

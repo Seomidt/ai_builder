@@ -1,22 +1,22 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
-import { db } from "../db";
+import { db } from "../db.ts";
 import { sql } from "drizzle-orm";
-import { getPlatformIntegrationsStatus } from "../lib/integrations/platform-integrations-status";
-import { getPlatformHealth } from "../lib/integrations/integrations-health";
+import { getPlatformIntegrationsStatus } from "../lib/integrations/platform-integrations-status.ts";
+import { getPlatformHealth } from "../lib/integrations/integrations-health.ts";
 
-import { runAiOpsQuery } from "../lib/ai-ops/orchestrator";
-import { generateWeeklyDigest } from "../lib/ai-ops/digest";
-import { getOpsSummary, invalidateOpsSummaryCache } from "../lib/ai-ops/ops-summary";
-import { getRecentAuditLog, getAuditStats } from "../lib/ai-ops/audit";
-import { SUPPORTED_INTENTS, isValidIntent } from "../lib/ai-ops/intents";
-import { resolveUserFromRequest } from "../lib/ai-ops/access-control";
-import { checkTenantBudget, checkAllTenantBudgets, classifyBudgetStatus, currentPeriodBounds } from "../lib/ai-governance/budget-checker";
-import { snapshotTenantUsage, snapshotAllTenants, getLatestSnapshot } from "../lib/ai-governance/usage-snapshotter";
-import { detectTenantAnomalies, detectAllTenantAnomalies, persistAnomalies } from "../lib/ai-governance/anomaly-detector";
-import { generateBudgetAlerts, generateAnomalyAlerts, listOpenAlerts, acknowledgeAlert, resolveAlert } from "../lib/ai-governance/alert-generator";
-import { checkRunawayProtection, checkAllRunawayProtection } from "../lib/ai-governance/runaway-protection";
-import type { PeriodType } from "../lib/ai-governance/budget-checker";
+import { runAiOpsQuery } from "../lib/ai-ops/orchestrator.ts";
+import { generateWeeklyDigest } from "../lib/ai-ops/digest.ts";
+import { getOpsSummary, invalidateOpsSummaryCache } from "../lib/ai-ops/ops-summary.ts";
+import { getRecentAuditLog, getAuditStats } from "../lib/ai-ops/audit.ts";
+import { SUPPORTED_INTENTS, isValidIntent } from "../lib/ai-ops/intents.ts";
+import { resolveUserFromRequest } from "../lib/ai-ops/access-control.ts";
+import { checkTenantBudget, checkAllTenantBudgets, classifyBudgetStatus, currentPeriodBounds } from "../lib/ai-governance/budget-checker.ts";
+import { snapshotTenantUsage, snapshotAllTenants, getLatestSnapshot } from "../lib/ai-governance/usage-snapshotter.ts";
+import { detectTenantAnomalies, detectAllTenantAnomalies, persistAnomalies } from "../lib/ai-governance/anomaly-detector.ts";
+import { generateBudgetAlerts, generateAnomalyAlerts, listOpenAlerts, acknowledgeAlert, resolveAlert } from "../lib/ai-governance/alert-generator.ts";
+import { checkRunawayProtection, checkAllRunawayProtection } from "../lib/ai-governance/runaway-protection.ts";
+import type { PeriodType } from "../lib/ai-governance/budget-checker.ts";
 
 const AiOpsQuerySchema = z.object({
   intent: z.string(),

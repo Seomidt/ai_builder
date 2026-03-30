@@ -6,7 +6,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { z } from "zod";
-import { type OpsIntentId, OPS_INTENT } from "./intents";
+import { type OpsIntentId, OPS_INTENT } from "./intents.ts";
 
 export const ConfidenceSchema = z.enum(["high", "medium", "low", "insufficient_data"]);
 export type Confidence = z.infer<typeof ConfidenceSchema>;

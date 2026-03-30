@@ -6,7 +6,7 @@
  */
 
 import pg from "pg";
-import { checkGuardrails } from "../ai/ai-guardrails";
+import { checkGuardrails } from "../ai/ai-guardrails.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });

@@ -13,10 +13,10 @@
  *   processing, model selection, and cost optimization in the background.
  */
 
-import "../../server/lib/env";
+import "../../server/lib/env.ts";
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate }                         from "./_lib/auth";
-import { json, err, readBody, pathSegments }    from "./_lib/response";
+import { authenticate }                         from "./_lib/auth.ts";
+import { json, err, readBody, pathSegments }    from "./_lib/response.ts";
 
 // ── Allowed MIME types (single source of truth lives in kb-upload-service) ────
 const ALLOWED_MIME_TYPES: Record<string, string> = {

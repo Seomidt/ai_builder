@@ -10,7 +10,7 @@
  * buffer/upload step since the file is already in R2.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import {
   knowledgeBases,
   knowledgeDocuments,
@@ -20,7 +20,7 @@ import {
 } from "@shared/schema";
 import { eq, and } from "drizzle-orm";
 import { createHash } from "crypto";
-import { ALLOWED_MIME_TYPES } from "./kb-upload-service";
+import { ALLOWED_MIME_TYPES } from "./kb-upload-service.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

@@ -6,7 +6,7 @@
  * and maps the result into a chat-safe response shape.
  */
 
-import { db } from "../db";
+import { db } from "../db.ts";
 import {
   architectureProfiles,
   specialistRules,
@@ -16,8 +16,8 @@ import {
   chatMessages,
 } from "../../shared/schema";
 import { eq, and } from "drizzle-orm";
-import type { AccessibleExpert } from "./chat-routing";
-import { AI_MODEL_ROUTES } from "../lib/ai/config";
+import type { AccessibleExpert } from "./chat-routing.ts";
+import { AI_MODEL_ROUTES } from "../lib/ai/config.ts";
 import {
   shouldRunSimilarity,
   shouldAllowSimilarityByBudget,

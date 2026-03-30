@@ -18,7 +18,7 @@
  *   app.blissops.com, admin.blissops.com — documented in DOMAIN_CONFIG.plannedSubdomains
  */
 
-import { DOMAIN_CONFIG } from "./domain-config";
+import { DOMAIN_CONFIG } from "./domain-config.ts";
 
 // ─── Environment detection ────────────────────────────────────────────────────
 

@@ -7,7 +7,7 @@
  * INV-JOB5: Tenant-safe — no cross-tenant job access.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { jobs } from "@shared/schema";
 import { eq, sql as drizzleSql } from "drizzle-orm";
 

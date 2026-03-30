@@ -6,7 +6,7 @@
  * INV-FLAG5: Pause/complete lifecycle transitions must be explicit.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { featureFlags } from "@shared/schema";
 import { eq, desc, sql as drizzleSql } from "drizzle-orm";
 

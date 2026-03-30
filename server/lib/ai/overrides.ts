@@ -23,10 +23,10 @@
  */
 
 import { eq, and, isNull } from "drizzle-orm";
-import { db } from "../../db";
-import { aiModelOverrides } from "../../../shared/schema";
-import type { AiModelRoute, AiProviderKey } from "./config";
-import { getActiveProviderKeys } from "./providers/registry";
+import { db } from "../../db.ts";
+import { aiModelOverrides } from "../../../shared/schema.ts";
+import type { AiModelRoute, AiProviderKey } from "./config.ts";
+import { getActiveProviderKeys } from "./providers/registry.ts";
 
 // ── Cache ──────────────────────────────────────────────────────────────────────
 

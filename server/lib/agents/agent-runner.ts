@@ -6,9 +6,9 @@
  */
 
 import pg from "pg";
-import { getAgentVersion, getAgentById } from "./agent-engine";
-import { createRun, transitionRun } from "./agent-state";
-import { executeWorkflow } from "./workflow-engine";
+import { getAgentVersion, getAgentById } from "./agent-engine.ts";
+import { createRun, transitionRun } from "./agent-state.ts";
+import { executeWorkflow } from "./workflow-engine.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });

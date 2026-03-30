@@ -17,7 +17,7 @@
  */
 
 import { and, eq, gte, isNull, lt, sum } from "drizzle-orm";
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import {
   aiUsage,
   aiUsageLimits,
@@ -25,7 +25,7 @@ import {
   usageThresholdEvents,
   type AiUsageLimit,
 } from "@shared/schema";
-import { getCurrentPeriod } from "./usage-periods";
+import { getCurrentPeriod } from "./usage-periods.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 

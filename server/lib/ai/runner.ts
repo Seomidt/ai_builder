@@ -53,12 +53,12 @@
  */
 
 // OpenAI import removed for Manus-Only architecture
-import { AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS, getRouteCachePolicy } from "./config";
-import { resolveRoute } from "./router";
-import { getProvider } from "./providers/registry";
-import { logAiUsage } from "./usage";
-import { loadPricing } from "./pricing";
-import { estimateAiCost } from "./costs";
+import { AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS, getRouteCachePolicy } from "./config.ts";
+import { resolveRoute } from "./router.ts";
+import { getProvider } from "./providers/registry.ts";
+import { logAiUsage } from "./usage.ts";
+import { loadPricing } from "./pricing.ts";
+import { estimateAiCost } from "./costs.ts";
 import {
   loadUsageLimit,
   getCurrentAiUsageForPeriod,
@@ -85,7 +85,7 @@ import {
   releaseAiRequestOwnership,
 } from "./idempotency";
 // Phase 15: Observability — fire-and-forget, never throws (INV-OBS-1, INV-OBS-6)
-import { collectAiLatency } from "../observability/metrics-collector";
+import { collectAiLatency } from "../observability/metrics-collector.ts";
 import {
   AiUnavailableError,
   AiTimeoutError,
@@ -100,9 +100,9 @@ import {
   AiWalletLimitError,
   type AiErrorMeta,
 } from "./errors";
-import { checkWalletHardLimit } from "./wallet";
-import { acquireAiStep, recordStepCompleted } from "./step-budget";
-import { assertTenantFeatureEntitled } from "./entitlement-enforcement";
+import { checkWalletHardLimit } from "./wallet.ts";
+import { acquireAiStep, recordStepCompleted } from "./step-budget.ts";
+import { assertTenantFeatureEntitled } from "./entitlement-enforcement.ts";
 import {
   recordRequestStartedEvent,
   recordProviderCallStartedEvent,
@@ -110,8 +110,8 @@ import {
   recordRequestReplayedEvent,
   recordCacheHitReplayedEvent,
 } from "./billing-events";
-import type { AiCallContext, AiCallResult } from "./types";
-import { isGroundedUseCase } from "./types";
+import type { AiCallContext, AiCallResult } from "./types.ts";
+import { isGroundedUseCase } from "./types.ts";
 import type { AiUsageLimit } from "@shared/schema";
 
 export interface AiCallInput {

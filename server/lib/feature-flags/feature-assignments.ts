@@ -6,7 +6,7 @@
  * INV-FLAG2: Resolution order must be deterministic.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { featureFlagAssignments, featureFlags } from "@shared/schema";
 import { eq, sql as drizzleSql, and } from "drizzle-orm";
 

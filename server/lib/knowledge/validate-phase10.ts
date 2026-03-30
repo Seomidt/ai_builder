@@ -6,12 +6,12 @@
  */
 
 import pg from "pg";
-import { createKnowledgeSource, getKnowledgeSourceById, listKnowledgeSources, updateKnowledgeSourceStatus } from "./knowledge-sources";
-import { ingestDocument, getIngestionDocumentById, listIngestionDocuments, updateDocumentStatus } from "./knowledge-documents";
-import { chunkDocument, getChunksByDocumentId, countChunksByDocument, updateChunkEmbeddingStatus } from "./knowledge-chunking";
-import { generateEmbeddings, generateEmbeddingsForDocument, getEmbeddingsByChunkId, markEmbeddingFailed, retryFailedEmbeddings } from "./knowledge-embeddings";
-import { registerIndexEntry, registerIndexEntriesForDocument, getIndexEntryByChunkId, listIndexEntriesByDocument, listIndexEntriesBySource, summarizeIndexState } from "./knowledge-indexing";
-import { runIngestionPipeline, retryFailedPipelineDocument, explainPipelineState } from "./knowledge-ingestion";
+import { createKnowledgeSource, getKnowledgeSourceById, listKnowledgeSources, updateKnowledgeSourceStatus } from "./knowledge-sources.ts";
+import { ingestDocument, getIngestionDocumentById, listIngestionDocuments, updateDocumentStatus } from "./knowledge-documents.ts";
+import { chunkDocument, getChunksByDocumentId, countChunksByDocument, updateChunkEmbeddingStatus } from "./knowledge-chunking.ts";
+import { generateEmbeddings, generateEmbeddingsForDocument, getEmbeddingsByChunkId, markEmbeddingFailed, retryFailedEmbeddings } from "./knowledge-embeddings.ts";
+import { registerIndexEntry, registerIndexEntriesForDocument, getIndexEntryByChunkId, listIndexEntriesByDocument, listIndexEntriesBySource, summarizeIndexState } from "./knowledge-indexing.ts";
+import { runIngestionPipeline, retryFailedPipelineDocument, explainPipelineState } from "./knowledge-ingestion.ts";
 
 let passed = 0; let failed = 0;
 

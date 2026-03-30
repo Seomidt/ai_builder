@@ -6,8 +6,8 @@
  */
 
 import pg from "pg";
-import { logAuditBestEffort } from "../audit/audit-log";
-import { updateDocumentStatus } from "./knowledge-documents";
+import { logAuditBestEffort } from "../audit/audit-log.ts";
+import { updateDocumentStatus } from "./knowledge-documents.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({

@@ -7,10 +7,10 @@
  * INV-EVAL12: No cross-tenant regression leakage.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { aiEvalRegressions } from "@shared/schema";
 import { eq, and, desc } from "drizzle-orm";
-import { getEvalRun, listEvalResults } from "./eval-runs";
+import { getEvalRun, listEvalResults } from "./eval-runs.ts";
 
 export type RegressionType =
   | "answer_quality_drop"

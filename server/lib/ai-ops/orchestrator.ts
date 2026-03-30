@@ -7,9 +7,9 @@
 // No prompt injection surface from tenant content.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { runAiCall } from "../ai/runner";
-import { assertValidIntent, getIntentDefinition, OPS_INTENT, type OpsIntentId } from "./intents";
-import { assertAiOpsAccess, resolveAiOpsScope, type AiOpsAccessContext, type AiOpsScope } from "./access-control";
+import { runAiCall } from "../ai/runner.ts";
+import { assertValidIntent, getIntentDefinition, OPS_INTENT, type OpsIntentId } from "./intents.ts";
+import { assertAiOpsAccess, resolveAiOpsScope, type AiOpsAccessContext, type AiOpsScope } from "./access-control.ts";
 import {
   buildPlatformHealthContext,
   buildTenantUsageContext,
@@ -28,10 +28,10 @@ import {
   type StorageHealthContext,
   type SecurityContext,
 } from "./context-assembler";
-import { validateOpsResponse, makeBaseResponse, type OpsResponseBase } from "./response-contracts";
-import { assertAiOpsSafeContext, assertAiOpsOutputSafe, assertNoForbiddenIntent, assertNoRawTenantContent } from "./safety";
-import { logAiOpsAudit } from "./audit";
-import type { AiOpsSourceId } from "./data-sources";
+import { validateOpsResponse, makeBaseResponse, type OpsResponseBase } from "./response-contracts.ts";
+import { assertAiOpsSafeContext, assertAiOpsOutputSafe, assertNoForbiddenIntent, assertNoRawTenantContent } from "./safety.ts";
+import { logAiOpsAudit } from "./audit.ts";
+import type { AiOpsSourceId } from "./data-sources.ts";
 
 export interface OrchestratorInput {
   intent: string;

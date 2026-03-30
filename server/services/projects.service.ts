@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { projectsRepository } from "../repositories/projects.repository";
-import { NotFoundError, ConflictError } from "../lib/errors";
+import { NotFoundError, ConflictError } from "../lib/errors.ts";
 import type { Project } from "@shared/schema";
 
 export const createProjectSchema = z.object({

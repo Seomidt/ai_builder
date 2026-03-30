@@ -29,7 +29,7 @@ import {
   MAX_PROMPT_TOKENS_ESTIMATE,
   MAX_PIPELINE_TIME_MS,
 } from "./ai-orchestrator";
-import { securityHealth } from "./security-health";
+import { securityHealth } from "./security-health.ts";
 
 let passed = 0;
 let failed = 0;

@@ -7,8 +7,8 @@
  * Does not stream — runs as batch aggregation per day.
  */
 
-import { db }           from "../../db";
-import { analyticsEvents, analyticsDailyRollups } from "../../../shared/schema";
+import { db }           from "../../db.ts";
+import { analyticsEvents, analyticsDailyRollups } from "../../../shared/schema.ts";
 import { sql, and, gte, lt, eq } from "drizzle-orm";
 
 export interface DailyRollupResult {

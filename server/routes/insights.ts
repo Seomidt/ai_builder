@@ -11,10 +11,10 @@
  */
 
 import type { Express, Request, Response } from "express";
-import { db } from "../db";
+import { db } from "../db.ts";
 import { tenantInsights } from "@shared/schema";
 import { eq, and, desc } from "drizzle-orm";
-import { runTenantInsights } from "../lib/insights/run-tenant-insights";
+import { runTenantInsights } from "../lib/insights/run-tenant-insights.ts";
 
 function getOrgId(req: Request): string {
   return (req as any).user?.organizationId ?? "demo-org";

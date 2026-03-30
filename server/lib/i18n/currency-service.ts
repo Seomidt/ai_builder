@@ -3,7 +3,7 @@
  * Registry and lookup for supported currencies + observability.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { supportedCurrencies } from "@shared/schema";
 import { sql as drizzleSql } from "drizzle-orm";
 

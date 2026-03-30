@@ -18,7 +18,7 @@ import { architecturesService, type CreateProfileInput, type UpdateProfileInput,
 import { runsService, type CreateRunInput, type UpdateRunStatusInput, type AppendStepInput, type AppendArtifactInput, type AppendToolCallInput, type AppendApprovalInput, type ResolveApprovalInput } from "./services/runs.service";
 import { runsRepository } from "./repositories/runs.repository";
 import { integrationsService, type UpsertIntegrationInput } from "./services/integrations.service";
-import { SupabaseStorage } from "./lib/supabase-runtime-storage";
+import { SupabaseStorage } from "./lib/supabase-runtime-storage.ts";
 
 export interface IStorage {
   // Projects

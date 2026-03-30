@@ -6,7 +6,7 @@
  * INV-AI4: Context must not exceed model context_window.
  */
 
-import type { RankedResult } from "../retrieval/retrieval-ranker";
+import type { RankedResult } from "../retrieval/retrieval-ranker.ts";
 
 export interface AssembledContext {
   chunks: Array<{

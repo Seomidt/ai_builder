@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate } from "./_lib/auth";
-import { json, err } from "./_lib/response";
-import { dbList } from "./_lib/db";
+import { authenticate } from "./_lib/auth.ts";
+import { json, err } from "./_lib/response.ts";
+import { dbList } from "./_lib/db.ts";
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "GET") return err(res, 405, "METHOD_NOT_ALLOWED", "Method not allowed");

@@ -6,8 +6,8 @@
  */
 
 import pg from "pg";
-import { logAuditBestEffort } from "../audit/audit-log";
-import { updateChunkEmbeddingStatus } from "./knowledge-chunking";
+import { logAuditBestEffort } from "../audit/audit-log.ts";
+import { updateChunkEmbeddingStatus } from "./knowledge-chunking.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({

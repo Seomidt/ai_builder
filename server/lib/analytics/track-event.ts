@@ -8,8 +8,8 @@
  * Dedupes via idempotency_key (WHERE idempotency_key IS NOT NULL).
  */
 
-import { db } from "../../db";
-import { analyticsEvents } from "../../../shared/schema";
+import { db } from "../../db.ts";
+import { analyticsEvents } from "../../../shared/schema.ts";
 import { eq }              from "drizzle-orm";
 import {
   isValidEventName,
@@ -22,7 +22,7 @@ import {
   type AnalyticsDomainRole,
   type SupportedLocale,
 } from "./event-taxonomy";
-import { sanitizeAnalyticsPayload } from "./privacy-rules";
+import { sanitizeAnalyticsPayload } from "./privacy-rules.ts";
 
 // ─── Core input type ──────────────────────────────────────────────────────────
 

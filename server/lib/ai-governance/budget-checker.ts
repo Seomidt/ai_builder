@@ -6,7 +6,7 @@
  * Callers (alert-generator, admin routes) decide what to do with the result.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { sql } from "drizzle-orm";
 
 // ─── Types ────────────────────────────────────────────────────────────────────

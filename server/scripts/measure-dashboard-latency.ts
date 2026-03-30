@@ -10,7 +10,7 @@
  *   4. Index usage via EXPLAIN (via pg client)
  */
 
-import "../lib/env";
+import "../lib/env.ts";
 import { createClient } from "@supabase/supabase-js";
 import pg from "pg";
 

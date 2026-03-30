@@ -7,11 +7,11 @@
  */
 
 import pg from "pg";
-import { validateQueryInput, embedQuery, storeQuery, type RetrievalStrategy } from "./retrieval-query";
-import { vectorSearch } from "./retrieval-vector";
-import { lexicalSearch, lexicalSearchFallback } from "./retrieval-lexical";
-import { rankResults, type RankedResult } from "./retrieval-ranker";
-import { recordMetrics } from "./retrieval-metrics";
+import { validateQueryInput, embedQuery, storeQuery, type RetrievalStrategy } from "./retrieval-query.ts";
+import { vectorSearch } from "./retrieval-vector.ts";
+import { lexicalSearch, lexicalSearchFallback } from "./retrieval-lexical.ts";
+import { rankResults, type RankedResult } from "./retrieval-ranker.ts";
+import { recordMetrics } from "./retrieval-metrics.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({

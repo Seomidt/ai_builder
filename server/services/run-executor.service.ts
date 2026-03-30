@@ -13,9 +13,9 @@
 
 import { runsRepository } from "../repositories/runs.repository";
 import { architecturesRepository } from "../repositories/architectures.repository";
-import { getAgent, DEFAULT_PIPELINE } from "../lib/agents/registry";
-import { NotFoundError, ConflictError, ValidationError } from "../lib/errors";
-import type { RunContext } from "../lib/agents/types";
+import { getAgent, DEFAULT_PIPELINE } from "../lib/agents/registry.ts";
+import { NotFoundError, ConflictError, ValidationError } from "../lib/errors.ts";
+import type { RunContext } from "../lib/agents/types.ts";
 import type { AiArtifact, AiStep } from "@shared/schema";
 
 export interface ExecuteRunResult {

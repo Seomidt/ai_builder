@@ -5,7 +5,7 @@
  * INV-AI1: Model execution must always produce a response (or structured error).
  */
 
-import type { AiModelRecord } from "./ai-model-router";
+import type { AiModelRecord } from "./ai-model-router.ts";
 
 export interface ModelResponse {
   responseText: string;

@@ -15,8 +15,8 @@
  * - Full tenant isolation on all operations
  */
 
-import type { OcrJob, OcrJobPayload, OcrJobCompletion, JobStage } from "./job-types";
-import { nextRetryTimestamp }                                       from "./job-types";
+import type { OcrJob, OcrJobPayload, OcrJobCompletion, JobStage } from "./job-types.ts";
+import { nextRetryTimestamp }                                       from "./job-types.ts";
 
 // ── DB URL resolution ─────────────────────────────────────────────────────────
 

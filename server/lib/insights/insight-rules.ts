@@ -13,8 +13,8 @@
  *   5. slow_ai_response_p95      — performance / moderate (REAL: latency metrics)
  */
 
-import type { InsightRule, InsightMatch, TenantInsightContext } from "./types";
-import { INSIGHT_CODES } from "./types";
+import type { InsightRule, InsightMatch, TenantInsightContext } from "./types.ts";
+import { INSIGHT_CODES } from "./types.ts";
 
 // ── Rule 1: Budget warning at or above warning threshold ──────────────────────
 

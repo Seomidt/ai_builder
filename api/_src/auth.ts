@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate } from "./_lib/auth";
-import { json, err, pathSegments } from "./_lib/response";
+import { authenticate } from "./_lib/auth.ts";
+import { json, err, pathSegments } from "./_lib/response.ts";
 
 const SUPABASE_URL     = process.env.SUPABASE_URL     ?? "";
 const SUPABASE_ANON    = process.env.SUPABASE_ANON_KEY ?? "";

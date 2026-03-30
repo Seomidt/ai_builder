@@ -5,7 +5,7 @@
  */
 
 import pg from "pg";
-import { getAuditWriteFailures } from "./audit-log";
+import { getAuditWriteFailures } from "./audit-log.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({

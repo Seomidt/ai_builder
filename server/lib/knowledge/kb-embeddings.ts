@@ -7,10 +7,10 @@
  * Used by: kb-worker.ts (embedding_generate jobs) + kb-retrieval.ts (query embedding)
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { knowledgeChunks, knowledgeEmbeddings } from "@shared/schema";
 import { eq, and, inArray } from "drizzle-orm";
-import { isOpenAIAvailable, getOpenAIClient } from "../openai-client";
+import { isOpenAIAvailable, getOpenAIClient } from "../openai-client.ts";
 
 export const EMBEDDING_MODEL  = "text-embedding-3-small";
 export const EMBEDDING_DIMS   = 1536;

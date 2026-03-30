@@ -7,7 +7,7 @@
  * Integrates with Phase 15 observability platform.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { sql as drizzleSql } from "drizzle-orm";
 
 export interface JobMetrics {

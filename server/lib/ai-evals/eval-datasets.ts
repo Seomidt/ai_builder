@@ -7,7 +7,7 @@
  * INV-EVAL12: Cross-tenant leakage is impossible.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { aiEvalDatasets, aiEvalCases } from "@shared/schema";
 import { eq, and, desc, isNull } from "drizzle-orm";
 

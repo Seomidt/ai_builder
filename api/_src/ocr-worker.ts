@@ -11,9 +11,9 @@
  *   - Simplified codebase (easier to maintain and scale).
  */
 
-import "../../server/lib/env";
+import "../../server/lib/env.ts";
 import type { IncomingMessage, ServerResponse } from "http";
-import { json, err }                            from "./_lib/response";
+import { json, err }                            from "./_lib/response.ts";
 import {
   claimJobs,
   updateStage,

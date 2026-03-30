@@ -8,8 +8,8 @@
  * the existing AI stack (runner → provider → ai_usage table).
  */
 
-import { runAiCall } from "../../lib/ai/runner";
-import { getSummarizePrompt } from "../../lib/ai/prompts/summarize";
+import { runAiCall } from "../../lib/ai/runner.ts";
+import { getSummarizePrompt } from "../../lib/ai/prompts/summarize.ts";
 
 export interface SummarizeInput {
   text: string;

@@ -6,7 +6,7 @@
  */
 
 import pg from "pg";
-import { listPolicies, evaluateAllPolicies, type PolicyRecord } from "./policy-engine";
+import { listPolicies, evaluateAllPolicies, type PolicyRecord } from "./policy-engine.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });

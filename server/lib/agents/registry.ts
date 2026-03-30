@@ -1,8 +1,8 @@
-import type { AgentContract } from "./types";
-import { plannerAgent } from "./planner-agent";
-import { uxAgent } from "./ux-agent";
-import { architectAgent } from "./architect-agent";
-import { reviewAgent } from "./review-agent";
+import type { AgentContract } from "./types.ts";
+import { plannerAgent } from "./planner-agent.ts";
+import { uxAgent } from "./ux-agent.ts";
+import { architectAgent } from "./architect-agent.ts";
+import { reviewAgent } from "./review-agent.ts";
 
 /**
  * Agent registry — maps agentKey → AgentContract.

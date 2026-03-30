@@ -20,10 +20,10 @@
  *   GET    /api/tenant/audit
  */
 
-import "../../server/lib/env";
+import "../../server/lib/env.ts";
 import { z } from "zod";
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate } from "./_lib/auth";
+import { authenticate } from "./_lib/auth.ts";
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 

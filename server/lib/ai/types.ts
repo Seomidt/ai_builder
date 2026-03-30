@@ -5,7 +5,7 @@
  * Shared types used across runner.ts and any future AI feature callers.
  */
 
-import type { AiModelKey } from "./config";
+import type { AiModelKey } from "./config.ts";
 
 /**
  * Use-case identifier — determines whether the grounded-data gate applies.

@@ -20,7 +20,7 @@
  */
 
 import pg from "pg";
-import { generateQueryEmbedding } from "./kb-embeddings";
+import { generateQueryEmbedding } from "./kb-embeddings.ts";
 import {
   resolveMinScore,
   deriveWhyMatchedCode,

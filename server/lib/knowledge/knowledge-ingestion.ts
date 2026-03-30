@@ -6,12 +6,12 @@
  * INV-KNW12: Pipeline status must be observable at every stage.
  */
 
-import { createKnowledgeSource, updateKnowledgeSourceStatus } from "./knowledge-sources";
-import { ingestDocument, updateDocumentStatus } from "./knowledge-documents";
-import { chunkDocument } from "./knowledge-chunking";
-import { generateEmbeddingsForDocument, retryFailedEmbeddings } from "./knowledge-embeddings";
-import { registerIndexEntriesForDocument } from "./knowledge-indexing";
-import { logAuditBestEffort } from "../audit/audit-log";
+import { createKnowledgeSource, updateKnowledgeSourceStatus } from "./knowledge-sources.ts";
+import { ingestDocument, updateDocumentStatus } from "./knowledge-documents.ts";
+import { chunkDocument } from "./knowledge-chunking.ts";
+import { generateEmbeddingsForDocument, retryFailedEmbeddings } from "./knowledge-embeddings.ts";
+import { registerIndexEntriesForDocument } from "./knowledge-indexing.ts";
+import { logAuditBestEffort } from "../audit/audit-log.ts";
 
 export type PipelineStage = "source_created" | "document_ingested" | "document_chunked" | "embeddings_generated" | "indexed" | "failed";
 

@@ -12,9 +12,9 @@
  *   sudden_stop    — requests drop to zero (after active period)
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { sql } from "drizzle-orm";
-import type { PeriodType } from "./budget-checker";
+import type { PeriodType } from "./budget-checker.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

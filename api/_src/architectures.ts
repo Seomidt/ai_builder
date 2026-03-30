@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate } from "./_lib/auth";
-import { json, err, pathSegments, readBody } from "./_lib/response";
-import { dbList, dbGet, dbInsert, dbUpdate, dbUpsert, dbRpc } from "./_lib/db";
+import { authenticate } from "./_lib/auth.ts";
+import { json, err, pathSegments, readBody } from "./_lib/response.ts";
+import { dbList, dbGet, dbInsert, dbUpdate, dbUpsert, dbRpc } from "./_lib/db.ts";
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   const auth = await authenticate(req);

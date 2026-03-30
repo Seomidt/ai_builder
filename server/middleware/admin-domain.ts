@@ -20,7 +20,7 @@
  */
 
 import { Request, Response, NextFunction } from "express";
-import { ADMIN_CONFIG } from "../lib/platform/platform-hardening-config";
+import { ADMIN_CONFIG } from "../lib/platform/platform-hardening-config.ts";
 
 // ─── Check if path is admin-scoped ────────────────────────────────────────────
 

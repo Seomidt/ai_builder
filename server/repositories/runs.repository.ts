@@ -1,5 +1,5 @@
 import { eq, and, desc, max, or } from "drizzle-orm";
-import { db } from "../db";
+import { db } from "../db.ts";
 import {
   aiRuns,
   aiSteps,

@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "http";
-import { json, err, readBody } from "./_lib/response";
-import { dbInsert } from "./_lib/db";
+import { json, err, readBody } from "./_lib/response.ts";
+import { dbInsert } from "./_lib/db.ts";
 
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "POST") return err(res, 405, "METHOD_NOT_ALLOWED", "Method not allowed");

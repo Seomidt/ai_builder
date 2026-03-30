@@ -1,5 +1,5 @@
 import { eq, and } from "drizzle-orm";
-import { db } from "../db";
+import { db } from "../db.ts";
 import {
   integrations,
   type Integration,

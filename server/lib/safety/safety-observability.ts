@@ -4,7 +4,7 @@
  * restart recovery actions, and frozen tenant history.
  */
 
-import type { TenantState, TenantSafetyTransition } from "./tenant-circuit-breaker";
+import type { TenantState, TenantSafetyTransition } from "./tenant-circuit-breaker.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

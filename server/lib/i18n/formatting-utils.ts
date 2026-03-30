@@ -3,7 +3,7 @@
  * Locale-aware formatters for currency, numbers, dates, and time.
  */
 
-import { normalizeTimezone } from "./timezone-service";
+import { normalizeTimezone } from "./timezone-service.ts";
 
 export interface FormatOptions {
   locale?: string;       // BCP-47, e.g. "en-US", "da-DK"

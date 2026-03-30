@@ -4,7 +4,7 @@
  * Integrates with Phase 18 feature flags for runtime gate resolution.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { sql as drizzleSql } from "drizzle-orm";
 
 export interface EntitlementResult {

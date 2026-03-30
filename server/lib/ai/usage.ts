@@ -21,12 +21,12 @@
  */
 
 import { sql } from "drizzle-orm";
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { aiUsage, tenantAiUsagePeriods } from "@shared/schema";
-import { getCurrentPeriod } from "./usage-periods";
-import { runAnomalyDetection } from "./anomaly-detector";
-import { maybeRecordAiBillingUsage } from "./billing";
-import { recordUsageRecordedEvent } from "./billing-events";
+import { getCurrentPeriod } from "./usage-periods.ts";
+import { runAnomalyDetection } from "./anomaly-detector.ts";
+import { maybeRecordAiBillingUsage } from "./billing.ts";
+import { recordUsageRecordedEvent } from "./billing-events.ts";
 
 export interface LogAiUsagePayload {
   tenantId?: string | null;

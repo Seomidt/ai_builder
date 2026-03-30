@@ -5,7 +5,7 @@
  */
 
 import pg from "pg";
-import { logAuditBestEffort } from "../audit/audit-log";
+import { logAuditBestEffort } from "../audit/audit-log.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({

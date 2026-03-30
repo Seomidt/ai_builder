@@ -16,12 +16,12 @@
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { createServerSupabaseClient, getSupabaseAdmin } from "./supabase";
+import { createServerSupabaseClient, getSupabaseAdmin } from "./supabase.ts";
 import type {
   Project, AiRun, AiStep, AiArtifact, AiToolCall, AiApproval,
   ArchitectureProfile, ArchitectureVersion, Integration, ArtifactDependency,
 } from "@shared/schema";
-import type { IStorage } from "../storage";
+import type { IStorage } from "../storage.ts";
 import type {
   CreateProjectInput, UpdateProjectInput,
 } from "../services/projects.service";
@@ -34,7 +34,7 @@ import type {
   AppendToolCallInput, AppendApprovalInput, ResolveApprovalInput,
 } from "../services/runs.service";
 import type { UpsertIntegrationInput } from "../services/integrations.service";
-import { mapSupabaseError } from "./errors";
+import { mapSupabaseError } from "./errors.ts";
 
 // ── Column name conversion ────────────────────────────────────────────────────
 // Supabase / PostgREST returns snake_case column names from Postgres.

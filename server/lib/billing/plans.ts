@@ -3,7 +3,7 @@
  * CRUD for SaaS plan definitions and feature entitlements.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { plans, planFeatures } from "@shared/schema";
 import { eq, sql as drizzleSql } from "drizzle-orm";
 

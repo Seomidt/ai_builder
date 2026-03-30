@@ -5,8 +5,8 @@
  */
 
 import type { Request } from "express";
-import type { ResolvedActor } from "../auth/actor-resolution";
-import type { AuditActorType, AuditSource, AuditEventStatus } from "./audit-actions";
+import type { ResolvedActor } from "../auth/actor-resolution.ts";
+import type { AuditActorType, AuditSource, AuditEventStatus } from "./audit-actions.ts";
 import crypto from "crypto";
 
 // ─── AuditContext ─────────────────────────────────────────────────────────────

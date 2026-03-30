@@ -21,7 +21,7 @@
  */
 
 import pg from "pg";
-import { generateQueryEmbedding, cosineSimilarity } from "./kb-embeddings";
+import { generateQueryEmbedding, cosineSimilarity } from "./kb-embeddings.ts";
 
 export interface KbSearchResult {
   chunkId:             string;

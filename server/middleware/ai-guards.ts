@@ -12,7 +12,7 @@
 
 import type { Request, Response, NextFunction, RequestHandler } from "express";
 import rateLimit from "express-rate-limit";
-import { checkTenantBudget } from "../lib/ai-governance/budget-checker";
+import { checkTenantBudget } from "../lib/ai-governance/budget-checker.ts";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 

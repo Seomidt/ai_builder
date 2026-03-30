@@ -7,7 +7,7 @@
 // - No cross-tenant leakage in tenant mode
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { type OpsIntentId, type OpsIntentAudience, INTENT_DEFINITIONS } from "./intents";
+import { type OpsIntentId, type OpsIntentAudience, INTENT_DEFINITIONS } from "./intents.ts";
 
 export type AiOpsRole = "platform_admin" | "tenant_admin" | "none";
 

@@ -1,5 +1,5 @@
-import { DEFAULT_MODEL } from "./agents/model-config";
-import { env } from "./env";
+import { DEFAULT_MODEL } from "./agents/model-config.ts";
+import { env } from "./env.ts";
 
 /**
  * OpenAI client factory (DISABLED for Manus-Only architecture).

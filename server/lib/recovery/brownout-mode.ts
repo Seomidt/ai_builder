@@ -4,7 +4,7 @@
  * INV-REC10: Brownout transitions must be logged and explainable.
  */
 
-import type { PressureLevel } from "./system-pressure";
+import type { PressureLevel } from "./system-pressure.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

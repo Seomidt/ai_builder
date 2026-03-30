@@ -13,13 +13,13 @@
  */
 
 import pg from "pg";
-import { checkGuardrails, assertSafeQuery, sanitizeQuery } from "./ai-guardrails";
-import { buildContext } from "./ai-context-builder";
-import { buildPrompt, getPromptVersion, getLatestPromptVersion } from "./ai-prompt-builder";
-import { selectModel } from "./ai-model-router";
-import { executeModel } from "./ai-stream";
-import { recordUsage, storeResponse } from "./ai-usage";
-import { runRetrieval } from "../retrieval/retrieval-orchestrator";
+import { checkGuardrails, assertSafeQuery, sanitizeQuery } from "./ai-guardrails.ts";
+import { buildContext } from "./ai-context-builder.ts";
+import { buildPrompt, getPromptVersion, getLatestPromptVersion } from "./ai-prompt-builder.ts";
+import { selectModel } from "./ai-model-router.ts";
+import { executeModel } from "./ai-stream.ts";
+import { recordUsage, storeResponse } from "./ai-usage.ts";
+import { runRetrieval } from "../retrieval/retrieval-orchestrator.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });

@@ -8,8 +8,8 @@
  * named interface required by the spec without duplicating logic.
  */
 
-import { estimateAiCost, type AiUsageTokens } from "./costs";
-import { loadPricing } from "./pricing";
+import { estimateAiCost, type AiUsageTokens } from "./costs.ts";
+import { loadPricing } from "./pricing.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 

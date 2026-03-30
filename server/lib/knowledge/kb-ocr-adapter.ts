@@ -9,7 +9,7 @@
  *   Throws OcrProviderError if provider is unavailable.
  */
 
-import { isOpenAIAvailable, getOpenAIClient } from "../openai-client";
+import { isOpenAIAvailable, getOpenAIClient } from "../openai-client.ts";
 
 export class OcrProviderError extends Error {
   constructor(message: string) {

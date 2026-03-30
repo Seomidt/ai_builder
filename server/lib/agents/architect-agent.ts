@@ -1,6 +1,6 @@
-import type { AgentContract, RunContext, AgentOutput } from "./types";
-import { chatJSON, isOpenAIAvailable } from "../openai-client";
-import { getModelForAgent } from "./model-config";
+import type { AgentContract, RunContext, AgentOutput } from "./types.ts";
+import { chatJSON, isOpenAIAvailable } from "../openai-client.ts";
+import { getModelForAgent } from "./model-config.ts";
 
 /**
  * Architect Agent

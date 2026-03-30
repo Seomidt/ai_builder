@@ -8,7 +8,7 @@
  */
 
 import { Request, Response, NextFunction } from "express";
-import { PUBLIC_CANONICAL_HOST } from "../lib/platform/platform-hardening-config";
+import { PUBLIC_CANONICAL_HOST } from "../lib/platform/platform-hardening-config.ts";
 
 const WWW_HOST = `www.${PUBLIC_CANONICAL_HOST}`;
 

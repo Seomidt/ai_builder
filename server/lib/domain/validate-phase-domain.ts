@@ -36,7 +36,7 @@ import {
   HOST_ALLOWLIST_CONFIG,
 } from "../platform/platform-hardening-config";
 
-import { isAllowedHost } from "../../middleware/host-allowlist";
+import { isAllowedHost } from "../../middleware/host-allowlist.ts";
 
 // ─── Test runner ──────────────────────────────────────────────────────────────
 

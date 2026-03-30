@@ -6,9 +6,9 @@
  * INV-AUD9: Does NOT replace security_events — both may fire for same operation.
  */
 
-import { logAuditBestEffort, logAuditResourceChange, logAuditEvent } from "./audit-log";
-import { buildBestEffortAuditContext, buildSystemAuditContext } from "./audit-context";
-import { AUDIT_ACTIONS } from "./audit-actions";
+import { logAuditBestEffort, logAuditResourceChange, logAuditEvent } from "./audit-log.ts";
+import { buildBestEffortAuditContext, buildSystemAuditContext } from "./audit-context.ts";
+import { AUDIT_ACTIONS } from "./audit-actions.ts";
 
 // ─── Identity Integration Hooks ───────────────────────────────────────────────
 

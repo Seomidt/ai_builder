@@ -1,5 +1,5 @@
 import { eq, and, desc } from "drizzle-orm";
-import { db } from "../db";
+import { db } from "../db.ts";
 import { projects, type Project, type InsertProject } from "@shared/schema";
 
 export const projectsRepository = {

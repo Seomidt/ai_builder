@@ -6,10 +6,10 @@
  * the same org within the same UTC calendar day.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { sql } from "drizzle-orm";
-import type { BudgetCheckResult } from "./budget-checker";
-import type { AnomalyCandidate } from "./anomaly-detector";
+import type { BudgetCheckResult } from "./budget-checker.ts";
+import type { AnomalyCandidate } from "./anomaly-detector.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

@@ -8,7 +8,7 @@
  */
 
 import pg from "pg";
-import { seedDefaultModels, DEFAULT_MODELS } from "./ai-model-router";
+import { seedDefaultModels, DEFAULT_MODELS } from "./ai-model-router.ts";
 
 const TABLES = ["ai_models", "ai_prompts", "ai_prompt_versions", "ai_requests", "ai_responses", "ai_usage_metrics"];
 

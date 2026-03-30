@@ -13,13 +13,13 @@
  */
 
 import pg from "pg";
-import { checkGuardrails, assertSafeQuery, explainGuardrails, sanitizeQuery } from "./ai-guardrails";
-import { buildContext, estimateTokens } from "./ai-context-builder";
-import { selectModel, listModels, seedDefaultModels, deactivateModel, getModelById } from "./ai-model-router";
-import { createPrompt, listPrompts, addPromptVersion, listPromptVersions, buildPrompt, getLatestPromptVersion } from "./ai-prompt-builder";
-import { estimateCost, recordUsage, storeResponse, getUsageByRequest, tenantUsageSummary, aiHealth } from "./ai-usage";
-import { runAiQuery, getResponseByRequestId, listRequests } from "./ai-orchestrator";
-import type { RankedResult } from "../retrieval/retrieval-ranker";
+import { checkGuardrails, assertSafeQuery, explainGuardrails, sanitizeQuery } from "./ai-guardrails.ts";
+import { buildContext, estimateTokens } from "./ai-context-builder.ts";
+import { selectModel, listModels, seedDefaultModels, deactivateModel, getModelById } from "./ai-model-router.ts";
+import { createPrompt, listPrompts, addPromptVersion, listPromptVersions, buildPrompt, getLatestPromptVersion } from "./ai-prompt-builder.ts";
+import { estimateCost, recordUsage, storeResponse, getUsageByRequest, tenantUsageSummary, aiHealth } from "./ai-usage.ts";
+import { runAiQuery, getResponseByRequestId, listRequests } from "./ai-orchestrator.ts";
+import type { RankedResult } from "../retrieval/retrieval-ranker.ts";
 
 const client = new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
 

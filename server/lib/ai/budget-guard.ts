@@ -26,10 +26,10 @@ import {
   evaluateAiUsageState,
   type AiUsageState,
 } from "./guards";
-import { getCurrentPeriod } from "./usage-periods";
-import { db } from "../../db";
+import { getCurrentPeriod } from "./usage-periods.ts";
+import { db } from "../../db.ts";
 import { sql } from "drizzle-orm";
-import { tenantAiUsagePeriods } from "../../../shared/schema";
+import { tenantAiUsagePeriods } from "../../../shared/schema.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 

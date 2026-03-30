@@ -8,7 +8,7 @@
  *   Change the value to AI_MODELS.heavy — no runtime code changes needed.
  */
 
-import { AI_MODELS } from "../ai/config";
+import { AI_MODELS } from "../ai/config.ts";
 
 export const DEFAULT_MODEL = AI_MODELS.default;
 

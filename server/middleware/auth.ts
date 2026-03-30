@@ -11,12 +11,12 @@
 
 import { randomUUID, createHmac, timingSafeEqual } from "crypto";
 import type { Request, Response, NextFunction } from "express";
-import { supabaseAdmin } from "../lib/supabase";
-import { db } from "../db";
+import { supabaseAdmin } from "../lib/supabase.ts";
+import { db } from "../db.ts";
 import { organizationMembers, organizations } from "@shared/schema";
 import { eq } from "drizzle-orm";
-import { mapCurrentUserToCanonicalActor } from "../lib/auth/identity-compat";
-import type { ResolvedActor } from "../lib/auth/actor-resolution";
+import { mapCurrentUserToCanonicalActor } from "../lib/auth/identity-compat.ts";
+import type { ResolvedActor } from "../lib/auth/actor-resolution.ts";
 
 export interface AuthUser {
   id: string;

@@ -9,8 +9,8 @@
 // - No fabricated certainty
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { FORBIDDEN_SOURCE_CATEGORIES, type AiOpsSourceId, AI_OPS_DATA_SOURCES } from "./data-sources";
-import { isValidIntent, type OpsIntentId } from "./intents";
+import { FORBIDDEN_SOURCE_CATEGORIES, type AiOpsSourceId, AI_OPS_DATA_SOURCES } from "./data-sources.ts";
+import { isValidIntent, type OpsIntentId } from "./intents.ts";
 
 export class AiOpsSafetyError extends Error {
   constructor(message: string) {

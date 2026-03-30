@@ -19,8 +19,8 @@
  * Override failures are silent — code defaults are always the safety net.
  */
 
-import { AI_MODEL_ROUTES, type AiModelKey, type AiModelRoute } from "./config";
-import { loadOverride } from "./overrides";
+import { AI_MODEL_ROUTES, type AiModelKey, type AiModelRoute } from "./config.ts";
+import { loadOverride } from "./overrides.ts";
 
 export interface AiRoute extends AiModelRoute {
   /** The logical key that was resolved — useful for tracing */

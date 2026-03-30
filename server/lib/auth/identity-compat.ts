@@ -1,4 +1,4 @@
-import type { ResolvedActor } from "./actor-resolution";
+import type { ResolvedActor } from "./actor-resolution.ts";
 
 interface AuthUser {
   id:             string;

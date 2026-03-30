@@ -7,7 +7,7 @@
  * INV-EVAL12: No hidden cross-tenant data exposure.
  */
 
-import { getEvalRun, listEvalResults } from "./eval-runs";
+import { getEvalRun, listEvalResults } from "./eval-runs.ts";
 
 export interface ScoreDelta {
   dimension: string;

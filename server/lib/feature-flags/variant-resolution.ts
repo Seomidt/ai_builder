@@ -9,7 +9,7 @@
  */
 
 import { createHash } from "crypto";
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { featureResolutionEvents } from "@shared/schema";
 import { sql as drizzleSql } from "drizzle-orm";
 

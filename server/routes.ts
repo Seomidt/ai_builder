@@ -1,8 +1,8 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
-import { registerAdminRoutes } from "./routes/admin";
-import { registerInsightRoutes } from "./routes/insights";
-import { aiRouteChain } from "./middleware/ai-guards";
+import { registerAdminRoutes } from "./routes/admin.ts";
+import { registerInsightRoutes } from "./routes/insights.ts";
+import { aiRouteChain } from "./middleware/ai-guards.ts";
 import {
   getSecurityHealth,
   getSecurityViolationCounts,
@@ -15,29 +15,29 @@ import {
   explainSecurityEvent,
   type SecurityEventType,
 } from "./lib/security/security-events";
-import { sanitizeInput, sanitizeObject, explainSanitization } from "./lib/security/sanitize";
-import { getRateLimitConfig } from "./middleware/rate-limit";
-import { createStorageForRequest } from "./storage";
-import { previewCommit } from "./lib/github-commit-format";
+import { sanitizeInput, sanitizeObject, explainSanitization } from "./lib/security/sanitize.ts";
+import { getRateLimitConfig } from "./middleware/rate-limit.ts";
+import { createStorageForRequest } from "./storage.ts";
+import { previewCommit } from "./lib/github-commit-format.ts";
 import { runExecutorService } from "./services/run-executor.service";
 import { summarize } from "./features/ai-summarize/summarize.service";
 import { z, ZodError } from "zod";
 import { fromZodError } from "zod-validation-error";
-import { AiError } from "./lib/ai/errors";
+import { AiError } from "./lib/ai/errors.ts";
 import {
   createStripeCheckoutForInvoice,
   createStripePaymentIntentForInvoice,
   getStripeCheckoutState,
 } from "./lib/ai/stripe-checkout";
-import { handleStripeWebhook } from "./lib/ai/stripe-webhooks";
+import { handleStripeWebhook } from "./lib/ai/stripe-webhooks.ts";
 import {
   listStripeWebhookEvents,
   getStripeWebhookEventByStripeEventId,
   getInvoiceStripeLifecycle,
   explainStripeWebhookOutcome,
 } from "./lib/ai/stripe-webhook-summary";
-import type { IStorage } from "./storage";
-import { AppError } from "./lib/errors";
+import type { IStorage } from "./storage.ts";
+import { AppError } from "./lib/errors.ts";
 
 
 /**

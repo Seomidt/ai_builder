@@ -19,12 +19,12 @@
  */
 
 import pg from "pg";
-import { createPolicy, listPolicies, deactivatePolicy, evaluatePolicy, evaluateAllPolicies, getPolicyById } from "./policy-engine";
-import { createReview, listReviews, getLatestReview, updateReviewStatus, isReviewPassed } from "./prompt-review";
-import { createApproval, rejectApproval, revokeApproval, getApproval, isVersionApproved, assertVersionApproved } from "./approval-engine";
-import { createRedteamTest, runRedteamTest, runAllRedteamTestsForVersion, seedStandardRedteamTests, listRedteamTests, STANDARD_REDTEAM_INPUTS } from "./redteam-tests";
-import { logViolation, checkAndLogPolicies, listViolations, getViolationsByPolicy } from "./policy-checker";
-import { logChange, getAuditLog, governanceHealth } from "./prompt-audit";
+import { createPolicy, listPolicies, deactivatePolicy, evaluatePolicy, evaluateAllPolicies, getPolicyById } from "./policy-engine.ts";
+import { createReview, listReviews, getLatestReview, updateReviewStatus, isReviewPassed } from "./prompt-review.ts";
+import { createApproval, rejectApproval, revokeApproval, getApproval, isVersionApproved, assertVersionApproved } from "./approval-engine.ts";
+import { createRedteamTest, runRedteamTest, runAllRedteamTestsForVersion, seedStandardRedteamTests, listRedteamTests, STANDARD_REDTEAM_INPUTS } from "./redteam-tests.ts";
+import { logViolation, checkAndLogPolicies, listViolations, getViolationsByPolicy } from "./policy-checker.ts";
+import { logChange, getAuditLog, governanceHealth } from "./prompt-audit.ts";
 
 const client = new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });
 

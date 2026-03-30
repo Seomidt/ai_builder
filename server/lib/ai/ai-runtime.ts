@@ -18,7 +18,7 @@
  *   - Reservation release: releaseBudgetReservation() always called after the call.
  */
 
-import { runAiCall, type AiCallInput } from "./runner";
+import { runAiCall, type AiCallInput } from "./runner.ts";
 
 // ── Re-export runner API for callers that want full pipeline ──────────────────
 

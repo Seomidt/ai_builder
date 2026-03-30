@@ -7,9 +7,9 @@
  */
 
 import pg from "pg";
-import { logAuditBestEffort, logAuditResourceChange } from "../audit/audit-log";
-import { buildSystemAuditContext } from "../audit/audit-context";
-import { TENANT_AUDIT_ACTIONS } from "./audit-actions-phase9";
+import { logAuditBestEffort, logAuditResourceChange } from "../audit/audit-log.ts";
+import { buildSystemAuditContext } from "../audit/audit-context.ts";
+import { TENANT_AUDIT_ACTIONS } from "./audit-actions-phase9.ts";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 

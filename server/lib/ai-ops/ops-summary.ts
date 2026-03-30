@@ -11,7 +11,7 @@
 // Role protection is handled at the route layer (platform_admin only).
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { supabaseAdmin } from "../supabase";
+import { supabaseAdmin } from "../supabase.ts";
 
 export interface OpsSummary {
   healthStatus: "healthy" | "degraded" | "critical" | "unknown";

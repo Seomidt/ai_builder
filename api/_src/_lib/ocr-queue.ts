@@ -23,4 +23,4 @@ export {
   type OcrCostLog,
 } from "../../../server/lib/jobs/job-queue";
 
-export type { OcrJob, OcrJobPayload, OcrJobCompletion } from "../../../server/lib/jobs/job-types";
+export type { OcrJob, OcrJobPayload, OcrJobCompletion } from "../../../server/lib/jobs/job-types.ts";

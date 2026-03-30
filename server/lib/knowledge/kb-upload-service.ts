@@ -20,7 +20,7 @@
  */
 
 import { createHash } from "crypto";
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import {
   knowledgeBases,
   knowledgeDocuments,

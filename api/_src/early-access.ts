@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "http";
-import { json, err, readBody } from "./_lib/response";
+import { json, err, readBody } from "./_lib/response.ts";
 import pg from "pg";
 
 const CORS_HEADERS: Record<string, string> = {

@@ -8,8 +8,8 @@
  * For agent-specific JSON-structured calls, see server/lib/openai-client.ts chatJSON().
  */
 
-import { getOpenAIClient } from "../openai-client";
-import { AI_MODELS, AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS } from "./config";
+import { getOpenAIClient } from "../openai-client.ts";
+import { AI_MODELS, AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS } from "./config.ts";
 
 /** Legacy model keys supported by this module — see AI_MODEL_ROUTES in config.ts for the full routing table */
 type LegacyModelKey = keyof typeof AI_MODELS;

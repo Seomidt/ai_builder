@@ -7,8 +7,8 @@
  */
 
 import pg from "pg";
-import { getLatestReview, isReviewPassed } from "./prompt-review";
-import { logChange } from "./prompt-audit";
+import { getLatestReview, isReviewPassed } from "./prompt-review.ts";
+import { logChange } from "./prompt-audit.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });

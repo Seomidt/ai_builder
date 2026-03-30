@@ -5,8 +5,8 @@
  * Tenant isolation is enforced at every query level.
  */
 
-import { db } from "../db";
-import { architectureProfiles } from "../../shared/schema";
+import { db } from "../db.ts";
+import { architectureProfiles } from "../../shared/schema.ts";
 import { eq, and, ne } from "drizzle-orm";
 
 export interface AccessibleExpert {

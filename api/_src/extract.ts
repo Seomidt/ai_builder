@@ -12,8 +12,8 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate }                         from "./_lib/auth";
-import { json, err }                            from "./_lib/response";
+import { authenticate }                         from "./_lib/auth.ts";
+import { json, err }                            from "./_lib/response.ts";
 import Busboy                                   from "busboy";
 
 // ── Types ─────────────────────────────────────────────────────────────────────

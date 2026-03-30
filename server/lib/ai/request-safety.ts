@@ -39,9 +39,9 @@
  */
 
 import { and, count, eq, gte } from "drizzle-orm";
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { aiUsage, tenantRateLimits, requestSafetyEvents } from "@shared/schema";
-import { AI_SAFETY_DEFAULTS, type AiSafetyConfig } from "./config";
+import { AI_SAFETY_DEFAULTS, type AiSafetyConfig } from "./config.ts";
 import {
   AiTokenCapError,
   AiRateLimitError,

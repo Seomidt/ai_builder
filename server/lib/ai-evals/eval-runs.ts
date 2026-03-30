@@ -7,11 +7,11 @@
  * INV-EVAL3: All aggregated scores remain bounded.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { aiEvalRuns, aiEvalResults, aiEvalCases } from "@shared/schema";
 import { eq, desc, and } from "drizzle-orm";
-import { listEvalCases } from "./eval-datasets";
-import { scoreAnswerQuality, scoreRetrievalQuality, scoreGrounding, scoreHallucinationRisk, summarizeEvalScores } from "./eval-scorer";
+import { listEvalCases } from "./eval-datasets.ts";
+import { scoreAnswerQuality, scoreRetrievalQuality, scoreGrounding, scoreHallucinationRisk, summarizeEvalScores } from "./eval-scorer.ts";
 
 // ── Run lifecycle ─────────────────────────────────────────────────────────────
 

@@ -6,10 +6,10 @@
  * INV-JOB5: Tenant-safe — schedules are tenant-isolated where applicable.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { jobSchedules } from "@shared/schema";
 import { eq, sql as drizzleSql } from "drizzle-orm";
-import { dispatchJob } from "./job-dispatcher";
+import { dispatchJob } from "./job-dispatcher.ts";
 
 export interface CreateScheduleParams {
   jobType: string;

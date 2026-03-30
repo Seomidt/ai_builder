@@ -17,11 +17,11 @@
  *   { status, taskId, errorReason, attemptCount, maxAttempts }
  */
 
-import "../../server/lib/env";
+import "../../server/lib/env.ts";
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate }                         from "./_lib/auth";
-import { json, err }                            from "./_lib/response";
-import { getOcrTask }                           from "./_lib/ocr-queue";
+import { authenticate }                         from "./_lib/auth.ts";
+import { json, err }                            from "./_lib/response.ts";
+import { getOcrTask }                           from "./_lib/ocr-queue.ts";
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
 

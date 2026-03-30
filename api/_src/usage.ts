@@ -7,9 +7,9 @@
  *   POST /api/budget/update   — update tenant monthly AI budget (admin only)
  */
 
-import "../../server/lib/env";
+import "../../server/lib/env.ts";
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate } from "./_lib/auth";
+import { authenticate } from "./_lib/auth.ts";
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 

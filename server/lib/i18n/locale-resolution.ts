@@ -7,11 +7,11 @@
  * INV-I18N2: Platform defaults are always the final fallback.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { tenantLocales, userLocales } from "@shared/schema";
 import { sql as drizzleSql } from "drizzle-orm";
-import { normalizeLanguageCode, PLATFORM_DEFAULT_LANGUAGE } from "./language-service";
-import { PLATFORM_DEFAULT_CURRENCY } from "./currency-service";
+import { normalizeLanguageCode, PLATFORM_DEFAULT_LANGUAGE } from "./language-service.ts";
+import { PLATFORM_DEFAULT_CURRENCY } from "./currency-service.ts";
 
 const PLATFORM_DEFAULT_TIMEZONE = "UTC";
 const PLATFORM_DEFAULT_NUMBER_FORMAT = "en-US";

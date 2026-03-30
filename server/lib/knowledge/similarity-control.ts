@@ -21,7 +21,7 @@
  *   - Abstraction-ready: cache layer has interface — Redis/Upstash can plug in cleanly
  */
 
-import type { AiUseCase } from "../ai/types";
+import type { AiUseCase } from "../ai/types.ts";
 
 // ─── Locale-safe types ────────────────────────────────────────────────────────
 

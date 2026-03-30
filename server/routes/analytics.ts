@@ -9,15 +9,15 @@
  */
 
 import { Router, Request, Response } from "express";
-import { db }                        from "../db";
-import { analyticsEvents, analyticsDailyRollups } from "../../shared/schema";
+import { db }                        from "../db.ts";
+import { analyticsEvents, analyticsDailyRollups } from "../../shared/schema.ts";
 import {
   isValidEventName,
   getFamilyForEvent,
   isValidDomainRole,
   isValidLocale,
 } from "../lib/analytics/event-taxonomy";
-import { sanitizeAnalyticsPayload } from "../lib/analytics/privacy-rules";
+import { sanitizeAnalyticsPayload } from "../lib/analytics/privacy-rules.ts";
 import { eq, sql, desc, and, gte }  from "drizzle-orm";
 
 export const analyticsRouter = Router();

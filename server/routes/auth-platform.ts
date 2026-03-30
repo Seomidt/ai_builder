@@ -1,5 +1,5 @@
 import type { Express, Request, Response } from "express";
-import { env } from "../lib/env";
+import { env } from "../lib/env.ts";
 
 export function registerAuthPlatformRoutes(app: Express): void {
 

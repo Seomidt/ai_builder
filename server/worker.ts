@@ -15,7 +15,7 @@
  *   KB_WORKER_MAX_CONCURRENT     — optional, default 3
  */
 
-import { startKbWorker } from "./lib/knowledge/kb-worker";
+import { startKbWorker } from "./lib/knowledge/kb-worker.ts";
 
 const POLL_MS   = parseInt(process.env.KB_WORKER_POLL_INTERVAL_MS ?? "5000", 10);
 const MAX_CONC  = parseInt(process.env.KB_WORKER_MAX_CONCURRENT   ?? "3",    10);

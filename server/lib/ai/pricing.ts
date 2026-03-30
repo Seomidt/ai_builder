@@ -22,9 +22,9 @@
  */
 
 import { eq, and } from "drizzle-orm";
-import { db } from "../../db";
-import { aiModelPricing } from "../../../shared/schema";
-import { getDefaultPricing, type AiPricing } from "./costs";
+import { db } from "../../db.ts";
+import { aiModelPricing } from "../../../shared/schema.ts";
+import { getDefaultPricing, type AiPricing } from "./costs.ts";
 
 // ── Result type ─────────────────────────────────────────────────────────────────
 

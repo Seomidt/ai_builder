@@ -9,9 +9,9 @@
  *   POST /api/insights/:id/resolve    — resolve an insight
  */
 
-import "../../server/lib/env";
+import "../../server/lib/env.ts";
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate } from "./_lib/auth";
+import { authenticate } from "./_lib/auth.ts";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

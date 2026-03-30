@@ -6,8 +6,8 @@
  */
 
 import pg from "pg";
-import { SEED_LANGUAGES } from "./language-service";
-import { SEED_CURRENCIES } from "./currency-service";
+import { SEED_LANGUAGES } from "./language-service.ts";
+import { SEED_CURRENCIES } from "./currency-service.ts";
 
 const DB_URL = process.env.SUPABASE_DB_POOL_URL ?? process.env.DATABASE_URL;
 if (!DB_URL) throw new Error("SUPABASE_DB_POOL_URL or DATABASE_URL is required");

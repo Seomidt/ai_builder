@@ -1,31 +1,31 @@
-import "./lib/env";
+import "./lib/env.ts";
 import express, { type Request, Response, NextFunction } from "express";
-import { registerRoutes } from "./routes";
-import { serveStatic } from "./static";
+import { registerRoutes } from "./routes.ts";
+import { serveStatic } from "./static.ts";
 import { createServer } from "http";
-import { authMiddleware } from "./middleware/auth";
-import { requestIdMiddleware, structuredLoggingMiddleware } from "./middleware/request-id";
-import { securityHeaders, reportingEndpointsMiddleware } from "./middleware/security-headers";
+import { authMiddleware } from "./middleware/auth.ts";
+import { requestIdMiddleware, structuredLoggingMiddleware } from "./middleware/request-id.ts";
+import { securityHeaders, reportingEndpointsMiddleware } from "./middleware/security-headers.ts";
 // Phase 44: cspMiddleware removed — it was a duplicate of helmet CSP in securityHeaders.
 // Both set Content-Security-Policy; browsers enforce the intersection (most restrictive).
 // securityHeaders (helmet) is the authoritative CSP source going forward.
 // csp.ts is retained for reference but no longer applied.
-import { responseSecurityMiddleware } from "./middleware/response-security";
-import { globalApiLimiter } from "./middleware/rate-limit";
-import { nonceMiddleware } from "./middleware/nonce";
-import { cspReportRouter } from "./routes/security-report";
-import { createRouteGroupRateLimiter } from "./lib/security/api-rate-limits";
+import { responseSecurityMiddleware } from "./middleware/response-security.ts";
+import { globalApiLimiter } from "./middleware/rate-limit.ts";
+import { nonceMiddleware } from "./middleware/nonce.ts";
+import { cspReportRouter } from "./routes/security-report.ts";
+import { createRouteGroupRateLimiter } from "./lib/security/api-rate-limits.ts";
 // Phase Next: domain/subdomain architecture hardening
-import { wwwRedirectMiddleware } from "./middleware/www-redirect";
-import { hostAllowlistMiddleware } from "./middleware/host-allowlist";
-import { adminDomainGuard, adminNoindexHeader } from "./middleware/admin-domain";
-import { robotsRouter } from "./routes/robots";
+import { wwwRedirectMiddleware } from "./middleware/www-redirect.ts";
+import { hostAllowlistMiddleware } from "./middleware/host-allowlist.ts";
+import { adminDomainGuard, adminNoindexHeader } from "./middleware/admin-domain.ts";
+import { robotsRouter } from "./routes/robots.ts";
 // Enterprise auth lockdown — AI & Admin guard chains
-import { adminGuardMiddleware } from "./middleware/ai-guards";
+import { adminGuardMiddleware } from "./middleware/ai-guards.ts";
 // Emergency single-email production lockdown
-import { lockdownGuard } from "./middleware/lockdown";
+import { lockdownGuard } from "./middleware/lockdown.ts";
 // Storage 1.4: pgvector migration
-import { runPgvectorMigration } from "./lib/knowledge/migrate-pgvector";
+import { runPgvectorMigration } from "./lib/knowledge/migrate-pgvector.ts";
 
 const app = express();
 const httpServer = createServer(app);

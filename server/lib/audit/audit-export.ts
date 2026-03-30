@@ -6,7 +6,7 @@
  */
 
 import pg from "pg";
-import { listAuditEventsByTenant } from "./audit-log";
+import { listAuditEventsByTenant } from "./audit-log.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({

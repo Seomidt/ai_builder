@@ -8,9 +8,9 @@
  */
 
 import pg from "pg";
-import type { AuditContext } from "./audit-context";
-import type { AuditActorType, AuditSource, AuditEventStatus } from "./audit-actions";
-import { isKnownAuditAction } from "./audit-actions";
+import type { AuditContext } from "./audit-context.ts";
+import type { AuditActorType, AuditSource, AuditEventStatus } from "./audit-actions.ts";
+import { isKnownAuditAction } from "./audit-actions.ts";
 
 // ─── Write failure tracking (INV-AUD12) ──────────────────────────────────────
 

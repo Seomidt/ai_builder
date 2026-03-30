@@ -6,8 +6,8 @@
  */
 
 import pg from "pg";
-import { getWorkflowSteps, validateWorkflow, type WorkflowStepRecord } from "./workflow-validator";
-import { logStep } from "./agent-logger";
+import { getWorkflowSteps, validateWorkflow, type WorkflowStepRecord } from "./workflow-validator.ts";
+import { logStep } from "./agent-logger.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({ connectionString: process.env.SUPABASE_DB_POOL_URL, ssl: { rejectUnauthorized: false } });

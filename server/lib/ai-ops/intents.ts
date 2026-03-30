@@ -5,7 +5,7 @@
 // Free-form unrestricted queries are NOT supported.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { AI_OPS_SOURCE_ID, type AiOpsSourceId } from "./data-sources";
+import { AI_OPS_SOURCE_ID, type AiOpsSourceId } from "./data-sources.ts";
 
 export const OPS_INTENT = {
   PLATFORM_HEALTH_SUMMARY: "platform_health_summary",

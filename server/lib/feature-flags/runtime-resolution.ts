@@ -7,7 +7,7 @@
  * INV-FLAG8: No hidden writes in read-only/preview paths.
  */
 
-import { resolveFeatureFlag } from "./variant-resolution";
+import { resolveFeatureFlag } from "./variant-resolution.ts";
 
 export interface RuntimeContext {
   tenantId?: string;

@@ -3,7 +3,7 @@
  * Registry and resolution for supported languages.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { supportedLanguages } from "@shared/schema";
 import { sql as drizzleSql } from "drizzle-orm";
 

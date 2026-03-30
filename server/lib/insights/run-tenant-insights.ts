@@ -12,7 +12,7 @@
  * 5. Logs structured events — no PII, SOC2-friendly.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import {
   tenantInsights,
   tenantAiBudgets,
@@ -22,8 +22,8 @@ import {
   knowledgeRetrievalQualitySignals,
 } from "@shared/schema";
 import { eq, and, gte, desc, sql } from "drizzle-orm";
-import type { TenantInsightContext, InsightRunResult } from "./types";
-import { ALL_RULES } from "./insight-rules";
+import type { TenantInsightContext, InsightRunResult } from "./types.ts";
+import { ALL_RULES } from "./insight-rules.ts";
 
 // ── Context collector ─────────────────────────────────────────────────────────
 

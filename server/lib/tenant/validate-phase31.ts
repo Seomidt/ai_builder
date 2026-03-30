@@ -7,8 +7,8 @@
  */
 
 import { sql as drizzleSql } from "drizzle-orm";
-import { db } from "../../db";
-import { storage } from "../../storage";
+import { db } from "../../db.ts";
+import { storage } from "../../storage.ts";
 
 let passed   = 0;
 let failed   = 0;

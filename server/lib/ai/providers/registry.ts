@@ -12,10 +12,10 @@
  * Never silently fall back to a different provider.
  */
 
-import type { AiProviderKey } from "../config";
-import type { AiProvider } from "./provider";
-import { OpenAiProvider } from "./openai-provider";
-import { ValidationError } from "../../errors";
+import type { AiProviderKey } from "../config.ts";
+import type { AiProvider } from "./provider.ts";
+import { OpenAiProvider } from "./openai-provider.ts";
+import { ValidationError } from "../../errors.ts";
 
 const ACTIVE_PROVIDERS: Partial<Record<AiProviderKey, AiProvider>> = {
   openai: new OpenAiProvider(),

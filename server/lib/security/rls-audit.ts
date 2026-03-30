@@ -17,7 +17,7 @@
  *   MIXED          → mixed_tenant_admin
  */
 
-import { db }  from "../../db";
+import { db }  from "../../db.ts";
 import { sql } from "drizzle-orm";
 import {
   TABLE_GOVERNANCE,

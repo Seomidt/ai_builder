@@ -6,7 +6,7 @@
  */
 
 import pg from "pg";
-import type { TenantLifecycleStatus } from "./tenant-lifecycle";
+import type { TenantLifecycleStatus } from "./tenant-lifecycle.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({

@@ -20,9 +20,9 @@
  *   DELETE /api/kb/:id/experts/:expertId
  */
 
-import "../../server/lib/env";
+import "../../server/lib/env.ts";
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate } from "./_lib/auth";
+import { authenticate } from "./_lib/auth.ts";
 
 // ── Response helpers ──────────────────────────────────────────────────────────
 

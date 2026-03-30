@@ -6,8 +6,8 @@
  */
 
 import pg from "pg";
-import { logAuditBestEffort } from "../audit/audit-log";
-import { TENANT_AUDIT_ACTIONS } from "./audit-actions-phase9";
+import { logAuditBestEffort } from "../audit/audit-log.ts";
+import { TENANT_AUDIT_ACTIONS } from "./audit-actions-phase9.ts";
 
 function getClient(): pg.Client {
   return new pg.Client({

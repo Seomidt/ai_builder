@@ -10,19 +10,19 @@
 
 import express, { type Request, type Response, type NextFunction } from "express";
 import { createServer } from "http";
-import { registerRoutes } from "./routes";
-import { authMiddleware } from "./middleware/auth";
-import { requestIdMiddleware, structuredLoggingMiddleware } from "./middleware/request-id";
-import { securityHeaders, reportingEndpointsMiddleware } from "./middleware/security-headers";
-import { responseSecurityMiddleware } from "./middleware/response-security";
-import { globalApiLimiter } from "./middleware/rate-limit";
-import { nonceMiddleware } from "./middleware/nonce";
-import { cspReportRouter } from "./routes/security-report";
-import { createRouteGroupRateLimiter } from "./lib/security/api-rate-limits";
-import { robotsRouter } from "./routes/robots";
-import { adminDomainGuard, adminNoindexHeader } from "./middleware/admin-domain";
-import { adminGuardMiddleware } from "./middleware/ai-guards";
-import { lockdownGuard } from "./middleware/lockdown";
+import { registerRoutes } from "./routes.ts";
+import { authMiddleware } from "./middleware/auth.ts";
+import { requestIdMiddleware, structuredLoggingMiddleware } from "./middleware/request-id.ts";
+import { securityHeaders, reportingEndpointsMiddleware } from "./middleware/security-headers.ts";
+import { responseSecurityMiddleware } from "./middleware/response-security.ts";
+import { globalApiLimiter } from "./middleware/rate-limit.ts";
+import { nonceMiddleware } from "./middleware/nonce.ts";
+import { cspReportRouter } from "./routes/security-report.ts";
+import { createRouteGroupRateLimiter } from "./lib/security/api-rate-limits.ts";
+import { robotsRouter } from "./routes/robots.ts";
+import { adminDomainGuard, adminNoindexHeader } from "./middleware/admin-domain.ts";
+import { adminGuardMiddleware } from "./middleware/ai-guards.ts";
+import { lockdownGuard } from "./middleware/lockdown.ts";
 
 // Vercel handles www-redirects and host-allowlisting at the platform level.
 const ON_VERCEL = !!process.env.VERCEL;

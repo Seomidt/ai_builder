@@ -15,15 +15,15 @@
  *  - Transcript: explicit failure — no provider yet
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import {
   knowledgeProcessingJobs, knowledgeDocuments,
   knowledgeDocumentVersions, knowledgeChunks,
   knowledgeEmbeddings, knowledgeIndexState,
 } from "@shared/schema";
 import { eq, and, count, sql } from "drizzle-orm";
-import { generateChunkEmbeddings, embeddingCount } from "./kb-embeddings";
-import { fetchImageFromR2AndOcr, OcrProviderError } from "./kb-ocr-adapter";
+import { generateChunkEmbeddings, embeddingCount } from "./kb-embeddings.ts";
+import { fetchImageFromR2AndOcr, OcrProviderError } from "./kb-ocr-adapter.ts";
 
 const MAX_ATTEMPTS = 3;
 

@@ -3,7 +3,7 @@
  * Tenant plan assignment, upgrades, downgrades, trial, cancellation, and expiry.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { tenantPlans } from "@shared/schema";
 import { sql as drizzleSql } from "drizzle-orm";
 

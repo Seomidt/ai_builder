@@ -5,9 +5,9 @@
 // Never includes raw secrets, tokens, signed URLs, or private content.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { supabaseAdmin } from "../supabase";
-import { AI_OPS_SOURCE_ID } from "./data-sources";
-import { redactUnsafeOpsContext } from "./safety";
+import { supabaseAdmin } from "../supabase.ts";
+import { AI_OPS_SOURCE_ID } from "./data-sources.ts";
+import { redactUnsafeOpsContext } from "./safety.ts";
 
 export interface ContextMeta {
   assembledAt: string;

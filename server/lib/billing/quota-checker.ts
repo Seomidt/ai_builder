@@ -8,7 +8,7 @@
  * INV-ENT3: Quota enforcement is tenant-isolated.
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { sql as drizzleSql } from "drizzle-orm";
 
 export interface QuotaCheckResult {

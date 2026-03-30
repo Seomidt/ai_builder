@@ -4,7 +4,7 @@
  * Integrates with AI cost governance (Phase 16) and background jobs (Phase 19).
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { usageCounters } from "@shared/schema";
 import { sql as drizzleSql } from "drizzle-orm";
 

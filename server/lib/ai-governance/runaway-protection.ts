@@ -13,9 +13,9 @@
  *   4. budget_burn:  projected end-of-period cost exceeds hard limit
  */
 
-import { db } from "../../db";
+import { db } from "../../db.ts";
 import { sql } from "drizzle-orm";
-import { insertAlertReturnId } from "./alert-generator";
+import { insertAlertReturnId } from "./alert-generator.ts";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 

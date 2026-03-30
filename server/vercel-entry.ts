@@ -6,9 +6,9 @@
  * Express app is initialised once per cold-start via getApp() singleton.
  */
 
-import "../server/lib/env";
+import "../server/lib/env.ts";
 import type { IncomingMessage, ServerResponse } from "http";
-import { getApp } from "../server/app";
+import { getApp } from "../server/app.ts";
 
 let _appPromise: Promise<ReturnType<typeof getApp>> | null = null;
 

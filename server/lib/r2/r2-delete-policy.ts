@@ -9,8 +9,8 @@
  *   critical — platform/backups/
  */
 
-import { PLATFORM_ROOT, TENANT_ROOT } from "./key-builder";
-import { R2AccessDeniedError } from "./r2-auth";
+import { PLATFORM_ROOT, TENANT_ROOT } from "./key-builder.ts";
+import { R2AccessDeniedError } from "./r2-auth.ts";
 
 type ActorLike = { organizationId: string; role?: string; id?: string };
 

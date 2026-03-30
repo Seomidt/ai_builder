@@ -9,7 +9,7 @@
  */
 
 import { GetObjectCommand } from "@aws-sdk/client-s3";
-import { r2Client, R2_BUCKET, R2_CONFIGURED } from "../r2/r2-client";
+import { r2Client, R2_BUCKET, R2_CONFIGURED } from "../r2/r2-client.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { architecturesRepository } from "../repositories/architectures.repository";
-import { NotFoundError, ConflictError } from "../lib/errors";
+import { NotFoundError, ConflictError } from "../lib/errors.ts";
 import type {
   ArchitectureProfile,
   ArchitectureVersion,

@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from "http";
-import { authenticate } from "./_lib/auth";
-import { json, err, pathSegments, parseUrl, readBody } from "./_lib/response";
-import { dbList, dbGet, dbUpdate } from "./_lib/db";
-import { getPlatformHealth } from "./_lib/integrations-health";
+import { authenticate } from "./_lib/auth.ts";
+import { json, err, pathSegments, parseUrl, readBody } from "./_lib/response.ts";
+import { dbList, dbGet, dbUpdate } from "./_lib/db.ts";
+import { getPlatformHealth } from "./_lib/integrations-health.ts";
 
 const _FB_URL  = "https://jneoimqidmkhikvusxak.supabase.co";
 const _FB_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpuZW9pbXFpZG1raGlrdnVzeGFrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxMzcxNTgsImV4cCI6MjA4ODcxMzE1OH0.CPdFKA1jfs7OAfHCm49J7_gl3GrA2b7WLmbKWzhoY8M";
