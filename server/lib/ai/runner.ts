@@ -52,7 +52,7 @@
  *   - Cache WRITE: ai_cache_events cache_write row written after successful provider call.
  */
 
-import OpenAI from "openai";
+// OpenAI import removed for Manus-Only architecture
 import { AI_TIMEOUT_MS, AI_INPUT_PREVIEW_MAX_CHARS, getRouteCachePolicy } from "./config";
 import { resolveRoute } from "./router";
 import { getProvider } from "./providers/registry";

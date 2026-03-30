@@ -1,18 +1,11 @@
 /**
- * Direct Attachment Processor — Mode A.
+ * Direct Attachment Processor — Mode A (Manus-Only Optimized).
  *
  * Reads a file that has already been uploaded to R2 via presigned URL,
  * extracts text/content, and returns it ready for direct chat usage.
  *
- * Safe only for small/simple files (≤ 4 MB). For larger files or video/audio,
- * the attachment router sends requests to Mode B instead.
- *
- * Supported types for direct extraction:
- *   - PDF  (pdf-parse, lazy-loaded) — scanned PDFs return code SCANNED_PDF (async OCR)
- *   - Plain text / CSV / Markdown
- *   - Images (returned as-is for vision models, no text extraction)
- *
- * Video/audio: NOT supported here — always routes to B.
+ * PDF extraction is now delegated to the async OCR pipeline (Manus)
+ * to remove the 'pdf-parse' dependency and ensure 110% SaaS stability.
  */
 
 import { GetObjectCommand } from "@aws-sdk/client-s3";
@@ -37,43 +30,6 @@ export interface DirectProcessResult {
   code?:          "SCANNED_PDF" | "PDF_ERROR" | "R2_ERROR" | "UNSUPPORTED";
   message?:       string;
   source:         "r2_direct";
-}
-
-// ── Timeouts ──────────────────────────────────────────────────────────────────
-
-const PDF_PARSE_TIMEOUT_MS = 25_000;
-const SCANNED_THRESHOLD    = 100; // chars below this → treat as scanned/image-based
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Timeout: ${label} overskred ${ms / 1000}s`)), ms),
-    ),
-  ]);
-}
-
-// ── PDF text extraction — supports pdf-parse v1 + v2 ─────────────────────────
-
-async function extractPdfText(buf: Buffer): Promise<{ text: string; numpages: number }> {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const pdfMod = require("pdf-parse");
-
-  if (pdfMod.PDFParse) {
-    const parser = new pdfMod.PDFParse({ data: buf });
-    const result = await withTimeout(parser.getText(), PDF_PARSE_TIMEOUT_MS, "PDF-parsing (v2)");
-    return {
-      text:     typeof result.text === "string" ? result.text : "",
-      numpages: typeof result.total === "number" ? result.total : 0,
-    };
-  }
-
-  if (typeof pdfMod === "function") {
-    const result = await withTimeout(pdfMod(buf, { max: 50 }), PDF_PARSE_TIMEOUT_MS, "PDF-parsing (v1)");
-    return { text: result.text ?? "", numpages: result.numpages ?? 0 };
-  }
-
-  throw new Error("pdf-parse modul har ukendt API");
 }
 
 // ── Text MIME check ───────────────────────────────────────────────────────────
@@ -131,18 +87,15 @@ export async function processDirectAttachment(
     };
   }
 
-  // Large PDFs (> 5 MB): skip R2 download entirely — go directly to async OCR.
-  // pdf-parse routinely times out on large files, and downloading 7+ MB twice
-  // (here + SHA-256 in handleOcrPending) risks Vercel function timeout.
-  const LARGE_PDF_BYTES = 5 * 1024 * 1024;
-  if (isPdfMime(contentType, filename) && sizeBytes > LARGE_PDF_BYTES) {
-    const mb = (sizeBytes / 1024 / 1024).toFixed(1);
-    console.log(`[direct-processor] pdf=large size=${mb}MB — skip R2 download, routing to async OCR`);
+  // PDF: Always route to async OCR in Manus-Only architecture.
+  // This removes the need for 'pdf-parse' and ensures high-quality extraction.
+  if (isPdfMime(contentType, filename)) {
+    console.log(`[direct-processor] pdf detected — routing to async OCR (Manus)`);
     return {
       filename, mime_type: contentType, char_count: 0, extracted_text: "",
       status:  "scanned_pdf",
       code:    "SCANNED_PDF",
-      message: `PDF er stor (${mb} MB) — afventer asynkron OCR`,
+      message: `PDF sendt til asynkron behandling via Manus`,
       source:  "r2_direct",
     };
   }
@@ -167,42 +120,6 @@ export async function processDirectAttachment(
       filename, mime_type: contentType, char_count: text.length,
       extracted_text: text, status: "ok", source: "r2_direct",
     };
-  }
-
-  // PDF — extract text layer only. Scanned PDFs hand off to async OCR.
-  if (isPdfMime(contentType, filename)) {
-    try {
-      const { text: rawText, numpages } = await extractPdfText(buf);
-      const textTrimmed = (rawText ?? "").trim();
-
-      if (textTrimmed.length >= SCANNED_THRESHOLD) {
-        // Normal text-layer PDF — use as-is
-        const capped = textTrimmed.slice(0, 80_000);
-        console.log(`[direct-processor] pdf=text pages=${numpages} chars_raw=${textTrimmed.length} chars_used=${capped.length}`);
-        return {
-          filename, mime_type: contentType, char_count: capped.length,
-          extracted_text: capped, status: "ok", source: "r2_direct",
-        };
-      }
-
-      // Scanned/image-based PDF — signal caller to create async OCR task
-      console.log(`[direct-processor] pdf=scanned pages=${numpages} raw_chars=${textTrimmed.length} — returning SCANNED_PDF`);
-      return {
-        filename, mime_type: contentType, char_count: 0, extracted_text: "",
-        status:  "scanned_pdf",
-        code:    "SCANNED_PDF",
-        message: `PDF er scannet/billede-baseret (${numpages} sider) — afventer asynkron OCR`,
-        source:  "r2_direct",
-      };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[direct-processor] pdf-parse error: ${msg}`);
-      return {
-        filename, mime_type: contentType, char_count: 0, extracted_text: "",
-        status: "error", code: "PDF_ERROR",
-        message: "PDF-parsing fejlede: " + msg, source: "r2_direct",
-      };
-    }
   }
 
   return {
