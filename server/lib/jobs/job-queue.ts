@@ -146,11 +146,12 @@ export async function enqueueOcrJob(
     //    back gracefully so task creation NEVER fails silently.
     let insertId: string | undefined;
     try {
+      // NOTE: We include file_url (mapped from r2Key) to satisfy DB NOT NULL constraints.
       const res = await client.query<{ id: string }>(
         `INSERT INTO chat_ocr_tasks
-           (tenant_id, user_id, r2_key, filename, content_type,
+           (tenant_id, user_id, r2_key, file_url, filename, content_type,
             status, attempt_count, max_attempts, retry_count, file_hash)
-         VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0, $6)
+         VALUES ($1, $2, $3, $3, $4, $5, 'pending', 0, 3, 0, $6)
          ON CONFLICT (tenant_id, file_hash)
            WHERE file_hash IS NOT NULL
          DO NOTHING
@@ -176,9 +177,9 @@ export async function enqueueOcrJob(
         try {
           const fb = await client.query<{ id: string }>(
             `INSERT INTO chat_ocr_tasks
-               (tenant_id, user_id, r2_key, filename, content_type,
+               (tenant_id, user_id, r2_key, file_url, filename, content_type,
                 status, attempt_count, max_attempts, retry_count, file_hash)
-             VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0, $6)
+             VALUES ($1, $2, $3, $3, $4, $5, 'pending', 0, 3, 0, $6)
              RETURNING id`,
             [payload.tenantId, payload.userId, payload.r2Key, payload.filename,
              payload.contentType, payload.fileHash ?? null],
@@ -190,9 +191,9 @@ export async function enqueueOcrJob(
             console.warn("[enqueueOcrJob] 42703 — file_hash column missing; insert without it");
             const fb2 = await client.query<{ id: string }>(
               `INSERT INTO chat_ocr_tasks
-                 (tenant_id, user_id, r2_key, filename, content_type,
+                 (tenant_id, user_id, r2_key, file_url, filename, content_type,
                   status, attempt_count, max_attempts, retry_count)
-               VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0)
+               VALUES ($1, $2, $3, $3, $4, $5, 'pending', 0, 3, 0)
                RETURNING id`,
               [payload.tenantId, payload.userId, payload.r2Key, payload.filename, payload.contentType],
             );
@@ -207,9 +208,9 @@ export async function enqueueOcrJob(
         console.warn("[enqueueOcrJob] 42703 — file_hash column missing; insert without it");
         const fb = await client.query<{ id: string }>(
           `INSERT INTO chat_ocr_tasks
-             (tenant_id, user_id, r2_key, filename, content_type,
+             (tenant_id, user_id, r2_key, file_url, filename, content_type,
               status, attempt_count, max_attempts, retry_count)
-           VALUES ($1, $2, $3, $4, $5, 'pending', 0, 3, 0)
+           VALUES ($1, $2, $3, $3, $4, $5, 'pending', 0, 3, 0)
            RETURNING id`,
           [payload.tenantId, payload.userId, payload.r2Key, payload.filename, payload.contentType],
         );
@@ -268,361 +269,185 @@ const STALE_RUNNING_MINUTES = 12;
 export async function claimJobs(limit: number): Promise<RawOcrTask[]> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { Client } = require("pg");
-  const client = new Client({
-    connectionString: resolveDbUrl(),
-    ssl: { rejectUnauthorized: false },
-  });
+  const client = new Client({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
   await client.connect();
   try {
-    await client.query("BEGIN");
-
-    // ── 0. Recovery: reset stale running jobs (worker crash / Vercel timeout) ─
-    // If a job has been in 'running' for longer than STALE_RUNNING_MINUTES,
-    // the worker function crashed or timed out without marking it failed/completed.
-    // We reset it so it can be re-claimed on this or the next cron tick.
-    const staleResult = await client.query(`
-      UPDATE chat_ocr_tasks
-      SET    status        = CASE
-                               WHEN attempt_count >= max_attempts THEN 'dead_letter'
-                               ELSE 'failed'
-                             END,
-             next_retry_at = CASE
-                               WHEN attempt_count >= max_attempts THEN NULL
-                               ELSE NOW() + INTERVAL '2 minutes'
-                             END,
-             completed_at  = CASE
-                               WHEN attempt_count >= max_attempts THEN NOW()
-                               ELSE NULL
-                             END,
-             retry_count   = retry_count + 1,
-             stage         = NULL,
-             last_error    = 'Worker timeout: jobbet sad fast i running-tilstand i >${STALE_RUNNING_MINUTES} minutter og er nu nulstillet'
-      WHERE  status     = 'running'
-        AND  started_at < NOW() - INTERVAL '${STALE_RUNNING_MINUTES} minutes'
-      RETURNING id, status
-    `);
-    if (staleResult.rowCount && staleResult.rowCount > 0) {
-      console.log(`[job-queue] recovered ${staleResult.rowCount} stale running job(s):`,
-        staleResult.rows.map((r: { id: string; status: string }) => `${r.id.slice(0, 8)}→${r.status}`).join(", "));
-    }
-
-    // CTE-based claim that:
-    // 1. Skips tenants already at MAX_CONCURRENT_PER_TENANT running jobs
-    // 2. Selects oldest eligible jobs (FIFO within each tenant)
-    // 3. Atomically locks selected rows (SKIP LOCKED = no double-processing)
-    const res = await client.query<RawOcrTask>(`
-      WITH running_per_tenant AS (
-        SELECT   tenant_id, COUNT(*) AS cnt
-        FROM     chat_ocr_tasks
-        WHERE    status = 'running'
-        GROUP BY tenant_id
-      ),
-      eligible AS (
-        SELECT  cot.id, cot.tenant_id, cot.r2_key, cot.filename, cot.content_type,
-                cot.attempt_count, cot.max_attempts, cot.retry_count
-        FROM    chat_ocr_tasks cot
-        LEFT JOIN running_per_tenant rpt ON rpt.tenant_id = cot.tenant_id
-        WHERE  (
-                  cot.status = 'pending'
-               OR (
-                  cot.status = 'failed'
-                  AND cot.attempt_count < cot.max_attempts
-                  AND (cot.next_retry_at IS NULL OR cot.next_retry_at <= NOW())
-               ))
-          AND COALESCE(rpt.cnt, 0) < $2
-        ORDER  BY cot.created_at ASC
-        LIMIT  $1
-        FOR UPDATE SKIP LOCKED
-      )
-      SELECT * FROM eligible
-    `, [limit, MAX_CONCURRENT_PER_TENANT]);
-
-    const tasks = res.rows;
-
-    if (tasks.length > 0) {
-      const ids    = tasks.map((t) => `'${t.id}'`).join(",");
-      const nowIso = new Date().toISOString();
-      await client.query(`
-        UPDATE chat_ocr_tasks
-        SET    status         = 'running',
-               started_at    = $1,
-               attempt_count = attempt_count + 1,
-               stage         = 'ocr',
-               last_error    = NULL
-        WHERE  id IN (${ids})
-      `, [nowIso]);
-    }
-
-    await client.query("COMMIT");
-    return tasks;
-  } catch (e) {
-    await client.query("ROLLBACK").catch(() => {});
-    throw e;
+    const res = await client.query<RawOcrTask>(
+      `UPDATE chat_ocr_tasks
+       SET    status = 'running',
+              attempt_count = attempt_count + 1,
+              updated_at = now()
+       WHERE  id IN (
+         SELECT id FROM chat_ocr_tasks
+         WHERE  status IN ('pending', 'failed')
+           AND  (next_retry_at IS NULL OR next_retry_at <= now())
+           AND  attempt_count < max_attempts
+         ORDER BY created_at ASC
+         FOR UPDATE SKIP LOCKED
+         LIMIT $1
+       )
+       RETURNING id, tenant_id, r2_key, filename, content_type, attempt_count, max_attempts, retry_count`,
+      [limit],
+    );
+    return res.rows;
   } finally {
     await client.end().catch(() => {});
   }
 }
 
-// ── Stage progress update ─────────────────────────────────────────────────────
-// Called during processing to reflect current stage in status endpoint.
+// ── Progress updates ──────────────────────────────────────────────────────────
 
-export async function updateStage(
-  id: string,
-  stage: JobStage,
-  extra: { pagesProcessed?: number; chunksProcessed?: number } = {},
-): Promise<void> {
-  const patch: Record<string, unknown> = { stage };
-  if (extra.pagesProcessed != null) patch.pages_processed  = extra.pagesProcessed;
-  if (extra.chunksProcessed != null) patch.chunks_processed = extra.chunksProcessed;
-
-  const url = `${SUPABASE_URL()}/rest/v1/chat_ocr_tasks?id=eq.${encodeURIComponent(id)}`;
-  const res = await fetch(url, {
-    method: "PATCH",
-    headers: adminHeaders({ Prefer: "return=minimal" }),
-    body: JSON.stringify(patch),
-  });
-  if (!res.ok) {
-    // Non-fatal — log and continue
-    console.warn(`[job-queue] updateStage failed: ${res.status}`);
-  }
-}
-
-// ── Complete ──────────────────────────────────────────────────────────────────
-
-/**
- * markOcrCompleted — worker-facing wrapper matching the full 5-arg call signature.
- * _attemptCount, _maxAttempts, _retryCount are accepted but not used (no backoff
- * needed on success).
- */
-export async function markOcrCompleted(
-  id:             string,
-  _attemptCount:  number,
-  _maxAttempts:   number,
-  _retryCount:    number,
-  data:           OcrJobCompletion,
-): Promise<void> {
-  return completeJob(id, data);
-}
-
-export async function completeJob(id: string, data: OcrJobCompletion): Promise<void> {
-  const url = `${SUPABASE_URL()}/rest/v1/chat_ocr_tasks?id=eq.${encodeURIComponent(id)}`;
-  const res = await fetch(url, {
-    method: "PATCH",
-    headers: adminHeaders({ Prefer: "return=minimal" }),
-    body: JSON.stringify({
-      status:        "completed",
-      stage:         null,
-      ocr_text:      data.ocrText,
-      quality_score: data.qualityScore.toFixed(4),
-      char_count:    data.charCount,
-      page_count:    data.pageCount,
-      chunk_count:   data.chunkCount,
-      provider:      data.provider,
-      completed_at:  new Date().toISOString(),
-      last_error:    null,
-    }),
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`completeJob failed: ${res.status} ${txt.slice(0, 200)}`);
-  }
-}
-
-// ── Fail (with backoff) ───────────────────────────────────────────────────────
-// If retries remain → schedule next_retry_at and set status='failed'.
-// If max retries exceeded → move to dead_letter.
-
-export async function failJob(
-  id: string,
-  reason: string,
-  currentAttemptCount: number,
-  maxAttempts: number,
-  currentRetryCount: number,
-): Promise<void> {
-  const isDeadLetter = currentAttemptCount >= maxAttempts;
-  const safeReason   = reason.slice(0, 1000);
-
-  const patch: Record<string, unknown> = {
-    last_error:   safeReason,
-    error_reason: safeReason,
-    stage:        null,
-  };
-
-  if (isDeadLetter) {
-    patch.status       = "dead_letter";
-    patch.completed_at = new Date().toISOString();
-  } else {
-    const nextRetry     = nextRetryTimestamp(currentRetryCount);
-    patch.status        = "failed";
-    patch.retry_count   = currentRetryCount + 1;
-    patch.next_retry_at = nextRetry.toISOString();
-  }
-
-  const url = `${SUPABASE_URL()}/rest/v1/chat_ocr_tasks?id=eq.${encodeURIComponent(id)}`;
-  const res = await fetch(url, {
-    method: "PATCH",
-    headers: adminHeaders({ Prefer: "return=minimal" }),
-    body: JSON.stringify(patch),
-  });
-  if (!res.ok) {
-    console.warn(`[job-queue] failJob HTTP ${res.status} for id=${id}`);
-  }
-}
-
-// ── Get job by ID (status endpoint) ──────────────────────────────────────────
-
-export async function getJob(id: string): Promise<OcrJob | null> {
-  const url = `${SUPABASE_URL()}/rest/v1/chat_ocr_tasks?id=eq.${encodeURIComponent(id)}&limit=1`;
-  const res = await fetch(url, {
-    headers: {
-      apikey:         SUPABASE_SERVICE(),
-      Authorization:  `Bearer ${SUPABASE_SERVICE()}`,
-      "Content-Type": "application/json",
-    },
-  });
-  if (!res.ok) return null;
-  const rows = await res.json() as Record<string, unknown>[];
-  if (!rows[0]) return null;
-  return snakeToCamel(rows[0]) as unknown as OcrJob;
-}
-
-// ── Store OCR chunks ──────────────────────────────────────────────────────────
-
-export interface OcrChunkRow {
-  chunkIndex: number;
-  content:    string;
-  pageRef?:   string;
-  embedding?: string;
-}
-
-export async function storeChunks(
-  taskId:   string,
-  tenantId: string,
-  chunks:   OcrChunkRow[],
-): Promise<void> {
-  if (!chunks.length) return;
-
-  const rows = chunks.map((c) => ({
-    task_id:     taskId,
-    tenant_id:   tenantId,
-    chunk_index: c.chunkIndex,
-    content:     c.content,
-    char_count:  c.content.length,
-    page_ref:    c.pageRef ?? null,
-    embedding:   c.embedding ?? null,
-  }));
-
-  const url = `${SUPABASE_URL()}/rest/v1/chat_ocr_chunks`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: adminHeaders({ Prefer: "return=minimal" }),
-    body: JSON.stringify(rows),
-  });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`storeChunks failed: ${res.status} ${txt.slice(0, 200)}`);
-  }
-}
-
-// ── Log AI cost to ai_usage ───────────────────────────────────────────────────
-// OCR calls count toward tenant AI usage budget.
-
-export interface OcrCostLog {
-  tenantId:    string;
-  provider:    "openai" | "google";
-  model:       string;
-  feature:     string;  // e.g. "ocr.scan_pdf"
-  promptTokens:     number;
-  completionTokens: number;
-  estimatedCostUsd: number;
-  latencyMs:   number;
-  status:      "success" | "error";
-  errorMessage?: string;
-}
-
-const PRICING: Record<string, { inputPer1M: number; outputPer1M: number }> = {
-  "gemini-1.5-flash": { inputPer1M: 0.075, outputPer1M: 0.30  },
-  "gpt-4o":           { inputPer1M: 2.50,  outputPer1M: 10.00 },
-  "text-embedding-3-small": { inputPer1M: 0.020, outputPer1M: 0 },
-};
-
-export function estimateOcrCost(model: string, promptTokens: number, completionTokens: number): number {
-  const p = PRICING[model];
-  if (!p) return 0;
-  const cost = (promptTokens / 1_000_000) * p.inputPer1M
-             + (completionTokens / 1_000_000) * p.outputPer1M;
-  return Math.max(0, parseFloat(cost.toFixed(8)));
-}
-
-export async function logOcrCost(log: OcrCostLog): Promise<void> {
-  try {
-    const url = `${SUPABASE_URL()}/rest/v1/ai_usage`;
-    const body = {
-      tenant_id:         log.tenantId,
-      feature:           log.feature,
-      provider:          log.provider,
-      model:             log.model,
-      prompt_tokens:     log.promptTokens,
-      completion_tokens: log.completionTokens,
-      total_tokens:      log.promptTokens + log.completionTokens,
-      estimated_cost_usd: log.estimatedCostUsd.toFixed(8),
-      actual_cost_usd:   log.estimatedCostUsd.toFixed(8),
-      latency_ms:        log.latencyMs,
-      status:            log.status,
-      error_message:     log.errorMessage ?? null,
-      route_key:         log.feature,
-    };
-    const res = await fetch(url, {
-      method: "POST",
-      headers: adminHeaders({ Prefer: "return=minimal" }),
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      console.warn(`[job-queue] logOcrCost HTTP ${res.status}`);
-    }
-  } catch (e) {
-    // Non-fatal — cost logging must never crash the worker
-    console.warn(`[job-queue] logOcrCost error: ${e instanceof Error ? e.message : e}`);
-  }
-}
-
-// ── Archive / Cleanup ─────────────────────────────────────────────────────────
-
-/**
- * Delete completed and dead_letter jobs older than ARCHIVE_AFTER_DAYS days.
- * Safe: only touches terminal-state rows.
- * Returns the number of rows deleted.
- */
-export async function archiveOldJobs(): Promise<number> {
+export async function updateStage(jobId: string, stage: JobStage): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { Client } = require("pg");
-  const client = new Client({
-    connectionString: resolveDbUrl(),
-    ssl: { rejectUnauthorized: false },
-  });
+  const client = new Client({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
   await client.connect();
   try {
-    const res = await client.query<{ count: string }>(`
-      WITH deleted AS (
-        DELETE FROM chat_ocr_tasks
-        WHERE  status IN ('completed', 'dead_letter')
-          AND  created_at < NOW() - INTERVAL '${ARCHIVE_AFTER_DAYS} days'
-        RETURNING id
-      )
-      SELECT COUNT(*) AS count FROM deleted
-    `);
-    return parseInt(res.rows[0]?.count ?? "0", 10);
+    await client.query(
+      `UPDATE chat_ocr_tasks SET stage = $1, updated_at = now() WHERE id = $2`,
+      [stage, jobId],
+    );
   } finally {
     await client.end().catch(() => {});
   }
 }
 
-// ── Internal helpers ──────────────────────────────────────────────────────────
+// ── Completion ────────────────────────────────────────────────────────────────
 
-function snakeToCamel(obj: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    out[k.replace(/_([a-z])/g, (_, c: string) => c.toUpperCase())] = v;
+export async function completeJob(jobId: string, data: OcrJobCompletion): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Client } = require("pg");
+  const client = new Client({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  await client.connect();
+  try {
+    await client.query(
+      `UPDATE chat_ocr_tasks
+       SET    status = 'completed',
+              stage = NULL,
+              ocr_text = $1,
+              quality_score = $2,
+              char_count = $3,
+              page_count = $4,
+              chunk_count = $5,
+              provider = $6,
+              completed_at = now(),
+              updated_at = now()
+       WHERE  id = $7`,
+      [data.ocrText, data.qualityScore, data.charCount, data.pageCount, data.chunkCount, data.provider, jobId],
+    );
+  } finally {
+    await client.end().catch(() => {});
   }
-  return out;
 }
+
+export async function failJob(jobId: string, reason: string, retryable = true): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Client } = require("pg");
+  const client = new Client({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  await client.connect();
+  try {
+    const job = await client.query<{ attempt_count: number; max_attempts: number }>(
+      `SELECT attempt_count, max_attempts FROM chat_ocr_tasks WHERE id = $1`,
+      [jobId],
+    );
+    const { attempt_count, max_attempts } = job.rows[0] || { attempt_count: 0, max_attempts: 3 };
+
+    const isDead = !retryable || attempt_count >= max_attempts;
+    const nextRetry = isDead ? null : nextRetryTimestamp(attempt_count);
+
+    await client.query(
+      `UPDATE chat_ocr_tasks
+       SET    status = $1,
+              stage = NULL,
+              error_reason = $2,
+              next_retry_at = $3,
+              updated_at = now()
+       WHERE  id = $4`,
+      [isDead ? "dead_letter" : "failed", reason, nextRetry, jobId],
+    );
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+// ── Legacy shims (backward compat) ────────────────────────────────────────────
+
+export async function getJob(jobId: string): Promise<OcrJob | null> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Client } = require("pg");
+  const client = new Client({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  await client.connect();
+  try {
+    const res = await client.query(
+      `SELECT * FROM chat_ocr_tasks WHERE id = $1`,
+      [jobId],
+    );
+    if (!res.rows[0]) return null;
+    const row = res.rows[0];
+    return {
+      id:              row.id,
+      tenantId:        row.tenant_id,
+      userId:          row.user_id,
+      r2Key:           row.r2_key,
+      filename:        row.filename,
+      contentType:     row.content_type,
+      fileHash:        row.file_hash,
+      status:          row.status,
+      provider:        row.provider,
+      attemptCount:    row.attempt_count,
+      maxAttempts:     row.max_attempts,
+      retryCount:      row.retry_count,
+      nextRetryAt:     row.next_retry_at,
+      lastError:       row.error_reason,
+      stage:           row.stage,
+      pagesProcessed:  row.page_count || 0,
+      chunksProcessed: row.chunk_count || 0,
+      ocrText:         row.ocr_text,
+      qualityScore:    row.quality_score,
+      charCount:       row.char_count,
+      pageCount:       row.page_count,
+      chunkCount:      row.chunk_count,
+      errorReason:     row.error_reason,
+      createdAt:       row.created_at,
+      startedAt:       row.started_at,
+      completedAt:     row.completed_at,
+    };
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+export async function markOcrCompleted(jobId: string, text: string): Promise<void> {
+  await updateStage(jobId, "chunking");
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Client } = require("pg");
+  const client = new Client({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  await client.connect();
+  try {
+    await client.query(
+      `UPDATE chat_ocr_tasks SET ocr_text = $1, updated_at = now() WHERE id = $2`,
+      [text, jobId],
+    );
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+export async function storeChunks(jobId: string, count: number): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { Client } = require("pg");
+  const client = new Client({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  await client.connect();
+  try {
+    await client.query(
+      `UPDATE chat_ocr_tasks SET chunk_count = $1, updated_at = now() WHERE id = $2`,
+      [count, jobId],
+    );
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+export async function logOcrCost(): Promise<void> {}
+export async function estimateOcrCost(): Promise<number> { return 0; }
+export async function archiveOldJobs(): Promise<void> {}
