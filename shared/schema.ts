@@ -6617,8 +6617,8 @@ export const tenantMemberDepartments = pgTable(
   "tenant_member_departments",
   {
     id:           text("id").primaryKey().default(sql`gen_random_uuid()::text`),
-    tenantId:     text("tenant_id").notNull(),
-    userId:       text("user_id").notNull(),
+    tenantId:     varchar("tenant_id").notNull(),
+    userId:       varchar("user_id").notNull(),
     departmentId: text("department_id").notNull().references(() => tenantDepartments.id, { onDelete: "cascade" }),
     assignedAt:   timestamp("assigned_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -6842,8 +6842,8 @@ export const chatOcrTasks = pgTable(
   "chat_ocr_tasks",
   {
     id:           varchar("id").primaryKey().default(sql`gen_random_uuid()`),
-    tenantId:     text("tenant_id").notNull(),
-    userId:       text("user_id").notNull(),
+    tenantId:     varchar("tenant_id").notNull(),
+    userId:       varchar("user_id").notNull(),
     r2Key:        text("r2_key").notNull(),
     filename:     text("filename").notNull(),
     contentType:  text("content_type").notNull().default("application/pdf"),
