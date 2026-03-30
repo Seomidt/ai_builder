@@ -298,7 +298,7 @@ async function embedAllChunks(chunks: string[], tenantId: string): Promise<(numb
 
 // ── Process one job ───────────────────────────────────────────────────────────
 
-async function processJob(task: RawOcrTask): Promise<void> {
+export async function processJob(task: RawOcrTask): Promise<void> {
   const tag         = `[${task.id.slice(0, 8)}]`;
   const isFinalAttempt = task.attempt_count >= task.max_attempts;
 
