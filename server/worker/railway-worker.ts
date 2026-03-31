@@ -1,26 +1,30 @@
 /**
- * railway-worker.ts — Phase 5X: OCR Reliability, Fallback, Timeout & Dead-Letter Safety
+ * railway-worker.ts — Phase 5Y: Unified Media Processing Platform
  *
- * Key improvements over previous version:
- * - Hard timeout on ALL Gemini calls (no more infinite hangs)
- * - Heartbeat every 15s so the reaper can detect stuck jobs
- * - Fallback chain: gemini-2.5-flash (30s) → gemini-1.5-pro (60s)
- * - Deterministic state machine: pending → processing → completed/retryable_failed/dead_letter
- * - Append-only event log (ocr_event_log table)
- * - SOC2: no document content in logs
+ * Thin entrypoint that:
+ *  1. Starts the Phase 5Y media-worker loop (new media_processing_jobs table)
+ *  2. Starts the Phase 5X OCR worker loop (legacy chat_ocr_tasks table — backward compat)
+ *  3. Starts both reapers (media-reaper + ocr-reaper)
+ *  4. Exposes a /health HTTP endpoint for Railway health checks
+ *
+ * All heavy logic lives in:
+ *   server/lib/media/media-worker.ts   (Phase 5Y)
+ *   server/lib/ocr/ocr-orchestrator.ts (Phase 5X legacy)
  */
 
 import "../lib/env";
 import * as http from "http";
-import { startReaper } from "./ocr-reaper";
 import { randomUUID } from "crypto";
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { Client as PgClient } from "pg";
 import { resolveDbUrl } from "../lib/jobs/job-queue";
 import { getSupabaseSslConfig } from "../lib/jobs/ssl-config";
 import { executeOcrWithFallback } from "../lib/ocr/ocr-orchestrator";
-import { classifyError } from "../lib/ocr/ocr-error-classifier";
 import { isRetryable, calculateNextRetryAt } from "../lib/ocr/ocr-retry-policy";
+import { startReaper as startOcrReaper } from "./ocr-reaper";
+import { startReaper as startMediaReaper } from "../lib/media/media-reaper";
+import { claimNextJob, updateJobStatus, heartbeatJob, logEvent as mediaLogEvent } from "../lib/media/media-persistence";
+import { processJob as processMediaJob } from "../lib/media/media-worker";
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -59,7 +63,7 @@ function log(event: string, fields: Record<string, unknown> = {}): void {
   }));
 }
 
-// ── DB helpers ────────────────────────────────────────────────────────────────
+// ── DB helpers (legacy OCR) ───────────────────────────────────────────────────
 
 function newClient(): PgClient {
   return new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
@@ -75,42 +79,7 @@ async function withClient<T>(fn: (client: PgClient) => Promise<T>): Promise<T> {
   }
 }
 
-// ── Event log ─────────────────────────────────────────────────────────────────
-
-async function logEvent(params: {
-  tenantId: string;
-  jobId: string;
-  eventType: string;
-  stage?: string;
-  provider?: string;
-  model?: string;
-  attemptCount?: number;
-  fallbackDepth?: number;
-  traceId?: string;
-  payload?: Record<string, unknown>;
-}): Promise<void> {
-  try {
-    await withClient(async (client) => {
-      await client.query(
-        `INSERT INTO ocr_event_log
-           (tenant_id, job_id, event_type, stage, provider, model, attempt_count,
-            fallback_depth, worker_id, execution_trace_id, payload_jsonb)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-        [
-          params.tenantId, params.jobId, params.eventType,
-          params.stage ?? null, params.provider ?? null, params.model ?? null,
-          params.attemptCount ?? null, params.fallbackDepth ?? 0,
-          WORKER_ID, params.traceId ?? null,
-          JSON.stringify(params.payload ?? {}),
-        ]
-      );
-    });
-  } catch (err: any) {
-    log("event_log_write_failed", { error: err?.message });
-  }
-}
-
-// ── Claim jobs (atomic, FOR UPDATE SKIP LOCKED) ───────────────────────────────
+// ── Legacy OCR: claim jobs ────────────────────────────────────────────────────
 
 interface RawOcrTask {
   id:            string;
@@ -122,7 +91,7 @@ interface RawOcrTask {
   max_attempts:  number;
 }
 
-async function claimJobs(limit: number): Promise<RawOcrTask[]> {
+async function claimLegacyJobs(limit: number): Promise<RawOcrTask[]> {
   return withClient(async (client) => {
     const res = await client.query<RawOcrTask>(
       `UPDATE chat_ocr_tasks
@@ -150,9 +119,7 @@ async function claimJobs(limit: number): Promise<RawOcrTask[]> {
   });
 }
 
-// ── Heartbeat ─────────────────────────────────────────────────────────────────
-
-async function sendHeartbeat(jobId: string): Promise<void> {
+async function sendLegacyHeartbeat(jobId: string): Promise<void> {
   try {
     await withClient(async (client) => {
       await client.query(
@@ -165,9 +132,7 @@ async function sendHeartbeat(jobId: string): Promise<void> {
   }
 }
 
-// ── Stage update ──────────────────────────────────────────────────────────────
-
-async function updateStage(jobId: string, stage: string): Promise<void> {
+async function updateLegacyStage(jobId: string, stage: string): Promise<void> {
   try {
     await withClient(async (client) => {
       await client.query(
@@ -180,9 +145,7 @@ async function updateStage(jobId: string, stage: string): Promise<void> {
   }
 }
 
-// ── Complete job ──────────────────────────────────────────────────────────────
-
-async function completeJob(jobId: string, data: {
+async function completeLegacyJob(jobId: string, data: {
   ocrText: string;
   provider: string;
   model: string;
@@ -209,9 +172,7 @@ async function completeJob(jobId: string, data: {
   });
 }
 
-// ── Fail job ──────────────────────────────────────────────────────────────────
-
-async function failJobWithCategory(jobId: string, params: {
+async function failLegacyJob(jobId: string, params: {
   errorCode: string;
   errorMessage: string;
   failureCategory: string;
@@ -249,8 +210,6 @@ async function failJobWithCategory(jobId: string, params: {
   });
 }
 
-// ── Download from R2 ──────────────────────────────────────────────────────────
-
 async function downloadFromR2(r2Key: string): Promise<Buffer> {
   const cmd = new GetObjectCommand({ Bucket: R2_BUCKET, Key: r2Key });
   const response = await r2Client.send(cmd);
@@ -263,148 +222,153 @@ async function downloadFromR2(r2Key: string): Promise<Buffer> {
   });
 }
 
-// ── Process a single job ──────────────────────────────────────────────────────
+// ── Legacy OCR: process a single job ─────────────────────────────────────────
 
-async function processJob(job: RawOcrTask): Promise<void> {
-  const start   = Date.now();
+async function processLegacyJob(job: RawOcrTask): Promise<void> {
   const traceId = randomUUID();
+  log("legacy_job_started", { jobId: job.id, tenantId: job.tenant_id, filename: job.filename, traceId });
 
-  log("job_started", { jobId: job.id, tenantId: job.tenant_id, filename: job.filename, traceId });
-  await logEvent({ tenantId: job.tenant_id, jobId: job.id, eventType: "ocr_job_claimed", stage: "claim", attemptCount: job.attempt_count, traceId });
-
-  // Start heartbeat interval
-  const heartbeatInterval = setInterval(() => sendHeartbeat(job.id), HEARTBEAT_MS);
+  const heartbeatInterval = setInterval(() => sendLegacyHeartbeat(job.id), HEARTBEAT_MS);
 
   try {
-    // ── Stage: download from R2 ────────────────────────────────────────────────
-    await updateStage(job.id, "upload");
-    log("downloading_from_r2", { jobId: job.id, r2Key: job.r2_key });
+    await updateLegacyStage(job.id, "upload");
     const fileBuffer = await downloadFromR2(job.r2_key);
     log("download_complete", { jobId: job.id, bytes: fileBuffer.length });
 
-    // ── Stage: OCR with fallback chain (hard timeout enforced inside) ──────────
-    await updateStage(job.id, "ocr");
+    await updateLegacyStage(job.id, "ocr");
 
     const result = await executeOcrWithFallback(
       fileBuffer,
       job.filename,
       job.content_type,
       async (attempt, provider, model) => {
-        const isFallback = attempt > 1;
-        log("ai_extraction_attempt", { jobId: job.id, attempt, provider, model, isFallback, traceId });
-        await logEvent({
-          tenantId: job.tenant_id, jobId: job.id,
-          eventType: isFallback ? "ocr_fallback_started" : "ocr_provider_call_started",
-          stage: "ocr", provider, model, attemptCount: job.attempt_count,
-          fallbackDepth: attempt - 1, traceId,
-        });
+        log("ai_extraction_attempt", { jobId: job.id, attempt, provider, model, traceId });
       }
     );
 
     if (!result.success) {
       const retryable = isRetryable(result.failureCategory ?? "unknown");
-      log("ai_extraction_failed", { jobId: job.id, errorCode: result.errorCode, category: result.failureCategory, retryable, durationMs: result.durationMs, traceId });
-
-      await logEvent({
-        tenantId: job.tenant_id, jobId: job.id,
-        eventType: result.failureCategory === "timeout" ? "ocr_provider_call_timed_out" : "ocr_provider_call_failed",
-        stage: "ocr", provider: result.provider, model: result.model,
-        attemptCount: job.attempt_count, traceId,
-        payload: { errorCode: result.errorCode, errorMessage: result.errorMessage, durationMs: result.durationMs },
-      });
-
-      await failJobWithCategory(job.id, {
-        errorCode:       result.errorCode ?? "UNKNOWN",
-        errorMessage:    result.errorMessage ?? "Unknown error",
+      await failLegacyJob(job.id, {
+        errorCode: result.errorCode ?? "UNKNOWN",
+        errorMessage: result.errorMessage ?? "Unknown error",
         failureCategory: result.failureCategory ?? "unknown",
-        attemptCount:    job.attempt_count,
-        maxAttempts:     job.max_attempts,
+        attemptCount: job.attempt_count,
+        maxAttempts: job.max_attempts,
         retryable,
       });
+      log("legacy_job_failed", { jobId: job.id, errorCode: result.errorCode, failureCategory: result.failureCategory });
       return;
     }
 
-    log("ai_extraction_complete", { jobId: job.id, chars: result.text!.length, model: result.model, provider: result.provider, usedFallback: result.usedFallback, durationMs: result.durationMs, traceId });
-
-    // ── Stage: persist result ──────────────────────────────────────────────────
-    await updateStage(job.id, "persist");
-    await completeJob(job.id, {
-      ocrText:      result.text!,
-      provider:     result.provider,
-      model:        result.model,
-      charCount:    result.text!.length,
-      fallbackDepth: result.usedFallback ? 1 : 0,
+    await completeLegacyJob(job.id, {
+      ocrText: result.text ?? "",
+      provider: result.provider ?? "google",
+      model: result.model ?? "gemini-2.5-flash",
+      charCount: result.charCount ?? 0,
+      fallbackDepth: result.fallbackDepth ?? 0,
     });
 
-    await logEvent({
-      tenantId: job.tenant_id, jobId: job.id, eventType: "ocr_job_completed",
-      stage: "finalize", provider: result.provider, model: result.model,
-      attemptCount: job.attempt_count, traceId,
-      payload: { durationMs: Date.now() - start, chars: result.text!.length, usedFallback: result.usedFallback },
+    log("legacy_job_completed", { jobId: job.id, charCount: result.charCount });
+  } catch (err: any) {
+    log("legacy_job_crashed", { jobId: job.id, error: err?.message });
+    await failLegacyJob(job.id, {
+      errorCode: "INTERNAL_ERROR",
+      errorMessage: err?.message ?? "Unknown crash",
+      failureCategory: "internal",
+      attemptCount: job.attempt_count,
+      maxAttempts: job.max_attempts,
+      retryable: false,
     });
-
-    log("job_completed", { jobId: job.id, tenantId: job.tenant_id, model: result.model, durationMs: Date.now() - start, chars: result.text!.length, usedFallback: result.usedFallback, traceId });
-
-  } catch (e: any) {
-    const { category, code, message } = classifyError(e);
-    const retryable = isRetryable(category);
-    log("job_error", { jobId: job.id, tenantId: job.tenant_id, code, category, retryable, traceId });
-
-    await logEvent({ tenantId: job.tenant_id, jobId: job.id, eventType: "ocr_job_failed", stage: "ocr", traceId, payload: { errorCode: code, errorMessage: message, category } });
-
-    await failJobWithCategory(job.id, {
-      errorCode:       code,
-      errorMessage:    message,
-      failureCategory: category,
-      attemptCount:    job.attempt_count,
-      maxAttempts:     job.max_attempts,
-      retryable,
-    }).catch(() => {});
-
   } finally {
     clearInterval(heartbeatInterval);
   }
 }
 
-// ── Health check HTTP server ──────────────────────────────────────────────────
+// ── Phase 5Y: media job loop ──────────────────────────────────────────────────
 
-const healthServer = http.createServer((req, res) => {
-  if (req.url === "/health" || req.url === "/") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", service: "railway-worker", workerId: WORKER_ID, ts: new Date().toISOString() }));
-  } else {
-    res.writeHead(404);
-    res.end("Not found");
-  }
-});
-
-healthServer.listen(HEALTH_PORT, () => {
-  log("health_server_started", { port: HEALTH_PORT });
-});
-
-// ── Worker loop ───────────────────────────────────────────────────────────────
-
-async function runWorker(): Promise<void> {
-  log("worker_started", { concurrency: CONCURRENCY, pollIntervalMs: POLL_INTERVAL_MS, heartbeatMs: HEARTBEAT_MS, supports: "pdf,image,video,audio" });
-
-  // Start the reaper to clean up stuck jobs
-  startReaper();
+async function runMediaJobLoop(): Promise<void> {
+  log("media_job_loop_started");
 
   while (true) {
     try {
-      const jobs = await claimJobs(CONCURRENCY);
-      if (jobs.length > 0) {
-        log("jobs_claimed", { count: jobs.length });
-        await Promise.all(jobs.map(job => processJob(job)));
+      const job = await claimNextJob(WORKER_ID);
+      if (job) {
+        log("media_job_claimed", { jobId: job.id, mediaType: job.media_type, pipelineType: job.pipeline_type });
+        processMediaJob(job).catch((err) => {
+          log("media_job_unhandled_error", { jobId: job.id, error: err?.message });
+        });
       }
     } catch (err: any) {
-      log("worker_loop_error", { error: err?.message ?? String(err) });
+      log("media_job_loop_error", { error: err?.message });
     }
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 }
 
-runWorker().catch(err => {
-  console.error("Fatal worker error:", err);
+// ── Legacy OCR: job loop ──────────────────────────────────────────────────────
+
+async function runLegacyOcrLoop(): Promise<void> {
+  log("legacy_ocr_loop_started");
+  let activeJobs = 0;
+
+  while (true) {
+    try {
+      const available = CONCURRENCY - activeJobs;
+      if (available > 0) {
+        const jobs = await claimLegacyJobs(available);
+        for (const job of jobs) {
+          activeJobs++;
+          processLegacyJob(job)
+            .catch((err) => log("legacy_job_unhandled", { jobId: job.id, error: err?.message }))
+            .finally(() => { activeJobs--; });
+        }
+      }
+    } catch (err: any) {
+      log("legacy_ocr_loop_error", { error: err?.message });
+    }
+
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  }
+}
+
+// ── Health check server ───────────────────────────────────────────────────────
+
+function startHealthServer(): void {
+  const server = http.createServer((req, res) => {
+    if (req.url === "/health" || req.url === "/") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok", workerId: WORKER_ID, ts: new Date().toISOString() }));
+    } else {
+      res.writeHead(404);
+      res.end("Not found");
+    }
+  });
+
+  server.listen(HEALTH_PORT, () => {
+    log("health_server_started", { port: HEALTH_PORT });
+  });
+}
+
+// ── Main ──────────────────────────────────────────────────────────────────────
+
+async function main(): Promise<void> {
+  log("worker_starting", { concurrency: CONCURRENCY, pollIntervalMs: POLL_INTERVAL_MS });
+
+  startHealthServer();
+
+  // Start both reapers
+  startOcrReaper();
+  startMediaReaper();
+
+  // Start both job loops concurrently
+  await Promise.all([
+    runMediaJobLoop(),
+    runLegacyOcrLoop(),
+  ]);
+}
+
+main().catch((err) => {
+  console.error("[railway-worker] Fatal error:", err);
   process.exit(1);
 });

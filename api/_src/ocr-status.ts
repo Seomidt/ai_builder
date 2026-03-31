@@ -22,6 +22,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { authenticate }                         from "./_lib/auth.ts";
 import { json, err }                            from "./_lib/response.ts";
 import { getOcrTask }                           from "./_lib/ocr-queue.ts";
+import { getOcrTaskStatus }                     from "../../server/lib/media/media-persistence.ts";
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
 
@@ -50,8 +51,25 @@ export default async function handler(
   const taskId = url.searchParams.get("id") ?? "";
   if (!taskId) return err(res, 400, "MISSING_ID", "id query parameter krævet");
 
+  // Try legacy chat_ocr_tasks first
   const task = await getOcrTask(taskId);
-  if (!task) return err(res, 404, "NOT_FOUND", "OCR-opgave ikke fundet");
+
+  if (!task) {
+    // Fall back to Phase 5Y media_processing_jobs
+    const mediaTask = await getOcrTaskStatus(taskId);
+    if (!mediaTask) return err(res, 404, "NOT_FOUND", "Opgave ikke fundet");
+
+    if (mediaTask.status === "completed") {
+      return json(res, { status: "completed", taskId, ocrText: mediaTask.result ?? "", charCount: (mediaTask.result ?? "").length, completedAt: new Date().toISOString() });
+    }
+    if (mediaTask.status === "dead_letter" || mediaTask.status === "failed") {
+      return json(res, { status: mediaTask.status, taskId, errorReason: mediaTask.error ?? "Permanent fejl" });
+    }
+    if (mediaTask.status === "retryable_failed") {
+      return json(res, { status: "retryable_failed", taskId, errorReason: mediaTask.error ?? "Midlertidig fejl — prøver igen" });
+    }
+    return json(res, { status: mediaTask.status, taskId, stage: mediaTask.stage ?? null });
+  }
 
   // Tenant isolation — user must belong to the same tenant
   if (task.tenantId !== auth.user.organizationId) {
@@ -94,11 +112,11 @@ export default async function handler(
     });
   }
 
-  // pending or running — include stage + progress for live UI feedback
+  // pending, running, processing, retryable_failed — include stage + progress for live UI feedback
   return json(res, {
-    status:          task.status,        // "pending" | "running"
+    status:          task.status,
     taskId:          task.id,
-    stage:           task.stage ?? null, // "ocr" | "chunking" | "embedding" | "storing" | null
+    stage:           task.stage ?? null,
     pagesProcessed:  task.pagesProcessed  ?? 0,
     chunksProcessed: task.chunksProcessed ?? 0,
     attemptCount:    task.attemptCount,
