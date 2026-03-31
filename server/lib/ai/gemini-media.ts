@@ -141,6 +141,7 @@ export async function extractWithGemini(
   fileBuffer: Buffer,
   filename:   string,
   mimeType:   string,
+  modelOverride?: string,
 ): Promise<GeminiMediaResult> {
   if (!GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY is not set. Add it to Railway environment variables.");
@@ -165,7 +166,7 @@ export async function extractWithGemini(
   // Gemini uses "image_url" field for all media types via OpenAI-compatible endpoint
   // The MIME type in the data URL tells Gemini how to interpret the content
   const requestBody = {
-    model:       GEMINI_MODEL,
+    model:       modelOverride || GEMINI_MODEL,
     temperature: 0,
     max_tokens:  16000,
     messages: [

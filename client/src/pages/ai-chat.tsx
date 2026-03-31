@@ -678,8 +678,8 @@ export default function AiChatPage() {
                 const pollData = await pollRes.json() as any;
                 console.log(`[TRACE-2ocr][${traceId}] poll status=${pollData.status} stage=${pollData.stage ?? "-"} elapsed=${elapsedSec}s`);
 
-                // Update label based on live stage
-                if (pollData.status === "running" || pollData.status === "pending") {
+                // Update label based on live stage (Phase 5X: also handle 'processing')
+                if (pollData.status === "running" || pollData.status === "pending" || pollData.status === "processing") {
                   const sLabel   = stageLabel(pollData.stage);
                   const progress = pollData.chunksProcessed > 0
                     ? ` · ${pollData.chunksProcessed} blokke`
@@ -695,6 +695,11 @@ export default function AiChatPage() {
                     new Error(pollData.errorReason ?? "PDF kan ikke læses — for mange fejlede forsøg"),
                     { errorCode: "DOCUMENT_UNREADABLE" },
                   );
+                }
+                if (pollData.status === "retryable_failed") {
+                  // Phase 5X: 'retryable_failed' → worker vil hente den igen, bliv ved med at polle
+                  setOcrStatusLabel(`Prøver igen: ${file.name} (forsøg ${(pollData.attemptCount ?? 0) + 1}/${pollData.maxAttempts ?? 3})`);
+                  continue;
                 }
                 if (pollData.status === "failed") {
                   // 'failed' med retries planlagt → bliv ved med at polle
