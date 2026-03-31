@@ -257,17 +257,21 @@ async function extractPdfViaGemini(buffer: Buffer, jobId: string): Promise<strin
   const body = {
     contents: [{
       parts: [
-        { inline_data: { mime_type: "application/pdf", data: base64 } },
         { text: "Extract ALL text content from this PDF document. Return only the extracted text verbatim, preserving paragraph structure. If no text is present, return the single word: EMPTY" },
+        { inline_data: { mime_type: "application/pdf", data: base64 } },
       ],
     }],
     generationConfig: { maxOutputTokens: 8192 },
   };
 
+  log("gemini_ocr_request_sent", { jobId, bodySize: JSON.stringify(body).length });
+
   const resp = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
   );
+
+  log("gemini_ocr_response_received", { jobId, status: resp.status, ok: resp.ok });
 
   if (!resp.ok) {
     const errText = await resp.text();
