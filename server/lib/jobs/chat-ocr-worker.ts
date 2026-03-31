@@ -220,38 +220,37 @@ async function extractPdfViaOpenAI(
 ): Promise<string> {
   log("openai_ocr_start", { jobId, bufferKb: Math.round(buffer.length / 1024) });
 
-  // Upload PDF to OpenAI Files API (purpose: "user_data" for gpt-4o file reading)
-  const { toFile } = await import("openai");
-  const file = await toFile(buffer, `doc-${jobId}.pdf`, { type: "application/pdf" });
-  const uploaded = await client.files.create({ file, purpose: "user_data" });
-  log("openai_file_uploaded", { jobId, fileId: uploaded.id });
+  // gpt-4o supports PDF as base64 via chat.completions with image_url content type
+  // This is the standard API path that works on all OpenAI accounts
+  const base64 = buffer.toString("base64");
 
-  try {
-    // Use gpt-4o with the uploaded file
-    const response = await (client as any).responses.create({
-      model: "gpt-4o",
-      input: [
-        {
-          role: "user",
-          content: [
-            { type: "input_file", file_id: uploaded.id },
-            {
-              type: "input_text",
-              text: "Extract ALL text content from this PDF document verbatim, preserving paragraph structure. If no text is present, return the single word: EMPTY",
+  const completion = await client.chat.completions.create({
+    model: "gpt-4o",
+    max_tokens: 16000,
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: {
+              url: `data:application/pdf;base64,${base64}`,
+              detail: "high",
             },
-          ],
-        },
-      ],
-    });
+          } as any,
+          {
+            type: "text",
+            text: "Extract ALL text content from this PDF document verbatim, preserving paragraph structure. If no text is present, return the single word: EMPTY",
+          },
+        ],
+      },
+    ],
+  });
 
-    const extracted = response.output_text?.trim() ?? "";
-    if (!extracted || extracted === "EMPTY") return "";
-    log("openai_ocr_done", { jobId, chars: extracted.length });
-    return extracted;
-  } finally {
-    // Always clean up uploaded file
-    await client.files.del(uploaded.id).catch(() => {});
-  }
+  const extracted = completion.choices[0]?.message?.content?.trim() ?? "";
+  if (!extracted || extracted === "EMPTY") return "";
+  log("openai_ocr_done", { jobId, chars: extracted.length });
+  return extracted;
 }
 
 // ── Scanned PDF via Gemini (secondary fallback) ────────────────────────────────
