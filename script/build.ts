@@ -49,6 +49,7 @@ const allowlist = [
   "nodemailer",
   "openai",
   "passport",
+  "pdf-parse",
   "passport-local",
   "pg",
   "stripe",

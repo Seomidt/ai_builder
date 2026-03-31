@@ -137,13 +137,14 @@ async function fetchFromR2(r2Key: string): Promise<Buffer> {
 
 // ── PDF text extraction ────────────────────────────────────────────────────────
 
+// pdf-parse is kept external in esbuild (not bundled) so require() works correctly
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const _pdfParse: (buf: Buffer) => Promise<{ text: string; numpages: number }> =
+  require("pdf-parse");
+
 async function extractPdfText(buffer: Buffer, jobId: string): Promise<string> {
   try {
-    // pdf-parse is a CommonJS module — must use createRequire in ESM/bundled context
-    const { createRequire } = await import("module");
-    const require = createRequire(import.meta.url);
-    const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string; numpages: number }>;
-    const result = await pdfParse(buffer);
+    const result = await _pdfParse(buffer);
     const text = result.text?.trim() ?? "";
     log("pdf_parse_result", { jobId, chars: text.length, pages: result.numpages });
     return text;
