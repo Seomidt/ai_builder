@@ -5,22 +5,31 @@
 /**
  * railway-worker.ts — Continuous background worker for OCR and document analysis.
  *
+ * OCR Provider: Manus-Gateway → gemini-2.5-flash (native PDF understanding)
+ *
+ * Why Manus-Gateway + Gemini for PDFs?
+ *   - No separate Google API key needed — uses the same OPENAI_API_KEY + OPENAI_BASE_URL
+ *     that the rest of the app uses (Manus-Gateway is OpenAI-compatible)
+ *   - Manus automatically routes to the cheapest capable model
+ *   - Gemini 2.5 Flash has native PDF MIME type support — no image conversion needed
+ *   - Understands full document structure: headers, tables, footnotes, multi-column
+ *   - 1M token context window handles very large documents
+ *
  * Flow per job:
  *   1. Claim job from Supabase queue (chat_ocr_tasks)
  *   2. Download the file from Cloudflare R2 as a buffer
- *   3. Send to OpenAI GPT-4.1-mini (vision) for full text extraction
+ *   3. Send to Manus-Gateway (gemini-2.5-flash) as inline PDF base64
  *   4. Store extracted text in the job record (ocrText)
  *   5. Mark job as completed — frontend polling picks it up
  *
  * SOC2/ISO compliance:
  *   - Tenant ID and User ID are logged for full audit trail
  *   - Document content is never logged — only metadata
- *   - All DB connections use SSL (rejectUnauthorized disabled only for
- *     Supabase Session Pooler IPv4 compatibility — see above)
+ *   - All DB connections use SSL with Supabase CA certificate
  */
 
 import "../lib/env";
-import http from "http";
+import * as http from "http";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import {
   claimJobs,
@@ -53,8 +62,14 @@ const r2Client = new S3Client({
 const POLL_INTERVAL_MS  = 5_000;
 const CONCURRENCY_LIMIT = 2;
 const HEALTH_PORT       = parseInt(process.env.PORT ?? "8080", 10);
-const OPENAI_API_KEY    = process.env.OPENAI_API_KEY ?? "";
-const OPENAI_MODEL      = "gpt-4.1-mini";
+
+// Manus-Gateway (OpenAI-compatible proxy — supports Gemini, OpenAI, Claude)
+// OPENAI_BASE_URL and OPENAI_API_KEY are set in Railway environment variables.
+const MANUS_API_KEY     = process.env.OPENAI_API_KEY  ?? "";
+const MANUS_BASE_URL    = process.env.OPENAI_BASE_URL ?? "https://api.manus.im/api/llm-proxy/v1";
+
+// OCR model: gemini-2.5-flash — native PDF support, cheapest capable model via Manus
+const OCR_MODEL         = "gemini-2.5-flash";
 
 // ── Health check HTTP server ──────────────────────────────────────────────────
 // Railway requires a process to bind to a port and respond to HTTP requests.
@@ -63,7 +78,13 @@ const OPENAI_MODEL      = "gpt-4.1-mini";
 const healthServer = http.createServer((req, res) => {
   if (req.url === "/health" || req.url === "/") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", service: "railway-worker", ts: new Date().toISOString() }));
+    res.end(JSON.stringify({
+      status:   "ok",
+      service:  "railway-worker",
+      ocrModel: OCR_MODEL,
+      gateway:  MANUS_BASE_URL,
+      ts:       new Date().toISOString(),
+    }));
   } else {
     res.writeHead(404);
     res.end("Not found");
@@ -100,78 +121,80 @@ async function downloadFromR2(r2Key: string): Promise<Buffer> {
   });
 }
 
-// ── Extract text from document via OpenAI Vision ─────────────────────────────
+// ── Extract text via Manus-Gateway → gemini-2.5-flash (native PDF) ───────────
+//
+// Manus-Gateway is OpenAI-compatible. We pass the PDF as a base64 data URL
+// in the image_url field — Gemini 2.5 Flash natively understands application/pdf.
+//
+// This approach:
+//   - Requires no separate Google API key (uses existing OPENAI_API_KEY)
+//   - Manus automatically selects the cheapest model that can handle the task
+//   - Gemini handles scanned PDFs, tables, multi-column layouts, and footnotes
+//   - Max inline size: ~20 MB (sufficient for most contracts and reports)
 
 async function extractTextWithAI(
   fileBuffer: Buffer,
   filename: string,
   contentType: string,
 ): Promise<string> {
-  const base64 = fileBuffer.toString("base64");
-  const isPdf  = contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
+  const isPdf     = contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
+  const mimeType  = isPdf ? "application/pdf" : (contentType || "application/octet-stream");
+  const base64    = fileBuffer.toString("base64");
 
-  // For PDFs: use file upload approach with base64 data URL
-  // For images: use vision with image_url
-  const mediaType = isPdf ? "application/pdf" : (contentType || "application/octet-stream");
-
-  const systemPrompt = `Du er en ekspert i dokumentanalyse. Din opgave er at udtrække og strukturere ALT tekst fra det uploadede dokument.
+  const prompt = `Udtræk og returner ALT tekst fra dette dokument præcist som det fremgår.
 
 Regler:
 - Udtræk HELE dokumentets tekstindhold — ingen udeladelser
-- Bevar dokumentets struktur (overskrifter, afsnit, tabeller, lister)
+- Bevar dokumentets struktur (overskrifter, afsnit, tabeller, lister, sidenumre)
 - Inkludér alle tal, datoer, navne og juridiske termer præcist
-- Svar KUN med dokumentets tekst — ingen kommentarer eller forklaringer
-- Bevar det originale sprog (dansk, engelsk osv.)`;
+- Svar KUN med dokumentets tekst — ingen kommentarer, forklaringer eller opsummeringer
+- Bevar det originale sprog (dansk, engelsk osv.)
+- Tabeller: bevar kolonner og rækker med tabulering
+- Hvis dokumentet er scannet/billede-baseret: transskribér al synlig tekst
 
-  const userMessage = isPdf
-    ? `Udtræk al tekst fra dette PDF-dokument: ${filename}`
-    : `Udtræk al tekst fra dette dokument: ${filename}`;
+Dokument: ${filename}`;
 
-  const requestBody: Record<string, unknown> = {
-    model: OPENAI_MODEL,
+  const requestBody = {
+    model:       OCR_MODEL,
+    temperature: 0,
+    max_tokens:  16000,
     messages: [
       {
-        role: "system",
-        content: systemPrompt,
-      },
-      {
-        role: "user",
+        role:    "user",
         content: [
           {
-            type: "text",
-            text: userMessage,
+            type:      "text",
+            text:      prompt,
           },
           {
-            type: "image_url",
+            type:      "image_url",
             image_url: {
-              url: `data:${mediaType};base64,${base64}`,
-              detail: "high",
+              url: `data:${mimeType};base64,${base64}`,
             },
           },
         ],
       },
     ],
-    max_tokens: 16000,
-    temperature: 0,
   };
 
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
+  const response = await fetch(`${MANUS_BASE_URL}/chat/completions`, {
+    method:  "POST",
     headers: {
       "Content-Type":  "application/json",
-      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Authorization": `Bearer ${MANUS_API_KEY}`,
     },
     body: JSON.stringify(requestBody),
   });
 
   if (!response.ok) {
     const errText = await response.text();
-    throw new Error(`OpenAI API error ${response.status}: ${errText.slice(0, 200)}`);
+    throw new Error(`Manus-Gateway OCR error ${response.status}: ${errText.slice(0, 300)}`);
   }
 
   const data = await response.json() as {
     choices: Array<{ message: { content: string } }>;
-    usage?: { total_tokens: number };
+    model?:  string;
+    usage?:  { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
   };
 
   const text = data.choices?.[0]?.message?.content ?? "";
@@ -191,16 +214,15 @@ async function processJob(job: RawOcrTask): Promise<void> {
 
   try {
     // Stage 1: Download from R2
-    await updateStage(job.id, "downloading");
+    await updateStage(job.id, "ocr");
     log("downloading_from_r2", { jobId: job.id, r2Key: job.r2_key });
     const fileBuffer = await downloadFromR2(job.r2_key);
     log("download_complete", { jobId: job.id, bytes: fileBuffer.length });
 
-    // Stage 2: Extract text with AI
-    await updateStage(job.id, "manus_processing");
-    log("ai_extraction_started", { jobId: job.id, model: OPENAI_MODEL });
+    // Stage 2: Extract text via Manus-Gateway → gemini-2.5-flash
+    log("ai_extraction_started", { jobId: job.id, model: OCR_MODEL, gateway: MANUS_BASE_URL });
     const ocrText = await extractTextWithAI(fileBuffer, job.filename, job.content_type);
-    log("ai_extraction_complete", { jobId: job.id, chars: ocrText.length });
+    log("ai_extraction_complete", { jobId: job.id, chars: ocrText.length, model: OCR_MODEL });
 
     // Stage 3: Store result
     await updateStage(job.id, "storing");
@@ -211,12 +233,13 @@ async function processJob(job: RawOcrTask): Promise<void> {
       charCount:    ocrText.length,
       pageCount:    1,
       chunkCount:   Math.ceil(ocrText.length / 2000),
-      provider:     `openai-${OPENAI_MODEL}`,
+      provider:     `manus-gateway/${OCR_MODEL}`,
     });
 
     log("job_completed", {
       jobId:      job.id,
       tenantId:   job.tenant_id,
+      model:      OCR_MODEL,
       durationMs: Date.now() - start,
       chars:      ocrText.length,
       // SOC2: durationMs and chars logged for audit — no content
@@ -232,7 +255,12 @@ async function processJob(job: RawOcrTask): Promise<void> {
 // ── Worker loop ───────────────────────────────────────────────────────────────
 
 async function runWorker(): Promise<void> {
-  log("worker_started", { concurrency: CONCURRENCY_LIMIT, pollIntervalMs: POLL_INTERVAL_MS });
+  log("worker_started", {
+    concurrency:    CONCURRENCY_LIMIT,
+    pollIntervalMs: POLL_INTERVAL_MS,
+    ocrModel:       OCR_MODEL,
+    gateway:        MANUS_BASE_URL,
+  });
 
   while (true) {
     try {

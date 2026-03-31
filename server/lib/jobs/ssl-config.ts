@@ -6,8 +6,8 @@
  *   - Falls back to rejectUnauthorized: false with a warning if cert is missing
  *   - Never uses NODE_TLS_REJECT_UNAUTHORIZED=0 (process-wide override)
  */
-import fs from "fs";
-import path from "path";
+import * as fs from "fs";
+import * as path from "path";
 
 let _sslConfig: { ca?: string; rejectUnauthorized: boolean } | null = null;
 
@@ -19,11 +19,11 @@ export function getSupabaseSslConfig(): { ca?: string; rejectUnauthorized: boole
   if (_sslConfig) return _sslConfig;
 
   try {
-    // Try project root first, then __dirname-relative paths
+    // Try project root first, then common deployment paths
     const candidates = [
       path.resolve(process.cwd(), "prod-ca-2021.crt"),
       path.resolve(process.cwd(), "server", "prod-ca-2021.crt"),
-      path.resolve(new URL(".", import.meta.url).pathname, "../../../prod-ca-2021.crt"),
+      "/app/prod-ca-2021.crt",
     ];
 
     for (const certPath of candidates) {
@@ -40,7 +40,7 @@ export function getSupabaseSslConfig(): { ca?: string; rejectUnauthorized: boole
     // Fallback: certificate not found
     console.warn(
       "[SSL] prod-ca-2021.crt not found — falling back to rejectUnauthorized: false. " +
-      "This is NOT SOC2 compliant. Add prod-ca-2021.crt to the project root."
+      "This is NOT SOC2 compliant. Add prod-ca-2021.crt to the project root.",
     );
     _sslConfig = { rejectUnauthorized: false };
     return _sslConfig;
