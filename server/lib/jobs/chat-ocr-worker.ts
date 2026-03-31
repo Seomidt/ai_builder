@@ -198,18 +198,8 @@ async function extractImageText(buffer: Buffer, mimeType: string, jobId: string)
 // This is used when pdf-parse returns empty text (scanned/image-based PDFs).
 
 async function extractPdfViaVision(buffer: Buffer, jobId: string): Promise<string> {
-  const { isOpenAIAvailable, getOpenAIClient } = await import("../openai-client.ts");
-
-  if (isOpenAIAvailable()) {
-    try {
-      return await extractPdfViaOpenAI(buffer, jobId, getOpenAIClient());
-    } catch (err) {
-      log("openai_ocr_error", { jobId, error: (err as Error).message });
-      // fall through to Gemini
-    }
-  }
-
-  // Gemini as secondary fallback
+  // Gemini natively supports PDF inline_data — use as primary fallback for scanned PDFs.
+  // OpenAI chat.completions does not support application/pdf MIME type in image_url.
   return extractPdfViaGemini(buffer, jobId);
 }
 
