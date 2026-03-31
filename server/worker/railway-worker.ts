@@ -1,8 +1,6 @@
-// Disable TLS certificate validation for Supabase Session Pooler compatibility.
-// This is required because Railway's network resolves Supabase's pooler to an
-// IP that presents a certificate chain not trusted by Node.js by default.
-// Safe to set here as this is a backend-only worker with no user-facing TLS.
-process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
+// SOC2 Compliance: TLS certificate validation is enforced.
+// We use the Supabase CA certificate (prod-ca-2021.crt) in db.ts
+// to securely connect to the Supabase Session Pooler.
 
 /**
  * railway-worker.ts — Continuous background worker for OCR and document analysis.

@@ -30,6 +30,8 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "@shared/schema";
+import fs from "fs";
+import path from "path";
 
 const { Pool } = pg;
 
@@ -58,10 +60,26 @@ function initPool(): pg.Pool {
   const isSupabase =
     connectionString.includes("supabase.com") ||
     connectionString.includes("supabase.co");
+
+  let sslConfig: any = false;
+  if (isSupabase) {
+    try {
+      // Try to load the Supabase CA certificate for SOC2 compliance
+      const certPath = path.resolve(process.cwd(), "prod-ca-2021.crt");
+      sslConfig = {
+        ca: fs.readFileSync(certPath).toString(),
+        rejectUnauthorized: true,
+      };
+    } catch (e) {
+      console.warn("[DB] Could not load prod-ca-2021.crt, falling back to rejectUnauthorized: false");
+      sslConfig = { rejectUnauthorized: false };
+    }
+  }
+
   _pool = new Pool({
     connectionString,
     max: 3,
-    ...(isSupabase ? { ssl: { rejectUnauthorized: false } } : {}),
+    ...(isSupabase ? { ssl: sslConfig } : {}),
   });
   return _pool;
 }

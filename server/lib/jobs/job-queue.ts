@@ -18,6 +18,7 @@
 import type { OcrJob, OcrJobPayload, OcrJobCompletion, JobStage } from "./job-types.ts";
 import { Client as PgClient } from "pg";
 import { nextRetryTimestamp }                                       from "./job-types.ts";
+import { getSupabaseSslConfig }                                     from "./ssl-config.ts";
 
 // ── DB URL resolution ─────────────────────────────────────────────────────────
 
@@ -65,7 +66,7 @@ const ARCHIVE_AFTER_DAYS = 30;
 export async function ensureOcrSchema(): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   // PgClient imported at top level
-  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
   await client.connect();
   try {
     // Add file_hash column if missing (nullable, backward compat)
@@ -124,7 +125,7 @@ export async function enqueueOcrJob(
   // PgClient imported at top level
   const client = new PgClient({
     connectionString: resolveDbUrl(),
-    ssl: { rejectUnauthorized: false },
+    ssl: getSupabaseSslConfig(),
   });
   await client.connect();
   try {
@@ -270,7 +271,7 @@ const STALE_RUNNING_MINUTES = 12;
 export async function claimJobs(limit: number): Promise<RawOcrTask[]> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   // PgClient imported at top level
-  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
   await client.connect();
   try {
     const res = await client.query<RawOcrTask>(
@@ -301,7 +302,7 @@ export async function claimJobs(limit: number): Promise<RawOcrTask[]> {
 export async function updateStage(jobId: string, stage: JobStage): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   // PgClient imported at top level
-  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
   await client.connect();
   try {
     await client.query(
@@ -318,7 +319,7 @@ export async function updateStage(jobId: string, stage: JobStage): Promise<void>
 export async function completeJob(jobId: string, data: OcrJobCompletion): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   // PgClient imported at top level
-  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
   await client.connect();
   try {
     await client.query(
@@ -344,7 +345,7 @@ export async function completeJob(jobId: string, data: OcrJobCompletion): Promis
 export async function failJob(jobId: string, reason: string, retryable = true): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   // PgClient imported at top level
-  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
   await client.connect();
   try {
     const job = await client.query<{ attempt_count: number; max_attempts: number }>(
@@ -376,7 +377,7 @@ export async function failJob(jobId: string, reason: string, retryable = true): 
 export async function getJob(jobId: string): Promise<OcrJob | null> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   // PgClient imported at top level
-  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
   await client.connect();
   try {
     const res = await client.query(
@@ -422,7 +423,7 @@ export async function markOcrCompleted(jobId: string, text: string): Promise<voi
   await updateStage(jobId, "chunking");
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   // PgClient imported at top level
-  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
   await client.connect();
   try {
     await client.query(
@@ -437,7 +438,7 @@ export async function markOcrCompleted(jobId: string, text: string): Promise<voi
 export async function storeChunks(jobId: string, count: number): Promise<void> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   // PgClient imported at top level
-  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: { rejectUnauthorized: false } });
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
   await client.connect();
   try {
     await client.query(
