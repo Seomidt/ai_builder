@@ -963,7 +963,7 @@ export default function AiChatPage() {
           </div>
 
           <p className="text-xs text-muted-foreground/30 text-center">
-            Understøtter dokumenter, billeder, video og lyd · Max 25 MB upload · AI-analyse op til 18 MB
+            Understøtter dokumenter, billeder, video og lyd · AI-analyse op til 18 MB
           </p>
 
         </div>{/* /max-w */}
