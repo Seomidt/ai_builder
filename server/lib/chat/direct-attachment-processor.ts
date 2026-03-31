@@ -92,19 +92,41 @@ export async function processDirectAttachment(
     };
   }
 
-  // ── Video / Audio: route to async pipeline ───────────────────────────────
+  // ── Video / Audio: Gemini 2.5 Flash multimodal ──────────────────────────────────────
   if (isVideoOrAudioMime(contentType)) {
-    console.log(`[direct-processor] video/audio → async pipeline`);
-    return {
-      filename, mime_type: contentType, char_count: 0, extracted_text: "",
-      status:  "scanned_pdf",
-      code:    "SCANNED_PDF",
-      message: "Video/lyd sendt til asynkron behandling via Gemini multimodal",
-      source:  "r2_direct",
-    };
+    const mediaLabel = contentType.startsWith("audio/") ? "lyd" : "video";
+    console.log(`[direct-processor] ${mediaLabel} → Gemini 2.5 Flash multimodal`);
+    let mediaBuf: Buffer;
+    try {
+      mediaBuf = await readFromR2(objectKey);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[direct-processor] r2 read failed for ${mediaLabel}: ${msg}`);
+      return {
+        filename, mime_type: contentType, char_count: 0, extracted_text: "",
+        status: "error", code: "R2_ERROR", message: msg, source: "r2_direct",
+      };
+    }
+    try {
+      const result = await extractWithGemini(mediaBuf, filename, contentType);
+      console.log(`[direct-processor] gemini ${mediaLabel} ok chars=${result.charCount} model=${result.model}`);
+      return {
+        filename, mime_type: contentType,
+        char_count: result.charCount, extracted_text: result.text,
+        status: "ok", source: "r2_direct",
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[direct-processor] gemini ${mediaLabel} failed: ${msg}`);
+      return {
+        filename, mime_type: contentType, char_count: 0,
+        extracted_text: `[${mediaLabel === "lyd" ? "Lydfil" : "Video"}: ${filename} — analyse fejlede: ${msg.slice(0, 100)}]`,
+        status: "error", code: "GEMINI_ERROR", message: msg, source: "r2_direct",
+      };
+    }
   }
 
-  // ── Images: Gemini 2.5 Flash vision ─────────────────────────────────────
+  // ── Images: Gemini 2.5 Flash vision ───────────────────────────────────────
   if (isImageMime(contentType)) {
     console.log(`[direct-processor] image → Gemini 2.5 Flash vision`);
     let imgBuf: Buffer;

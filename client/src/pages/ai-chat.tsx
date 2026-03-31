@@ -35,7 +35,7 @@ interface ChatResponse {
 interface AttachedFile {
   id: string;
   file: File;
-  type: "document" | "image" | "video";
+  type: "document" | "image" | "video" | "audio";
   status: "ready" | "uploading" | "processing" | "done" | "failed";
   previewUrl?: string;
 }
@@ -55,18 +55,21 @@ interface ChatMessage {
 const MAX_SIZE_MB = 25;
 const ACCEPT_DOCS  = ".pdf,.doc,.docx,.txt,.csv,.xlsx,.xls";
 const ACCEPT_IMG   = "image/jpeg,image/png,image/gif,image/webp";
-const ACCEPT_VIDEO = "video/mp4,video/quicktime,video/x-msvideo";
-const ACCEPT_ALL   = `${ACCEPT_DOCS},${ACCEPT_IMG},${ACCEPT_VIDEO}`;
+const ACCEPT_VIDEO = "video/mp4,video/quicktime,video/x-msvideo,video/webm";
+const ACCEPT_AUDIO = "audio/mpeg,audio/wav,audio/ogg,audio/mp4,audio/webm";
+const ACCEPT_ALL   = `${ACCEPT_DOCS},${ACCEPT_IMG},${ACCEPT_VIDEO},${ACCEPT_AUDIO}`;
 
 function fileType(f: File): AttachedFile["type"] {
   if (f.type.startsWith("image/")) return "image";
   if (f.type.startsWith("video/")) return "video";
+  if (f.type.startsWith("audio/")) return "audio";
   return "document";
 }
 
 function fileIcon(type: AttachedFile["type"]) {
   if (type === "image") return <Image className="w-3.5 h-3.5 text-blue-400" />;
   if (type === "video") return <Video className="w-3.5 h-3.5 text-purple-400" />;
+  if (type === "audio") return <Video className="w-3.5 h-3.5 text-green-400" />;
   return <FileText className="w-3.5 h-3.5 text-primary" />;
 }
 
@@ -563,12 +566,13 @@ export default function AiChatPage() {
       // Vercel modtager kun lille JSON (presign-request + finalize-request).
       let documentContext: any[] = [];
 
-      // Behandl billeder som dokumenter — upload til R2 og analyser via Gemini Vision
-      const allUploadFiles = [...docFiles, ...imgFiles];
+      // Behandl billeder og video/lyd som dokumenter — upload til R2 og analyser via Gemini
+      const videoFiles = payload.attachments.filter(a => a.type === "video" || a.type === "audio");
+      const allUploadFiles = [...docFiles, ...imgFiles, ...videoFiles];
 
       if (allUploadFiles.length > 0) {
         try {
-          console.log(`[TRACE-2a][${traceId}] starting direct-to-R2 upload for ${allUploadFiles.length} file(s) (${docFiles.length} docs, ${imgFiles.length} images)`);
+          console.log(`[TRACE-2a][${traceId}] starting direct-to-R2 upload for ${allUploadFiles.length} file(s) (${docFiles.length} docs, ${imgFiles.length} images, ${videoFiles.length} videos)`);
 
           // Upload alle filer (dokumenter + billeder) direkte til R2 og finaliser
           const finalizeResults: any[] = [];

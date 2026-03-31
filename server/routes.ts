@@ -1294,6 +1294,9 @@ Generate names and content in ${langNote}.`;
         "image/gif": "image", "image/webp": "image", "image/tiff": "image",
         "image/bmp": "image", "video/mp4": "video", "video/quicktime": "video",
         "video/x-msvideo": "video", "video/webm": "video", "video/mpeg": "video",
+        "audio/mpeg": "audio", "audio/wav": "audio", "audio/ogg": "audio",
+        "audio/mp4": "audio", "audio/webm": "audio", "audio/aac": "audio",
+        "audio/flac": "audio", "audio/x-wav": "audio",
       };
       if (!ALLOWED_MIME_TYPES[contentType]) {
         return res.status(415).json({ error_code: "UNSUPPORTED_MIME", message: `Filtypen "${contentType}" understøttes ikke` });
