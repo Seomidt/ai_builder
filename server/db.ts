@@ -30,8 +30,7 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import * as schema from "@shared/schema";
-import * as fs from "fs";
-import * as path from "path";
+import { getSupabaseSslConfig } from "./lib/jobs/ssl-config";
 
 const { Pool } = pg;
 
@@ -63,17 +62,9 @@ function initPool(): pg.Pool {
 
   let sslConfig: any = false;
   if (isSupabase) {
-    try {
-      // Try to load the Supabase CA certificate for SOC2 compliance
-      const certPath = path.resolve(process.cwd(), "prod-ca-2021.crt");
-      sslConfig = {
-        ca: fs.readFileSync(certPath).toString(),
-        rejectUnauthorized: true,
-      };
-    } catch (e) {
-      console.warn("[DB] Could not load prod-ca-2021.crt, falling back to rejectUnauthorized: false");
-      sslConfig = { rejectUnauthorized: false };
-    }
+    // Use centralized SSL config — includes embedded Supabase CA cert as fallback
+    // so Railway/Docker deployments work even when prod-ca-2021.crt is not on disk.
+    sslConfig = getSupabaseSslConfig();
   }
 
   _pool = new Pool({
