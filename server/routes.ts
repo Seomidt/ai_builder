@@ -1401,7 +1401,7 @@ Generate names and content in ${langNote}.`;
         return res.status(404).json({ error_code: "NOT_FOUND", message: `OCR task ${taskId} ikke fundet` });
       }
       // Tenant isolation
-      if (task.tenant_id !== orgId) {
+      if (task.tenantId !== orgId) {
         return res.status(403).json({ error_code: "FORBIDDEN", message: "Adgang nægtet" });
       }
       if (task.status === "completed") {
@@ -1421,9 +1421,9 @@ Generate names and content in ${langNote}.`;
         return res.json({
           status:       task.status,
           taskId:       task.id,
-          errorReason:  task.failure_reason ?? "Ukendt fejl",
-          attemptCount: task.attempt_count ?? 0,
-          maxAttempts:  task.max_attempts ?? 3,
+          errorReason:  task.errorReason ?? task.lastError ?? "Ukendt fejl",
+          attemptCount: task.attemptCount ?? 0,
+          maxAttempts:  task.maxAttempts ?? 3,
         });
       }
       return res.json({
