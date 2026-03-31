@@ -1408,11 +1408,11 @@ Generate names and content in ${langNote}.`;
         return res.json({
           status:       "completed",
           taskId:       task.id,
-          ocrText:      task.ocr_text ?? "",
-          charCount:    task.char_count ?? 0,
-          chunkCount:   task.chunk_count ?? 0,
-          qualityScore: task.quality_score ?? 0,
-          pageCount:    task.page_count ?? 1,
+          ocrText:      task.ocrText ?? "",
+          charCount:    task.charCount ?? 0,
+          chunkCount:   task.chunkCount ?? 0,
+          qualityScore: task.qualityScore ?? 0,
+          pageCount:    task.pageCount ?? 1,
           provider:     task.provider ?? "manus-agent",
           completedAt:  task.completed_at,
         });
@@ -1430,7 +1430,7 @@ Generate names and content in ${langNote}.`;
         status:       task.status ?? "pending",
         taskId:       task.id,
         stage:        task.stage ?? null,
-        attemptCount: task.attempt_count ?? 0,
+        attemptCount: task.attemptCount ?? 0,
       });
     } catch (e) {
       console.error("[ocr-status] error:", e);
