@@ -233,6 +233,15 @@ app.use((req, res, next) => {
           })
           .catch((err) => log(`[kb-worker] failed to start: ${String(err)}`));
       }
+      // Chat OCR worker — processes chat_ocr_tasks for PDF uploads in Railway
+      if (process.env.CHAT_OCR_WORKER === "true" || ON_RAILWAY) {
+        import("./lib/jobs/chat-ocr-worker")
+          .then(({ startChatOcrWorker }) => {
+            log("[chat-ocr-worker] starting in-process");
+            startChatOcrWorker();
+          })
+          .catch((err) => log(`[chat-ocr-worker] failed to start: ${String(err)}`));
+      }
     },
   );
 })();
