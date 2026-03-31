@@ -46,6 +46,8 @@ export function getApp(): Promise<express.Express> {
         "https://blissops.com",
         "https://www.blissops.com",
         "https://app.blissops.com",
+        "https://api.blissops.com",
+        "https://admin.blissops.com",
         ...(process.env.VERCEL_URL ? [`https://${process.env.VERCEL_URL}`] : []),
       ];
       app.use((req, res, next) => {
