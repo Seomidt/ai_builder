@@ -10,6 +10,7 @@
 
 import { GetObjectCommand } from "@aws-sdk/client-s3";
 import { r2Client, R2_BUCKET, R2_CONFIGURED } from "../r2/r2-client.ts";
+import { extractWithGemini } from "../ai/gemini-media.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -27,7 +28,7 @@ export interface DirectProcessResult {
   extracted_text: string;
   status:         "ok" | "unsupported" | "error" | "scanned_pdf";
   /** Machine-readable code for programmatic handling in the caller. */
-  code?:          "SCANNED_PDF" | "PDF_ERROR" | "R2_ERROR" | "UNSUPPORTED";
+  code?:          "SCANNED_PDF" | "PDF_ERROR" | "R2_ERROR" | "UNSUPPORTED" | "GEMINI_ERROR";
   message?:       string;
   source:         "r2_direct";
 }
@@ -48,6 +49,10 @@ function isPdfMime(mime: string, filename: string): boolean {
 
 function isImageMime(mime: string): boolean {
   return mime.startsWith("image/");
+}
+
+function isVideoOrAudioMime(mime: string): boolean {
+  return mime.startsWith("video/") || mime.startsWith("audio/");
 }
 
 // ── R2 read helper ────────────────────────────────────────────────────────────
@@ -73,33 +78,66 @@ export async function processDirectAttachment(
 ): Promise<DirectProcessResult> {
   const { objectKey, filename, contentType, sizeBytes } = input;
 
-  console.log(`[direct-processor] mode=A key=${objectKey} mime=${contentType} size=${sizeBytes}b`);
+  console.log(`[direct-processor] key=${objectKey} mime=${contentType} size=${sizeBytes}b`);
 
-  // Images: return metadata without text extraction (vision models use URL/key)
-  if (isImageMime(contentType)) {
-    return {
-      filename,
-      mime_type:      contentType,
-      char_count:     0,
-      extracted_text: `[Billede: ${filename}]`,
-      status:         "ok",
-      source:         "r2_direct",
-    };
-  }
-
-  // PDF: Always route to async OCR in Manus-Only architecture.
-  // This removes the need for 'pdf-parse' and ensures high-quality extraction.
+  // ── PDF: Always route to async OCR pipeline ─────────────────────────────
   if (isPdfMime(contentType, filename)) {
-    console.log(`[direct-processor] pdf detected — routing to async OCR (Manus)`);
+    console.log(`[direct-processor] pdf → async OCR pipeline`);
     return {
       filename, mime_type: contentType, char_count: 0, extracted_text: "",
       status:  "scanned_pdf",
       code:    "SCANNED_PDF",
-      message: `PDF sendt til asynkron behandling via Manus`,
+      message: "PDF sendt til asynkron behandling via Gemini OCR",
       source:  "r2_direct",
     };
   }
 
+  // ── Video / Audio: route to async pipeline ───────────────────────────────
+  if (isVideoOrAudioMime(contentType)) {
+    console.log(`[direct-processor] video/audio → async pipeline`);
+    return {
+      filename, mime_type: contentType, char_count: 0, extracted_text: "",
+      status:  "scanned_pdf",
+      code:    "SCANNED_PDF",
+      message: "Video/lyd sendt til asynkron behandling via Gemini multimodal",
+      source:  "r2_direct",
+    };
+  }
+
+  // ── Images: Gemini 2.5 Flash vision ─────────────────────────────────────
+  if (isImageMime(contentType)) {
+    console.log(`[direct-processor] image → Gemini 2.5 Flash vision`);
+    let imgBuf: Buffer;
+    try {
+      imgBuf = await readFromR2(objectKey);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[direct-processor] r2 read failed for image: ${msg}`);
+      return {
+        filename, mime_type: contentType, char_count: 0, extracted_text: "",
+        status: "error", code: "R2_ERROR", message: msg, source: "r2_direct",
+      };
+    }
+    try {
+      const result = await extractWithGemini(imgBuf, filename, contentType);
+      console.log(`[direct-processor] gemini vision ok chars=${result.charCount} model=${result.model}`);
+      return {
+        filename, mime_type: contentType,
+        char_count: result.charCount, extracted_text: result.text,
+        status: "ok", source: "r2_direct",
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`[direct-processor] gemini vision failed: ${msg}`);
+      return {
+        filename, mime_type: contentType, char_count: 0,
+        extracted_text: `[Billede: ${filename} — analyse fejlede: ${msg.slice(0, 100)}]`,
+        status: "error", code: "GEMINI_ERROR", message: msg, source: "r2_direct",
+      };
+    }
+  }
+
+  // ── Plain text ───────────────────────────────────────────────────────────
   let buf: Buffer;
   try {
     buf = await readFromR2(objectKey);
@@ -112,7 +150,6 @@ export async function processDirectAttachment(
     };
   }
 
-  // Plain text
   if (isTextMime(contentType)) {
     const text = buf.toString("utf-8").slice(0, 80_000);
     console.log(`[direct-processor] text extracted chars=${text.length}`);
@@ -122,10 +159,11 @@ export async function processDirectAttachment(
     };
   }
 
+  // ── Unsupported ──────────────────────────────────────────────────────────
   return {
     filename, mime_type: contentType, char_count: 0, extracted_text: "",
     status: "unsupported", code: "UNSUPPORTED",
-    message: `Filtype "${contentType}" understøttes ikke til direkte behandling. Upload PDF eller en tekstfil.`,
+    message: `Filtype "${contentType}" understøttes ikke. Upload PDF, billede, video, lyd eller tekstfil.`,
     source: "r2_direct",
   };
 }

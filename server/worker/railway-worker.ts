@@ -37,6 +37,7 @@ import {
   failJob,
   type RawOcrTask,
 } from "../lib/jobs/job-queue";
+import { extractWithGemini, classifyMime } from "../lib/ai/gemini-media";
 
 // ── R2 client (inline to avoid cross-dir ESM issues) ─────────────────────────
 import { S3Client } from "@aws-sdk/client-s3";
@@ -62,12 +63,7 @@ const POLL_INTERVAL_MS  = 5_000;
 const CONCURRENCY_LIMIT = 2;
 const HEALTH_PORT       = parseInt(process.env.PORT ?? "8080", 10);
 
-// Google AI (OpenAI-compatible endpoint — no extra SDK needed)
-// GEMINI_API_KEY is set in Railway environment variables.
-const GEMINI_API_KEY    = process.env.GEMINI_API_KEY  ?? "";
-const GEMINI_BASE_URL   = "https://generativelanguage.googleapis.com/v1beta/openai";
-
-// OCR model: gemini-2.5-flash — native PDF support, cheapest capable model
+// OCR model: gemini-2.5-flash — native PDF/image/video/audio support
 const OCR_MODEL         = "gemini-2.5-flash";
 
 // ── Health check HTTP server ──────────────────────────────────────────────────
@@ -81,7 +77,7 @@ const healthServer = http.createServer((req, res) => {
       status:   "ok",
       service:  "railway-worker",
       ocrModel: OCR_MODEL,
-      gateway:  GEMINI_BASE_URL,
+      gateway:  "generativelanguage.googleapis.com",
       ts:       new Date().toISOString(),
     }));
   } else {
@@ -120,84 +116,29 @@ async function downloadFromR2(r2Key: string): Promise<Buffer> {
   });
 }
 
-// ── Extract text via Manus-Gateway → gemini-2.5-flash (native PDF) ───────────
+// ── Extract text/content via Gemini 2.5 Flash (all media types) ──────────────
 //
-// Manus-Gateway is OpenAI-compatible. We pass the PDF as a base64 data URL
-// in the image_url field — Gemini 2.5 Flash natively understands application/pdf.
+// Delegates to gemini-media.ts which handles:
+//   - PDF:   native PDF understanding (text, tables, scanned pages)
+//   - Image: vision analysis (OCR + visual description)
+//   - Video: frame analysis + speech transcription
+//   - Audio: speech-to-text transcription
 //
-// This approach:
-//   - Requires no separate Google API key (uses existing OPENAI_API_KEY)
-//   - Manus automatically selects the cheapest model that can handle the task
-//   - Gemini handles scanned PDFs, tables, multi-column layouts, and footnotes
-//   - Max inline size: ~20 MB (sufficient for most contracts and reports)
+// All via GEMINI_API_KEY → generativelanguage.googleapis.com
 
 async function extractTextWithAI(
   fileBuffer: Buffer,
-  filename: string,
+  filename:   string,
   contentType: string,
 ): Promise<string> {
-  const isPdf     = contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
-  const mimeType  = isPdf ? "application/pdf" : (contentType || "application/octet-stream");
-  const base64    = fileBuffer.toString("base64");
+  const mediaType = classifyMime(contentType, filename);
 
-  const prompt = `Udtræk og returner ALT tekst fra dette dokument præcist som det fremgår.
-
-Regler:
-- Udtræk HELE dokumentets tekstindhold — ingen udeladelser
-- Bevar dokumentets struktur (overskrifter, afsnit, tabeller, lister, sidenumre)
-- Inkludér alle tal, datoer, navne og juridiske termer præcist
-- Svar KUN med dokumentets tekst — ingen kommentarer, forklaringer eller opsummeringer
-- Bevar det originale sprog (dansk, engelsk osv.)
-- Tabeller: bevar kolonner og rækker med tabulering
-- Hvis dokumentet er scannet/billede-baseret: transskribér al synlig tekst
-
-Dokument: ${filename}`;
-
-  const requestBody = {
-    model:       OCR_MODEL,
-    temperature: 0,
-    max_tokens:  16000,
-    messages: [
-      {
-        role:    "user",
-        content: [
-          {
-            type:      "text",
-            text:      prompt,
-          },
-          {
-            type:      "image_url",
-            image_url: {
-              url: `data:${mimeType};base64,${base64}`,
-            },
-          },
-        ],
-      },
-    ],
-  };
-
-  const response = await fetch(`${GEMINI_BASE_URL}/chat/completions`, {
-    method:  "POST",
-    headers: {
-      "Content-Type":  "application/json",
-      "Authorization": `Bearer ${GEMINI_API_KEY}`,
-    },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Manus-Gateway OCR error ${response.status}: ${errText.slice(0, 300)}`);
+  if (mediaType === "unknown") {
+    throw new Error(`Unsupported file type: ${contentType} (${filename})`);
   }
 
-  const data = await response.json() as {
-    choices: Array<{ message: { content: string } }>;
-    model?:  string;
-    usage?:  { total_tokens?: number; prompt_tokens?: number; completion_tokens?: number };
-  };
-
-  const text = data.choices?.[0]?.message?.content ?? "";
-  return text;
+  const result = await extractWithGemini(fileBuffer, filename, contentType);
+  return result.text;
 }
 
 // ── Job processor ─────────────────────────────────────────────────────────────
@@ -218,10 +159,11 @@ async function processJob(job: RawOcrTask): Promise<void> {
     const fileBuffer = await downloadFromR2(job.r2_key);
     log("download_complete", { jobId: job.id, bytes: fileBuffer.length });
 
-    // Stage 2: Extract text via Google AI → gemini-2.5-flash
-    log("ai_extraction_started", { jobId: job.id, model: OCR_MODEL, gateway: GEMINI_BASE_URL });
+    // Stage 2: Extract text/content via Gemini 2.5 Flash (PDF/image/video/audio)
+    const mediaType = classifyMime(job.content_type, job.filename);
+    log("ai_extraction_started", { jobId: job.id, model: OCR_MODEL, mediaType });
     const ocrText = await extractTextWithAI(fileBuffer, job.filename, job.content_type);
-    log("ai_extraction_complete", { jobId: job.id, chars: ocrText.length, model: OCR_MODEL });
+    log("ai_extraction_complete", { jobId: job.id, chars: ocrText.length, model: OCR_MODEL, mediaType });
 
     // Stage 3: Store result
     await updateStage(job.id, "storing");
@@ -258,7 +200,8 @@ async function runWorker(): Promise<void> {
     concurrency:    CONCURRENCY_LIMIT,
     pollIntervalMs: POLL_INTERVAL_MS,
     ocrModel:       OCR_MODEL,
-    gateway:        GEMINI_BASE_URL,
+    gateway:        "generativelanguage.googleapis.com",
+    supports:       "pdf,image,video,audio",
   });
 
   while (true) {
