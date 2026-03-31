@@ -563,14 +563,17 @@ export default function AiChatPage() {
       // Vercel modtager kun lille JSON (presign-request + finalize-request).
       let documentContext: any[] = [];
 
-      if (docFiles.length > 0) {
-        try {
-          console.log(`[TRACE-2a][${traceId}] starting direct-to-R2 upload for ${docFiles.length} file(s)`);
+      // Behandl billeder som dokumenter — upload til R2 og analyser via Gemini Vision
+      const allUploadFiles = [...docFiles, ...imgFiles];
 
-          // Upload alle doc-filer direkte til R2 og finaliser
+      if (allUploadFiles.length > 0) {
+        try {
+          console.log(`[TRACE-2a][${traceId}] starting direct-to-R2 upload for ${allUploadFiles.length} file(s) (${docFiles.length} docs, ${imgFiles.length} images)`);
+
+          // Upload alle filer (dokumenter + billeder) direkte til R2 og finaliser
           const finalizeResults: any[] = [];
 
-          for (const af of docFiles) {
+          for (const af of allUploadFiles) {
             const file = af.file;
 
             // ── 1. Hent presigned URL ─────────────────────────────────────
