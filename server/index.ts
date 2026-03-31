@@ -27,6 +27,9 @@ import { lockdownGuard } from "./middleware/lockdown.ts";
 // Storage 1.4: pgvector migration
 import { runPgvectorMigration } from "./lib/knowledge/migrate-pgvector.ts";
 
+// Railway: running as standalone Express API server (not Vercel serverless)
+const ON_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_PUBLIC_DOMAIN;
+
 const app = express();
 const httpServer = createServer(app);
 
@@ -35,11 +38,43 @@ const httpServer = createServer(app);
 // without throwing ERR_ERL_UNEXPECTED_X_FORWARDED_FOR.
 app.set("trust proxy", 1);
 
-// Phase Next: www → apex redirect — FIRST so no other middleware runs on www requests
-app.use(wwwRedirectMiddleware);
+// Railway API mode: register /health FIRST — before all middleware, auth, and host checks.
+// Railway's healthcheck hits /health with its own internal hostname; it must always pass.
+if (ON_RAILWAY) {
+  // CORS for Railway API mode — Vercel frontend calls us cross-origin
+  const allowedOrigins = [
+    "https://blissops.com",
+    "https://www.blissops.com",
+    "https://app.blissops.com",
+    "https://api.blissops.com",
+    "https://admin.blissops.com",
+    ...(process.env.VERCEL_URL ? [`https://${process.env.VERCEL_URL}`] : []),
+  ];
+  app.use((req, res, next) => {
+    const origin = req.headers.origin as string | undefined;
+    if (origin && allowedOrigins.includes(origin)) {
+      res.setHeader("Access-Control-Allow-Origin", origin);
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Request-Id");
+    }
+    if (req.method === "OPTIONS") { res.sendStatus(204); return; }
+    next();
+  });
 
-// Phase Next: host allowlist — rejects non-canonical hosts in production
-app.use(hostAllowlistMiddleware);
+  // Health check — must respond before any auth/host middleware
+  app.get("/health", (_req, res) => {
+    res.json({ ok: true, service: "blissops-api", ts: Date.now() });
+  });
+}
+
+// Phase Next: www → apex redirect — only in non-Railway, non-Vercel environments
+// (Railway doesn't serve the frontend; Vercel handles www redirects at platform level)
+if (!ON_RAILWAY) {
+  app.use(wwwRedirectMiddleware);
+  // Phase Next: host allowlist — rejects non-canonical hosts in production
+  app.use(hostAllowlistMiddleware);
+}
 
 // Phase 44: nonce middleware — generates per-request CSP nonce (infrastructure for future SSR)
 app.use(nonceMiddleware);
