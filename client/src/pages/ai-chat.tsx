@@ -626,6 +626,12 @@ export default function AiChatPage() {
             const finalData = await finalRes.json() as { mode: string; results?: any[]; message?: string; taskId?: string };
             console.log(`[TRACE-2f][${traceId}] finalize OK mode=${finalData.mode} results=${finalData.results?.length ?? 0} msg=${finalData.message ?? "-"}`);
 
+            // Trigger OCR worker on-demand to save costs (only run when needed)
+            if (finalData.mode === "OCR_PENDING") {
+              console.log(`[TRACE-2trigger][${traceId}] triggering OCR worker on-demand`);
+              fetch("/api/ocr-worker", { method: "POST" }).catch(() => {});
+            }
+
             // ── B_FALLBACK: OCR-task creation failed (DB/queue error) ─────
             if (finalData.mode === "B_FALLBACK") {
               const reason = finalData.message ?? "OCR-systemet er ikke tilgængeligt. Prøv igen om lidt.";
