@@ -14,11 +14,19 @@
 
 export type DomainMode = "single" | "multi";
 
+// Railway API service public URL — injected via RAILWAY_PUBLIC_DOMAIN env var at runtime
+const RAILWAY_HOST = process.env.RAILWAY_PUBLIC_DOMAIN ?? "";
+
 export const DOMAIN_CONFIG = {
   mode: "single" as DomainMode,
   primaryDomain: "blissops.com",
   redirectHosts: ["www.blissops.com"],
-  allowHosts: ["blissops.com", "www.blissops.com"],
+  allowHosts: [
+    "blissops.com",
+    "www.blissops.com",
+    // Railway: allow its own public domain so Express host-allowlist passes
+    ...(RAILWAY_HOST ? [RAILWAY_HOST] : []),
+  ],
   blockPreviewHosts: true,
 
   // Future-only targets. Not active in runtime yet.

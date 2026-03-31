@@ -27,6 +27,9 @@ import { lockdownGuard } from "./middleware/lockdown.ts";
 // Vercel handles www-redirects and host-allowlisting at the platform level.
 const ON_VERCEL = !!process.env.VERCEL;
 
+// Railway: running as standalone Express API server
+const ON_RAILWAY = !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RAILWAY_PUBLIC_DOMAIN;
+
 // Singleton: routes are registered once per process lifetime.
 let _ready: Promise<express.Express> | null = null;
 
@@ -36,8 +39,32 @@ export function getApp(): Promise<express.Express> {
   _ready = (async () => {
     const app = express();
 
-    if (!ON_VERCEL) {
-      // These guards run only in non-Vercel environments (Replit dev / self-hosted).
+    if (ON_RAILWAY) {
+      // Railway API mode: add CORS so blissops.com (Vercel frontend) can call us.
+      // All /api/* requests are proxied from Vercel → Railway.
+      const allowedOrigins = [
+        "https://blissops.com",
+        "https://www.blissops.com",
+        "https://app.blissops.com",
+        ...(process.env.VERCEL_URL ? [`https://${process.env.VERCEL_URL}`] : []),
+      ];
+      app.use((req, res, next) => {
+        const origin = req.headers.origin as string | undefined;
+        if (origin && allowedOrigins.includes(origin)) {
+          res.setHeader("Access-Control-Allow-Origin", origin);
+          res.setHeader("Access-Control-Allow-Credentials", "true");
+          res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+          res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Request-Id");
+        }
+        if (req.method === "OPTIONS") { res.sendStatus(204); return; }
+        next();
+      });
+      // Health check endpoint for Railway healthcheck
+      app.get("/health", (_req, res) => res.json({ ok: true, service: "blissops-api", ts: Date.now() }));
+    }
+
+    if (!ON_VERCEL && !ON_RAILWAY) {
+      // These guards run only in non-Vercel, non-Railway environments (Replit dev / self-hosted).
       const { wwwRedirectMiddleware } = await import("./middleware/www-redirect");
       const { hostAllowlistMiddleware } = await import("./middleware/host-allowlist");
       app.use(wwwRedirectMiddleware);

@@ -4,5 +4,9 @@ nixPkgs = ["nodejs_22"]
 [phases.install]
 cmds = ["npm install"]
 
+[phases.build]
+cmds = ["npm run build"]
+
 [start]
-cmd = "npx tsx server/worker/railway-worker.ts"
+# Railway: Express API (alle /api/*) + OCR-worker startes via KB_WORKER=true
+cmd = "npm start"
