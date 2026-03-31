@@ -193,14 +193,68 @@ async function extractImageText(buffer: Buffer, mimeType: string, jobId: string)
   return extracted;
 }
 
-// ── Scanned PDF via Gemini (primary for scanned PDFs) ───────────────────────
-// Gemini natively supports PDF inline_data — no image conversion needed.
+// ── Scanned PDF via OpenAI gpt-4o (primary fallback for scanned PDFs) ────────
+// gpt-4o supports PDF as base64 inline data via the file content type.
+// This is used when pdf-parse returns empty text (scanned/image-based PDFs).
 
 async function extractPdfViaVision(buffer: Buffer, jobId: string): Promise<string> {
+  const { isOpenAIAvailable, getOpenAIClient } = await import("../openai-client.ts");
+
+  if (isOpenAIAvailable()) {
+    try {
+      return await extractPdfViaOpenAI(buffer, jobId, getOpenAIClient());
+    } catch (err) {
+      log("openai_ocr_error", { jobId, error: (err as Error).message });
+      // fall through to Gemini
+    }
+  }
+
+  // Gemini as secondary fallback
   return extractPdfViaGemini(buffer, jobId);
 }
 
-// ── Scanned PDF via Gemini (fallback) ─────────────────────────────────────────
+async function extractPdfViaOpenAI(
+  buffer: Buffer,
+  jobId: string,
+  client: import("openai").default,
+): Promise<string> {
+  log("openai_ocr_start", { jobId, bufferKb: Math.round(buffer.length / 1024) });
+
+  // Upload PDF to OpenAI Files API (purpose: "user_data" for gpt-4o file reading)
+  const { toFile } = await import("openai");
+  const file = await toFile(buffer, `doc-${jobId}.pdf`, { type: "application/pdf" });
+  const uploaded = await client.files.create({ file, purpose: "user_data" });
+  log("openai_file_uploaded", { jobId, fileId: uploaded.id });
+
+  try {
+    // Use gpt-4o with the uploaded file
+    const response = await (client as any).responses.create({
+      model: "gpt-4o",
+      input: [
+        {
+          role: "user",
+          content: [
+            { type: "input_file", file_id: uploaded.id },
+            {
+              type: "input_text",
+              text: "Extract ALL text content from this PDF document verbatim, preserving paragraph structure. If no text is present, return the single word: EMPTY",
+            },
+          ],
+        },
+      ],
+    });
+
+    const extracted = response.output_text?.trim() ?? "";
+    if (!extracted || extracted === "EMPTY") return "";
+    log("openai_ocr_done", { jobId, chars: extracted.length });
+    return extracted;
+  } finally {
+    // Always clean up uploaded file
+    await client.files.del(uploaded.id).catch(() => {});
+  }
+}
+
+// ── Scanned PDF via Gemini (secondary fallback) ────────────────────────────────
 
 async function extractPdfViaGemini(buffer: Buffer, jobId: string): Promise<string> {
   const GEMINI_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_AI_API_KEY ?? "";
