@@ -139,10 +139,10 @@ async function fetchFromR2(r2Key: string): Promise<Buffer> {
 
 async function extractPdfText(buffer: Buffer, jobId: string): Promise<string> {
   try {
-    // pdf-parse must be imported as a CommonJS require (it uses __dirname internally)
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pdfParseModule = await import("pdf-parse");
-    const pdfParse = (pdfParseModule.default ?? pdfParseModule) as (buf: Buffer) => Promise<{ text: string; numpages: number }>;
+    // pdf-parse is a CommonJS module — must use createRequire in ESM/bundled context
+    const { createRequire } = await import("module");
+    const require = createRequire(import.meta.url);
+    const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string; numpages: number }>;
     const result = await pdfParse(buffer);
     const text = result.text?.trim() ?? "";
     log("pdf_parse_result", { jobId, chars: text.length, pages: result.numpages });
@@ -192,65 +192,11 @@ async function extractImageText(buffer: Buffer, mimeType: string, jobId: string)
   return extracted;
 }
 
-// ── Scanned PDF via OpenAI Files API ─────────────────────────────────────────
-// GPT-4o-mini does not accept PDF as image_url. Instead we upload the PDF as
-// a file via the Files API and pass it as an input_file content block.
+// ── Scanned PDF via Gemini (primary for scanned PDFs) ───────────────────────
+// Gemini natively supports PDF inline_data — no image conversion needed.
 
 async function extractPdfViaVision(buffer: Buffer, jobId: string): Promise<string> {
-  const { isOpenAIAvailable, getOpenAIClient } = await import("../openai-client.ts");
-  if (!isOpenAIAvailable()) {
-    throw new Error("OpenAI API key not configured — cannot perform OCR on scanned PDF");
-  }
-
-  const client = getOpenAIClient();
-  log("pdf_vision_ocr_start", { jobId, bufferKb: Math.round(buffer.length / 1024) });
-
-  try {
-    // Upload PDF to OpenAI Files API
-    const { Blob } = await import("buffer");
-    const blob = new Blob([buffer], { type: "application/pdf" }) as any;
-    // Give the blob a name property so OpenAI SDK can set filename
-    (blob as any).name = `doc-${jobId}.pdf`;
-
-    const uploadedFile = await (client.files as any).create({
-      file: blob,
-      purpose: "assistants",
-    });
-
-    log("pdf_file_uploaded", { jobId, fileId: uploadedFile.id });
-
-    // Use the Responses API with the uploaded file
-    const response = await (client as any).responses.create({
-      model: "gpt-4o-mini",
-      input: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "input_file",
-              file_id: uploadedFile.id,
-            },
-            {
-              type: "input_text",
-              text: "Extract ALL text content from this PDF document. Return only the extracted text verbatim, preserving paragraph structure. If no text is present, return the single word: EMPTY",
-            },
-          ],
-        },
-      ],
-    });
-
-    // Clean up uploaded file
-    await (client.files as any).del(uploadedFile.id).catch(() => {});
-
-    const extracted = response.output_text?.trim() ?? "";
-    if (!extracted || extracted === "EMPTY") return "";
-    log("pdf_vision_ocr_done", { jobId, chars: extracted.length });
-    return extracted;
-  } catch (err) {
-    log("pdf_vision_ocr_error", { jobId, error: (err as Error).message });
-    // If Responses API fails, try Gemini as fallback
-    return extractPdfViaGemini(buffer, jobId);
-  }
+  return extractPdfViaGemini(buffer, jobId);
 }
 
 // ── Scanned PDF via Gemini (fallback) ─────────────────────────────────────────
@@ -275,7 +221,7 @@ async function extractPdfViaGemini(buffer: Buffer, jobId: string): Promise<strin
   };
 
   const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
   );
 
