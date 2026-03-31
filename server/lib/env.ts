@@ -36,6 +36,11 @@ export const env = {
     if (!v) warn("OPENAI_API_KEY");
     return v;
   },
+  get GEMINI_API_KEY(): string {
+    const v = process.env.GEMINI_API_KEY ?? "";
+    if (!v) warn("GEMINI_API_KEY");
+    return v;
+  },
   get APP_ENV(): string {
     return process.env.APP_ENV ?? "development";
   },

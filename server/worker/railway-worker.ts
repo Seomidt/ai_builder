@@ -5,20 +5,19 @@
 /**
  * railway-worker.ts — Continuous background worker for OCR and document analysis.
  *
- * OCR Provider: Manus-Gateway → gemini-2.5-flash (native PDF understanding)
+ * OCR Provider: Google Gemini 2.5 Flash (native PDF understanding)
  *
- * Why Manus-Gateway + Gemini for PDFs?
- *   - No separate Google API key needed — uses the same OPENAI_API_KEY + OPENAI_BASE_URL
- *     that the rest of the app uses (Manus-Gateway is OpenAI-compatible)
- *   - Manus automatically routes to the cheapest capable model
- *   - Gemini 2.5 Flash has native PDF MIME type support — no image conversion needed
+ * Why Gemini 2.5 Flash for PDFs?
+ *   - Native application/pdf MIME type support — no image conversion needed
  *   - Understands full document structure: headers, tables, footnotes, multi-column
  *   - 1M token context window handles very large documents
+ *   - Cheapest capable model for PDF OCR (~$0.075/1M tokens)
+ *   - Uses Google AI OpenAI-compatible endpoint — no extra SDK needed
  *
  * Flow per job:
  *   1. Claim job from Supabase queue (chat_ocr_tasks)
  *   2. Download the file from Cloudflare R2 as a buffer
- *   3. Send to Manus-Gateway (gemini-2.5-flash) as inline PDF base64
+ *   3. Send to Google AI (gemini-2.5-flash) as inline PDF base64
  *   4. Store extracted text in the job record (ocrText)
  *   5. Mark job as completed — frontend polling picks it up
  *
@@ -63,12 +62,12 @@ const POLL_INTERVAL_MS  = 5_000;
 const CONCURRENCY_LIMIT = 2;
 const HEALTH_PORT       = parseInt(process.env.PORT ?? "8080", 10);
 
-// Manus-Gateway (OpenAI-compatible proxy — supports Gemini, OpenAI, Claude)
-// OPENAI_BASE_URL and OPENAI_API_KEY are set in Railway environment variables.
-const MANUS_API_KEY     = process.env.OPENAI_API_KEY  ?? "";
-const MANUS_BASE_URL    = process.env.OPENAI_BASE_URL ?? "https://api.manus.im/api/llm-proxy/v1";
+// Google AI (OpenAI-compatible endpoint — no extra SDK needed)
+// GEMINI_API_KEY is set in Railway environment variables.
+const GEMINI_API_KEY    = process.env.GEMINI_API_KEY  ?? "";
+const GEMINI_BASE_URL   = "https://generativelanguage.googleapis.com/v1beta/openai";
 
-// OCR model: gemini-2.5-flash — native PDF support, cheapest capable model via Manus
+// OCR model: gemini-2.5-flash — native PDF support, cheapest capable model
 const OCR_MODEL         = "gemini-2.5-flash";
 
 // ── Health check HTTP server ──────────────────────────────────────────────────
@@ -82,7 +81,7 @@ const healthServer = http.createServer((req, res) => {
       status:   "ok",
       service:  "railway-worker",
       ocrModel: OCR_MODEL,
-      gateway:  MANUS_BASE_URL,
+      gateway:  GEMINI_BASE_URL,
       ts:       new Date().toISOString(),
     }));
   } else {
@@ -177,11 +176,11 @@ Dokument: ${filename}`;
     ],
   };
 
-  const response = await fetch(`${MANUS_BASE_URL}/chat/completions`, {
+  const response = await fetch(`${GEMINI_BASE_URL}/chat/completions`, {
     method:  "POST",
     headers: {
       "Content-Type":  "application/json",
-      "Authorization": `Bearer ${MANUS_API_KEY}`,
+      "Authorization": `Bearer ${GEMINI_API_KEY}`,
     },
     body: JSON.stringify(requestBody),
   });
@@ -219,8 +218,8 @@ async function processJob(job: RawOcrTask): Promise<void> {
     const fileBuffer = await downloadFromR2(job.r2_key);
     log("download_complete", { jobId: job.id, bytes: fileBuffer.length });
 
-    // Stage 2: Extract text via Manus-Gateway → gemini-2.5-flash
-    log("ai_extraction_started", { jobId: job.id, model: OCR_MODEL, gateway: MANUS_BASE_URL });
+    // Stage 2: Extract text via Google AI → gemini-2.5-flash
+    log("ai_extraction_started", { jobId: job.id, model: OCR_MODEL, gateway: GEMINI_BASE_URL });
     const ocrText = await extractTextWithAI(fileBuffer, job.filename, job.content_type);
     log("ai_extraction_complete", { jobId: job.id, chars: ocrText.length, model: OCR_MODEL });
 
@@ -233,7 +232,7 @@ async function processJob(job: RawOcrTask): Promise<void> {
       charCount:    ocrText.length,
       pageCount:    1,
       chunkCount:   Math.ceil(ocrText.length / 2000),
-      provider:     `manus-gateway/${OCR_MODEL}`,
+      provider:     `google/${OCR_MODEL}`,
     });
 
     log("job_completed", {
@@ -259,7 +258,7 @@ async function runWorker(): Promise<void> {
     concurrency:    CONCURRENCY_LIMIT,
     pollIntervalMs: POLL_INTERVAL_MS,
     ocrModel:       OCR_MODEL,
-    gateway:        MANUS_BASE_URL,
+    gateway:        GEMINI_BASE_URL,
   });
 
   while (true) {

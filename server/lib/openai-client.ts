@@ -1,16 +1,28 @@
+import OpenAI from "openai";
 import { DEFAULT_MODEL } from "./agents/model-config.ts";
-import { env } from "./env.ts";
+
+let _client: OpenAI | null = null;
 
 /**
- * OpenAI client factory (DISABLED for Manus-Only architecture).
- * Returns a dummy object to satisfy TypeScript but throws if actually called.
+ * OpenAI client factory.
+ * Connects directly to api.openai.com using OPENAI_API_KEY.
+ * No proxy — production setup.
  */
-export function getOpenAIClient(): any {
-  throw new Error("OpenAI is disabled in Manus-Only architecture. Please use Manus-Gateway instead.");
+export function getOpenAIClient(): OpenAI {
+  if (_client) return _client;
+  const apiKey = process.env.OPENAI_API_KEY ?? "";
+  if (!apiKey) {
+    throw new Error("OPENAI_API_KEY is not set. Add it to Railway environment variables.");
+  }
+  _client = new OpenAI({
+    apiKey,
+    baseURL: "https://api.openai.com/v1",
+  });
+  return _client;
 }
 
 export function isOpenAIAvailable(): boolean {
-  return false;
+  return !!(process.env.OPENAI_API_KEY);
 }
 
 /**
@@ -48,7 +60,7 @@ export interface ChatJSONOptions {
 }
 
 /**
- * Call the chat completions API (DISABLED for Manus-Only architecture).
+ * Call the chat completions API with JSON output.
  */
 export async function chatJSON<T = unknown>(
   systemPrompt: string,
@@ -56,5 +68,40 @@ export async function chatJSON<T = unknown>(
   model: string = DEFAULT_MODEL,
   opts: ChatJSONOptions = { agentKey: "unknown" },
 ): Promise<T> {
-  throw new Error("chatJSON is disabled in Manus-Only architecture. Please use Manus-Gateway instead.");
+  const client = getOpenAIClient();
+  const t0 = Date.now();
+  try {
+    const completion = await client.chat.completions.create({
+      model,
+      temperature: opts.temperature ?? 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userPrompt },
+      ],
+    });
+    const text = completion.choices[0]?.message?.content ?? "{}";
+    emitAgentCallLog({
+      agentKey:         opts.agentKey,
+      model,
+      latencyMs:        Date.now() - t0,
+      promptTokens:     completion.usage?.prompt_tokens     ?? null,
+      completionTokens: completion.usage?.completion_tokens ?? null,
+      totalTokens:      completion.usage?.total_tokens      ?? null,
+      success:          true,
+    });
+    return JSON.parse(text) as T;
+  } catch (e: any) {
+    emitAgentCallLog({
+      agentKey:         opts.agentKey,
+      model,
+      latencyMs:        Date.now() - t0,
+      promptTokens:     null,
+      completionTokens: null,
+      totalTokens:      null,
+      success:          false,
+      error:            e?.message,
+    });
+    throw e;
+  }
 }

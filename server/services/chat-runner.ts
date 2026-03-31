@@ -327,9 +327,11 @@ export async function runChatMessage(params: {
   // ── Storage 1.7: Similar Cases — intent-based, cached, rate-limited ─────────
 
   // Resolve expert routing hints for the decision layer
-  const expertRoutingHints = (expert as Record<string, unknown>)["routingHints"] as Record<string, unknown> | null | undefined;
-  const hasKnowledgeBases  = expert.knowledgeBases != null
-    ? (expert.knowledgeBases as unknown[]).length > 0
+  const _expertAny = expert as unknown as Record<string, unknown>;
+  const expertRoutingHints = _expertAny["routingHints"] as Record<string, unknown> | null | undefined;
+  const _kbField = _expertAny["knowledgeBases"];
+  const hasKnowledgeBases  = _kbField != null
+    ? (_kbField as unknown[]).length > 0
     : undefined; // unknown — don't block
 
   const decision = shouldRunSimilarity({
