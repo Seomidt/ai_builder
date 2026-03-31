@@ -139,8 +139,10 @@ async function fetchFromR2(r2Key: string): Promise<Buffer> {
 
 async function extractPdfText(buffer: Buffer, jobId: string): Promise<string> {
   try {
+    // pdf-parse must be imported as a CommonJS require (it uses __dirname internally)
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string; numpages: number }>;
+    const pdfParseModule = await import("pdf-parse");
+    const pdfParse = (pdfParseModule.default ?? pdfParseModule) as (buf: Buffer) => Promise<{ text: string; numpages: number }>;
     const result = await pdfParse(buffer);
     const text = result.text?.trim() ?? "";
     log("pdf_parse_result", { jobId, chars: text.length, pages: result.numpages });
@@ -190,42 +192,101 @@ async function extractImageText(buffer: Buffer, mimeType: string, jobId: string)
   return extracted;
 }
 
-// ── Scanned PDF via Vision (convert first page to image) ──────────────────────
+// ── Scanned PDF via OpenAI Files API ─────────────────────────────────────────
+// GPT-4o-mini does not accept PDF as image_url. Instead we upload the PDF as
+// a file via the Files API and pass it as an input_file content block.
 
 async function extractPdfViaVision(buffer: Buffer, jobId: string): Promise<string> {
   const { isOpenAIAvailable, getOpenAIClient } = await import("../openai-client.ts");
   if (!isOpenAIAvailable()) {
-    throw new Error("OpenAI API key not configured — cannot perform vision OCR on scanned PDF");
+    throw new Error("OpenAI API key not configured — cannot perform OCR on scanned PDF");
   }
 
-  // Send the raw PDF bytes as base64 to GPT-4o-mini which supports PDF natively
-  const base64  = buffer.toString("base64");
-  const dataUrl = `data:application/pdf;base64,${base64}`;
-  const client  = getOpenAIClient();
-
+  const client = getOpenAIClient();
   log("pdf_vision_ocr_start", { jobId, bufferKb: Math.round(buffer.length / 1024) });
 
   try {
-    const response = await client.chat.completions.create({
+    // Upload PDF to OpenAI Files API
+    const { Blob } = await import("buffer");
+    const blob = new Blob([buffer], { type: "application/pdf" }) as any;
+    // Give the blob a name property so OpenAI SDK can set filename
+    (blob as any).name = `doc-${jobId}.pdf`;
+
+    const uploadedFile = await (client.files as any).create({
+      file: blob,
+      purpose: "assistants",
+    });
+
+    log("pdf_file_uploaded", { jobId, fileId: uploadedFile.id });
+
+    // Use the Responses API with the uploaded file
+    const response = await (client as any).responses.create({
       model: "gpt-4o-mini",
-      messages: [
+      input: [
         {
           role: "user",
           content: [
-            { type: "image_url", image_url: { url: dataUrl, detail: "high" } },
-            { type: "text", text: "This is a scanned PDF document. Extract ALL text content visible in this document. Return only the extracted text verbatim, preserving paragraph structure. If no text is present, return the single word: EMPTY" },
+            {
+              type: "input_file",
+              file_id: uploadedFile.id,
+            },
+            {
+              type: "input_text",
+              text: "Extract ALL text content from this PDF document. Return only the extracted text verbatim, preserving paragraph structure. If no text is present, return the single word: EMPTY",
+            },
           ],
         },
       ],
-      max_tokens: 16384,
     });
 
-    const extracted = response.choices[0]?.message?.content?.trim() ?? "";
+    // Clean up uploaded file
+    await (client.files as any).del(uploadedFile.id).catch(() => {});
+
+    const extracted = response.output_text?.trim() ?? "";
     if (!extracted || extracted === "EMPTY") return "";
     log("pdf_vision_ocr_done", { jobId, chars: extracted.length });
     return extracted;
   } catch (err) {
     log("pdf_vision_ocr_error", { jobId, error: (err as Error).message });
-    throw err;
+    // If Responses API fails, try Gemini as fallback
+    return extractPdfViaGemini(buffer, jobId);
   }
+}
+
+// ── Scanned PDF via Gemini (fallback) ─────────────────────────────────────────
+
+async function extractPdfViaGemini(buffer: Buffer, jobId: string): Promise<string> {
+  const GEMINI_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_AI_API_KEY ?? "";
+  if (!GEMINI_KEY) {
+    throw new Error("No AI provider available for scanned PDF OCR (set OPENAI_API_KEY or GEMINI_API_KEY)");
+  }
+
+  log("gemini_ocr_start", { jobId, bufferKb: Math.round(buffer.length / 1024) });
+
+  const base64 = buffer.toString("base64");
+  const body = {
+    contents: [{
+      parts: [
+        { inline_data: { mime_type: "application/pdf", data: base64 } },
+        { text: "Extract ALL text content from this PDF document. Return only the extracted text verbatim, preserving paragraph structure. If no text is present, return the single word: EMPTY" },
+      ],
+    }],
+    generationConfig: { maxOutputTokens: 8192 },
+  };
+
+  const resp = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_KEY}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+  );
+
+  if (!resp.ok) {
+    const errText = await resp.text();
+    throw new Error(`Gemini OCR failed: ${resp.status} ${errText.slice(0, 200)}`);
+  }
+
+  const data = await resp.json() as any;
+  const extracted = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
+  if (!extracted || extracted === "EMPTY") return "";
+  log("gemini_ocr_done", { jobId, chars: extracted.length });
+  return extracted;
 }
