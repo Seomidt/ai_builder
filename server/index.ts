@@ -161,7 +161,11 @@ app.use((req, res, next) => {
   // setting up all the other routes so the catch-all route
   // doesn't interfere with the other routes
   if (process.env.NODE_ENV === "production") {
-    serveStatic(app);
+    // Railway API-only mode: Vercel serves the React SPA.
+    // Set SERVE_FRONTEND=true only if you want this process to also serve the frontend.
+    if (process.env.SERVE_FRONTEND === "true") {
+      serveStatic(app);
+    }
   } else {
     const { setupVite } = await import("./vite");
     await setupVite(httpServer, app);
