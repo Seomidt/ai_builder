@@ -454,6 +454,50 @@ export async function logOcrCost(): Promise<void> {}
 export async function estimateOcrCost(): Promise<number> { return 0; }
 export async function archiveOldJobs(): Promise<void> {}
 
+// ── OCR Progress table (PHASE 5Z.6) ───────────────────────────────────────────
+
+/**
+ * Upsert per-page streaming progress into chat_ocr_progress.
+ *
+ * Uses INSERT ... ON CONFLICT (document_id, page_index) DO UPDATE with
+ * optimistic version increment — safe for concurrent batch writes.
+ * Non-critical: failures must not propagate to the caller.
+ */
+export async function upsertOcrProgress(
+  documentId:      string,
+  tenantId:        string,
+  pageIndex:       number,
+  textAccumulated: string,
+  status:          "streaming" | "partial_ready" | "completed",
+): Promise<void> {
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
+  try {
+    await client.connect();
+    await client.query(
+      `INSERT INTO chat_ocr_progress
+         (document_id, tenant_id, page_index, text_accumulated, char_count, status, version, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 1, now())
+       ON CONFLICT (document_id, page_index)
+       DO UPDATE SET
+         text_accumulated = EXCLUDED.text_accumulated,
+         char_count       = EXCLUDED.char_count,
+         status           = EXCLUDED.status,
+         version          = chat_ocr_progress.version + 1,
+         updated_at       = now()
+       WHERE chat_ocr_progress.document_id = EXCLUDED.document_id
+         AND chat_ocr_progress.page_index  = EXCLUDED.page_index`,
+      [documentId, tenantId, pageIndex, textAccumulated.slice(0, 200_000), textAccumulated.length, status],
+    );
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (!msg.includes("does not exist") && !msg.includes("relation") && !msg.includes("ENOTFOUND") && !msg.includes("ECONNREFUSED")) {
+      console.warn(JSON.stringify({ ts: new Date().toISOString(), svc: "job-queue", event: "upsert_progress_warn", error: msg }));
+    }
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
 // ── Inline processing helpers ──────────────────────────────────────────────────
 // Used by ocr-inline-processor.ts (fire-and-forget path from upload/finalize).
 

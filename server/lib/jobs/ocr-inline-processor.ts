@@ -6,34 +6,43 @@
  *
  *  1. Splits PDF into individual page PDFs (pdf-lib, pure JS)
  *  2. Processes PAGE 1 first → marks job as partial_ready in DB
- *     (client polling detects this and triggers early chat, ~3–5 s)
- *  3. Processes remaining pages with concurrency=3 in background
- *  4. Calls completeJob() with full text when all pages are done
+ *     (client polling detects this and triggers early chat, ~1–2 s)
+ *  3. Processes remaining pages with streaming + semaphore (MAX_CONCURRENT_STREAMS)
+ *  4. Writes per-batch progress to chat_ocr_progress table (Phase 5Z.6)
+ *  5. Calls completeJob() with full text when all pages are done
+ *
+ * PHASE 5Z.6 changes:
+ *  - ALL pages now use extractWithGeminiStream (no blocking extractWithGemini)
+ *  - Semaphore limits concurrency to MAX_CONCURRENT_STREAMS (default 5)
+ *  - DB progress written per-batch (BATCH_WRITE_CHARS threshold)
+ *  - Observability: streaming_pages_active, stream_chunks_per_second
  *
  * Metrics logged (structured JSON):
  *   first_page_started_at / first_page_completed_at
- *   first_chunk_ready_at / full_completion_at
- *
- * Multi-tenant isolation: job is already scoped to tenantId by enqueueOcrJob.
- * Idempotency: if job is not in 'pending' state, start is skipped gracefully.
+ *   first_streamed_text_at / full_completion_at
+ *   streaming_pages_active / stream_chunks_per_second
  */
 
 import { extractWithGemini, extractWithGeminiStream } from "../ai/gemini-media.ts";
-import { isPartialTextUsable }                       from "../media/partial-text-readiness.ts";
-import { splitPdfIntoPages }  from "../media/pdf-page-splitter.ts";
+import { isPartialTextUsable }                        from "../media/partial-text-readiness.ts";
+import { splitPdfIntoPages }   from "../media/pdf-page-splitter.ts";
 import {
   startJobInline,
   updateStage,
   updatePartialText,
   completeJob,
   failJob,
+  upsertOcrProgress,
 } from "./job-queue.ts";
 import { chunkText, DEFAULT_CHUNKING_POLICY, type ChunkingPolicy } from "../media/retrieval-chunker.ts";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const CONCURRENCY = 3;    // parallel Gemini calls for pages 2–N
-const MAX_CHARS   = 80_000; // cap per job (same as monolithic path)
+/** Max parallel Gemini streams. Configurable via env. */
+const MAX_CONCURRENT_STREAMS = parseInt(process.env.OCR_MAX_CONCURRENT_STREAMS ?? "5", 10);
+/** Chars accumulated before a mid-stream DB write is issued. */
+const BATCH_WRITE_CHARS = 200;
+const MAX_CHARS         = 80_000;
 
 // ── Logger ────────────────────────────────────────────────────────────────────
 
@@ -62,39 +71,135 @@ function selectPolicy(charCount: number): ChunkingPolicy {
   return DEFAULT_CHUNKING_POLICY;
 }
 
-// ── Concurrency-limited page processor ───────────────────────────────────────
+// ── Semaphore (backpressure) ──────────────────────────────────────────────────
 
-async function processPages(
-  pageBuffers: Buffer[],
-  filename: string,
-): Promise<Array<string | null>> {
-  const results: Array<string | null> = new Array(pageBuffers.length).fill(null);
-  let   cursor = 0;
+class Semaphore {
+  private _slots: number;
+  private _queue: Array<() => void> = [];
 
-  async function worker(): Promise<void> {
-    while (cursor < pageBuffers.length) {
-      const i   = cursor++;
-      const buf = pageBuffers[i];
-      try {
-        const { text } = await extractWithGemini(buf, `${filename}_page${i + 1}.pdf`, "application/pdf");
-        results[i] = text || null;
-      } catch (e) {
-        log("?", "page_ocr_failed", { pageIndex: i, error: (e as Error).message });
-        results[i] = null;
-      }
-    }
+  constructor(slots: number) {
+    this._slots = slots;
   }
 
-  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  async acquire(): Promise<void> {
+    if (this._slots > 0) { this._slots--; return; }
+    await new Promise<void>(resolve => this._queue.push(resolve));
+  }
+
+  release(): void {
+    if (this._queue.length > 0) {
+      this._queue.shift()!();
+    } else {
+      this._slots++;
+    }
+  }
+}
+
+// ── Single page streaming processor ──────────────────────────────────────────
+
+interface PageStreamResult {
+  text:      string;
+  model:     string;
+  totalSeq:  number;
+  durationMs: number;
+}
+
+/**
+ * Streams a single page via Gemini and calls onBatch() every BATCH_WRITE_CHARS.
+ * Safe to run concurrently — semaphore is acquired before calling this.
+ */
+async function streamPage(
+  jobId:     string,
+  tenantId:  string,
+  buf:       Buffer,
+  filename:  string,
+  pageIndex: number,
+  onBatch:   (pageIndex: number, accumulated: string, batchSeq: number) => Promise<void>,
+): Promise<PageStreamResult> {
+  const tStart     = Date.now();
+  let   accumulated = "";
+  let   lastWriteLen = 0;
+  let   batchSeq    = 0;
+  let   lastModel   = "gemini-2.5-flash";
+  let   totalSeq    = 0;
+  let   chunkCount  = 0;
+
+  try {
+    for await (const chunk of extractWithGeminiStream(
+      buf, `${filename}_p${pageIndex + 1}.pdf`, "application/pdf", pageIndex,
+    )) {
+      accumulated  += chunk.textDelta;
+      totalSeq      = chunk.streamSeq;
+      lastModel     = chunk.model;
+      chunkCount++;
+
+      if (accumulated.length - lastWriteLen >= BATCH_WRITE_CHARS) {
+        await onBatch(pageIndex, accumulated, batchSeq++);
+        lastWriteLen = accumulated.length;
+      }
+    }
+  } catch (e) {
+    log(jobId, "page_stream_failed", { pageIndex, error: (e as Error).message });
+  }
+
+  // Final flush
+  if (accumulated.length > lastWriteLen) {
+    await onBatch(pageIndex, accumulated, batchSeq);
+  }
+
+  const durationMs = Date.now() - tStart;
+  const chunksPerSec = durationMs > 0 ? Math.round((chunkCount / durationMs) * 1000) : 0;
+  log(jobId, "page_stream_complete", {
+    pageIndex, chars: accumulated.length, totalSeq,
+    model: lastModel, durationMs,
+    stream_chunks_per_second: chunksPerSec,
+  });
+
+  return { text: accumulated, model: lastModel, totalSeq, durationMs };
+}
+
+// ── Multi-page streaming with semaphore ───────────────────────────────────────
+
+/**
+ * PHASE 5Z.6: ALL pages now use streaming with semaphore-limited concurrency.
+ * Calls onBatch() mid-stream for each page as text arrives.
+ */
+async function processAllPagesStreaming(
+  jobId:     string,
+  tenantId:  string,
+  pageBuffers: Buffer[],
+  filename:  string,
+  onBatch:   (pageIndex: number, accumulated: string, batchSeq: number) => Promise<void>,
+): Promise<Array<string | null>> {
+  const results:  Array<string | null> = new Array(pageBuffers.length).fill(null);
+  const semaphore = new Semaphore(MAX_CONCURRENT_STREAMS);
+  let   activeCount = 0;
+
+  const tasks = pageBuffers.map(async (buf, i) => {
+    await semaphore.acquire();
+    activeCount++;
+    log(jobId, "streaming_pages_active", { active: activeCount, pageIndex: i });
+
+    try {
+      const { text } = await streamPage(jobId, tenantId, buf, filename, i, onBatch);
+      results[i] = text.trim() ? text : null;
+    } finally {
+      activeCount--;
+      semaphore.release();
+    }
+  });
+
+  await Promise.all(tasks);
   return results;
 }
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
 /**
- * Process an OCR job inline (fire-and-forget) using page-first strategy.
+ * Process an OCR job inline (fire-and-forget) using page-first streaming strategy.
  *
  * @param jobId        chat_ocr_tasks.id
+ * @param tenantId     Tenant identifier (for progress table isolation)
  * @param buffer       Pre-downloaded PDF bytes (from upload/finalize handler)
  * @param filename     Original filename
  * @param contentType  MIME type (must be application/pdf for page splitting)
@@ -104,12 +209,12 @@ export async function processOcrJobInline(
   buffer:      Buffer,
   filename:    string,
   contentType: string,
+  tenantId = "unknown",
 ): Promise<void> {
   const tJobStart = Date.now();
   log(jobId, "job_start", { filename, contentType, bytes: buffer.length });
 
   try {
-    // Atomically mark job as running (skips if already running/completed)
     const started = await startJobInline(jobId);
     if (!started) {
       log(jobId, "job_skip", { reason: "already_running_or_complete" });
@@ -118,11 +223,10 @@ export async function processOcrJobInline(
 
     await updateStage(jobId, "ocr");
 
-    // ── PDFs: page-split strategy ─────────────────────────────────────────
     const isPdf = contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
 
+    // ── Non-PDF: single Gemini call ───────────────────────────────────────
     if (!isPdf) {
-      // Non-PDF (image/audio/video): single Gemini call, no splitting
       log(jobId, "single_call_start", { contentType });
       const t = Date.now();
       const { text, charCount } = await extractWithGemini(buffer, filename, contentType);
@@ -151,48 +255,54 @@ export async function processOcrJobInline(
     log(jobId, "pdf_split_ok", { pageCount, bytes: buffer.length });
 
     if (pageCount === 1) {
-      // Single page: process as-is (monolithic call, same as before but with job tracking)
-      log(jobId, "single_page_ocr_start");
-      const t1 = Date.now();
-      const { text, charCount } = await extractWithGemini(pageBuffers[0], filename, "application/pdf");
-      log(jobId, "single_page_ocr_ok", { chars: charCount, ms: Date.now() - t1 });
+      // Single page: streaming (consistent with multi-page path)
+      log(jobId, "single_page_stream_start");
+      const tP = Date.now();
+      let page1Text = "";
 
-      if (!text.trim()) {
+      for await (const chunk of extractWithGeminiStream(
+        pageBuffers[0], `${filename}_p1.pdf`, "application/pdf", 0,
+      )) {
+        page1Text += chunk.textDelta;
+      }
+      log(jobId, "single_page_stream_ok", { chars: page1Text.length, ms: Date.now() - tP });
+
+      if (!page1Text.trim()) {
         await failJob(jobId, "Ingen læsbar tekst fundet i dokumentet", false);
         return;
       }
 
       await updateStage(jobId, "chunking");
-      const policy = selectPolicy(text.length);
+      const policy = selectPolicy(page1Text.length);
       let   chunks = 0;
-      try { chunks = chunkText(text.slice(0, MAX_CHARS), policy).length; } catch { chunks = 1; }
+      try { chunks = chunkText(page1Text.slice(0, MAX_CHARS), policy).length; } catch { chunks = 1; }
 
       await completeJob(jobId, {
-        ocrText: text.slice(0, 200_000), qualityScore: scoreQuality(text),
-        charCount, pageCount: 1, chunkCount: chunks, provider: "gemini_vision",
+        ocrText: page1Text.slice(0, 200_000), qualityScore: scoreQuality(page1Text),
+        charCount: page1Text.length, pageCount: 1, chunkCount: chunks, provider: "gemini_vision",
       });
-      log(jobId, "job_completed", { chars: charCount, totalMs: Date.now() - tJobStart });
+      log(jobId, "job_completed", { chars: page1Text.length, totalMs: Date.now() - tJobStart });
       return;
     }
 
-    // ── Multi-page: page 1 first → partial_ready → remaining pages ────────
+    // ── Multi-page: page 1 first → partial_ready → remaining pages streaming ──
 
-    // ── Page 1 — PHASE 5Z.5: TRUE STREAMING (no hidden blocking await) ─────
+    // ─ Page 1: true streaming with mid-stream partial_ready threshold ─────
     const tP1 = Date.now();
     log(jobId, "first_page_started_at", { ts: new Date().toISOString() });
     let page1Text           = "";
     let firstPartialEmitted = false;
+
     try {
       for await (const chunk of extractWithGeminiStream(
         pageBuffers[0], `${filename}_p1.pdf`, "application/pdf", 0,
       )) {
         page1Text += chunk.textDelta;
 
-        // Emit partial readiness as soon as threshold is met — mid-stream.
-        // This allows client polling to trigger an early AI answer while
-        // Gemini is still producing the remaining tokens for page 1.
         if (!firstPartialEmitted && isPartialTextUsable(page1Text, 0)) {
           await updatePartialText(jobId, page1Text, "partial_ready");
+          // Write progress for page 0
+          await upsertOcrProgress(jobId, tenantId, 0, page1Text, "partial_ready");
           log(jobId, "first_streamed_text_at", {
             ts: new Date().toISOString(),
             upload_to_first_streamed_ocr_text_ms: Date.now() - tJobStart,
@@ -206,13 +316,14 @@ export async function processOcrJobInline(
     } catch (e) {
       log(jobId, "first_page_failed", { error: (e as Error).message });
     }
+
     const tP1Done = Date.now();
     log(jobId, "first_page_completed_at", { ts: new Date().toISOString(), ms: tP1Done - tP1 });
 
     if (page1Text.trim()) {
+      // Final progress write for page 0
+      await upsertOcrProgress(jobId, tenantId, 0, page1Text, "completed");
       if (!firstPartialEmitted) {
-        // Threshold was never met mid-stream (e.g. very short/noisy page).
-        // Still publish so client can start a best-effort early answer.
         await updatePartialText(jobId, page1Text, "partial_ready");
         log(jobId, "first_chunk_ready_at", { ts: new Date().toISOString(), chars: page1Text.length });
       }
@@ -220,11 +331,36 @@ export async function processOcrJobInline(
       log(jobId, "first_page_empty", { reason: "no_text_extracted" });
     }
 
-    // ── Remaining pages (concurrency=3) ───────────────────────────────────
+    // ─ Remaining pages: PHASE 5Z.6 — ALL streaming with semaphore ────────
     await updateStage(jobId, "continuing");
-    const remainingResults = await processPages(pageBuffers.slice(1), filename);
 
-    // Assemble full text (page 1 + successful remaining pages)
+    const remainingBuffers = pageBuffers.slice(1);
+    const remainingResults = await processAllPagesStreaming(
+      jobId,
+      tenantId,
+      remainingBuffers,
+      filename,
+      async (relativePageIndex, accumulated, _batchSeq) => {
+        const absolutePageIndex = relativePageIndex + 1;
+        // Determine status from accumulation progress
+        const status: "streaming" | "partial_ready" | "completed" = "streaming";
+        try {
+          await upsertOcrProgress(jobId, tenantId, absolutePageIndex, accumulated, status);
+        } catch { /* non-critical — progress table write failures must not kill OCR */ }
+      },
+    );
+
+    // Mark remaining pages as completed in progress table
+    for (let i = 0; i < remainingResults.length; i++) {
+      const t = remainingResults[i];
+      if (t && t.trim()) {
+        try {
+          await upsertOcrProgress(jobId, tenantId, i + 1, t, "completed");
+        } catch { /* non-critical */ }
+      }
+    }
+
+    // ─ Assemble full text ─────────────────────────────────────────────────
     const allTexts: string[] = [];
     if (page1Text.trim()) allTexts.push(page1Text);
     for (const t of remainingResults) {
@@ -238,7 +374,7 @@ export async function processOcrJobInline(
       return;
     }
 
-    // ── Final completion ──────────────────────────────────────────────────
+    // ─ Final completion ───────────────────────────────────────────────────
     await updateStage(jobId, "chunking");
     const charCount  = fullText.length;
     const policy     = selectPolicy(charCount);

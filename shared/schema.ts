@@ -6955,3 +6955,59 @@ export const chatRouteDecisions = pgTable(
 );
 
 export type ChatRouteDecision = typeof chatRouteDecisions.$inferSelect;
+
+// ─── chat_ocr_progress ────────────────────────────────────────────────────────
+// PHASE 5Z.6 — Per-page streaming progress for all pages (not just page 1).
+// Written per-batch as Gemini streams tokens. Append-safe via version column.
+// Enables: replay, pause/resume, fine-grained refinement triggers.
+
+export const chatOcrProgress = pgTable(
+  "chat_ocr_progress",
+  {
+    id:              varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId:        varchar("tenant_id").notNull(),
+    documentId:      varchar("document_id").notNull(),
+    pageIndex:       integer("page_index").notNull(),
+    textAccumulated: text("text_accumulated"),
+    charCount:       integer("char_count").notNull().default(0),
+    status:          text("status").notNull().default("streaming"),
+    version:         integer("version").notNull().default(1),
+    createdAt:       timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt:       timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("cop_doc_page_uq").on(t.documentId, t.pageIndex),
+    index("cop_tenant_idx").on(t.tenantId),
+    check("cop_status_check", sql`${t.status} IN ('streaming','partial_ready','completed')`),
+  ],
+);
+export const insertChatOcrProgressSchema = createInsertSchema(chatOcrProgress).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertChatOcrProgress = z.infer<typeof insertChatOcrProgressSchema>;
+export type ChatOcrProgress = typeof chatOcrProgress.$inferSelect;
+
+// ─── chat_answer_generations ──────────────────────────────────────────────────
+// PHASE 5Z.6 — Append-only log of every AI answer generated.
+// Enables: replay, audit, determinism verification.
+// NEVER update existing rows — always append a new row.
+
+export const chatAnswerGenerations = pgTable(
+  "chat_answer_generations",
+  {
+    id:               varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId:         varchar("tenant_id").notNull(),
+    queryHash:        text("query_hash").notNull(),
+    refinementGenKey: text("refinement_gen_key").notNull(),
+    answer:           text("answer").notNull(),
+    completeness:     text("completeness").notNull(),
+    coveragePct:      numeric("coverage_pct", { precision: 5, scale: 2 }),
+    createdAt:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("cag_tenant_query_idx").on(t.tenantId, t.queryHash),
+    index("cag_gen_key_idx").on(t.refinementGenKey),
+    index("cag_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+export const insertChatAnswerGenerationSchema = createInsertSchema(chatAnswerGenerations).omit({ id: true, createdAt: true });
+export type InsertChatAnswerGeneration = z.infer<typeof insertChatAnswerGenerationSchema>;
+export type ChatAnswerGeneration = typeof chatAnswerGenerations.$inferSelect;

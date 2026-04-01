@@ -38,6 +38,12 @@ export interface RefinementSession {
   lifecycleState:        AnswerLifecycleState;
   /** Last emitted refinement generation (0 = none). */
   lastGeneration:        number;
+  /** PHASE 5Z.6 — Fine-grained key of last answer (null if no answer yet). */
+  lastGenKey:            string | null;
+  /** Char count at time of last answer (for trigger delta). */
+  lastCharCount:         number;
+  /** Coverage % at time of last answer. */
+  lastCoveragePercent:   number;
   /** ISO timestamp of last refinement. */
   lastRefinedAt:         string | null;
   /** Number of refinement runs completed. */
@@ -85,12 +91,15 @@ export function getOrCreateSession(sessionKey: string): RefinementSession {
 
   const session: RefinementSession = {
     sessionKey,
-    lifecycleState:  "no_answer",
-    lastGeneration:  0,
-    lastRefinedAt:   null,
-    refinementCount: 0,
-    firstAnswerAt:   null,
-    finalAnswerAt:   null,
+    lifecycleState:      "no_answer",
+    lastGeneration:      0,
+    lastGenKey:          null,
+    lastCharCount:       0,
+    lastCoveragePercent: 0,
+    lastRefinedAt:       null,
+    refinementCount:     0,
+    firstAnswerAt:       null,
+    finalAnswerAt:       null,
   };
   _sessions.set(sessionKey, session);
 
@@ -125,7 +134,13 @@ export function evaluateRefinementTransition(
   session:      RefinementSession,
   currentState: OcrJobRefinementState,
 ): RefinementTransition {
-  const policy       = evaluateRefinementPolicy(session.lastGeneration, currentState);
+  const policy = evaluateRefinementPolicy(
+    session.lastGenKey,
+    session.lastGeneration,
+    session.lastCharCount,
+    session.lastCoveragePercent,
+    currentState,
+  );
   const previousState = session.lifecycleState;
   const now          = new Date().toISOString();
 
@@ -160,10 +175,13 @@ export function evaluateRefinementTransition(
     : null;
 
   // ── Mutate session ────────────────────────────────────────────────────────
-  session.lifecycleState   = newState;
-  session.lastGeneration   = policy.refinementGeneration;
-  session.lastRefinedAt    = now;
-  session.refinementCount += 1;
+  session.lifecycleState       = newState;
+  session.lastGeneration       = policy.refinementGeneration;
+  session.lastGenKey           = policy.refinementGenKey;
+  session.lastCharCount        = currentState.charCount;
+  session.lastCoveragePercent  = currentState.coveragePercent ?? 0;
+  session.lastRefinedAt        = now;
+  session.refinementCount     += 1;
   if (policy.action === "start_first_answer") session.firstAnswerAt = now;
   if (policy.action === "finalize_answer")    session.finalAnswerAt = now;
 
