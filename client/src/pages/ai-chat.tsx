@@ -35,7 +35,7 @@ interface ChatResponse {
 interface AttachedFile {
   id: string;
   file: File;
-  type: "document" | "image" | "video" | "audio";
+  type: "document" | "image" | "video";
   status: "ready" | "uploading" | "processing" | "done" | "failed";
   previewUrl?: string;
 }
@@ -55,21 +55,18 @@ interface ChatMessage {
 const MAX_SIZE_MB = 25;
 const ACCEPT_DOCS  = ".pdf,.doc,.docx,.txt,.csv,.xlsx,.xls";
 const ACCEPT_IMG   = "image/jpeg,image/png,image/gif,image/webp";
-const ACCEPT_VIDEO = "video/mp4,video/quicktime,video/x-msvideo,video/webm";
-const ACCEPT_AUDIO = "audio/mpeg,audio/wav,audio/ogg,audio/mp4,audio/webm";
-const ACCEPT_ALL   = `${ACCEPT_DOCS},${ACCEPT_IMG},${ACCEPT_VIDEO},${ACCEPT_AUDIO}`;
+const ACCEPT_VIDEO = "video/mp4,video/quicktime,video/x-msvideo";
+const ACCEPT_ALL   = `${ACCEPT_DOCS},${ACCEPT_IMG},${ACCEPT_VIDEO}`;
 
 function fileType(f: File): AttachedFile["type"] {
   if (f.type.startsWith("image/")) return "image";
   if (f.type.startsWith("video/")) return "video";
-  if (f.type.startsWith("audio/")) return "audio";
   return "document";
 }
 
 function fileIcon(type: AttachedFile["type"]) {
   if (type === "image") return <Image className="w-3.5 h-3.5 text-blue-400" />;
   if (type === "video") return <Video className="w-3.5 h-3.5 text-purple-400" />;
-  if (type === "audio") return <Video className="w-3.5 h-3.5 text-green-400" />;
   return <FileText className="w-3.5 h-3.5 text-primary" />;
 }
 
@@ -566,18 +563,14 @@ export default function AiChatPage() {
       // Vercel modtager kun lille JSON (presign-request + finalize-request).
       let documentContext: any[] = [];
 
-      // Behandl billeder og video/lyd som dokumenter — upload til R2 og analyser via Gemini
-      const videoFiles = payload.attachments.filter(a => a.type === "video" || a.type === "audio");
-      const allUploadFiles = [...docFiles, ...imgFiles, ...videoFiles];
-
-      if (allUploadFiles.length > 0) {
+      if (docFiles.length > 0) {
         try {
-          console.log(`[TRACE-2a][${traceId}] starting direct-to-R2 upload for ${allUploadFiles.length} file(s) (${docFiles.length} docs, ${imgFiles.length} images, ${videoFiles.length} videos)`);
+          console.log(`[TRACE-2a][${traceId}] starting direct-to-R2 upload for ${docFiles.length} file(s)`);
 
-          // Upload alle filer (dokumenter + billeder) direkte til R2 og finaliser
+          // Upload alle doc-filer direkte til R2 og finaliser
           const finalizeResults: any[] = [];
 
-          for (const af of allUploadFiles) {
+          for (const af of docFiles) {
             const file = af.file;
 
             // ── 1. Hent presigned URL ─────────────────────────────────────
@@ -626,12 +619,6 @@ export default function AiChatPage() {
             const finalData = await finalRes.json() as { mode: string; results?: any[]; message?: string; taskId?: string };
             console.log(`[TRACE-2f][${traceId}] finalize OK mode=${finalData.mode} results=${finalData.results?.length ?? 0} msg=${finalData.message ?? "-"}`);
 
-            // Trigger OCR worker on-demand to save costs (only run when needed)
-            if (finalData.mode === "OCR_PENDING") {
-              console.log(`[TRACE-2trigger][${traceId}] triggering OCR worker on-demand`);
-              fetch("/api/ocr-worker", { method: "POST" }).catch(() => {});
-            }
-
             // ── B_FALLBACK: OCR-task creation failed (DB/queue error) ─────
             if (finalData.mode === "B_FALLBACK") {
               const reason = finalData.message ?? "OCR-systemet er ikke tilgængeligt. Prøv igen om lidt.";
@@ -644,7 +631,7 @@ export default function AiChatPage() {
               const taskId = finalData.taskId;
               console.log(`[TRACE-2ocr][${traceId}] OCR_PENDING taskId=${taskId} polling...`);
 
-              const OCR_TIMEOUT   = 600_000; // 10 minutes for Enterprise documents
+              const OCR_TIMEOUT   = 360_000;
               const ocrStart      = Date.now();
               let ocrResult: any  = null;
 
@@ -678,8 +665,8 @@ export default function AiChatPage() {
                 const pollData = await pollRes.json() as any;
                 console.log(`[TRACE-2ocr][${traceId}] poll status=${pollData.status} stage=${pollData.stage ?? "-"} elapsed=${elapsedSec}s`);
 
-                // Update label based on live stage (Phase 5X: also handle 'processing')
-                if (pollData.status === "running" || pollData.status === "pending" || pollData.status === "processing") {
+                // Update label based on live stage
+                if (pollData.status === "running" || pollData.status === "pending") {
                   const sLabel   = stageLabel(pollData.stage);
                   const progress = pollData.chunksProcessed > 0
                     ? ` · ${pollData.chunksProcessed} blokke`
@@ -696,11 +683,6 @@ export default function AiChatPage() {
                     { errorCode: "DOCUMENT_UNREADABLE" },
                   );
                 }
-                if (pollData.status === "retryable_failed") {
-                  // Phase 5X: 'retryable_failed' → worker vil hente den igen, bliv ved med at polle
-                  setOcrStatusLabel(`Prøver igen: ${file.name} (forsøg ${(pollData.attemptCount ?? 0) + 1}/${pollData.maxAttempts ?? 3})`);
-                  continue;
-                }
                 if (pollData.status === "failed") {
                   // 'failed' med retries planlagt → bliv ved med at polle
                   if (pollData.nextRetryAt) {
@@ -716,8 +698,8 @@ export default function AiChatPage() {
               setOcrStatusLabel(null);
 
               if (!ocrResult) {
-                console.error(`[OCR-FAIL][${traceId}] PATH=timeout elapsed=180s task never completed`);
-                throw Object.assign(new Error("Analysen af det store dokument tager længere tid end forventet. Prøv igen om et øjeblik, eller tjek status i Storage."), { errorCode: "DOCUMENT_UNREADABLE" });
+                console.error(`[OCR-FAIL][${traceId}] PATH=timeout elapsed=360s task never completed`);
+                throw Object.assign(new Error("OCR tog for lang tid (>6 min). Prøv igen — store filer kan tage tid."), { errorCode: "DOCUMENT_UNREADABLE" });
               }
 
               const ocrText = (ocrResult.ocrText ?? "").slice(0, 80_000);
@@ -974,7 +956,7 @@ export default function AiChatPage() {
           </div>
 
           <p className="text-xs text-muted-foreground/30 text-center">
-            Understøtter dokumenter, billeder, video og lyd · AI-analyse op til 18 MB
+            Understøtter dokumenter, billeder og tekst · Max {MAX_SIZE_MB} MB
           </p>
 
         </div>{/* /max-w */}

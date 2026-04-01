@@ -82,8 +82,15 @@ export default async function handler(
     return json(res, { status: mediaTask.status, taskId, stage: mediaTask.stage ?? null });
   }
 
-  // Tenant isolation — user must belong to the same tenant
-  if (task.tenantId !== auth.user.organizationId) {
+  // Tenant isolation — verify user owns this task.
+  // Primary check: userId from JWT (always reliable, no DB lookup needed).
+  // Fallback check: tenantId match (works when org UUID is correctly resolved).
+  // This dual-check prevents 403 when lookupMembership() returns a slug fallback
+  // instead of the real org UUID (which would cause tenantId mismatch even for the
+  // legitimate owner).
+  const userMatch   = task.userId   === auth.user.id;
+  const tenantMatch = task.tenantId === auth.user.organizationId;
+  if (!userMatch && !tenantMatch) {
     return err(res, 403, "FORBIDDEN", "Ingen adgang til denne OCR-opgave");
   }
 
