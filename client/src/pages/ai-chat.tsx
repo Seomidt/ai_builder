@@ -17,10 +17,13 @@ interface ChatSource { id: string; name: string; sourceType?: string }
 interface ChatRule   { id: string; title: string }
 type ConfidenceBand  = "high" | "medium" | "low" | "unknown";
 
+type RouteType = "attachment_first" | "hybrid" | "expert_auto" | "processing" | "not_ready" | "no_context";
+
 interface ChatResponse {
   answer: string;
   document_validation?: string | null;
   conversation_id: string;
+  route_type?: RouteType;
   expert: { id: string; name: string; category: string | null };
   source?: { type: "expert" | "system"; name?: string };
   used_sources: ChatSource[];
@@ -48,6 +51,7 @@ interface ChatMessage {
   response?: ChatResponse;
   timestamp: Date;
   isError?: boolean;
+  isStreaming?: boolean;
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -266,6 +270,25 @@ function ValidationCard({ vm, warnings }: { vm: ValidationCardViewModel; warning
 
 // ─── Status Badge (non-validation cards) ──────────────────────────────────────
 
+const ROUTE_BADGE: Record<RouteType, { label: string; className: string }> = {
+  attachment_first: { label: "Dokumentsvar",     className: "text-blue-400 border-blue-400/30 bg-blue-400/10" },
+  hybrid:           { label: "Hybrid",            className: "text-violet-400 border-violet-400/30 bg-violet-400/10" },
+  expert_auto:      { label: "Ekspertsvar",       className: "text-emerald-400 border-emerald-400/30 bg-emerald-400/10" },
+  processing:       { label: "Behandler...",      className: "text-amber-400 border-amber-400/30 bg-amber-400/10" },
+  not_ready:        { label: "Fejl i dokument",   className: "text-red-400 border-red-400/30 bg-red-400/10" },
+  no_context:       { label: "Ingen kontekst",    className: "text-muted-foreground border-border bg-muted/30" },
+};
+
+function RoutingBadge({ routeType }: { routeType?: RouteType }) {
+  if (!routeType || routeType === "expert_auto") return null;
+  const cfg = ROUTE_BADGE[routeType];
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs border rounded-full px-2 py-0.5 font-medium ${cfg.className}`}>
+      {cfg.label}
+    </span>
+  );
+}
+
 function StatusBadge({ response }: { response: ChatResponse }) {
   if (response.needs_manual_review) {
     return (
@@ -314,7 +337,10 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
                 ? (response.source?.name ?? response.expert.name)
                 : "Systemsvar"}
           </span>
-          <StatusBadge response={response} />
+          <div className="flex items-center gap-1.5">
+            <RoutingBadge routeType={response.route_type} />
+            <StatusBadge response={response} />
+          </div>
         </div>
 
         {response.warnings.map((w, i) => (
@@ -454,6 +480,11 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
             <div className="flex items-start gap-2 text-sm text-red-400">
               <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />{msg.text}
             </div>
+          ) : msg.isStreaming ? (
+            <p className="text-sm text-foreground whitespace-pre-wrap">
+              {msg.text || <span className="text-muted-foreground text-xs">Skriver...</span>}
+              <span className="inline-block w-0.5 h-4 bg-primary/70 ml-0.5 align-middle animate-pulse" />
+            </p>
           ) : msg.response ? (
             <AnswerCard response={msg.response} text={msg.text} />
           ) : (
@@ -750,40 +781,104 @@ export default function AiChatPage() {
       // ── Step B: Byg besked-tekst ───────────────────────────────────────────
       const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";
 
-      // ── TRACE STAGE 3: CHAT REQUEST ───────────────────────────────────────
-      console.log(`[TRACE-3][${traceId}] sending /api/chat message_len=${fullMessage.length} document_context_len=${documentContext.length}`);
+      // ── TRACE STAGE 3: CHAT REQUEST (streaming) ───────────────────────────
+      console.log(`[TRACE-3][${traceId}] streaming /api/chat/stream message_len=${fullMessage.length} document_context_len=${documentContext.length}`);
 
-      // ── Step C: Send til /api/chat med dokument-kontekst ───────────────────
-      const res = await apiRequest("POST", "/api/chat", {
-        message: fullMessage,
-        conversation_id: conversationId ?? null,
-        document_context: documentContext,
-        context: {
-          document_ids: [],
-          preferred_expert_id: null,
-          attachment_count: payload.attachments.length,
-          attachment_types: Array.from(new Set(payload.attachments.map(a => a.type))),
-          use_case: (payload.useCase ?? "grounded_chat") as any,
-        },
-        _trace_id: traceId,
-      });
-      const data = await res.json() as ChatResponse & { _trace?: any };
+      // ── Step C: SSE-streaming til /api/chat/stream ─────────────────────────
+      // Tilføj streaming-placeholder INDEN vi sender, så brugeren ser noget med det samme
+      const streamMsgId = crypto.randomUUID();
+      setMessages(prev => [...prev, {
+        id: streamMsgId, role: "assistant" as const,
+        text: "", isStreaming: true, timestamp: new Date(),
+      }]);
+
+      let doneData: (ChatResponse & { _trace?: any }) | null = null;
+
+      try {
+        const res = await apiRequest("POST", "/api/chat/stream", {
+          message: fullMessage,
+          conversation_id: conversationId ?? null,
+          document_context: documentContext,
+          context: {
+            document_ids: [],
+            preferred_expert_id: null,
+          },
+        });
+
+        const reader  = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer    = "";
+        let streamText = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop()!;
+
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const raw = line.slice(6).trim();
+            if (!raw) continue;
+            let event: any;
+            try { event = JSON.parse(raw); } catch { continue; }
+
+            if (event.type === "delta") {
+              streamText += event.text;
+              setMessages(prev => prev.map(m =>
+                m.id === streamMsgId ? { ...m, text: streamText } : m
+              ));
+            } else if (event.type === "status" && event.text) {
+              setOcrStatusLabel(event.text);
+            } else if (event.type === "gated") {
+              // Routing gate: processing/no_context — show as assistant info message
+              const gatedMsg = event.message ?? "Forespørgslen kan ikke behandles i øjeblikket.";
+              setMessages(prev => [
+                ...prev.filter(m => m.id !== streamMsgId),
+                { id: streamMsgId, role: "assistant" as const, text: gatedMsg, timestamp: new Date() },
+              ]);
+              // Synthesise a fake done response so onSuccess/cleanup runs
+              doneData = {
+                answer: gatedMsg,
+                conversation_id: "",
+                route_type: event.routeType,
+                expert: { id: "", name: "", category: null },
+                used_sources: [], used_rules: [], warnings: [],
+                latency_ms: 0, confidence_band: "unknown",
+                needs_manual_review: false,
+                routing_explanation: event.routeType ?? "gated",
+              } as any;
+            } else if (event.type === "done") {
+              doneData = event as ChatResponse & { _trace?: any };
+              setMessages(prev => prev.map(m =>
+                m.id === streamMsgId
+                  ? { ...m, text: streamText, isStreaming: false, response: doneData ?? undefined }
+                  : m
+              ));
+            } else if (event.type === "error") {
+              throw Object.assign(new Error(event.message ?? "Ukendt fejl"), { errorCode: event.errorCode });
+            }
+          }
+        }
+      } catch (streamErr) {
+        // Fjern streaming-placeholder ved fejl — onError tilføjer fejlbesked
+        setMessages(prev => prev.filter(m => m.id !== streamMsgId));
+        throw streamErr;
+      }
 
       // ── TRACE STAGE 5: SERVER RESPONSE ────────────────────────────────────
-      console.log(`[TRACE-5][${traceId}] server _trace:`, JSON.stringify((data as any)._trace ?? "none"));
-      console.log(`[TRACE-5][${traceId}] final_answer_first100="${data.answer?.slice(0,100)}"`);
+      if (doneData) {
+        console.log(`[TRACE-5][${traceId}] streaming done conversation_id=${doneData.conversation_id} answer_len=${doneData.answer?.length}`);
+      }
 
-      return data;
+      return doneData ?? ({ answer: "", conversation_id: "", expert: { id: "", name: "", category: null }, used_sources: [], used_rules: [], warnings: [], latency_ms: 0, confidence_band: "unknown", needs_manual_review: false, routing_explanation: "" } as ChatResponse);
     },
     onSuccess: (data) => {
-      setConversationId(data.conversation_id);
-      setMessages(prev => [...prev, {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        text: data.answer,
-        response: data,
-        timestamp: new Date(),
-      }]);
+      // Besked er allerede tilføjet til messages via streaming-callback.
+      // Her sætter vi kun conversationId og rydder OCR-status.
+      if (data?.conversation_id) setConversationId(data.conversation_id);
+      setOcrStatusLabel(null);
     },
     onError: (err: any) => {
       setOcrStatusLabel(null);
@@ -846,6 +941,7 @@ export default function AiChatPage() {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
+  const hasStreamingMessage = messages.some(m => m.isStreaming);
   const isEmpty = messages.length === 0 && !chatMutation.isPending;
   const canSend = (input.trim().length > 0 || attachments.length > 0) && !chatMutation.isPending;
 
@@ -888,7 +984,7 @@ export default function AiChatPage() {
           ) : (
             <div className="pt-6">
               {messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)}
-              {chatMutation.isPending && !ocrStatusLabel && <TypingIndicator />}
+              {chatMutation.isPending && !ocrStatusLabel && !hasStreamingMessage && <TypingIndicator />}
               {ocrStatusLabel && (
                 <div className="flex items-center gap-2 px-4 py-2 text-sm text-muted-foreground animate-pulse" data-testid="status-ocr-pending">
                   <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">

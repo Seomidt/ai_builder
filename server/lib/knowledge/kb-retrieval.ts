@@ -149,7 +149,7 @@ async function vectorFirstSearch(params: {
                 AND ke.embedding_vector_pgv   IS NOT NULL
          INNER JOIN knowledge_documents kd
                  ON kd.id             = kc.knowledge_document_id
-                AND kd.document_status IN ('ready', 'active')
+                AND kd.document_status IN ('ready', 'active', 'processing')
          WHERE kc.tenant_id    = $1
            AND kc.chunk_active = TRUE
            AND kc.chunk_text   IS NOT NULL
@@ -195,7 +195,7 @@ async function vectorFirstSearch(params: {
                 AND ke.embedding_vector   IS NOT NULL
          INNER JOIN knowledge_documents kd
                  ON kd.id = kc.knowledge_document_id
-                AND kd.document_status IN ('ready', 'active')
+                AND kd.document_status IN ('ready', 'active', 'processing')
          WHERE kc.tenant_id    = $1
            AND kc.chunk_active = TRUE
            AND kc.chunk_text   IS NOT NULL
@@ -307,7 +307,7 @@ async function _lexicalSearchWithClient(
      FROM knowledge_chunks kc
      INNER JOIN knowledge_documents kd
              ON kd.id = kc.knowledge_document_id
-            AND kd.document_status IN ('ready', 'active')
+            AND kd.document_status IN ('ready', 'active', 'processing')
      WHERE kc.tenant_id    = $1
        AND kc.chunk_active = TRUE
        AND kc.chunk_text   IS NOT NULL
@@ -392,7 +392,7 @@ export async function searchByAsset(params: {
                 AND ke.embedding_vector_pgv   IS NOT NULL
          INNER JOIN knowledge_documents kd
                  ON kd.id             = kc.knowledge_document_id
-                AND kd.document_status IN ('ready', 'active')
+                AND kd.document_status IN ('ready', 'active', 'processing')
          WHERE kc.tenant_id    = $1
            AND kc.knowledge_document_id != ${ kbIds?.length ? 5 : 4 }
            AND kc.chunk_active = TRUE

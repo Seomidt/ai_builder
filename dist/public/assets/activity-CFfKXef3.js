@@ -1,5 +1,0 @@
-<<<<<<<< HEAD:dist/public/assets/activity-CFfKXef3.js
-import{m as t}from"./index-DUKqbUGv.js";const c=t("Activity",[["path",{d:"M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2",key:"169zse"}]]);export{c as A};
-========
-import{m as t}from"./index-Cxd6D-a6.js";const c=t("Activity",[["path",{d:"M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2",key:"169zse"}]]);export{c as A};
->>>>>>>> c2ee253 (fix(ocr): dual userId+tenantId isolation check + extend poll timeout 180s→360s):dist/public/assets/activity-ByGZM91E.js

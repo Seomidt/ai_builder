@@ -80,17 +80,33 @@ interface DocumentContextItem {
   message?:       string;
 }
 
+// Virtual expert used when routing is attachment_first with no available experts.
+const VIRTUAL_ATTACHMENT_EXPERT: AccessibleExpert = {
+  id:            "__virtual_attachment__",
+  name:          "Dokumentanalytiker",
+  description:   "Automatisk dokumentanalyse",
+  category:      "document",
+  routingHints:  null,
+  departmentId:  null,
+  enabledForChat: true,
+};
+
 export async function runChatMessage(params: {
   message: string;
-  expert: AccessibleExpert;
+  /** null allowed for attachment_first routing when no experts are configured. */
+  expert: AccessibleExpert | null;
   organizationId: string;
   userId: string;
   conversationId?: string | null;
   routingExplanation: string;
   documentContext?: DocumentContextItem[];
+  routeType?: string;
   useCase?: import("../lib/ai/types").AiUseCase;
+  /** SSE streaming callback — when provided, AI call uses stream=true and calls this per token */
+  onToken?: (delta: string) => void;
 }): Promise<ChatRunResult> {
-  const { message, expert, organizationId, userId, routingExplanation } = params;
+  const expert = params.expert ?? VIRTUAL_ATTACHMENT_EXPERT;
+  const { message, organizationId, userId, routingExplanation } = params;
   const startMs = Date.now();
 
   // ── Document context validation + injection ────────────────────────────────
@@ -98,8 +114,7 @@ export async function runChatMessage(params: {
   const docCtx     = rawDocCtx.filter(d => d.status === "ok" && d.extracted_text?.trim());
   const failedDocs = rawDocCtx.filter(d => d.status !== "ok");
 
-  // TASK 4 — debug log ALTID
-  console.log(`[chat-runner] message_len=${message.length} doc_ctx_raw=${rawDocCtx.length} doc_ctx_ok=${docCtx.length}`);
+  console.log(`[chat-runner] routeType=${params.routeType ?? "legacy"} message_len=${message.length} doc_ctx_ok=${docCtx.length}`);
   if (docCtx.length > 0) {
     const totalChars = docCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0);
     console.log(`[chat-runner] total_doc_chars=${totalChars} first200="${docCtx[0].extracted_text.slice(0, 200).replace(/\n/g, " ")}"`);
@@ -108,56 +123,71 @@ export async function runChatMessage(params: {
     console.warn(`[chat-runner] failed_docs:`, failedDocs.map(d => `${d.filename}:${d.status}:${d.message}`).join(", "));
   }
 
-  // TASK 5 — hard assertion
-  if (rawDocCtx.length > 0 && docCtx.length === 0) {
+  // Only throw if caller explicitly passed attachments that all failed (request-level docs)
+  // Do NOT throw for stored attachments from DB (they come pre-filtered as valid).
+  if (rawDocCtx.length > 0 && docCtx.length === 0 && failedDocs.length > 0) {
     const reason = failedDocs.map(d => d.message).filter(Boolean).join("; ")
       || "Ingen tekst kunne udtrækkes";
     throw Object.assign(new Error(reason), { errorCode: "DOCUMENT_UNREADABLE" });
   }
 
   // ── 1. Load full expert record ─────────────────────────────────────────────
-  const [fullExpert] = await db
-    .select()
-    .from(architectureProfiles)
-    .where(
-      and(
-        eq(architectureProfiles.id, expert.id),
-        eq(architectureProfiles.organizationId, organizationId),
-      ),
-    )
-    .limit(1);
+  // Virtual expert (attachment_first with no configured experts) skips DB lookup.
+  const isVirtualExpert = expert.id === "__virtual_attachment__";
 
-  if (!fullExpert) throw new Error("Expert not found during chat execution.");
-
-  // ── 2. Build prompt (reuse existing prompt builder) ────────────────────────
   const { buildExpertPromptFromSnapshot, buildExpertPrompt } = await import(
     "../lib/ai/expert-prompt-builder"
   );
 
   let builtPrompt: Awaited<ReturnType<typeof buildExpertPromptFromSnapshot>>;
 
-  // Prefer live version snapshot — same behavior as /api/experts/:id/test
-  const targetVersionId = fullExpert.currentVersionId;
-
-  if (targetVersionId) {
-    const [version] = await db
+  if (isVirtualExpert) {
+    // Minimal prompt — doc mode will fully override the system prompt anyway.
+    builtPrompt = buildExpertPromptFromSnapshot({
+      identity: { name: "Dokumentanalytiker", language: "da" },
+      ai: {
+        goal: "Analyser uploadede dokumenter og besvar spørgsmål baseret på indholdet.",
+        instructions: "Svar udelukkende baseret på det uploadede dokument. Svar på dansk.",
+        output_style: "Klar, præcis og struktureret.",
+      },
+      routing:  { managed_by_platform: true },
+      rules:    [],
+      sources:  [],
+      metadata: { rule_count: 0, source_count: 0 },
+    });
+  } else {
+    const [fullExpert] = await db
       .select()
-      .from(expertVersions)
+      .from(architectureProfiles)
       .where(
         and(
-          eq(expertVersions.id, targetVersionId),
-          eq(expertVersions.organizationId, organizationId),
+          eq(architectureProfiles.id, expert.id),
+          eq(architectureProfiles.organizationId, organizationId),
         ),
       )
       .limit(1);
 
-    if (version) {
-      builtPrompt = buildExpertPromptFromSnapshot(version.configJson as any);
+    if (!fullExpert) throw new Error("Expert not found during chat execution.");
+
+    const targetVersionId = fullExpert.currentVersionId;
+    if (targetVersionId) {
+      const [version] = await db
+        .select()
+        .from(expertVersions)
+        .where(
+          and(
+            eq(expertVersions.id, targetVersionId),
+            eq(expertVersions.organizationId, organizationId),
+          ),
+        )
+        .limit(1);
+
+      builtPrompt = version
+        ? buildExpertPromptFromSnapshot(version.configJson as any)
+        : await buildFromLive(fullExpert, organizationId, buildExpertPrompt);
     } else {
       builtPrompt = await buildFromLive(fullExpert, organizationId, buildExpertPrompt);
     }
-  } else {
-    builtPrompt = await buildFromLive(fullExpert, organizationId, buildExpertPrompt);
   }
 
   // ── 3. Kør AI-kald ────────────────────────────────────────────────────────
@@ -227,16 +257,34 @@ export async function runChatMessage(params: {
     }
 
     const docModel = AI_MODEL_ROUTES.default.model;
-    console.log(`[ai:router] model=${docModel} provider=${AI_MODEL_ROUTES.default.provider} key=default use_case=doc_mode`);
+    console.log(`[ai:router] model=${docModel} provider=${AI_MODEL_ROUTES.default.provider} key=default use_case=doc_mode streaming=${!!params.onToken}`);
     const t0 = Date.now();
-    const completion = await oai.chat.completions.create({
-      model: docModel,
-      temperature: 0.1,
-      max_tokens: 2000,
-      messages: messagesPayload,
-    });
+
+    if (params.onToken) {
+      // ── STREAMING PATH ──────────────────────────────────────────────────────
+      const stream = await oai.chat.completions.create({
+        model:       docModel,
+        temperature: 0.1,
+        max_tokens:  2000,
+        messages:    messagesPayload,
+        stream:      true,
+      });
+      aiText = "";
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (delta) { params.onToken(delta); aiText += delta; }
+      }
+    } else {
+      // ── NON-STREAMING PATH (original) ────────────────────────────────────────
+      const completion = await oai.chat.completions.create({
+        model:       docModel,
+        temperature: 0.1,
+        max_tokens:  2000,
+        messages:    messagesPayload,
+      });
+      aiText = completion.choices[0]?.message?.content ?? "";
+    }
     aiLatencyMs = Date.now() - t0;
-    aiText = completion.choices[0]?.message?.content ?? "";
 
     console.log(`[chat-runner] DOC_ANSWER_LEN=${aiText.length} latency=${aiLatencyMs}ms`);
     console.log(`[chat-runner] DOC_ANSWER_PREVIEW="${aiText.slice(0, 200).replace(/\n/g, " ")}"`);
@@ -254,18 +302,40 @@ export async function runChatMessage(params: {
     }
   } else {
     // ── NORMAL MODE: runAiCall via Responses API ──────────────────────────────
-    const { runAiCall } = await import("../lib/ai/runner");
-    // Use the caller-supplied useCase; default to "grounded_chat" for backward compat.
-    // Non-grounded use cases (validation/analysis/classification) bypass the docCtx gate.
     const resolvedUseCase = params.useCase ?? "grounded_chat";
-    console.log(`[chat-runner] NORMAL_MODE useCase=${resolvedUseCase}`);
+    console.log(`[chat-runner] NORMAL_MODE useCase=${resolvedUseCase} streaming=${!!params.onToken}`);
     const t0 = Date.now();
-    const aiResult = await runAiCall(
-      { feature: "ai-chat", useCase: resolvedUseCase, tenantId: organizationId, userId },
-      { systemPrompt: builtPrompt.systemPrompt, userInput: message },
-    );
+
+    if (params.onToken) {
+      // ── STREAMING PATH: direct OpenAI streaming (bypasses runAiCall) ─────────
+      const { getOpenAIClient } = await import("../lib/openai-client");
+      const oai = getOpenAIClient();
+      const normalModel = AI_MODEL_ROUTES.default.model;
+      const stream = await oai.chat.completions.create({
+        model:       normalModel,
+        temperature: 0.3,
+        max_tokens:  2000,
+        messages: [
+          { role: "system", content: builtPrompt.systemPrompt },
+          { role: "user",   content: message },
+        ],
+        stream: true,
+      });
+      aiText = "";
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (delta) { params.onToken(delta); aiText += delta; }
+      }
+    } else {
+      // ── NON-STREAMING PATH (original) ────────────────────────────────────────
+      const { runAiCall } = await import("../lib/ai/runner");
+      const aiResult = await runAiCall(
+        { feature: "ai-chat", useCase: resolvedUseCase, tenantId: organizationId, userId },
+        { systemPrompt: builtPrompt.systemPrompt, userInput: message },
+      );
+      aiText = aiResult.text;
+    }
     aiLatencyMs = Date.now() - t0;
-    aiText = aiResult.text;
   }
 
   const [, retrievalResult] = await Promise.all([
@@ -323,6 +393,26 @@ export async function runChatMessage(params: {
     confidenceBand,
     existingConversationId: params.conversationId ?? null,
   });
+
+  // ── Persist document context for follow-up questions ──────────────────────
+  // Only save when this request carried fresh document context (not from DB store).
+  if (docCtx.length > 0 && !params.conversationId) {
+    // New conversation: save all valid attachments for future turns.
+    const { saveConversationAttachment } = await import("../lib/chat/attachment-state");
+    await Promise.allSettled(
+      docCtx.map((d) =>
+        saveConversationAttachment({
+          conversationId,
+          tenantId:      organizationId,
+          filename:      d.filename,
+          mimeType:      d.mime_type,
+          extractedText: d.extracted_text,
+          charCount:     d.char_count,
+        }),
+      ),
+    );
+    console.log(`[chat-runner] Saved ${docCtx.length} attachment(s) to conversation ${conversationId}`);
+  }
 
   // ── Storage 1.7: Similar Cases — intent-based, cached, rate-limited ─────────
 

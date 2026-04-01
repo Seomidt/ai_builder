@@ -1336,36 +1336,91 @@ Generate names and content in ${langNote}.`;
         return res.status(403).json({ error_code: "FORBIDDEN", message: "Ugyldig object key" });
       }
 
-      // ── Manus-Only: Force all PDFs to async OCR pipeline ──────────────────
+      // ── PDF: Hybrid tilgang — native tekst-ekstraktion → fallback til async OCR ─
       const isPdf = contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
       if (isPdf) {
-        console.log(`[upload/finalize] PDF — routing to async OCR. tenant=${orgId} key=${objectKey}`);
+        // ── Download PDF fra R2 (shared buffer for both pdf-parse and Gemini OCR) ──
+        let pdfBuf: Buffer = Buffer.alloc(0);
         try {
-          const { enqueueOcrJob } = await import("./lib/jobs/job-queue");
-          const ocrResult = await enqueueOcrJob({
-            tenantId:    orgId,
-            userId:      userId,
-            r2Key:       objectKey,
-            filename:    filename,
-            contentType: contentType,
-            fileHash:    undefined,
-          });
-          const { id: taskId, reused } = ocrResult;
-          console.log(`[upload/finalize] OCR task created taskId=${taskId} reused=${reused}`);
+          const { r2Client: r2c, R2_BUCKET: r2bucket, R2_CONFIGURED: r2ok } = await import("./lib/r2/r2-client");
+          if (r2ok) {
+            const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+            const r2resp = await r2c.send(new GetObjectCommand({ Bucket: r2bucket, Key: objectKey }));
+            if (r2resp.Body) {
+              const bufs: Buffer[] = [];
+              for await (const chunk of r2resp.Body as AsyncIterable<Uint8Array>) {
+                bufs.push(Buffer.from(chunk));
+              }
+              pdfBuf = Buffer.concat(bufs);
+            }
+          }
+        } catch (r2Err) {
+          console.error(`[upload/finalize] R2 download fejlede: ${(r2Err as Error).message}`);
+          return res.status(500).json({ error_code: "R2_ERROR", message: "Kunne ikke downloade fil til behandling" });
+        }
+
+        if (!pdfBuf.length) {
+          return res.status(500).json({ error_code: "R2_EMPTY", message: "R2 returnerede tom fil" });
+        }
+
+        // Trin 1: Forsøg native tekst-ekstraktion med pdf-parse (hurtig, præcis)
+        let embeddedText = "";
+        try {
+          const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string }>;
+          const parsed   = await pdfParse(pdfBuf);
+          embeddedText   = (parsed.text ?? "").trim();
+        } catch (parseErr) {
+          console.warn(`[upload/finalize] pdf-parse fejlede (fortsætter til Gemini): ${(parseErr as Error).message}`);
+        }
+
+        // Trin 2: Native PDF (indlejret tekst) → returnér direkte
+        const nonWsChars = embeddedText.replace(/\s+/g, "").length;
+        if (nonWsChars >= 120) {
+          console.log(`[upload/finalize] PDF native tekst ok — ${embeddedText.length} chars (${nonWsChars} non-ws). Returnerer direkte.`);
           return res.json({
-            mode:    "OCR_PENDING",
-            routing: "Manus-Only Async Pipeline (Enterprise Security)",
-            taskId,
-            reused,
-            pollUrl: `/api/ocr-status?id=${taskId}`,
-            message: reused
-              ? "Dette dokument er allerede i systemet. Hentet fra eksisterende behandling."
-              : "Dokumentet er modtaget. Manus analyserer det nu i baggrunden.",
+            mode:    "direct",
+            routing: "native_pdf_text",
+            results: [{
+              filename,
+              mime_type:      contentType,
+              char_count:     embeddedText.length,
+              extracted_text: embeddedText.slice(0, 80_000),
+              status:         "ok",
+              source:         "r2_pdf_parse",
+            }],
+          });
+        }
+
+        // Trin 3: Tom/scannet PDF → Gemini Vision OCR (læser PDF-bytes direkte)
+        console.log(`[upload/finalize] PDF scannet/tom (${nonWsChars} non-ws chars) — Gemini Vision OCR. tenant=${orgId}`);
+        try {
+          const { extractWithGemini, isGeminiAvailable } = await import("./lib/ai/gemini-media");
+          if (!isGeminiAvailable()) {
+            console.error("[upload/finalize] GEMINI_API_KEY ikke konfigureret");
+            return res.json({ mode: "B_FALLBACK", routing: "gemini_not_configured", message: "OCR ikke tilgængeligt — kontakt support", results: [] });
+          }
+          const ocrResult = await extractWithGemini(pdfBuf, filename, "application/pdf");
+          if (!ocrResult.text.trim()) {
+            console.error(`[upload/finalize] Gemini fandt ingen tekst i ${filename}`);
+            return res.json({ mode: "B_FALLBACK", routing: "ocr_empty", message: "Ingen læsbar tekst fundet i dokumentet", results: [] });
+          }
+          console.log(`[upload/finalize] Gemini OCR ok — ${ocrResult.charCount} chars (quality=${ocrResult.quality})`);
+          return res.json({
+            mode:    "direct",
+            routing: "gemini_ocr_sync",
+            results: [{
+              filename,
+              mime_type:      contentType,
+              char_count:     ocrResult.charCount,
+              extracted_text: ocrResult.text,
+              status:         "ok",
+              source:         "gemini_vision",
+            }],
           });
         } catch (ocrErr) {
           const msg = ocrErr instanceof Error ? ocrErr.message : String(ocrErr);
-          console.error(`[upload/finalize] OCR task creation failed: ${msg}`);
-          return res.json({ mode: "B_FALLBACK", routing: "ocr_task_error", message: `Fejl ved oprettelse af opgave: ${msg.slice(0, 300)}`, results: [] });
+          console.error(`[upload/finalize] Gemini OCR fejlede: ${msg}`);
+          return res.json({ mode: "B_FALLBACK", routing: "gemini_ocr_error", message: `OCR fejlede: ${msg.slice(0, 300)}`, results: [] });
         }
       }
 
@@ -1441,101 +1496,250 @@ Generate names and content in ${langNote}.`;
     }
   });
 
+  // ─── OCR Job Observability (Phase 5Z-PERF) ───────────────────────────────────
+  // GET /api/ocr-job-debug?id=<taskId>
+  // Returns full segmentation/performance facts for a chat_ocr_tasks job.
+
+  app.get("/api/ocr-job-debug", async (req: Request, res: Response) => {
+    try {
+      const orgId  = getOrgId(req);
+      const taskId = req.query.id as string;
+      if (!taskId) {
+        return res.status(400).json({ error_code: "MISSING_ID", message: "id query parameter krævet" });
+      }
+      const { getJob } = await import("./lib/jobs/job-queue");
+      const task = await getJob(taskId);
+      if (!task) {
+        return res.status(404).json({ error_code: "NOT_FOUND", message: `OCR task ${taskId} ikke fundet` });
+      }
+      if (task.tenantId !== orgId) {
+        return res.status(403).json({ error_code: "FORBIDDEN", message: "Adgang nægtet" });
+      }
+
+      const startedAt   = task.startedAt   ? new Date(task.startedAt).getTime()   : null;
+      const completedAt = task.completedAt  ? new Date(task.completedAt).getTime() : null;
+      const createdAt   = task.createdAt    ? new Date(task.createdAt).getTime()   : null;
+
+      const waitBeforeClaimMs = (startedAt && createdAt)   ? startedAt - createdAt     : null;
+      const processingDurationMs = (completedAt && startedAt) ? completedAt - startedAt : null;
+
+      return res.json({
+        jobId:               task.id,
+        status:              task.status,
+        stage:               task.stage ?? null,
+        filename:            task.filename,
+        contentType:         task.contentType,
+        provider:            task.provider ?? null,
+        plannerDecision:     task.charCount && task.charCount > 0 ? "single_segment_fast_path" : "pending",
+        segmentsTotal:       1,
+        segmentsPending:     task.status === "pending"   ? 1 : 0,
+        segmentsProcessing:  task.status === "running"   ? 1 : 0,
+        segmentsCompleted:   task.status === "completed" ? 1 : 0,
+        segmentsRetrievalReady: task.status === "completed" ? 1 : 0,
+        coveragePercent:     task.status === "completed" ? 100 : 0,
+        charCount:           task.charCount  ?? null,
+        chunkCount:          task.chunkCount ?? null,
+        qualityScore:        task.qualityScore ? parseFloat(task.qualityScore) : null,
+        attemptCount:        task.attemptCount,
+        maxAttempts:         task.maxAttempts,
+        nextRetryAt:         task.nextRetryAt ?? null,
+        lastError:           task.lastError   ?? null,
+        createdAt:           task.createdAt,
+        startedAt:           task.startedAt   ?? null,
+        completedAt:         task.completedAt  ?? null,
+        waitBeforeClaimMs,
+        processingDurationMs,
+        firstRetrievalReadyAt:         task.completedAt ?? null,
+        timeToFirstRetrievalReadyMs:   (completedAt && createdAt) ? completedAt - createdAt : null,
+      });
+    } catch (e) {
+      console.error("[ocr-job-debug] error:", e);
+      return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Debug opslag fejlede" });
+    }
+  });
+
   // ─── AI Chat ──────────────────────────────────────────────────────────────────
+  // Shared document context schema (used by both /api/chat and /api/chat/stream)
+  const documentContextSchema = z.object({
+    filename:       z.string(),
+    mime_type:      z.string(),
+    char_count:     z.number(),
+    extracted_text: z.string(),
+    status:         z.enum(["ok", "unsupported", "error"]),
+    message:        z.string().optional(),
+    source:         z.string().optional(),
+  });
+
+  const chatBodySchema = z.object({
+    message:          z.string().min(1, "Besked er påkrævet").max(4000),
+    conversation_id:  z.string().optional().nullable(),
+    document_context: z.array(documentContextSchema).optional().default([]),
+    context: z.object({
+      document_ids:        z.array(z.string()).optional().default([]),
+      preferred_expert_id: z.string().optional().nullable(),
+    }).optional().default({}),
+  });
 
   app.post("/api/chat", async (req: Request, res: Response) => {
     try {
-      const documentContextSchema = z.object({
-        filename:       z.string(),
-        mime_type:      z.string(),
-        char_count:     z.number(),
-        extracted_text: z.string(),
-        status:         z.enum(["ok", "unsupported", "error"]),
-        message:        z.string().optional(),
-      });
-
-      const body = z.object({
-        message:          z.string().min(1, "Besked er påkrævet").max(4000),
-        conversation_id:  z.string().optional().nullable(),
-        document_context: z.array(documentContextSchema).optional().default([]),
-        context: z.object({
-          document_ids:        z.array(z.string()).optional().default([]),
-          preferred_expert_id: z.string().optional().nullable(),
-        }).optional().default({}),
-      }).parse(req.body);
-
+      const body   = chatBodySchema.parse(req.body);
       const orgId  = getOrgId(req);
       const userId = getUserId(req);
 
-      const {
-        listAccessibleExpertsForUser,
-        scoreExpertsForMessage,
-        selectBestExpert,
-        verifyExpertAccess,
-      } = await import("./services/chat-routing");
+      const { resolveRouteDecision } = await import("./lib/chat/route-decision");
+      const { runChatMessage }        = await import("./services/chat-runner");
 
-      // 1. List all experts this user can access
-      const accessible = await listAccessibleExpertsForUser({ organizationId: orgId });
+      // ── Automatic routing (RULE A-E) ────────────────────────────────────────
+      const decision = await resolveRouteDecision({
+        message:           body.message,
+        organizationId:    orgId,
+        userId,
+        conversationId:    body.conversation_id ?? null,
+        documentContext:   body.document_context as any[],
+        preferredExpertId: body.context?.preferred_expert_id ?? null,
+      });
 
-      if (accessible.length === 0) {
-        return res.status(422).json({
-          error_code: "NO_EXPERTS_AVAILABLE",
-          message: "Ingen AI-eksperter er tilgængelige for din organisation.",
+      // ── Gated responses (no AI call) ─────────────────────────────────────
+      if (!decision.requiresAiCall) {
+        return res.status(decision.routeType === "processing" ? 202 : 200).json({
+          route_type:      decision.routeType,
+          gating_message:  decision.gatingMessage,
+          routing_explanation: decision.routingExplanation,
         });
       }
 
-      // 2. Verify preferred expert hint (client hint — never trusted blindly)
-      let selectedExpert = null;
-      const hint = body.context?.preferred_expert_id;
-      if (hint) {
-        selectedExpert = await verifyExpertAccess({ expertId: hint, organizationId: orgId });
-      }
-
-      // 3. Score and route if no verified hint
-      let routingExplanation = "Ekspert valgt via brugerpræference.";
-      if (!selectedExpert) {
-        const scored = scoreExpertsForMessage(accessible, body.message);
-        const routing = selectBestExpert(scored);
-        if (!routing) {
-          return res.status(422).json({
-            error_code: "NO_RELEVANT_EXPERT",
-            message: "Ingen relevant ekspert fundet til din forespørgsel.",
-          });
-        }
-        selectedExpert = routing.expert;
-        routingExplanation = routing.explanation;
-      }
-
-      // 4. Execute via chat-runner (reuses existing orchestration)
-      const { runChatMessage } = await import("./services/chat-runner");
-
+      // ── Execute AI call ──────────────────────────────────────────────────
       const result = await runChatMessage({
         message:         body.message,
-        expert:          selectedExpert,
+        expert:          decision.primaryExpert,
         organizationId:  orgId,
         userId,
         conversationId:  body.conversation_id ?? null,
-        routingExplanation,
-        documentContext: body.document_context ?? [],
+        routingExplanation: decision.routingExplanation,
+        documentContext: decision.documentContext,
+        routeType:       decision.routeType,
+      });
+
+      // ── Optional: partial readiness metadata (non-fatal) ─────────────────
+      const { enrichResponseWithReadiness } = await import("./lib/chat/readiness-enrichment");
+      const partialReadiness = await enrichResponseWithReadiness({
+        tenantId:    orgId,
+        documentIds: body.context?.document_ids ?? [],
       });
 
       return res.json({
-        answer:          result.answer,
-        conversation_id: result.conversationId,
+        answer:              result.answer,
+        conversation_id:     result.conversationId,
+        route_type:          decision.routeType,
         expert: {
           id:       result.expert.id,
           name:     result.expert.name,
           category: result.expert.category,
         },
-        used_sources:       result.usedSources,
-        used_rules:         result.usedRules,
-        warnings:           result.warnings,
-        latency_ms:         result.latencyMs,
-        confidence_band:    result.confidenceBand,
+        used_sources:        result.usedSources,
+        used_rules:          result.usedRules,
+        warnings:            result.warnings,
+        latency_ms:          result.latencyMs,
+        confidence_band:     result.confidenceBand,
         needs_manual_review: result.needsManualReview,
         routing_explanation: result.routingExplanation,
+        ...(partialReadiness ? { partial_readiness: partialReadiness } : {}),
       });
     } catch (err) { handleError(res, err); }
+  });
+
+  // POST /api/chat/stream — SSE streaming variant (automatic routing)
+  // Events: {"type":"status","text":"..."} | {"type":"delta","text":"..."} | {"type":"done",...} | {"type":"error",...}
+  app.post("/api/chat/stream", async (req: Request, res: Response) => {
+    res.setHeader("Content-Type",      "text/event-stream");
+    res.setHeader("Cache-Control",     "no-cache");
+    res.setHeader("Connection",        "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    const sendEvent = (data: object) => {
+      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch { /* client disconnected */ }
+    };
+
+    try {
+      const body   = chatBodySchema.parse(req.body);
+      const orgId  = getOrgId(req);
+      const userId = getUserId(req);
+
+      const { resolveRouteDecision }    = await import("./lib/chat/route-decision");
+      const { getRoutingStatusMessage } = await import("./lib/chat/hybrid-context-builder");
+      const { runChatMessage }          = await import("./services/chat-runner");
+
+      // ── Automatic routing (RULE A-E) ─────────────────────────────────────
+      sendEvent({ type: "status", text: "Analyserer forespørgsel..." });
+
+      const decision = await resolveRouteDecision({
+        message:           body.message,
+        organizationId:    orgId,
+        userId,
+        conversationId:    body.conversation_id ?? null,
+        documentContext:   body.document_context as any[],
+        preferredExpertId: body.context?.preferred_expert_id ?? null,
+      });
+
+      // ── Gated responses ──────────────────────────────────────────────────
+      if (!decision.requiresAiCall) {
+        sendEvent({
+          type:       "gated",
+          routeType:  decision.routeType,
+          message:    decision.gatingMessage,
+        });
+        return res.end();
+      }
+
+      sendEvent({
+        type:      "status",
+        text:      getRoutingStatusMessage(decision.routeType),
+        routeType: decision.routeType,
+      });
+
+      // ── Execute AI call with streaming ───────────────────────────────────
+      const result = await runChatMessage({
+        message:         body.message,
+        expert:          decision.primaryExpert,
+        organizationId:  orgId,
+        userId,
+        conversationId:  body.conversation_id ?? null,
+        routingExplanation: decision.routingExplanation,
+        documentContext: decision.documentContext,
+        routeType:       decision.routeType,
+        onToken: (delta) => sendEvent({ type: "delta", text: delta }),
+      });
+
+      const { enrichResponseWithReadiness: enrichStream } = await import("./lib/chat/readiness-enrichment");
+      const streamReadiness = await enrichStream({
+        tenantId:    orgId,
+        documentIds: body.context?.document_ids ?? [],
+      });
+
+      sendEvent({
+        type:                "done",
+        answer:              result.answer,
+        conversation_id:     result.conversationId,
+        route_type:          decision.routeType,
+        expert:              { id: result.expert.id, name: result.expert.name, category: result.expert.category },
+        used_sources:        result.usedSources,
+        used_rules:          result.usedRules,
+        warnings:            result.warnings,
+        latency_ms:          result.latencyMs,
+        confidence_band:     result.confidenceBand,
+        needs_manual_review: result.needsManualReview,
+        routing_explanation: result.routingExplanation,
+        similar_cases:       result.similarCases,
+        ...(streamReadiness ? { partial_readiness: streamReadiness } : {}),
+      });
+      res.end();
+    } catch (err) {
+      const msg  = err instanceof Error ? err.message : String(err);
+      const code = (err as any)?.errorCode ?? "CHAT_ERROR";
+      sendEvent({ type: "error", errorCode: code, message: msg });
+      res.end();
+    }
   });
 
   // GET /api/chat/conversations — list conversations for current user
@@ -3511,6 +3715,134 @@ Generate names and content in ${langNote}.`;
       return res.json({ results, total: results.length });
     } catch (err) {
       return handleError(res, err);
+    }
+  });
+
+  // GET /api/kb/document-debug?id=<knowledgeDocumentId>
+  // Returns partial-readiness + timing metrics for a knowledge document.
+  // Phase 5Z.2 observability endpoint.
+  app.get("/api/kb/document-debug", async (req: Request, res: Response) => {
+    try {
+      const orgId      = getOrgId(req);
+      const documentId = req.query["id"] as string;
+      if (!documentId) {
+        return res.status(400).json({ error_code: "MISSING_ID", message: "id query parameter krævet" });
+      }
+
+      const { db: dbInst }        = await import("./db");
+      const { knowledgeDocuments, knowledgeDocumentVersions } = await import("../shared/schema");
+      const { eq, and }           = await import("drizzle-orm");
+
+      // Tenant-scoped document lookup
+      const [doc] = await dbInst
+        .select()
+        .from(knowledgeDocuments)
+        .where(
+          and(
+            eq(knowledgeDocuments.id, documentId),
+            eq(knowledgeDocuments.tenantId, orgId),
+          ),
+        )
+        .limit(1);
+
+      if (!doc) {
+        return res.status(404).json({ error_code: "NOT_FOUND", message: `Dokument ${documentId} ikke fundet` });
+      }
+
+      const versionId = doc.currentVersionId;
+      if (!versionId) {
+        return res.json({
+          documentId,
+          documentStatus: doc.documentStatus,
+          hasVersion:     false,
+          message:        "Ingen aktiv version fundet",
+        });
+      }
+
+      const [ver] = await dbInst
+        .select()
+        .from(knowledgeDocumentVersions)
+        .where(
+          and(
+            eq(knowledgeDocumentVersions.id, versionId),
+            eq(knowledgeDocumentVersions.tenantId, orgId),
+          ),
+        )
+        .limit(1);
+
+      const { getDocumentAggregation } = await import("./lib/media/segment-aggregator");
+      const { evaluateAnswerTiming }   = await import("./lib/media/answer-timing-policy");
+      const { checkInstantAnswerEligibility } = await import("./lib/media/instant-answer-readiness");
+
+      const agg         = await getDocumentAggregation({ tenantId: orgId, knowledgeDocumentVersionId: versionId });
+      const eligibility = await checkInstantAnswerEligibility({ tenantId: orgId, knowledgeDocumentVersionId: versionId });
+
+      // Compute timing from job data
+      const jobs          = agg.jobDetails ?? [];
+      const createdAtMs   = ver?.createdAt ? new Date(ver.createdAt as unknown as string).getTime() : null;
+      const nowMs         = Date.now();
+
+      const firstCompletedJob = jobs
+        .filter((j) => j.status === "completed" && j.completed_at)
+        .sort((a, b) => {
+          const aMs = a.completed_at instanceof Date ? a.completed_at.getTime() : 0;
+          const bMs = b.completed_at instanceof Date ? b.completed_at.getTime() : 0;
+          return aMs - bMs;
+        })[0];
+
+      const firstSegmentReadyMs  = (createdAtMs && firstCompletedJob?.completed_at)
+        ? (firstCompletedJob.completed_at instanceof Date
+            ? firstCompletedJob.completed_at.getTime()
+            : new Date(firstCompletedJob.completed_at as unknown as string).getTime()) - createdAtMs
+        : null;
+
+      const allDoneMs = (createdAtMs && jobs.every((j) => ["completed", "skipped", "failed", "cancelled"].includes(j.status)))
+        ? nowMs - createdAtMs
+        : null;
+
+      const timeSinceCreatedMs = createdAtMs ? nowMs - createdAtMs : 0;
+
+      const timingResult = evaluateAnswerTiming({
+        coveragePercent:       agg.coveragePercent,
+        segmentsReady:         agg.segmentsCompleted,
+        segmentsTotal:         agg.segmentsTotal,
+        retrievalChunksActive: agg.retrievalChunksActive,
+        timeSinceUploadMs:     timeSinceCreatedMs,
+        fullCompletionBlocked: agg.fullCompletionBlocked,
+      });
+
+      return res.json({
+        documentId,
+        versionId,
+        documentStatus:              doc.documentStatus,
+        aggregatedDocumentStatus:    agg.documentStatus,
+        answerCompleteness:          agg.answerCompleteness,
+        coveragePercent:             agg.coveragePercent,
+        segmentsTotal:               agg.segmentsTotal,
+        segmentsCompleted:           agg.segmentsCompleted,
+        segmentsFailed:              agg.segmentsFailed,
+        segmentsProcessing:          agg.segmentsProcessing,
+        segmentsQueued:              agg.segmentsQueued,
+        segmentsDeadLetter:          agg.segmentsDeadLetter,
+        hasFailedSegments:           agg.hasFailedSegments,
+        hasDeadLetterSegments:       agg.hasDeadLetterSegments,
+        fullCompletionBlocked:       agg.fullCompletionBlocked,
+        retrievalChunksActive:       agg.retrievalChunksActive,
+        invariantViolations:         agg.invariantViolations,
+        instantAnswerEligibility:    eligibility.eligibility,
+        canRefreshForBetterAnswer:   eligibility.canRefreshForBetterAnswer,
+        answerTimingDecision:        timingResult.decision,
+        answerTimingReason:          timingResult.reason,
+        timing: {
+          upload_to_first_segment_ready_ms:  firstSegmentReadyMs,
+          upload_to_first_retrieval_ready_ms: agg.retrievalChunksActive > 0 ? firstSegmentReadyMs : null,
+          upload_to_full_completion_ms:      allDoneMs,
+          time_since_upload_ms:              timeSinceCreatedMs,
+        },
+      });
+    } catch (err) {
+      console.error("[kb/document-debug] error:", err);
+      return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Debug opslag fejlede" });
     }
   });
 

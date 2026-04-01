@@ -6900,3 +6900,58 @@ export const chatOcrChunks = pgTable(
     uniqueIndex("coc_task_chunk_uq").on(t.taskId, t.chunkIndex),
   ],
 );
+
+// ─── chat_conversation_attachments ───────────────────────────────────────────
+// Server-side store for processed attachment context per conversation.
+// Written when a chat message arrives with document_context (sync OCR path).
+// Read on subsequent turns so the system remembers the conversation has a doc.
+
+export const chatConversationAttachments = pgTable(
+  "chat_conversation_attachments",
+  {
+    id:             varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    conversationId: text("conversation_id").notNull(),
+    tenantId:       text("tenant_id").notNull(),
+    filename:       text("filename").notNull(),
+    mimeType:       text("mime_type").notNull().default("application/pdf"),
+    extractedText:  text("extracted_text").notNull(),
+    charCount:      integer("char_count").notNull(),
+    status:         text("status").notNull().default("completed"),
+    createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("cca_conv_idx").on(t.conversationId),
+    index("cca_tenant_conv_idx").on(t.tenantId, t.conversationId),
+    check("cca_status_check", sql`${t.status} IN ('completed','failed')`),
+  ],
+);
+
+export type ChatConversationAttachment = typeof chatConversationAttachments.$inferSelect;
+
+// ─── chat_route_decisions ─────────────────────────────────────────────────────
+// Audit log for every routing decision made by the automatic router.
+// Enables debugging, analytics, and routing quality measurement.
+
+export const chatRouteDecisions = pgTable(
+  "chat_route_decisions",
+  {
+    id:             varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId:       text("tenant_id").notNull(),
+    conversationId: text("conversation_id"),
+    userId:         text("user_id").notNull(),
+    routeType:      text("route_type").notNull(),
+    attachmentIds:  text("attachment_ids").array(),
+    expertIds:      text("expert_ids").array(),
+    routeReason:    text("route_reason").notNull(),
+    expertScore:    numeric("expert_score", { precision: 6, scale: 2 }),
+    hasAttachment:  boolean("has_attachment").notNull().default(false),
+    hasExperts:     boolean("has_experts").notNull().default(false),
+    createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("crd_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("crd_conv_idx").on(t.conversationId),
+  ],
+);
+
+export type ChatRouteDecision = typeof chatRouteDecisions.$inferSelect;

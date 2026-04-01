@@ -1,221 +1,142 @@
 /**
- * gemini-media.ts — Central Gemini 2.5 Flash multimodal extraction helper.
+ * Gemini 2.5 Flash multimodal extraction for media files.
  *
- * Handles all non-text file types via Google AI's OpenAI-compatible endpoint:
- *   - PDF:   native PDF understanding (text, tables, scanned pages)
- *   - Image: vision analysis (text extraction + visual description)
- *   - Video: frame-by-frame analysis + spoken content transcription
- *   - Audio: speech-to-text transcription
+ * Supports: application/pdf, image/*, audio/*, video/*
+ * Runs synchronously — no async queue needed for typical documents.
  *
- * Uses GEMINI_API_KEY → https://generativelanguage.googleapis.com/v1beta/openai
- * Model: gemini-2.5-flash (~$0.075/1M tokens — cheapest capable multimodal model)
+ * Quality: Gemini reads PDF bytes directly (including embedded text AND
+ * renders scanned pages via Vision), so native and scanned PDFs both work.
  *
- * Max inline payload: ~20 MB base64. Files larger than this should be
- * uploaded via the Google Files API (not yet implemented — fallback to error).
- *
- * SOC2: file content is never logged — only metadata (filename, mime, chars).
+ * Env resolution: GEMINI_API_KEY → GOOGLE_GENERATIVE_AI_API_KEY
  */
 
-const GEMINI_API_KEY  = process.env.GEMINI_API_KEY ?? "";
-const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai";
-const GEMINI_MODEL    = "gemini-2.5-flash";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// 18 MB base64 limit (leaves headroom for JSON overhead)
-const MAX_INLINE_BYTES = 18 * 1024 * 1024;
+// ── Key resolution ─────────────────────────────────────────────────────────────
 
-export type GeminiMediaType = "pdf" | "image" | "video" | "audio" | "unknown";
+function getGeminiKey(): string {
+  return process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? "";
+}
 
-export interface GeminiMediaResult {
+export function isGeminiAvailable(): boolean {
+  return getGeminiKey().length > 0;
+}
+
+// ── Result type ────────────────────────────────────────────────────────────────
+
+export interface GeminiExtractionResult {
   text:       string;
-  mediaType:  GeminiMediaType;
-  model:      string;
   charCount:  number;
+  model:      string;
+  /** Estimated quality: 0.0–1.0 based on length heuristics. */
+  quality:    number;
 }
 
-/**
- * Classify a MIME type into a Gemini media category.
- */
-export function classifyMime(mimeType: string, filename: string): GeminiMediaType {
-  const mime = mimeType.toLowerCase();
-  const ext  = filename.toLowerCase().split(".").pop() ?? "";
+// ── MIME grouping helpers ─────────────────────────────────────────────────────
 
-  if (mime === "application/pdf" || ext === "pdf") return "pdf";
-
-  if (mime.startsWith("image/")) return "image";
-
-  if (
-    mime.startsWith("video/") ||
-    ["mp4", "mov", "avi", "webm", "mpeg", "mkv", "m4v"].includes(ext)
-  ) return "video";
-
-  if (
-    mime.startsWith("audio/") ||
-    ["mp3", "wav", "ogg", "aac", "m4a", "flac", "opus"].includes(ext)
-  ) return "audio";
-
-  return "unknown";
+function isImageMime(mimeType: string): boolean {
+  return mimeType.startsWith("image/");
 }
 
-/**
- * Build the extraction prompt based on media type.
- */
-function buildPrompt(mediaType: GeminiMediaType, filename: string): string {
-  switch (mediaType) {
-    case "pdf":
-      return `Udtræk og returner ALT tekst fra dette PDF-dokument præcist som det fremgår.
+function isAudioMime(mimeType: string): boolean {
+  return mimeType.startsWith("audio/");
+}
 
-Regler:
-- Udtræk HELE dokumentets tekstindhold — ingen udeladelser
-- Bevar dokumentets struktur (overskrifter, afsnit, tabeller, lister, sidenumre)
-- Inkludér alle tal, datoer, navne og juridiske termer præcist
-- Svar KUN med dokumentets tekst — ingen kommentarer eller forklaringer
-- Bevar det originale sprog (dansk, engelsk osv.)
-- Tabeller: bevar kolonner og rækker med tabulering
-- Hvis dokumentet er scannet/billede-baseret: transskribér al synlig tekst
+function isVideoMime(mimeType: string): boolean {
+  return mimeType.startsWith("video/");
+}
 
-Dokument: ${filename}`;
+function isPdfMime(mimeType: string, filename: string): boolean {
+  return mimeType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
+}
 
-    case "image":
-      return `Analysér dette billede grundigt og returner:
+// ── Prompt selection ───────────────────────────────────────────────────────────
 
-1. AL synlig tekst i billedet (OCR) — præcist som den fremgår
-2. En detaljeret beskrivelse af billedets indhold (hvad vises, farver, layout, diagrammer, tabeller)
-3. Hvis det er et dokument/screenshot: udtræk strukturen (overskrifter, felter, værdier)
-4. Hvis det er et diagram/flowchart: beskriv elementerne og forbindelserne
-
-Format:
-=== TEKST I BILLEDE ===
-[al synlig tekst]
-
-=== BILLEDBESKRIVELSE ===
-[detaljeret beskrivelse]
-
-Billede: ${filename}`;
-
-    case "video":
-      return `Analysér denne video grundigt og returner:
-
-1. TRANSSKRIPTION: Al talt dialog og fortælling ord-for-ord
-2. VISUEL BESKRIVELSE: Hvad vises i videoen (scener, tekst på skærm, diagrammer, handlinger)
-3. NØGLEPUNKTER: De vigtigste informationer fra videoen
-4. TIDSSTEMPLER: Angiv ca. tidspunkter for vigtige skift eller emner (hvis muligt)
-
-Format:
-=== TRANSSKRIPTION ===
-[al talt tekst]
-
-=== VISUEL BESKRIVELSE ===
-[hvad vises]
-
-=== NØGLEPUNKTER ===
-[vigtigste informationer]
-
-Video: ${filename}`;
-
-    case "audio":
-      return `Transskribér denne lydfil ord-for-ord.
-
-Regler:
-- Transskribér AL talt tekst præcist
-- Bevar det originale sprog
-- Angiv [PAUSE] ved lange pauser
-- Angiv [UTYDELIGT] hvis noget ikke kan høres
-- Inkludér ikke tidsstempler medmindre der er tydelige skift i emne
-
-Lydfil: ${filename}`;
-
-    default:
-      return `Udtræk al tilgængelig information fra denne fil: ${filename}`;
+function buildPrompt(mimeType: string, filename: string): string {
+  if (isPdfMime(mimeType, filename) || isImageMime(mimeType)) {
+    return (
+      "Extract all text from this document verbatim. " +
+      "Preserve structure (headings, tables, lists, paragraphs). " +
+      "If there is no readable text, return exactly: [NO_TEXT_FOUND]"
+    );
   }
+  if (isAudioMime(mimeType)) {
+    return (
+      "Transcribe all speech in this audio file. " +
+      "Include speaker labels if multiple speakers are identifiable. " +
+      "If the audio contains no speech, return exactly: [NO_SPEECH_FOUND]"
+    );
+  }
+  if (isVideoMime(mimeType)) {
+    return (
+      "Transcribe all speech and describe any key visual content in this video. " +
+      "Format as a structured transcript with timestamps if available. " +
+      "If there is no speech or meaningful visual content, return exactly: [NO_CONTENT_FOUND]"
+    );
+  }
+  return "Extract all text and meaningful content from this file verbatim.";
 }
 
+// ── Quality estimator ─────────────────────────────────────────────────────────
+
+function estimateQuality(text: string): number {
+  const len = text.trim().length;
+  if (len === 0) return 0;
+  if (len < 50)  return 0.3;
+  if (len < 500) return 0.7;
+  return 0.95;
+}
+
+// ── Main export ────────────────────────────────────────────────────────────────
+
+const GEMINI_MODEL = "gemini-2.0-flash";
+
 /**
- * Extract content from a media file using Gemini 2.5 Flash.
+ * Extract text/content from a file buffer using Gemini multimodal.
  *
- * @param fileBuffer  Raw file bytes
- * @param filename    Original filename (used for logging and prompt context)
- * @param mimeType    MIME type of the file
- * @returns           Extracted text and metadata
+ * @param buffer   Raw file bytes.
+ * @param filename Original filename (used for MIME inference fallback).
+ * @param mimeType MIME type string.
+ * @throws Error if Gemini key is not configured or the API call fails.
  */
 export async function extractWithGemini(
-  fileBuffer: Buffer,
-  filename:   string,
-  mimeType:   string,
-  modelOverride?: string,
-): Promise<GeminiMediaResult> {
-  if (!GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY is not set. Add it to Railway environment variables.");
+  buffer:   Buffer,
+  filename: string,
+  mimeType: string,
+): Promise<GeminiExtractionResult> {
+  const key = getGeminiKey();
+  if (!key) {
+    throw new Error("GEMINI_API_KEY is not configured — cannot run Gemini OCR");
   }
 
-  const mediaType = classifyMime(mimeType, filename);
+  const genAI = new GoogleGenerativeAI(key);
+  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
-  if (mediaType === "unknown") {
-    throw new Error(`Unsupported media type: ${mimeType} (${filename})`);
-  }
+  const base64data = buffer.toString("base64");
+  const prompt     = buildPrompt(mimeType, filename);
 
-  if (fileBuffer.length > MAX_INLINE_BYTES) {
-    throw new Error(
-      `File too large for inline processing: ${fileBuffer.length} bytes (max ${MAX_INLINE_BYTES}). ` +
-      `File: ${filename}`,
-    );
-  }
-
-  const base64   = fileBuffer.toString("base64");
-  const prompt   = buildPrompt(mediaType, filename);
-
-  // Gemini uses "image_url" field for all media types via OpenAI-compatible endpoint
-  // The MIME type in the data URL tells Gemini how to interpret the content
-  const requestBody = {
-    model:       modelOverride || GEMINI_MODEL,
-    temperature: 0,
-    max_tokens:  16000,
-    messages: [
-      {
-        role:    "user",
-        content: [
-          {
-            type: "text",
-            text: prompt,
-          },
-          {
-            type:      "image_url",
-            image_url: {
-              url: `data:${mimeType};base64,${base64}`,
-            },
-          },
-        ],
+  const result = await model.generateContent([
+    {
+      inlineData: {
+        data:     base64data,
+        mimeType: mimeType,
       },
-    ],
-  };
-
-  const response = await fetch(`${GEMINI_BASE_URL}/chat/completions`, {
-    method:  "POST",
-    headers: {
-      "Content-Type":  "application/json",
-      "Authorization": `Bearer ${GEMINI_API_KEY}`,
     },
-    body: JSON.stringify(requestBody),
-  });
+    { text: prompt },
+  ]);
 
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(
-      `Gemini API error ${response.status} for ${mediaType} (${filename}): ${errText.slice(0, 300)}`,
-    );
+  const raw = result.response.text()?.trim() ?? "";
+
+  const EMPTY_SIGNALS = ["[NO_TEXT_FOUND]", "[NO_SPEECH_FOUND]", "[NO_CONTENT_FOUND]"];
+  if (!raw || EMPTY_SIGNALS.includes(raw)) {
+    return { text: "", charCount: 0, model: GEMINI_MODEL, quality: 0 };
   }
 
-  const data = await response.json() as {
-    choices: Array<{ message: { content: string } }>;
-    model?:  string;
-    usage?:  { total_tokens?: number };
-  };
-
-  const text = data.choices?.[0]?.message?.content ?? "";
-
+  const capped = raw.slice(0, 200_000);
   return {
-    text,
-    mediaType,
-    model:     data.model ?? GEMINI_MODEL,
-    charCount: text.length,
+    text:      capped,
+    charCount: capped.length,
+    model:     GEMINI_MODEL,
+    quality:   estimateQuality(capped),
   };
 }
