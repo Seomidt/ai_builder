@@ -13,7 +13,7 @@
 import {
   updateStage,
   completeJob,
-  failJob,
+  markOcrFailed as failJob,
   type RawOcrTask,
 } from "./ocr-queue.ts";
 
