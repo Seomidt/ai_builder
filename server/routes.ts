@@ -1612,6 +1612,37 @@ Generate names and content in ${langNote}.`;
     }
   }
 
+  // ── Phase 5Z.5 — Answer cache + refinement helpers ───────────────────────────
+  // Separate from idempotency cache (keyed by context, not opaque key).
+  // Keyed by: hash(tenantId + queryHash + refinementGenKey + docIds + mode).
+  // TTL: 5 min partial, 30 min complete. Max: 200 entries.
+  const {
+    getCachedAnswer: _answerCacheGet,
+    setCachedAnswer: _answerCacheSet,
+    hashQuery:       _hashQuery,
+  } = await import("./lib/media/answer-cache.ts");
+
+  /**
+   * Derives a stable refinement generation integer (1–3) from readiness enrichment fields.
+   * Consistent with computeRefinementGeneration() in refinement-policy.ts.
+   */
+  function _derivedRefinementGen(enrichment: any): number {
+    if (!enrichment) return 1;
+    if (enrichment.answerCompleteness === "complete") return 3;
+    if ((enrichment.coveragePercent ?? 0) >= 50)      return 2;
+    return 1;
+  }
+
+  /**
+   * Builds a stable refinement generation key from enrichment data.
+   * Changes when coverage bucket or completeness changes (not on every tiny delta).
+   */
+  function _refinementGenKey(enrichment: any): string {
+    const gen = _derivedRefinementGen(enrichment);
+    const bkt = Math.floor(((enrichment?.coveragePercent ?? 0) as number) / 25) * 25;
+    return `gen${gen}:cov${bkt}`;
+  }
+
   app.post("/api/chat", async (req: Request, res: Response) => {
     try {
       const body   = chatBodySchema.parse(req.body);
@@ -1647,6 +1678,52 @@ Generate names and content in ${langNote}.`;
         });
       }
 
+      // ── Phase 5Z.5 — Readiness enrichment (needed for answer cache key) ──
+      const { enrichResponseWithReadiness } = await import("./lib/chat/readiness-enrichment");
+      const partialReadiness = await enrichResponseWithReadiness({
+        tenantId:    orgId,
+        documentIds: body.context?.document_ids ?? [],
+      });
+      const _docIds     = [...(body.context?.document_ids ?? [])].sort().join(",");
+      const _queryHash  = _hashQuery(body.message);
+      const _genKey     = _refinementGenKey(partialReadiness);
+      const _complt     = (partialReadiness as any)?.answerCompleteness ?? "partial";
+      const _refGen     = _derivedRefinementGen(partialReadiness);
+      const _covPct     = (partialReadiness as any)?.coveragePercent ?? 0;
+
+      // ── Phase 5Z.5 — Answer cache check (before AI call) ─────────────────
+      // Cache key combines tenant, query, and current chunk context.
+      // If context hasn't changed, we skip the LLM and return cached answer.
+      const _answerCacheKey = {
+        tenantId:         orgId,
+        queryHash:        _queryHash,
+        refinementGenKey: _genKey,
+        docIds:           _docIds,
+        mode:             _complt as "partial" | "complete",
+      };
+      const _cachedAnswer = _docIds.length > 0 ? _answerCacheGet(_answerCacheKey) : null;
+      if (_cachedAnswer) {
+        const _cachedResp: object = {
+          answer:                 _cachedAnswer.text,
+          conversation_id:        body.conversation_id ?? null,
+          route_type:             decision.routeType,
+          routing_explanation:    decision.routingExplanation,
+          // Phase 5Z.5 — Refinement metadata
+          answer_completeness:    _cachedAnswer.answerCompleteness,
+          refinement_generation:  _cachedAnswer.refinementGeneration,
+          supersedes_generation:  null,
+          source_coverage_percent: _cachedAnswer.coveragePercent,
+          partial_warning:        _cachedAnswer.answerCompleteness === "partial"
+            ? "Baseret på delvist behandlet dokument" : null,
+          trigger_key_used:       idemKey ?? null,
+          answer_generation:      { partial: _cachedAnswer.answerCompleteness === "partial", generation: _cachedAnswer.refinementGeneration },
+          _answer_cache_hit:       true,
+          ...(partialReadiness ? { partial_readiness: partialReadiness, ...partialReadiness } : {}),
+        };
+        _chatIdemSet(orgId, idemKey, _cachedResp);
+        return res.json(_cachedResp);
+      }
+
       // ── Execute AI call ──────────────────────────────────────────────────
       const result = await runChatMessage({
         message:         body.message,
@@ -1657,13 +1734,6 @@ Generate names and content in ${langNote}.`;
         routingExplanation: decision.routingExplanation,
         documentContext: decision.documentContext,
         routeType:       decision.routeType,
-      });
-
-      // ── Optional: partial readiness metadata (non-fatal) ─────────────────
-      const { enrichResponseWithReadiness } = await import("./lib/chat/readiness-enrichment");
-      const partialReadiness = await enrichResponseWithReadiness({
-        tenantId:    orgId,
-        documentIds: body.context?.document_ids ?? [],
       });
 
       const chatResponse: object = {
@@ -1682,13 +1752,32 @@ Generate names and content in ${langNote}.`;
         confidence_band:     result.confidenceBand,
         needs_manual_review: result.needsManualReview,
         routing_explanation: result.routingExplanation,
-        // Phase 5Z.3 — Idempotency + answer generation metadata
+        // Phase 5Z.3 — Idempotency
         trigger_key_used:    idemKey ?? null,
-        answer_generation:   { partial: !!(partialReadiness as any)?.fullCompletionBlocked, generation: 1 },
-        // Readiness fields are spread flat for direct access AND available nested as partial_readiness
+        // Phase 5Z.5 — Refinement metadata
+        answer_completeness:     _complt,
+        refinement_generation:   _refGen,
+        supersedes_generation:   null,
+        source_coverage_percent: _covPct,
+        partial_warning:         _complt === "partial" && _docIds.length > 0
+          ? "Baseret på delvist behandlet dokument" : null,
+        answer_generation:       { partial: _complt === "partial", generation: _refGen },
+        _answer_cache_hit:       false,
+        // Readiness fields spread flat + nested
         ...(partialReadiness ? { partial_readiness: partialReadiness, ...partialReadiness } : {}),
       };
+
+      // ── Store in caches ───────────────────────────────────────────────────
       _chatIdemSet(orgId, idemKey, chatResponse);
+      if (_docIds.length > 0 && result.answer) {
+        _answerCacheSet(_answerCacheKey, {
+          text:                  result.answer,
+          answerCompleteness:    _complt as "partial" | "complete",
+          coveragePercent:       _covPct,
+          refinementGeneration:  _refGen,
+          createdAt:             new Date().toISOString(),
+        });
+      }
       return res.json(chatResponse);
     } catch (err) { handleError(res, err); }
   });
@@ -1762,6 +1851,28 @@ Generate names and content in ${langNote}.`;
         documentIds: body.context?.document_ids ?? [],
       });
 
+      const _sDocIds   = [...(body.context?.document_ids ?? [])].sort().join(",");
+      const _sComplt   = (streamReadiness as any)?.answerCompleteness ?? "partial";
+      const _sRefGen   = _derivedRefinementGen(streamReadiness);
+      const _sCovPct   = (streamReadiness as any)?.coveragePercent ?? 0;
+
+      // Store in answer cache (streaming path)
+      if (_sDocIds.length > 0 && result.answer) {
+        _answerCacheSet({
+          tenantId:         orgId,
+          queryHash:        _hashQuery(body.message),
+          refinementGenKey: _refinementGenKey(streamReadiness),
+          docIds:           _sDocIds,
+          mode:             _sComplt as "partial" | "complete",
+        }, {
+          text:                 result.answer,
+          answerCompleteness:   _sComplt as "partial" | "complete",
+          coveragePercent:      _sCovPct,
+          refinementGeneration: _sRefGen,
+          createdAt:            new Date().toISOString(),
+        });
+      }
+
       sendEvent({
         type:                "done",
         answer:              result.answer,
@@ -1776,10 +1887,17 @@ Generate names and content in ${langNote}.`;
         needs_manual_review: result.needsManualReview,
         routing_explanation: result.routingExplanation,
         similar_cases:       result.similarCases,
-        // Phase 5Z.3 — Idempotency + answer generation metadata
+        // Phase 5Z.3 — Idempotency
         trigger_key_used:    body.idempotency_key ?? null,
-        answer_generation:   { partial: !!(streamReadiness as any)?.fullCompletionBlocked, generation: 1 },
-        // Readiness fields are spread flat for direct access AND available nested as partial_readiness
+        // Phase 5Z.5 — Refinement metadata
+        answer_completeness:     _sComplt,
+        refinement_generation:   _sRefGen,
+        supersedes_generation:   null,
+        source_coverage_percent: _sCovPct,
+        partial_warning:         _sComplt === "partial" && _sDocIds.length > 0
+          ? "Baseret på delvist behandlet dokument" : null,
+        answer_generation:       { partial: _sComplt === "partial", generation: _sRefGen },
+        // Readiness fields spread flat + nested
         ...(streamReadiness ? { partial_readiness: streamReadiness, ...streamReadiness } : {}),
       });
       res.end();

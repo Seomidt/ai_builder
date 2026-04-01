@@ -5,6 +5,7 @@ import {
   Send, Bot, User, ChevronDown, ChevronUp, ShieldAlert, BookOpen,
   AlertTriangle, CheckCircle2, HelpCircle, Paperclip, X,
   FileText, Image, Video, Sparkles, Zap, RefreshCw, Clock, WifiOff,
+  TrendingUp, Hourglass,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
@@ -35,7 +36,7 @@ interface ChatResponse {
   confidence_band: ConfidenceBand;
   needs_manual_review: boolean;
   routing_explanation: string;
-  // Phase 5Z.3 — progressive answer metadata
+  // Phase 5Z.3 — progressive answer metadata (camelCase from enrichment spread)
   answerCompleteness?:    "none" | "partial" | "complete";
   sourceCoveragePercent?: number;
   partialWarning?:        string | null;
@@ -45,6 +46,13 @@ interface ChatResponse {
   canRefreshForBetterAnswer?: boolean;
   triggerKeyUsed?:        string | null;
   answerGeneration?:      number;
+  // Phase 5Z.5 — refinement metadata (snake_case from API, mirrors above)
+  answer_completeness?:    "partial" | "complete";
+  refinement_generation?:  number;
+  supersedes_generation?:  number | null;
+  source_coverage_percent?: number;
+  partial_warning?:        string | null;
+  _answer_cache_hit?:      boolean;
 }
 
 interface AttachedFile {
@@ -64,6 +72,8 @@ interface ChatMessage {
   timestamp: Date;
   isError?: boolean;
   isStreaming?: boolean;
+  /** Phase 5Z.5 — true when a newer refined/final answer has superseded this one. */
+  isSuperseded?: boolean;
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -105,6 +115,51 @@ function ConfidenceBadge({ band }: { band: ConfidenceBand }) {
   return (
     <span className={cn("inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium", color)}>
       <Icon className="w-3 h-3" />{label}
+    </span>
+  );
+}
+
+// ─── Refinement Badge (Phase 5Z.5) ────────────────────────────────────────────
+
+/**
+ * Shows the refinement state of an answer:
+ *  gen=1 → Partial (first page only)
+ *  gen=2 → Improved (more context added)
+ *  gen=3 → Complete (full document)
+ */
+function RefinementBadge({
+  completeness, generation, coverage, cacheHit,
+}: {
+  completeness?: "partial" | "complete";
+  generation?:   number;
+  coverage?:     number;
+  cacheHit?:     boolean;
+}) {
+  if (!completeness || completeness === "complete") {
+    // Only show if we have a generation marker
+    if (!generation || generation < 2) return null;
+    return (
+      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-green-400 border-green-400/30 bg-green-400/10">
+        <CheckCircle2 className="w-3 h-3" />Fuldt svar
+        {coverage != null && coverage > 0 && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
+      </span>
+    );
+  }
+
+  if (generation === 2) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-blue-400 border-blue-400/30 bg-blue-400/10">
+        <TrendingUp className="w-3 h-3" />Forbedret
+        {coverage != null && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-amber-400 border-amber-400/30 bg-amber-400/10">
+      <Hourglass className="w-3 h-3" />Delsvar
+      {coverage != null && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
+      {cacheHit && <span className="opacity-50 ml-0.5">·cache</span>}
     </span>
   );
 }
@@ -349,7 +404,13 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
                 ? (response.source?.name ?? response.expert.name)
                 : "Systemsvar"}
           </span>
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <RefinementBadge
+              completeness={response.answer_completeness ?? (response.answerCompleteness as "partial" | "complete" | undefined)}
+              generation={response.refinement_generation}
+              coverage={response.source_coverage_percent ?? response.sourceCoveragePercent}
+              cacheHit={response._answer_cache_hit}
+            />
             <RoutingBadge routeType={response.route_type} />
             <StatusBadge response={response} />
           </div>
@@ -360,6 +421,14 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
             <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />{w}
           </div>
         ))}
+
+        {/* Phase 5Z.5 — Partial answer trust state */}
+        {(response.partial_warning ?? response.partialWarning) && (
+          <div className="flex items-center gap-1.5 text-xs text-amber-400/80">
+            <Hourglass className="w-3 h-3 shrink-0" />
+            {response.partial_warning ?? response.partialWarning}
+          </div>
+        )}
 
         <div className="text-sm leading-relaxed whitespace-pre-wrap text-foreground" data-testid="text-chat-answer">
           {text}
@@ -479,29 +548,45 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
   }
 
   return (
-    <div className="mb-6 last:mb-0 flex justify-start" data-testid={`msg-assistant-${msg.id}`}>
+    <div
+      className={cn("mb-6 last:mb-0 flex justify-start transition-opacity duration-300",
+        msg.isSuperseded && "opacity-40")}
+      data-testid={`msg-assistant-${msg.id}`}
+    >
       <div className="flex items-end gap-2 max-w-[88%]">
-        <div className="shrink-0 w-7 h-7 rounded-full bg-muted flex items-center justify-center mb-0.5">
+        <div className={cn(
+          "shrink-0 w-7 h-7 rounded-full bg-muted flex items-center justify-center mb-0.5",
+          msg.isSuperseded && "opacity-60",
+        )}>
           <Bot className="w-3.5 h-3.5 text-primary" />
         </div>
-        <div className={cn(
-          "rounded-2xl border bg-card px-4 py-3 shadow-sm rounded-bl-sm",
-          msg.isError && "border-red-400/30 bg-red-400/5"
-        )}>
-          {msg.isError ? (
-            <div className="flex items-start gap-2 text-sm text-red-400">
-              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />{msg.text}
-            </div>
-          ) : msg.isStreaming ? (
-            <p className="text-sm text-foreground whitespace-pre-wrap">
-              {msg.text || <span className="text-muted-foreground text-xs">Skriver...</span>}
-              <span className="inline-block w-0.5 h-4 bg-primary/70 ml-0.5 align-middle animate-pulse" />
-            </p>
-          ) : msg.response ? (
-            <AnswerCard response={msg.response} text={msg.text} />
-          ) : (
-            <p className="text-sm text-foreground">{msg.text}</p>
+        <div className="flex flex-col gap-1">
+          {/* Phase 5Z.5 — superseded label */}
+          {msg.isSuperseded && (
+            <span className="text-xs text-muted-foreground/60 flex items-center gap-1 pl-1">
+              <TrendingUp className="w-3 h-3" />Erstattet af opdateret svar
+            </span>
           )}
+          <div className={cn(
+            "rounded-2xl border bg-card px-4 py-3 shadow-sm rounded-bl-sm",
+            msg.isError && "border-red-400/30 bg-red-400/5",
+            msg.isSuperseded && "border-border/40",
+          )}>
+            {msg.isError ? (
+              <div className="flex items-start gap-2 text-sm text-red-400">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />{msg.text}
+              </div>
+            ) : msg.isStreaming ? (
+              <p className="text-sm text-foreground whitespace-pre-wrap">
+                {msg.text || <span className="text-muted-foreground text-xs">Skriver...</span>}
+                <span className="inline-block w-0.5 h-4 bg-primary/70 ml-0.5 align-middle animate-pulse" />
+              </p>
+            ) : msg.response ? (
+              <AnswerCard response={msg.response} text={msg.text} />
+            ) : (
+              <p className="text-sm text-foreground">{msg.text}</p>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -1020,11 +1105,18 @@ export default function AiChatPage() {
               } as any;
             } else if (event.type === "done") {
               doneData = event as ChatResponse & { _trace?: any };
-              setMessages(prev => prev.map(m =>
-                m.id === streamMsgId
-                  ? { ...m, text: streamText, isStreaming: false, response: doneData ?? undefined }
-                  : m
-              ));
+              const isRefined = (event.refinement_generation ?? 1) >= 2;
+              setMessages(prev => prev.map(m => {
+                if (m.id === streamMsgId) {
+                  // Current message: finalise it
+                  return { ...m, text: streamText, isStreaming: false, response: doneData ?? undefined };
+                }
+                // Phase 5Z.5 — supersede earlier assistant answers when a refined one arrives
+                if (isRefined && m.role === "assistant" && !m.isError && !m.isStreaming && m.id !== streamMsgId) {
+                  return { ...m, isSuperseded: true };
+                }
+                return m;
+              }));
             } else if (event.type === "error") {
               throw Object.assign(new Error(event.message ?? "Ukendt fejl"), { errorCode: event.errorCode });
             }

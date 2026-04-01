@@ -22,7 +22,7 @@ export function isGeminiAvailable(): boolean {
   return getGeminiKey().length > 0;
 }
 
-// ── Result type ────────────────────────────────────────────────────────────────
+// ── Result types ───────────────────────────────────────────────────────────────
 
 export interface GeminiExtractionResult {
   text:       string;
@@ -30,6 +30,23 @@ export interface GeminiExtractionResult {
   model:      string;
   /** Estimated quality: 0.0–1.0 based on length heuristics. */
   quality:    number;
+}
+
+/**
+ * PHASE 5Z.5 — Structured stream chunk emitted by extractWithGeminiStream().
+ * Carries enough metadata to tie each delta back to its document, page, and model.
+ */
+export interface OcrStreamChunk {
+  /** Incremental text token from Gemini (may be a few chars or a sentence). */
+  textDelta:  string;
+  /** 0-based page index within the document (-1 for non-PDF/single-file). */
+  pageIndex:  number;
+  /** Monotonically-increasing sequence number, per-page from 0. */
+  streamSeq:  number;
+  /** Provider name — always "gemini" for this extractor. */
+  provider:   "gemini";
+  /** Model name used for this call. */
+  model:      string;
 }
 
 // ── MIME grouping helpers ─────────────────────────────────────────────────────
@@ -142,40 +159,49 @@ export async function extractWithGemini(
 }
 
 /**
- * Streaming variant — yields text chunks as Gemini produces them.
- * Use for single-page buffers where partial tokens improve perceived latency.
+ * PHASE 5Z.5 — True streaming variant — yields structured OcrStreamChunk values
+ * as Gemini produces them. Downstream consumers must NOT await full accumulation;
+ * they must process each yielded chunk incrementally.
  *
- * @param buffer   Raw file bytes (single page recommended for low first-token latency).
- * @param filename Original filename.
- * @param mimeType MIME type string.
- * @yields Partial text strings as they arrive from Gemini.
+ * @param buffer    Raw file bytes (single page recommended for lowest first-token latency).
+ * @param filename  Original filename.
+ * @param mimeType   MIME type string.
+ * @param pageIndex  0-based page index within the document (-1 for non-paginated).
+ * @yields OcrStreamChunk — incremental text delta + metadata. Never yields empty deltas.
  */
 export async function* extractWithGeminiStream(
-  buffer:   Buffer,
-  filename: string,
-  mimeType: string,
-): AsyncGenerator<string> {
+  buffer:    Buffer,
+  filename:  string,
+  mimeType:  string,
+  pageIndex  = 0,
+): AsyncGenerator<OcrStreamChunk> {
   const key = getGeminiKey();
   if (!key) {
     throw new Error("GEMINI_API_KEY is not configured — cannot run Gemini streaming OCR");
   }
 
   const genAI      = new GoogleGenerativeAI(key);
-  const model      = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+  const mdl        = genAI.getGenerativeModel({ model: GEMINI_MODEL });
   const base64data = buffer.toString("base64");
   const prompt     = buildPrompt(mimeType, filename);
 
   const EMPTY_SIGNALS = ["[NO_TEXT_FOUND]", "[NO_SPEECH_FOUND]", "[NO_CONTENT_FOUND]"];
 
-  const streamResult = await model.generateContentStream([
+  const streamResult = await mdl.generateContentStream([
     { inlineData: { data: base64data, mimeType } },
     { text: prompt },
   ]);
 
+  let streamSeq = 0;
   for await (const chunk of streamResult.stream) {
-    const text = chunk.text()?.trim() ?? "";
-    if (text && !EMPTY_SIGNALS.includes(text)) {
-      yield text;
-    }
+    const delta = chunk.text() ?? "";
+    if (!delta || EMPTY_SIGNALS.includes(delta.trim())) continue;
+    yield {
+      textDelta: delta,
+      pageIndex,
+      streamSeq: streamSeq++,
+      provider:  "gemini",
+      model:     GEMINI_MODEL,
+    };
   }
 }

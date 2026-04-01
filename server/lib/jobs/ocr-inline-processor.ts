@@ -18,7 +18,8 @@
  * Idempotency: if job is not in 'pending' state, start is skipped gracefully.
  */
 
-import { extractWithGemini }  from "../ai/gemini-media.ts";
+import { extractWithGemini, extractWithGeminiStream } from "../ai/gemini-media.ts";
+import { isPartialTextUsable }                       from "../media/partial-text-readiness.ts";
 import { splitPdfIntoPages }  from "../media/pdf-page-splitter.ts";
 import {
   startJobInline,
@@ -176,13 +177,32 @@ export async function processOcrJobInline(
 
     // ── Multi-page: page 1 first → partial_ready → remaining pages ────────
 
-    // Page 1
+    // ── Page 1 — PHASE 5Z.5: TRUE STREAMING (no hidden blocking await) ─────
     const tP1 = Date.now();
     log(jobId, "first_page_started_at", { ts: new Date().toISOString() });
-    let page1Text = "";
+    let page1Text           = "";
+    let firstPartialEmitted = false;
     try {
-      const { text } = await extractWithGemini(pageBuffers[0], `${filename}_p1.pdf`, "application/pdf");
-      page1Text = text;
+      for await (const chunk of extractWithGeminiStream(
+        pageBuffers[0], `${filename}_p1.pdf`, "application/pdf", 0,
+      )) {
+        page1Text += chunk.textDelta;
+
+        // Emit partial readiness as soon as threshold is met — mid-stream.
+        // This allows client polling to trigger an early AI answer while
+        // Gemini is still producing the remaining tokens for page 1.
+        if (!firstPartialEmitted && isPartialTextUsable(page1Text, 0)) {
+          await updatePartialText(jobId, page1Text, "partial_ready");
+          log(jobId, "first_streamed_text_at", {
+            ts: new Date().toISOString(),
+            upload_to_first_streamed_ocr_text_ms: Date.now() - tJobStart,
+            chars: page1Text.length,
+            streamSeq: chunk.streamSeq,
+            model: chunk.model,
+          });
+          firstPartialEmitted = true;
+        }
+      }
     } catch (e) {
       log(jobId, "first_page_failed", { error: (e as Error).message });
     }
@@ -190,9 +210,12 @@ export async function processOcrJobInline(
     log(jobId, "first_page_completed_at", { ts: new Date().toISOString(), ms: tP1Done - tP1 });
 
     if (page1Text.trim()) {
-      // ── Partial readiness: publish page 1 text immediately ───────────────
-      await updatePartialText(jobId, page1Text, "partial_ready");
-      log(jobId, "first_chunk_ready_at", { ts: new Date().toISOString(), chars: page1Text.length });
+      if (!firstPartialEmitted) {
+        // Threshold was never met mid-stream (e.g. very short/noisy page).
+        // Still publish so client can start a best-effort early answer.
+        await updatePartialText(jobId, page1Text, "partial_ready");
+        log(jobId, "first_chunk_ready_at", { ts: new Date().toISOString(), chars: page1Text.length });
+      }
     } else {
       log(jobId, "first_page_empty", { reason: "no_text_extracted" });
     }
