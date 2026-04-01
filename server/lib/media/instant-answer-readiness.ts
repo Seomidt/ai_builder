@@ -62,7 +62,43 @@ export function deriveEligibility(agg: AggregationResult): InstantAnswerReadines
     documentStatus,
     answerCompleteness,
     firstRetrievalReadyAt,
+    invariantViolations,
   } = agg;
+
+  // Invariant violations detected by aggregator: treat as not_ready/blocked to prevent
+  // false-positive eligibility from corrupted aggregation state.
+  if (invariantViolations.length > 0) {
+    console.warn(
+      `[instant-answer-readiness] Aggregation invariant violations detected (${invariantViolations.length}) ` +
+      `for documentStatus=${documentStatus} — downgrading eligibility:`,
+      invariantViolations,
+    );
+    if (retrievalChunksActive > 0) {
+      // Chunks exist but state is inconsistent — serve partial with warning about violations
+      return {
+        eligibility:            "partial_ready",
+        retrievalChunksActive,
+        coveragePercent,
+        fullCompletionBlocked:  true,
+        hasDeadLetterSegments,
+        firstRetrievalReadyAt,
+        canRefreshForBetterAnswer: false,
+        reason:
+          `Invariant violation detected (${invariantViolations[0]}) — serving ${retrievalChunksActive} chunk(s) ` +
+          `at ${coveragePercent}% with blocked=true (cannot confirm full completion)`,
+      };
+    }
+    return {
+      eligibility:            "not_ready",
+      retrievalChunksActive:  0,
+      coveragePercent:        0,
+      fullCompletionBlocked:  true,
+      hasDeadLetterSegments,
+      firstRetrievalReadyAt:  null,
+      canRefreshForBetterAnswer: false,
+      reason: `Invariant violation detected (${invariantViolations[0]}) — eligibility blocked`,
+    };
+  }
 
   // INV-IAR2: must have at least one chunk to be partial_ready or fully_ready
   if (retrievalChunksActive === 0) {

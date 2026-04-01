@@ -23,6 +23,15 @@
 import pg from "pg";
 import { generateQueryEmbedding, cosineSimilarity } from "./kb-embeddings.ts";
 
+/**
+ * Authoritative list of document statuses eligible for retrieval.
+ * 'processing' is included (Phase 5Z.2) so that partially-ready documents
+ * with active, embedded chunks can be queried before full completion.
+ * 'superseded', 'failed', 'draft', 'dead_letter' are intentionally excluded.
+ */
+export const RETRIEVAL_ALLOWED_DOCUMENT_STATUSES = ["ready", "active", "processing"] as const;
+export type RetrievalAllowedDocumentStatus = typeof RETRIEVAL_ALLOWED_DOCUMENT_STATUSES[number];
+
 export interface KbSearchResult {
   chunkId:             string;
   knowledgeBaseId:     string;

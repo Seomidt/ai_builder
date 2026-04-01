@@ -279,4 +279,58 @@ describe("instant-answer-readiness — deriveEligibility", () => {
     }
   });
 
+  // ── invariantViolations handling ──────────────────────────────────────────
+
+  it("INV violations with zero chunks → not_ready with fullCompletionBlocked=true", () => {
+    const agg = makeAgg({
+      retrievalChunksActive: 0,
+      invariantViolations:   ["INV-AGG2 VIOLATION: status=completed but retrievalChunksActive=0"],
+    });
+    const result = deriveEligibility(agg);
+    assert.notEqual(result.eligibility, "fully_ready",
+      "Invariant violation must prevent fully_ready eligibility");
+    assert.notEqual(result.eligibility, "partial_ready",
+      "Zero chunks + invariant violation must not be partial_ready");
+    assert.equal(result.fullCompletionBlocked, true,
+      "fullCompletionBlocked must be true when invariant violations present");
+    assert.equal(result.canRefreshForBetterAnswer, false);
+  });
+
+  it("INV violations with chunks → partial_ready with blocked=true (safe partial)", () => {
+    const agg = makeAgg({
+      retrievalChunksActive: 5,
+      answerCompleteness:    "complete",
+      coveragePercent:       100,
+      invariantViolations:   ["INV-AGG1 VIOLATION: status=completed but hasFailedSegments=true"],
+    });
+    const result = deriveEligibility(agg);
+    // With violations + chunks: serve partial (not complete) with blocked=true
+    assert.equal(result.eligibility, "partial_ready",
+      "Invariant violation with chunks should serve partial (not complete) to avoid incorrect 'fully_ready'");
+    assert.equal(result.fullCompletionBlocked, true,
+      "fullCompletionBlocked must be true when invariant violations present with chunks");
+    assert.equal(result.canRefreshForBetterAnswer, false);
+  });
+
+  it("INV violations reason string always mentions the violation", () => {
+    const violation = "INV-AGG2 VIOLATION: test violation";
+    const agg = makeAgg({ invariantViolations: [violation] });
+    const result = deriveEligibility(agg);
+    assert.ok(result.reason.includes("Invariant violation"),
+      "Reason should mention invariant violation");
+  });
+
+  it("empty invariantViolations → normal eligibility path (no downgrade)", () => {
+    const agg = makeAgg({
+      documentStatus:        "completed",
+      answerCompleteness:    "complete",
+      coveragePercent:       100,
+      retrievalChunksActive: 5,
+      invariantViolations:   [],
+    });
+    const result = deriveEligibility(agg);
+    assert.equal(result.eligibility, "fully_ready",
+      "Empty invariant violations must not downgrade eligibility");
+  });
+
 });

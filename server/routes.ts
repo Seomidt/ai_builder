@@ -3848,12 +3848,12 @@ Generate names and content in ${langNote}.`;
           coveragePercent: timingResult.coveragePercent,
         },
         timing: {
-          upload_to_first_segment_ready_ms:        firstSegmentReadyMs,
-          upload_to_first_retrieval_ready_ms:      agg.retrievalChunksActive > 0 ? firstSegmentReadyMs : null,
-          upload_to_first_partial_answer_ms:       firstRetrievalReadyMs,
-          upload_to_full_completion_ms:            allDoneMs,
-          time_since_upload_ms:                    timeSinceCreatedMs,
-          retrieval_query_wait_ms:                 retrievalQueryWaitMs,
+          upload_to_first_segment_ready_ms:   firstSegmentReadyMs,
+          upload_to_first_retrieval_ready_ms: firstRetrievalReadyMs,
+          upload_to_first_partial_answer_ms:  firstRetrievalReadyMs,
+          upload_to_full_completion_ms:       allDoneMs,
+          time_since_upload_ms:              timeSinceCreatedMs,
+          retrieval_query_wait_ms:           retrievalQueryWaitMs,
         },
       });
     } catch (err) {
