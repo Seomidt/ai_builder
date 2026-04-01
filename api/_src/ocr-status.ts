@@ -60,6 +60,17 @@ export default async function handler(
     if (!mediaTask) return err(res, 404, "NOT_FOUND", "Opgave ikke fundet");
 
     if (mediaTask.status === "completed") {
+      // Read-path protection: Filter out known simulated/fake outputs
+      const text = mediaTask.result || "";
+      const isSimulated = text.includes("Analysen er gennemført") || 
+                          text.includes("simulated") || 
+                          text.includes("placeholder") ||
+                          text.includes("Dette er en simuleret");
+                          
+      if (isSimulated) {
+        return json(res, { status: "failed", taskId, errorReason: "Ugyldigt output (simuleret data opdaget)" });
+      }
+
       return json(res, { status: "completed", taskId, ocrText: mediaTask.result ?? "", charCount: (mediaTask.result ?? "").length, completedAt: new Date().toISOString() });
     }
     if (mediaTask.status === "dead_letter" || mediaTask.status === "failed") {
@@ -77,6 +88,23 @@ export default async function handler(
   }
 
   if (task.status === "completed") {
+    // Read-path protection: Filter out known simulated/fake outputs
+    const text = task.ocrText || "";
+    const isSimulated = text.includes("Analysen er gennemført") || 
+                        text.includes("simulated") || 
+                        text.includes("placeholder") ||
+                        text.includes("Dette er en simuleret");
+                        
+    if (isSimulated) {
+      return json(res, {
+        status:       "failed",
+        taskId:       task.id,
+        errorReason:  "Ugyldigt output (simuleret data opdaget)",
+        attemptCount: task.attemptCount,
+        maxAttempts:  task.maxAttempts,
+      });
+    }
+
     return json(res, {
       status:       "completed",
       taskId:       task.id,

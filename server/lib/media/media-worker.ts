@@ -15,6 +15,7 @@ import { getFallbackChain, getNextFallback } from "./fallback-policy.ts";
 import { evaluateRetry } from "./retry-policy.ts";
 import { classifyFailure } from "./failure-classifier.ts";
 import { deriveJobStatus } from "./pipeline-planner.ts";
+import { validateOutput, validateProviderResponse } from "./output-validator.ts";
 import {
   getJobSteps,
   markStepRunning,
@@ -103,6 +104,56 @@ export async function processJob(job: MediaProcessingJob): Promise<void> {
         previousOutputText,
         jobId,
       });
+
+      if (result.success) {
+        // 1. Validate provider response (basic sanity check)
+        const providerValidation = validateProviderResponse(result.outputText);
+        if (!providerValidation.isValid) {
+          result.success = false;
+          result.errorCode = providerValidation.failureCode;
+          result.errorMessage = providerValidation.reason;
+          result.failureCategory = "invalid_output";
+          result.retryable = false;
+        } else {
+          // 2. Validate extracted output
+          const outputValidation = validateOutput({
+            mediaType,
+            pipelineType,
+            stepType: step.step_type,
+            text: result.outputText,
+          });
+
+          if (!outputValidation.isValid) {
+            result.success = false;
+            result.errorCode = outputValidation.failureCode;
+            result.errorMessage = outputValidation.reason;
+            result.failureCategory = outputValidation.failureCategory;
+            result.retryable = false;
+
+            await logEvent({
+              job_id: jobId,
+              step_id: step.id,
+              event_type: "media_output_validation_failed",
+              event_data: {
+                stepKey: step.step_key,
+                failureCode: outputValidation.failureCode,
+                reason: outputValidation.reason,
+                metrics: outputValidation.metrics,
+              },
+            });
+          } else {
+            await logEvent({
+              job_id: jobId,
+              step_id: step.id,
+              event_type: "media_output_validation_passed",
+              event_data: {
+                stepKey: step.step_key,
+                metrics: outputValidation.metrics,
+              },
+            });
+          }
+        }
+      }
 
       if (result.success) {
         previousOutputText = result.outputText ?? "";

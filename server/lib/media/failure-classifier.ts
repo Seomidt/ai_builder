@@ -94,6 +94,20 @@ export function classifyFailure(error: unknown): ClassifiedFailure {
     return { category: "invalid_input", code: "INVALID_INPUT", message, retryable: false };
   }
 
+  // ── Invalid output (empty, junk, simulated) ───────────────────────────────
+  if (
+    code === "EMPTY_OUTPUT" ||
+    code === "OUTPUT_TOO_SHORT" ||
+    code === "INSUFFICIENT_WORD_COUNT" ||
+    code === "JUNK_OUTPUT" ||
+    code === "SIMULATED_OUTPUT_DETECTED" ||
+    code === "EMPTY_PROVIDER_RESPONSE" ||
+    code === "MALFORMED_PROVIDER_RESPONSE" ||
+    message.includes("invalid_output")
+  ) {
+    return { category: "invalid_output", code: code || "INVALID_OUTPUT", message, retryable: false };
+  }
+
   // ── Provider permanent (4xx excluding 429) ────────────────────────────────
   if (
     status === 400 ||

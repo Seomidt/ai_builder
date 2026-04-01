@@ -49,6 +49,7 @@ export type FailureCategory =
   | "provider_permanent"
   | "network"
   | "invalid_input"
+  | "invalid_output"
   | "unsupported_media"
   | "rate_limited"
   | "storage"

@@ -16,6 +16,7 @@ import {
   markOcrFailed as failJob,
   type RawOcrTask,
 } from "./ocr-queue.ts";
+import { validateOutput, validateProviderResponse } from "../../../server/lib/media/output-validator.ts";
 
 // ── Structured logger ─────────────────────────────────────────────────────────
 function log(event: string, fields: Record<string, unknown> = {}): void {
@@ -143,11 +144,24 @@ export async function processJob(job: RawOcrTask): Promise<void> {
       );
     }
 
-    if (!extractedText || extractedText.trim().length < 10) {
-      throw new Error("Ingen tekst kunne udtrækkes. Dokumentet kan være krypteret, tomt eller utilgængeligt.");
+    // 3. Validate provider response
+    const providerValidation = validateProviderResponse(extractedText);
+    if (!providerValidation.isValid) {
+      throw new Error(`Provider response invalid: ${providerValidation.reason}`);
     }
 
-    // 3. Store result
+    // 4. Validate extracted output
+    const outputValidation = validateOutput({
+      mediaType: "pdf", // Default for legacy OCR
+      pipelineType: "ocr",
+      text: extractedText,
+    });
+
+    if (!outputValidation.isValid) {
+      throw new Error(`Output validation failed: ${outputValidation.reason} (${outputValidation.failureCode})`);
+    }
+
+    // 5. Store result
     await updateStage(job.id, "storing");
     const charCount  = extractedText.length;
     const wordCount  = extractedText.split(/\s+/).filter(Boolean).length;
