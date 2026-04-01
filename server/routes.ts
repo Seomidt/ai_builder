@@ -3771,7 +3771,7 @@ Generate names and content in ${langNote}.`;
         .limit(1);
 
       const { getDocumentAggregation } = await import("./lib/media/segment-aggregator");
-      const { evaluateAnswerTiming }   = await import("./lib/media/answer-timing-policy");
+      const { evaluateAnswerTiming, WAIT_TIMEOUT_MS } = await import("./lib/media/answer-timing-policy");
       const { checkInstantAnswerEligibility } = await import("./lib/media/instant-answer-readiness");
 
       const agg         = await getDocumentAggregation({ tenantId: orgId, knowledgeDocumentVersionId: versionId });
@@ -3811,6 +3811,14 @@ Generate names and content in ${langNote}.`;
         fullCompletionBlocked: agg.fullCompletionBlocked,
       });
 
+      // upload_to_first_partial_answer_ms: time from upload to first retrieval-producing job completing
+      const firstRetrievalReadyMs = (createdAtMs && agg.firstRetrievalReadyAt)
+        ? new Date(agg.firstRetrievalReadyAt).getTime() - createdAtMs
+        : null;
+
+      // retrieval_query_wait_ms: remaining time in the WAIT_TIMEOUT window before forced answer
+      const retrievalQueryWaitMs = Math.max(0, WAIT_TIMEOUT_MS - timeSinceCreatedMs);
+
       return res.json({
         documentId,
         versionId,
@@ -3828,16 +3836,22 @@ Generate names and content in ${langNote}.`;
         hasDeadLetterSegments:       agg.hasDeadLetterSegments,
         fullCompletionBlocked:       agg.fullCompletionBlocked,
         retrievalChunksActive:       agg.retrievalChunksActive,
+        firstRetrievalReadyAt:       agg.firstRetrievalReadyAt,
         invariantViolations:         agg.invariantViolations,
         instantAnswerEligibility:    eligibility.eligibility,
         canRefreshForBetterAnswer:   eligibility.canRefreshForBetterAnswer,
-        answerTimingDecision:        timingResult.decision,
-        answerTimingReason:          timingResult.reason,
+        answer_timing_policy_result: {
+          decision:        timingResult.decision,
+          reason:          timingResult.reason,
+          coveragePercent: timingResult.coveragePercent,
+        },
         timing: {
-          upload_to_first_segment_ready_ms:  firstSegmentReadyMs,
-          upload_to_first_retrieval_ready_ms: agg.retrievalChunksActive > 0 ? firstSegmentReadyMs : null,
-          upload_to_full_completion_ms:      allDoneMs,
-          time_since_upload_ms:              timeSinceCreatedMs,
+          upload_to_first_segment_ready_ms:        firstSegmentReadyMs,
+          upload_to_first_retrieval_ready_ms:      agg.retrievalChunksActive > 0 ? firstSegmentReadyMs : null,
+          upload_to_first_partial_answer_ms:       firstRetrievalReadyMs,
+          upload_to_full_completion_ms:            allDoneMs,
+          time_since_upload_ms:                    timeSinceCreatedMs,
+          retrieval_query_wait_ms:                 retrievalQueryWaitMs,
         },
       });
     } catch (err) {

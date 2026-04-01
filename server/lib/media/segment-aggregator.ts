@@ -103,6 +103,8 @@ export interface AggregationResult {
   hasDeadLetterSegments: boolean;
   fullCompletionBlocked: boolean;
   retrievalChunksActive: number;
+  /** ISO timestamp of first retrieval-producing job completion, if available. */
+  firstRetrievalReadyAt: string | null;
   jobDetails:            JobRow[];
   invariantViolations:   string[];
 }
@@ -287,6 +289,23 @@ export async function getDocumentAggregation(params: {
       answerCompleteness = "none";
     }
 
+    // ── 8. Compute firstRetrievalReadyAt ──────────────────────────────────
+    // Earliest completed_at among retrieval-producing jobs.
+    const firstRetrievalReadyAt = (() => {
+      const done = jobs
+        .filter((j) => RETRIEVAL_PRODUCING_JOB_TYPES.has(j.job_type) && j.status === "completed" && j.completed_at)
+        .sort((a, b) => {
+          const aMs = a.completed_at instanceof Date ? a.completed_at.getTime() : new Date(a.completed_at as unknown as string).getTime();
+          const bMs = b.completed_at instanceof Date ? b.completed_at.getTime() : new Date(b.completed_at as unknown as string).getTime();
+          return aMs - bMs;
+        });
+      const first = done[0];
+      if (!first?.completed_at) return null;
+      return first.completed_at instanceof Date
+        ? first.completed_at.toISOString()
+        : new Date(first.completed_at as unknown as string).toISOString();
+    })();
+
     const resultWithoutViolations = {
       documentStatus,
       answerCompleteness,
@@ -301,6 +320,7 @@ export async function getDocumentAggregation(params: {
       hasDeadLetterSegments,
       fullCompletionBlocked,
       retrievalChunksActive,
+      firstRetrievalReadyAt,
       jobDetails: jobs,
     };
 

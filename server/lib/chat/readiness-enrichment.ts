@@ -54,9 +54,13 @@ export async function enrichResponseWithReadiness(params: {
     const { knowledgeDocuments } = await import("../../../shared/schema.ts");
     const { inArray, eq, and } = await import("drizzle-orm");
 
-    // Fetch current_version_id for each document (tenant-scoped — INV-RE3)
+    // Fetch current_version_id + createdAt for each document (tenant-scoped — INV-RE3)
     const docs = await db
-      .select({ id: knowledgeDocuments.id, currentVersionId: knowledgeDocuments.currentVersionId })
+      .select({
+        id:               knowledgeDocuments.id,
+        currentVersionId: knowledgeDocuments.currentVersionId,
+        createdAt:        knowledgeDocuments.createdAt,
+      })
       .from(knowledgeDocuments)
       .where(
         and(
@@ -68,6 +72,13 @@ export async function enrichResponseWithReadiness(params: {
     const versionIds = docs
       .map((d) => d.currentVersionId)
       .filter((v): v is string => !!v);
+
+    // Use the earliest createdAt among matched documents for timeSinceUploadMs
+    const earliestCreatedAt = docs
+      .map((d) => (d.createdAt ? new Date(d.createdAt as unknown as string).getTime() : null))
+      .filter((ms): ms is number => ms !== null)
+      .sort((a, b) => a - b)[0] ?? null;
+    const timeSinceUploadMs = earliestCreatedAt !== null ? Math.max(0, Date.now() - earliestCreatedAt) : 0;
 
     if (!versionIds.length) return null;
 
@@ -101,7 +112,7 @@ export async function enrichResponseWithReadiness(params: {
       segmentsReady:         aggregated.segmentsReady,
       segmentsTotal:         aggregated.segmentsTotal,
       retrievalChunksActive: successfulResults[0]?.retrievalChunksActive ?? 0,
-      timeSinceUploadMs:     0,
+      timeSinceUploadMs,
       fullCompletionBlocked: aggregated.fullCompletionBlocked,
     });
 

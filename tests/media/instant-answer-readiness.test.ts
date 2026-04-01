@@ -30,6 +30,7 @@ function makeAgg(overrides: Partial<AggregationResult> = {}): AggregationResult 
     hasDeadLetterSegments: false,
     fullCompletionBlocked: false,
     retrievalChunksActive: 0,
+    firstRetrievalReadyAt: null,
     invariantViolations:   [],
     jobDetails:            [],
     ...overrides,
@@ -180,6 +181,102 @@ describe("instant-answer-readiness — deriveEligibility", () => {
     });
     const result = deriveEligibility(agg);
     assert.notEqual(result.eligibility, "partial_ready");
+  });
+
+  // ── firstRetrievalReadyAt propagation ─────────────────────────────────────
+
+  it("firstRetrievalReadyAt is null when no chunks (not_ready)", () => {
+    const agg = makeAgg({ retrievalChunksActive: 0, firstRetrievalReadyAt: "2025-01-01T00:00:00.000Z" });
+    const result = deriveEligibility(agg);
+    assert.equal(result.firstRetrievalReadyAt, null, "no chunks → firstRetrievalReadyAt must be null");
+  });
+
+  it("firstRetrievalReadyAt is propagated when fully_ready", () => {
+    const ts = "2025-06-01T10:30:00.000Z";
+    const agg = makeAgg({
+      documentStatus:        "completed",
+      answerCompleteness:    "complete",
+      coveragePercent:       100,
+      retrievalChunksActive: 5,
+      fullCompletionBlocked: false,
+      firstRetrievalReadyAt: ts,
+    });
+    const result = deriveEligibility(agg);
+    assert.equal(result.eligibility, "fully_ready");
+    assert.equal(result.firstRetrievalReadyAt, ts);
+  });
+
+  it("firstRetrievalReadyAt is propagated when partial_ready", () => {
+    const ts = "2025-06-01T09:00:00.000Z";
+    const agg = makeAgg({
+      documentStatus:        "partially_ready",
+      answerCompleteness:    "partial",
+      coveragePercent:       50,
+      retrievalChunksActive: 4,
+      segmentsProcessing:    2,
+      firstRetrievalReadyAt: ts,
+    });
+    const result = deriveEligibility(agg);
+    assert.equal(result.eligibility, "partial_ready");
+    assert.equal(result.firstRetrievalReadyAt, ts);
+  });
+
+  it("firstRetrievalReadyAt is propagated when blocked with chunks", () => {
+    const ts = "2025-06-01T08:00:00.000Z";
+    const agg = makeAgg({
+      documentStatus:        "partially_ready_with_failures",
+      answerCompleteness:    "partial",
+      coveragePercent:       30,
+      retrievalChunksActive: 2,
+      fullCompletionBlocked: true,
+      hasDeadLetterSegments: true,
+      firstRetrievalReadyAt: ts,
+    });
+    const result = deriveEligibility(agg);
+    assert.equal(result.eligibility, "partial_ready");
+    assert.equal(result.firstRetrievalReadyAt, ts);
+  });
+
+  it("firstRetrievalReadyAt null does not break deriveEligibility for any branch", () => {
+    const branches = [
+      makeAgg({ retrievalChunksActive: 0, segmentsProcessing: 1 }),
+      makeAgg({ retrievalChunksActive: 0, fullCompletionBlocked: true }),
+      makeAgg({ retrievalChunksActive: 3, answerCompleteness: "partial", coveragePercent: 50, segmentsProcessing: 2 }),
+      makeAgg({ retrievalChunksActive: 3, answerCompleteness: "partial", coveragePercent: 50, fullCompletionBlocked: true }),
+      makeAgg({ retrievalChunksActive: 5, answerCompleteness: "complete", coveragePercent: 100 }),
+    ];
+    for (const agg of branches) {
+      const result = deriveEligibility(agg);
+      assert.ok(typeof result.eligibility === "string", "eligibility must be defined");
+    }
+  });
+
+  // ── retrieval completeness contract ───────────────────────────────────────
+
+  it("coveragePercent is always propagated in result", () => {
+    const agg = makeAgg({
+      documentStatus:        "partially_ready",
+      answerCompleteness:    "partial",
+      coveragePercent:       73,
+      retrievalChunksActive: 7,
+      segmentsProcessing:    1,
+    });
+    const result = deriveEligibility(agg);
+    assert.equal(result.coveragePercent, 73);
+  });
+
+  it("reason string is always non-empty for all eligibility states", () => {
+    const cases: Partial<AggregationResult>[] = [
+      { retrievalChunksActive: 0, segmentsProcessing: 1 },
+      { retrievalChunksActive: 0, fullCompletionBlocked: true },
+      { retrievalChunksActive: 5, answerCompleteness: "complete", coveragePercent: 100 },
+      { retrievalChunksActive: 3, answerCompleteness: "partial", coveragePercent: 60, segmentsProcessing: 1 },
+      { retrievalChunksActive: 3, answerCompleteness: "partial", coveragePercent: 60, fullCompletionBlocked: true, hasDeadLetterSegments: true },
+    ];
+    for (const c of cases) {
+      const result = deriveEligibility(makeAgg(c));
+      assert.ok(result.reason.length > 0, `reason must not be empty for eligibility=${result.eligibility}`);
+    }
   });
 
 });

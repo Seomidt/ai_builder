@@ -61,6 +61,7 @@ export function deriveEligibility(agg: AggregationResult): InstantAnswerReadines
     segmentsQueued,
     documentStatus,
     answerCompleteness,
+    firstRetrievalReadyAt,
   } = agg;
 
   // INV-IAR2: must have at least one chunk to be partial_ready or fully_ready
@@ -97,7 +98,7 @@ export function deriveEligibility(agg: AggregationResult): InstantAnswerReadines
       coveragePercent:        100,
       fullCompletionBlocked:  false,
       hasDeadLetterSegments,
-      firstRetrievalReadyAt:  null,
+      firstRetrievalReadyAt,
       canRefreshForBetterAnswer: false,
       reason:                 "All segments complete — full answer available",
     };
@@ -111,7 +112,7 @@ export function deriveEligibility(agg: AggregationResult): InstantAnswerReadines
       coveragePercent,
       fullCompletionBlocked:  true,
       hasDeadLetterSegments,
-      firstRetrievalReadyAt:  null,
+      firstRetrievalReadyAt,
       canRefreshForBetterAnswer: false,
       reason:
         `${retrievalChunksActive} chunk(s) available but blocked at ${coveragePercent}% ` +
@@ -127,7 +128,7 @@ export function deriveEligibility(agg: AggregationResult): InstantAnswerReadines
     coveragePercent,
     fullCompletionBlocked:  false,
     hasDeadLetterSegments,
-    firstRetrievalReadyAt:  null,
+    firstRetrievalReadyAt,
     canRefreshForBetterAnswer: stillProcessing,
     reason:
       `${retrievalChunksActive} chunk(s) ready at ${coveragePercent}% coverage ` +

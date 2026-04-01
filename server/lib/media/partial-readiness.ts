@@ -127,7 +127,25 @@ export async function getDocumentReadiness(params: {
     );
   }
 
-  const partialWarning = buildPartialWarning(agg.documentStatus, agg);
+  // INV-PR1 enforcement: partialWarning must be non-null iff answerCompleteness !== "complete".
+  // Build warning AFTER the answerCompleteness guard so the two are always consistent.
+  let partialWarning = buildPartialWarning(agg.documentStatus, agg);
+  if (answerCompleteness !== "complete" && partialWarning === null) {
+    // Guard was triggered (answerCompleteness downgraded) — synthesise a fallback warning.
+    partialWarning =
+      `Document coverage is ${coveragePercent}% — answers may be incomplete until processing finishes.`;
+    console.warn(
+      `[partial-readiness] INV-PR1 fallback warning for version=${params.knowledgeDocumentVersionId}: ` +
+      `partialWarning was null but answerCompleteness=${answerCompleteness}`,
+    );
+  } else if (answerCompleteness === "complete" && partialWarning !== null) {
+    // Defensive: should never happen given buildPartialWarning, but log it.
+    console.warn(
+      `[partial-readiness] INV-PR1 unexpected: answerCompleteness=complete but partialWarning non-null ` +
+      `for version=${params.knowledgeDocumentVersionId}`,
+    );
+    partialWarning = null;
+  }
 
   return {
     documentStatus:        agg.documentStatus,
