@@ -1,15 +1,17 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useMutation } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import {
   Send, Bot, User, ChevronDown, ChevronUp, ShieldAlert, BookOpen,
   AlertTriangle, CheckCircle2, HelpCircle, Paperclip, X,
-  FileText, Image, Video, Sparkles,
+  FileText, Image, Video, Sparkles, Zap, RefreshCw, Clock, WifiOff,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { useReadinessStream, type ReadinessSnapshot, type ReadinessUxState } from "@/hooks/use-readiness-stream";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -33,6 +35,16 @@ interface ChatResponse {
   confidence_band: ConfidenceBand;
   needs_manual_review: boolean;
   routing_explanation: string;
+  // Phase 5Z.3 — progressive answer metadata
+  answerCompleteness?:    "none" | "partial" | "complete";
+  sourceCoveragePercent?: number;
+  partialWarning?:        string | null;
+  hasFailedSegments?:     boolean;
+  fullCompletionBlocked?: boolean;
+  isPartial?:             boolean;
+  canRefreshForBetterAnswer?: boolean;
+  triggerKeyUsed?:        string | null;
+  answerGeneration?:      number;
 }
 
 interface AttachedFile {
@@ -515,6 +527,108 @@ function TypingIndicator() {
   );
 }
 
+// ─── Readiness Stream Banner (Phase 5Z.3) ─────────────────────────────────────
+
+interface ReadinessStreamBannerProps {
+  uxState:   ReadinessUxState;
+  snapshot:  ReadinessSnapshot | null;
+  isConnected: boolean;
+  onRefreshAnswer?: () => void;
+}
+
+function ReadinessStreamBanner({ uxState, snapshot, isConnected, onRefreshAnswer }: ReadinessStreamBannerProps) {
+  if (uxState === "idle" || uxState === "complete_answer_available") return null;
+
+  const coveragePct  = snapshot?.coveragePercent ?? 0;
+  const segsReady    = snapshot?.segmentsReady ?? 0;
+  const segsTotal    = snapshot?.segmentsTotal ?? 0;
+  const partialWarn  = snapshot?.partialWarning;
+  const canRefresh   = snapshot?.canRefreshForBetterAnswer ?? false;
+  const isBlocked    = snapshot?.fullCompletionBlocked ?? false;
+
+  if (uxState === "dead_letter_document") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-red-500 bg-red-50 dark:bg-red-950/30 rounded-md mx-4 mb-2" data-testid="readiness-banner-dead-letter">
+        <AlertTriangle className="w-4 h-4 shrink-0" />
+        <span>Dokumentet kunne ikke behandles fuldt ud. Svar baseres på tilgængeligt indhold.</span>
+      </div>
+    );
+  }
+
+  if (uxState === "failed_document") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-orange-500 bg-orange-50 dark:bg-orange-950/30 rounded-md mx-4 mb-2" data-testid="readiness-banner-failed">
+        <AlertTriangle className="w-4 h-4 shrink-0" />
+        <span>Behandling fejlede for dele af dokumentet. Forsøger igen automatisk…</span>
+      </div>
+    );
+  }
+
+  if (uxState === "blocked_partial_answer") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-amber-600 bg-amber-50 dark:bg-amber-950/30 rounded-md mx-4 mb-2" data-testid="readiness-banner-blocked">
+        <WifiOff className="w-4 h-4 shrink-0" />
+        <span>Fuld dokumentbehandling er blokeret. Svaret er baseret på delvist tilgængeligt indhold.</span>
+      </div>
+    );
+  }
+
+  if (uxState === "improving_answer") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-blue-500 bg-blue-50 dark:bg-blue-950/30 rounded-md mx-4 mb-2" data-testid="readiness-banner-improving">
+        <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+        <span>Forbedrer svar med mere indhold ({coveragePct}% dækning)…</span>
+      </div>
+    );
+  }
+
+  if (uxState === "partial_answer_available") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-primary/80 bg-primary/5 rounded-md mx-4 mb-2" data-testid="readiness-banner-partial">
+        <Zap className="w-4 h-4 shrink-0 text-primary" />
+        <span className="flex-1">
+          {partialWarn ?? `Delvist svar: ${coveragePct}% af dokumentet er klar (${segsReady}/${segsTotal} segmenter)`}
+          {isBlocked && " · Fuld behandling er blokeret"}
+        </span>
+        {canRefresh && onRefreshAnswer && (
+          <button
+            onClick={onRefreshAnswer}
+            className="text-primary hover:underline shrink-0"
+            data-testid="button-refresh-answer"
+          >
+            Opdater svar
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (uxState === "connecting_to_document_stream") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-muted-foreground" data-testid="readiness-banner-connecting">
+        <Clock className="w-4 h-4 shrink-0 animate-pulse" />
+        <span>Forbinder til dokumentstream…</span>
+      </div>
+    );
+  }
+
+  if (uxState === "processing_document") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-muted-foreground animate-pulse" data-testid="readiness-banner-processing">
+        <svg className="w-4 h-4 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+        <span>
+          Behandler dokument{segsTotal > 0 ? ` — ${segsReady}/${segsTotal} segmenter klar` : "…"}
+        </span>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 // ─── Empty State ──────────────────────────────────────────────────────────────
 
 function EmptyState() {
@@ -534,6 +648,7 @@ function EmptyState() {
 
 export default function AiChatPage() {
   const { toast } = useToast();
+  const [location] = useLocation();
   const [messages, setMessages]           = useState<ChatMessage[]>([]);
   const [input, setInput]                 = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -541,6 +656,47 @@ export default function AiChatPage() {
   const [ocrStatusLabel, setOcrStatusLabel] = useState<string | null>(null);
   const bottomRef   = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Phase 5Z.3 — Document readiness monitoring ────────────────────────────
+  // Activate when URL contains ?monitorDocumentId=<kb-doc-id>
+  const monitorDocumentId = new URLSearchParams(
+    typeof window !== "undefined" ? window.location.search : "",
+  ).get("monitorDocumentId");
+
+  const autoTriggeredKeysRef = useRef<Set<string>>(new Set());
+  // chatMutateRef holds a stable reference to chatMutation.mutate (set after hook declaration)
+  const chatMutateRef = useRef<((payload: { text: string; attachments: AttachedFile[]; documentIds?: string[]; triggerKey?: string }) => void) | null>(null);
+
+  const handleAutoTrigger = useCallback((snap: ReadinessSnapshot, isImprovement: boolean) => {
+    if (!snap.triggerKey) return;
+    if (autoTriggeredKeysRef.current.has(snap.triggerKey)) return; // idempotent
+    if (!chatMutateRef.current) return; // mutation not ready yet
+    autoTriggeredKeysRef.current.add(snap.triggerKey);
+
+    const defaultQuestion = isImprovement
+      ? "Opdater analysen med det nyeste indhold fra dokumentet."
+      : "Hvad indeholder dokumentet? Giv en præcis analyse baseret på det tilgængelige indhold.";
+
+    chatMutateRef.current({
+      text:        defaultQuestion,
+      attachments: [],
+      documentIds: monitorDocumentId ? [monitorDocumentId] : [],
+      triggerKey:  snap.triggerKey,
+    });
+  }, [monitorDocumentId]);
+
+  const { uxState, snapshot, isConnected, answerGeneration, duplicatesPrevented } =
+    useReadinessStream({
+      documentId:         monitorDocumentId,
+      onAutoTrigger:      handleAutoTrigger,
+      autoTriggerEnabled: !ocrStatusLabel,
+    });
+
+  const handleRefreshAnswer = useCallback(() => {
+    if (!snapshot?.triggerKey || !snapshot.canRefreshForBetterAnswer) return;
+    autoTriggeredKeysRef.current.delete(snapshot.triggerKey);
+    handleAutoTrigger(snapshot, true);
+  }, [snapshot, handleAutoTrigger]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -581,7 +737,7 @@ export default function AiChatPage() {
   // ── Send ─────────────────────────────────────────────────────────────────────
 
   const chatMutation = useMutation({
-    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string }) => {
+    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string }) => {
       const traceId = crypto.randomUUID().slice(0, 8);
 
       // ── TRACE STAGE 1: FRONTEND SEND ─────────────────────────────────────
@@ -800,9 +956,10 @@ export default function AiChatPage() {
           conversation_id: conversationId ?? null,
           document_context: documentContext,
           context: {
-            document_ids: [],
+            document_ids: payload.documentIds ?? [],
             preferred_expert_id: null,
           },
+          ...(payload.triggerKey ? { idempotency_key: `${payload.triggerKey}:${fullMessage.slice(0, 64)}` } : {}),
         });
 
         const reader  = res.body!.getReader();
@@ -917,6 +1074,9 @@ export default function AiChatPage() {
     },
   });
 
+  // Set chatMutateRef so handleAutoTrigger (declared before chatMutation) can use it
+  chatMutateRef.current = chatMutation.mutate as typeof chatMutateRef.current;
+
   const handleSend = () => {
     const text = input.trim();
     if ((!text && attachments.length === 0) || chatMutation.isPending) return;
@@ -979,7 +1139,19 @@ export default function AiChatPage() {
         <div className="mx-auto w-full max-w-3xl sm:max-w-4xl min-h-full flex flex-col">
           {isEmpty ? (
             <div className="flex-1 flex items-center justify-center py-8 -translate-y-[10%]">
-              <EmptyState />
+              {monitorDocumentId && uxState !== "idle" ? (
+                <div className="w-full max-w-md space-y-3">
+                  <ReadinessStreamBanner
+                    uxState={uxState}
+                    snapshot={snapshot}
+                    isConnected={isConnected}
+                    onRefreshAnswer={handleRefreshAnswer}
+                  />
+                  <EmptyState />
+                </div>
+              ) : (
+                <EmptyState />
+              )}
             </div>
           ) : (
             <div className="pt-6">
@@ -993,6 +1165,15 @@ export default function AiChatPage() {
                   </svg>
                   {ocrStatusLabel}
                 </div>
+              )}
+              {/* Phase 5Z.3 — Readiness banner shown during/after processing */}
+              {monitorDocumentId && (
+                <ReadinessStreamBanner
+                  uxState={uxState}
+                  snapshot={snapshot}
+                  isConnected={isConnected}
+                  onRefreshAnswer={handleRefreshAnswer}
+                />
               )}
             </div>
           )}

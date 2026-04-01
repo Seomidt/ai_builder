@@ -1578,13 +1578,51 @@ Generate names and content in ${langNote}.`;
       document_ids:        z.array(z.string()).optional().default([]),
       preferred_expert_id: z.string().optional().nullable(),
     }).optional().default({}),
+    // Phase 5Z.3 — Idempotency key prevents duplicate AI calls for the same readiness generation
+    idempotency_key: z.string().max(256).optional().nullable(),
   });
+
+  // ── Phase 5Z.3 — Chat idempotency cache ─────────────────────────────────────
+  // Keyed by: `${orgId}:${idempotency_key}`. TTL: 10 minutes (covers reconnect window).
+  // Only non-streaming /api/chat responses are cached. Streaming cannot be replayed byte-for-byte.
+  const _chatIdempotencyCache = new Map<string, { ts: number; payload: object }>();
+  const CHAT_IDEM_TTL_MS = 10 * 60 * 1000;
+
+  function _chatIdemGet(orgId: string, key: string | null | undefined) {
+    if (!key) return null;
+    const cacheKey = `${orgId}:${key}`;
+    const entry = _chatIdempotencyCache.get(cacheKey);
+    if (!entry) return null;
+    if (Date.now() - entry.ts > CHAT_IDEM_TTL_MS) { _chatIdempotencyCache.delete(cacheKey); return null; }
+    return entry.payload;
+  }
+
+  function _chatIdemSet(orgId: string, key: string | null | undefined, payload: object) {
+    if (!key) return;
+    const cacheKey = `${orgId}:${key}`;
+    _chatIdempotencyCache.set(cacheKey, { ts: Date.now(), payload });
+    // Prune old entries (keep cache bounded to 500 entries)
+    if (_chatIdempotencyCache.size > 500) {
+      const oldest = [..._chatIdempotencyCache.entries()]
+        .sort((a, b) => a[1].ts - b[1].ts)
+        .slice(0, 100)
+        .map(([k]) => k);
+      oldest.forEach(k => _chatIdempotencyCache.delete(k));
+    }
+  }
 
   app.post("/api/chat", async (req: Request, res: Response) => {
     try {
       const body   = chatBodySchema.parse(req.body);
       const orgId  = getOrgId(req);
       const userId = getUserId(req);
+
+      // ── Phase 5Z.3 — Idempotency check (non-streaming) ──────────────────────
+      const idemKey = body.idempotency_key ?? null;
+      const cached  = _chatIdemGet(orgId, idemKey);
+      if (cached) {
+        return res.json({ ...cached, _idempotent: true });
+      }
 
       const { resolveRouteDecision } = await import("./lib/chat/route-decision");
       const { runChatMessage }        = await import("./services/chat-runner");
@@ -1627,7 +1665,7 @@ Generate names and content in ${langNote}.`;
         documentIds: body.context?.document_ids ?? [],
       });
 
-      return res.json({
+      const chatResponse: object = {
         answer:              result.answer,
         conversation_id:     result.conversationId,
         route_type:          decision.routeType,
@@ -1643,9 +1681,14 @@ Generate names and content in ${langNote}.`;
         confidence_band:     result.confidenceBand,
         needs_manual_review: result.needsManualReview,
         routing_explanation: result.routingExplanation,
+        // Phase 5Z.3 — Idempotency + answer generation metadata
+        trigger_key_used:    idemKey ?? null,
+        answer_generation:   { partial: !!(partialReadiness as any)?.fullCompletionBlocked, generation: 1 },
         // Readiness fields are spread flat for direct access AND available nested as partial_readiness
         ...(partialReadiness ? { partial_readiness: partialReadiness, ...partialReadiness } : {}),
-      });
+      };
+      _chatIdemSet(orgId, idemKey, chatResponse);
+      return res.json(chatResponse);
     } catch (err) { handleError(res, err); }
   });
 
@@ -1732,6 +1775,9 @@ Generate names and content in ${langNote}.`;
         needs_manual_review: result.needsManualReview,
         routing_explanation: result.routingExplanation,
         similar_cases:       result.similarCases,
+        // Phase 5Z.3 — Idempotency + answer generation metadata
+        trigger_key_used:    body.idempotency_key ?? null,
+        answer_generation:   { partial: !!(streamReadiness as any)?.fullCompletionBlocked, generation: 1 },
         // Readiness fields are spread flat for direct access AND available nested as partial_readiness
         ...(streamReadiness ? { partial_readiness: streamReadiness, ...streamReadiness } : {}),
       });
@@ -3871,6 +3917,271 @@ Generate names and content in ${langNote}.`;
     } catch (err) {
       console.error("[kb/document-debug] error:", err);
       return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Debug opslag fejlede" });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // GET /api/readiness-stream — SSE real-time readiness updates (Phase 5Z.3)
+  //
+  // Streams document readiness changes to the client as Server-Sent Events.
+  // Authenticated, tenant-scoped. Polls DB on 1.5s interval, emits only when
+  // state materially changes. Auto-closes after terminal state or max 15 min.
+  //
+  // Query params:
+  //   documentId — ID of the knowledge document to monitor
+  //
+  // Events:
+  //   connected        — initial confirmation (always first)
+  //   status_snapshot  — current state (always after connected)
+  //   partial_ready    — emitted when first retrieval-ready chunks appear
+  //   readiness_progress — emitted on coverage improvements
+  //   completed        — document fully processed
+  //   failed           — document failed (with retries remaining)
+  //   dead_letter      — document permanently failed
+  //   blocked          — fullCompletionBlocked=true
+  //   keepalive        — heartbeat every 15s for idle connections
+  //   error            — error during readiness check
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.get("/api/readiness-stream", async (req: Request, res: Response) => {
+    const orgId      = getOrgId(req);
+    const documentId = req.query["documentId"] as string | undefined;
+
+    if (!documentId) {
+      res.status(400).json({ error_code: "MISSING_DOCUMENT_ID", message: "documentId query parameter krævet" });
+      return;
+    }
+
+    // ── SSE headers ────────────────────────────────────────────────────────
+    res.setHeader("Content-Type",      "text/event-stream");
+    res.setHeader("Cache-Control",     "no-cache");
+    res.setHeader("Connection",        "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    const sendEvent = (eventType: string, data: object) => {
+      try {
+        res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // client disconnected — will be cleaned up by close handler
+      }
+    };
+
+    // ── Observability counters ─────────────────────────────────────────────
+    let streamConnectCount    = 0;
+    let streamReconnectCount  = 0;
+    let pollCount             = 0;
+    let lastTriggerKey: string | null   = null;
+    let lastDocumentStatus: string | null = null;
+    let lastCoveragePercent   = -1;
+    let isTerminated          = false;
+    const startedAt           = Date.now();
+
+    // ── Cleanup ────────────────────────────────────────────────────────────
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
+    const MAX_DURATION_MS  = 15 * 60 * 1000; // 15 min
+    const POLL_INTERVAL_MS = 1_500;
+    const KEEPALIVE_MS     = 15_000;
+
+    function cleanup() {
+      if (isTerminated) return;
+      isTerminated = true;
+      if (pollInterval)      clearInterval(pollInterval);
+      if (keepaliveInterval) clearInterval(keepaliveInterval);
+      try { res.end(); } catch { /* already closed */ }
+    }
+
+    req.on("close",   cleanup);
+    req.on("error",   cleanup);
+    res.on("finish",  cleanup);
+
+    // ── Verify document belongs to tenant ──────────────────────────────────
+    try {
+      const { db: dbInst }          = await import("./db");
+      const { knowledgeDocuments }  = await import("../shared/schema");
+      const { eq, and }             = await import("drizzle-orm");
+
+      const [doc] = await dbInst
+        .select({ id: knowledgeDocuments.id, currentVersionId: knowledgeDocuments.currentVersionId })
+        .from(knowledgeDocuments)
+        .where(and(
+          eq(knowledgeDocuments.id, documentId),
+          eq(knowledgeDocuments.tenantId, orgId),
+        ))
+        .limit(1);
+
+      if (!doc) {
+        sendEvent("error", { error_code: "NOT_FOUND", message: `Dokument ${documentId} ikke fundet` });
+        cleanup();
+        return;
+      }
+
+      // ── Confirm connected ────────────────────────────────────────────────
+      streamConnectCount++;
+      sendEvent("connected", {
+        documentId,
+        tenantId:         orgId,
+        connectedAt:      new Date().toISOString(),
+        streamConnectCount,
+      });
+
+      // ── Poll function ────────────────────────────────────────────────────
+      const poll = async () => {
+        if (isTerminated) return;
+        if (Date.now() - startedAt > MAX_DURATION_MS) {
+          sendEvent("error", { error_code: "TIMEOUT", message: "Stream max duration reached" });
+          cleanup();
+          return;
+        }
+
+        pollCount++;
+
+        try {
+          // Re-fetch doc for latest versionId (may have changed)
+          const { knowledgeDocuments: kd2 } = await import("../shared/schema");
+          const [latestDoc] = await dbInst
+            .select({ id: kd2.id, currentVersionId: kd2.currentVersionId, createdAt: kd2.createdAt })
+            .from(kd2)
+            .where(and(eq(kd2.id, documentId), eq(kd2.tenantId, orgId)))
+            .limit(1);
+
+          if (!latestDoc?.currentVersionId) {
+            // No version yet — document still initializing
+            sendEvent("readiness_progress", {
+              documentId,
+              documentStatus:    "not_started",
+              answerCompleteness: "none",
+              isPartial:         false,
+              segmentsReady:     0,
+              segmentsTotal:     0,
+              coveragePercent:   0,
+              retrievalChunksActive: 0,
+              canAutoStartChat:  false,
+              triggerKey:        null,
+            });
+            return;
+          }
+
+          // Aggregate readiness state
+          const { getDocumentAggregation } = await import("./lib/media/segment-aggregator");
+          const { deriveEligibility }       = await import("./lib/media/instant-answer-readiness");
+          const { generateTriggerKey }      = await import("./lib/media/readiness-trigger-key");
+
+          const agg = await getDocumentAggregation({
+            tenantId:                    orgId,
+            knowledgeDocumentVersionId:  latestDoc.currentVersionId,
+          });
+
+          const eligibility = deriveEligibility(agg);
+          const triggerResult = generateTriggerKey({
+            documentId,
+            documentStatus:        agg.documentStatus,
+            coveragePercent:       agg.coveragePercent,
+            firstRetrievalReadyAt: agg.firstRetrievalReadyAt,
+            retrievalChunksActive: agg.retrievalChunksActive,
+          });
+
+          const createdAtMs = latestDoc.createdAt
+            ? (latestDoc.createdAt instanceof Date
+                ? latestDoc.createdAt.getTime()
+                : new Date(latestDoc.createdAt as string).getTime())
+            : null;
+          const nowMs = Date.now();
+          const timeToFirstRetrievalReadyMs = (createdAtMs && agg.firstRetrievalReadyAt)
+            ? new Date(agg.firstRetrievalReadyAt).getTime() - createdAtMs
+            : null;
+
+          const payload = {
+            documentId,
+            documentStatus:       agg.documentStatus,
+            answerCompleteness:   agg.answerCompleteness,
+            isPartial:            agg.answerCompleteness === "partial",
+            segmentsReady:        agg.segmentsCompleted,
+            segmentsTotal:        agg.segmentsTotal,
+            coveragePercent:      agg.coveragePercent,
+            retrievalChunksActive: agg.retrievalChunksActive,
+            hasFailedSegments:    agg.hasFailedSegments,
+            hasDeadLetterSegments: agg.hasDeadLetterSegments,
+            fullCompletionBlocked: agg.fullCompletionBlocked,
+            firstRetrievalReadyAt: agg.firstRetrievalReadyAt,
+            timeToFirstRetrievalReadyMs,
+            partialWarning:       eligibility.eligibility === "partial_ready"
+              ? `Kun ${agg.coveragePercent}% af dokumentet er behandlet endnu.`
+              : null,
+            canAutoStartChat:     eligibility.eligibility === "partial_ready" || eligibility.eligibility === "fully_ready",
+            canRefreshForBetterAnswer: eligibility.canRefreshForBetterAnswer,
+            triggerKey:           triggerResult.key,
+            triggerKeyDescription: triggerResult.description,
+            eligibility:          eligibility.eligibility,
+            pollCount,
+            timeSinceConnectMs:   nowMs - startedAt,
+          };
+
+          const statusChanged   = agg.documentStatus !== lastDocumentStatus;
+          const coverageChanged = agg.coveragePercent !== lastCoveragePercent;
+          const keyChanged      = triggerResult.key   !== lastTriggerKey;
+          const isFirstPoll     = pollCount === 1;
+
+          // ── Determine event type ─────────────────────────────────────────
+          let eventType: string;
+
+          if (isFirstPoll) {
+            eventType = "status_snapshot";
+          } else if (agg.documentStatus === "completed" && statusChanged) {
+            eventType = "completed";
+          } else if ((agg.documentStatus === "failed" || agg.documentStatus === "retryable_failed") && statusChanged) {
+            eventType = "failed";
+          } else if (agg.documentStatus === "dead_letter" && statusChanged) {
+            eventType = "dead_letter";
+          } else if (agg.fullCompletionBlocked && agg.retrievalChunksActive === 0 && statusChanged) {
+            eventType = "blocked";
+          } else if (
+            lastCoveragePercent === 0 && agg.coveragePercent > 0 && agg.retrievalChunksActive > 0
+          ) {
+            // First retrieval-ready chunks appeared
+            eventType = "partial_ready";
+          } else if (keyChanged) {
+            // Coverage bucket improved
+            eventType = "readiness_progress";
+          } else {
+            // No material change — skip emission (avoids noisy duplicate events)
+            return;
+          }
+
+          sendEvent(eventType, payload);
+          lastTriggerKey     = triggerResult.key;
+          lastDocumentStatus = agg.documentStatus;
+          lastCoveragePercent = agg.coveragePercent;
+
+          // ── Auto-close on terminal state ─────────────────────────────────
+          if (
+            agg.documentStatus === "completed" ||
+            agg.documentStatus === "dead_letter" ||
+            (agg.documentStatus === "failed" && !agg.hasFailedSegments)
+          ) {
+            // Allow client to receive the event, then close
+            setTimeout(() => cleanup(), 3_000);
+          }
+
+        } catch (pollErr) {
+          console.error("[readiness-stream] poll error:", pollErr);
+          sendEvent("error", { error_code: "POLL_ERROR", message: "Intern fejl under readiness-tjek" });
+        }
+      };
+
+      // ── Start immediately + schedule ───────────────────────────────────
+      await poll();
+      pollInterval      = setInterval(poll, POLL_INTERVAL_MS);
+      keepaliveInterval = setInterval(() => {
+        if (!isTerminated) {
+          sendEvent("keepalive", { ts: new Date().toISOString(), pollCount });
+        }
+      }, KEEPALIVE_MS);
+
+    } catch (err) {
+      console.error("[readiness-stream] setup error:", err);
+      sendEvent("error", { error_code: "INTERNAL_ERROR", message: "Stream opsætning fejlede" });
+      cleanup();
     }
   });
 
