@@ -11,6 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
+import { getSessionToken } from "@/lib/supabase";
 import { useToast } from "@/hooks/use-toast";
 import { useReadinessStream, type ReadinessSnapshot, type ReadinessUxState } from "@/hooks/use-readiness-stream";
 
@@ -882,6 +883,8 @@ export default function AiChatPage() {
               size:        file.size,
               context:     "chat",
               fileCount:   docFiles.length,
+              // PHASE 5Z.7 — question passed at upload time for server-driven orchestration
+              questionText: payload.text?.trim() || undefined,
             });
             if (!finalRes.ok) {
               const errBody = await finalRes.json().catch(() => ({})) as any;
@@ -898,14 +901,14 @@ export default function AiChatPage() {
               throw Object.assign(new Error(reason), { errorCode: "DOCUMENT_UNREADABLE" });
             }
 
-            // ── OCR_PENDING: scanned PDF → poll async OCR job ─────────────
+            // ── OCR_PENDING: scanned PDF → SSE-stream + polling-fallback ─────
             if (finalData.mode === "OCR_PENDING" && finalData.taskId) {
               const taskId = finalData.taskId;
-              console.log(`[TRACE-2ocr][${traceId}] OCR_PENDING taskId=${taskId} polling...`);
+              console.log(`[TRACE-2ocr][${traceId}] OCR_PENDING taskId=${taskId} SSE-subscribe...`);
 
-              const OCR_TIMEOUT   = 360_000;
-              const ocrStart      = Date.now();
-              let ocrResult: any  = null;
+              const OCR_TIMEOUT = 360_000;
+              const ocrStart    = Date.now();
+              let ocrResult: any = null;
 
               // Stage → brugervenlig tekst
               const stageLabel = (stage: string | null | undefined): string => {
@@ -919,63 +922,118 @@ export default function AiChatPage() {
 
               setOcrStatusLabel(`Behandler scannet PDF: ${file.name}`);
 
-              while (Date.now() - ocrStart < OCR_TIMEOUT) {
-                // Adaptive polling: hurtig start → langsom ved ventetid
-                const elapsed = Date.now() - ocrStart;
-                const pollMs  = elapsed < 10_000 ? 1_500
-                              : elapsed < 30_000 ? 3_000
-                              : 6_000;
-                await new Promise<void>((r) => setTimeout(r, pollMs));
+              // ── PHASE 5Z.7: SSE-baseret subscription ─────────────────────
+              // Forsøger at modtage real-time events fra serveren (nul polling-latency).
+              // Falder tilbage til polling-loop hvis SSE ikke virker.
+              let sseResolved = false;
+              try {
+                const token = await getSessionToken();
+                const sseHeaders: Record<string, string> = { Accept: "text/event-stream" };
+                if (token) sseHeaders["Authorization"] = `Bearer ${token}`;
 
-                const elapsedSec = Math.round((Date.now() - ocrStart) / 1000);
-
-                const pollRes = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch((e: any) => {
-                  console.warn(`[TRACE-2ocr][${traceId}] poll error: ${e?.message}`);
-                  return null;
+                const sseRes = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, {
+                  headers: sseHeaders,
+                  credentials: "include",
+                  signal: AbortSignal.timeout(OCR_TIMEOUT),
                 });
-                if (!pollRes) continue;
-                const pollData = await pollRes.json() as any;
-                console.log(`[TRACE-2ocr][${traceId}] poll status=${pollData.status} stage=${pollData.stage ?? "-"} elapsed=${elapsedSec}s`);
 
-                // Update label based on live stage
-                if (pollData.status === "running" || pollData.status === "pending") {
-                  const sLabel   = stageLabel(pollData.stage);
-                  const progress = pollData.chunksProcessed > 0
-                    ? ` · ${pollData.chunksProcessed} blokke`
-                    : "";
-                  setOcrStatusLabel(`${sLabel}: ${file.name} (${elapsedSec}s${progress})`);
-                }
+                if (sseRes.ok && sseRes.body) {
+                  const reader  = sseRes.body.getReader();
+                  const decoder = new TextDecoder();
+                  let   buf     = "";
 
-                // Early trigger: first page ready — trigger chat without waiting for all pages
-                if (
-                  pollData.status === "running" &&
-                  pollData.stage  === "partial_ready" &&
-                  pollData.ocrText?.trim()
-                ) {
-                  ocrResult = pollData;
-                  setOcrStatusLabel(`Første side klar — starter svar: ${file.name}`);
-                  console.log(`[TRACE-2ocr][${traceId}] partial_ready chars=${pollData.charCount} — early trigger`);
-                  break;
-                }
+                  outer: while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buf += decoder.decode(value, { stream: true });
+                    const lines = buf.split("\n");
+                    buf = lines.pop() ?? "";
 
-                if (pollData.status === "completed") { ocrResult = pollData; break; }
-                if (pollData.status === "dead_letter") {
-                  setOcrStatusLabel(null);
-                  console.error(`[OCR-FAIL][${traceId}] PATH=dead_letter reason="${pollData.errorReason}" attempts=${pollData.attemptCount}/${pollData.maxAttempts}`);
-                  throw Object.assign(
-                    new Error(pollData.errorReason ?? "PDF kan ikke læses — for mange fejlede forsøg"),
-                    { errorCode: "DOCUMENT_UNREADABLE" },
-                  );
-                }
-                if (pollData.status === "failed") {
-                  // 'failed' med retries planlagt → bliv ved med at polle
-                  if (pollData.nextRetryAt) {
-                    setOcrStatusLabel(`Prøver igen: ${file.name} (forsøg ${(pollData.attemptCount ?? 0) + 1}/${pollData.maxAttempts ?? 3})`);
-                    continue;
+                    for (const line of lines) {
+                      if (!line.startsWith("data:")) continue;
+                      let evt: any;
+                      try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+
+                      const { type, data } = evt;
+                      if (!type || !data) continue;
+
+                      if (type === "partial_ready" && data.ocrText?.trim()) {
+                        ocrResult = { ocrText: data.ocrText, charCount: data.charCount, status: "running", stage: "partial_ready" };
+                        setOcrStatusLabel(`Første side klar — starter svar: ${file.name}`);
+                        console.log(`[TRACE-2ocr][${traceId}] SSE partial_ready chars=${data.charCount}`);
+                        sseResolved = true;
+                        reader.cancel().catch(() => {});
+                        break outer;
+                      }
+                      if (type === "completed") {
+                        // completed event har ikke ocrText — hent via status-endpoint
+                        const sr = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch(() => null);
+                        if (sr?.ok) ocrResult = await sr.json().catch(() => null);
+                        if (!ocrResult) ocrResult = { status: "completed", charCount: data.charCount };
+                        console.log(`[TRACE-2ocr][${traceId}] SSE completed chars=${data.charCount}`);
+                        sseResolved = true;
+                        reader.cancel().catch(() => {});
+                        break outer;
+                      }
+                      if (type === "error") {
+                        console.warn(`[TRACE-2ocr][${traceId}] SSE error event: ${data.message}`);
+                        reader.cancel().catch(() => {});
+                        break outer;
+                      }
+                      if (type === "keepalive") {
+                        const elapsedSec = Math.round((Date.now() - ocrStart) / 1000);
+                        setOcrStatusLabel(`Læser tekst via AI: ${file.name} (${elapsedSec}s)`);
+                      }
+                    }
                   }
-                  setOcrStatusLabel(null);
-                  console.error(`[OCR-FAIL][${traceId}] PATH=failed_no_retry reason="${pollData.errorReason}" attempts=${pollData.attemptCount}/${pollData.maxAttempts}`);
-                  throw Object.assign(new Error(pollData.errorReason ?? "PDF OCR fejlede"), { errorCode: "DOCUMENT_UNREADABLE" });
+                }
+              } catch (sseErr: any) {
+                console.warn(`[TRACE-2ocr][${traceId}] SSE fejlede (falder tilbage til polling): ${sseErr?.message}`);
+              }
+
+              // ── Polling-fallback: bruges hvis SSE fejlede ──────────────────
+              if (!sseResolved) {
+                console.log(`[TRACE-2ocr][${traceId}] SSE-fallback: starter polling for taskId=${taskId}`);
+                while (Date.now() - ocrStart < OCR_TIMEOUT) {
+                  const elapsed = Date.now() - ocrStart;
+                  const pollMs  = elapsed < 10_000 ? 1_500 : elapsed < 30_000 ? 3_000 : 6_000;
+                  await new Promise<void>((r) => setTimeout(r, pollMs));
+
+                  const elapsedSec = Math.round((Date.now() - ocrStart) / 1000);
+                  const pollRes = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch((e: any) => {
+                    console.warn(`[TRACE-2ocr][${traceId}] poll error: ${e?.message}`);
+                    return null;
+                  });
+                  if (!pollRes) continue;
+                  const pollData = await pollRes.json() as any;
+                  console.log(`[TRACE-2ocr][${traceId}] poll status=${pollData.status} stage=${pollData.stage ?? "-"} elapsed=${elapsedSec}s`);
+
+                  if (pollData.status === "running" || pollData.status === "pending") {
+                    const sLabel   = stageLabel(pollData.stage);
+                    const progress = pollData.chunksProcessed > 0 ? ` · ${pollData.chunksProcessed} blokke` : "";
+                    setOcrStatusLabel(`${sLabel}: ${file.name} (${elapsedSec}s${progress})`);
+                  }
+                  if (pollData.status === "running" && pollData.stage === "partial_ready" && pollData.ocrText?.trim()) {
+                    ocrResult = pollData;
+                    setOcrStatusLabel(`Første side klar — starter svar: ${file.name}`);
+                    console.log(`[TRACE-2ocr][${traceId}] poll partial_ready chars=${pollData.charCount} — early trigger`);
+                    break;
+                  }
+                  if (pollData.status === "completed") { ocrResult = pollData; break; }
+                  if (pollData.status === "dead_letter") {
+                    setOcrStatusLabel(null);
+                    console.error(`[OCR-FAIL][${traceId}] PATH=dead_letter reason="${pollData.errorReason}"`);
+                    throw Object.assign(new Error(pollData.errorReason ?? "PDF kan ikke læses — for mange fejlede forsøg"), { errorCode: "DOCUMENT_UNREADABLE" });
+                  }
+                  if (pollData.status === "failed") {
+                    if (pollData.nextRetryAt) {
+                      setOcrStatusLabel(`Prøver igen: ${file.name} (forsøg ${(pollData.attemptCount ?? 0) + 1}/${pollData.maxAttempts ?? 3})`);
+                      continue;
+                    }
+                    setOcrStatusLabel(null);
+                    console.error(`[OCR-FAIL][${traceId}] PATH=failed_no_retry reason="${pollData.errorReason}"`);
+                    throw Object.assign(new Error(pollData.errorReason ?? "PDF OCR fejlede"), { errorCode: "DOCUMENT_UNREADABLE" });
+                  }
                 }
               }
 

@@ -6867,6 +6867,11 @@ export const chatOcrTasks = pgTable(
     createdAt:       timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt:       timestamp("started_at", { withTimezone: true }),
     completedAt:     timestamp("completed_at", { withTimezone: true }),
+    // PHASE 5Z.7 — server-driven orchestration fields
+    questionText:              text("question_text"),
+    partialReadyWrittenAt:     timestamp("partial_ready_written_at", { withTimezone: true }),
+    ocrChatTriggerAttemptedAt: timestamp("ocr_chat_trigger_attempted_at", { withTimezone: true }),
+    ocrChatTriggerKey:         text("ocr_chat_trigger_key"),
   },
   (t) => [
     index("cot_status_created_idx").on(t.status, t.createdAt),
@@ -7011,3 +7016,39 @@ export const chatAnswerGenerations = pgTable(
 export const insertChatAnswerGenerationSchema = createInsertSchema(chatAnswerGenerations).omit({ id: true, createdAt: true });
 export type InsertChatAnswerGeneration = z.infer<typeof insertChatAnswerGenerationSchema>;
 export type ChatAnswerGeneration = typeof chatAnswerGenerations.$inferSelect;
+
+// ─── chat_answer_requests ──────────────────────────────────────────────────────
+// PHASE 5Z.7 — Server-driven OCR→Chat orchestration.
+// One row per OCR trigger key + query hash. Idempotency guard: if a request
+// already exists for (task_id, trigger_key), no duplicate is created.
+// status lifecycle: pending → running → completed | failed | superseded
+
+export const chatAnswerRequests = pgTable(
+  "chat_answer_requests",
+  {
+    id:            varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId:      varchar("tenant_id").notNull(),
+    taskId:        varchar("task_id").notNull(),
+    triggerKey:    text("trigger_key").notNull(),
+    mode:          text("mode").notNull().default("partial"), // 'partial' | 'complete'
+    status:        text("status").notNull().default("pending"), // pending|running|completed|failed|superseded
+    triggerReason: text("trigger_reason"),
+    errorCode:     text("error_code"),
+    errorMessage:  text("error_message"),
+    createdAt:     timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt:     timestamp("started_at", { withTimezone: true }),
+    completedAt:   timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    // One active request per task+trigger_key (idempotency)
+    uniqueIndex("car_task_trigger_uq").on(t.taskId, t.triggerKey),
+    index("car_tenant_idx").on(t.tenantId),
+    index("car_task_idx").on(t.taskId),
+    index("car_status_idx").on(t.status),
+    check("car_mode_check",   sql`${t.mode}   IN ('partial','complete')`),
+    check("car_status_check", sql`${t.status} IN ('pending','running','completed','failed','superseded')`),
+  ],
+);
+export const insertChatAnswerRequestSchema = createInsertSchema(chatAnswerRequests).omit({ id: true, createdAt: true });
+export type InsertChatAnswerRequest = z.infer<typeof insertChatAnswerRequestSchema>;
+export type ChatAnswerRequest = typeof chatAnswerRequests.$inferSelect;

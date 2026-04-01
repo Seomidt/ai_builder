@@ -26,6 +26,7 @@
 import { extractWithGemini, extractWithGeminiStream } from "../ai/gemini-media.ts";
 import { isPartialTextUsable }                        from "../media/partial-text-readiness.ts";
 import { splitPdfIntoPages }   from "../media/pdf-page-splitter.ts";
+import { triggerOcrChat }      from "./ocr-chat-orchestrator.ts";
 import {
   startJobInline,
   updateStage,
@@ -255,21 +256,47 @@ export async function processOcrJobInline(
     log(jobId, "pdf_split_ok", { pageCount, bytes: buffer.length });
 
     if (pageCount === 1) {
-      // Single page: streaming (consistent with multi-page path)
+      // PHASE 5Z.7 — Single page: streaming with mid-stream partial_ready emit
+      // (same threshold logic as multi-page page-1 path)
       log(jobId, "single_page_stream_start");
       const tP = Date.now();
-      let page1Text = "";
+      let page1Text           = "";
+      let firstPartialEmitted = false;
 
       for await (const chunk of extractWithGeminiStream(
         pageBuffers[0], `${filename}_p1.pdf`, "application/pdf", 0,
       )) {
         page1Text += chunk.textDelta;
+
+        // Emit partial_ready as soon as threshold is crossed (do NOT wait for completion)
+        if (!firstPartialEmitted && isPartialTextUsable(page1Text, 0)) {
+          await updatePartialText(jobId, page1Text, "partial_ready");
+          await upsertOcrProgress(jobId, tenantId, 0, page1Text, "partial_ready");
+          log(jobId, "single_page_first_partial_at", {
+            ts: new Date().toISOString(),
+            upload_to_first_streamed_ocr_text_ms: Date.now() - tJobStart,
+            chars: page1Text.length,
+            streamSeq: chunk.streamSeq,
+            model: chunk.model,
+          });
+          firstPartialEmitted = true;
+          // PHASE 5Z.7 — trigger server-driven chat via orchestrator
+          triggerOcrChat({ jobId, tenantId, charCount: page1Text.length, stage: "partial_ready", status: "running", mode: "partial", triggerReason: "single_page_threshold", ocrText: page1Text }).catch(() => {});
+        }
       }
       log(jobId, "single_page_stream_ok", { chars: page1Text.length, ms: Date.now() - tP });
 
       if (!page1Text.trim()) {
         await failJob(jobId, "Ingen læsbar tekst fundet i dokumentet", false);
         return;
+      }
+
+      // Final progress write
+      await upsertOcrProgress(jobId, tenantId, 0, page1Text, "completed");
+      if (!firstPartialEmitted) {
+        // Fallback: ensure partial_ready is set even if threshold was never crossed mid-stream
+        await updatePartialText(jobId, page1Text, "partial_ready");
+        log(jobId, "single_page_partial_fallback_at", { ts: new Date().toISOString(), chars: page1Text.length });
       }
 
       await updateStage(jobId, "chunking");
@@ -281,6 +308,8 @@ export async function processOcrJobInline(
         ocrText: page1Text.slice(0, 200_000), qualityScore: scoreQuality(page1Text),
         charCount: page1Text.length, pageCount: 1, chunkCount: chunks, provider: "gemini_vision",
       });
+      // PHASE 5Z.7 — trigger completed chat event (idempotent)
+      triggerOcrChat({ jobId, tenantId, charCount: page1Text.length, stage: "completed", status: "completed", mode: "complete", triggerReason: "single_page_done" }).catch(() => {});
       log(jobId, "job_completed", { chars: page1Text.length, totalMs: Date.now() - tJobStart });
       return;
     }
@@ -311,6 +340,8 @@ export async function processOcrJobInline(
             model: chunk.model,
           });
           firstPartialEmitted = true;
+          // PHASE 5Z.7 — trigger server-driven chat via orchestrator
+          triggerOcrChat({ jobId, tenantId, charCount: page1Text.length, stage: "partial_ready", status: "running", mode: "partial", triggerReason: "multi_page_p1_threshold", ocrText: page1Text }).catch(() => {});
         }
       }
     } catch (e) {
@@ -389,6 +420,8 @@ export async function processOcrJobInline(
       chunkCount,
       provider: "gemini_vision",
     });
+    // PHASE 5Z.7 — trigger completed chat event (idempotent, may already have been triggered by partial)
+    triggerOcrChat({ jobId, tenantId, charCount, stage: "completed", status: "completed", mode: "complete", triggerReason: "multi_page_done" }).catch(() => {});
 
     const totalMs = Date.now() - tJobStart;
     log(jobId, "full_completion_at", { ts: new Date().toISOString(), totalMs });

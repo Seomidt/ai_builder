@@ -242,7 +242,16 @@ export async function enqueueOcrJob(
       if (existing.rows[0]) return { id: existing.rows[0].id, reused: true };
     }
 
-    if (insertId) return { id: insertId, reused: false };
+    if (insertId) {
+      // PHASE 5Z.7 — store question text for server-driven orchestration
+      if (payload.questionText) {
+        await client.query(
+          `UPDATE chat_ocr_tasks SET question_text = $1 WHERE id = $2`,
+          [payload.questionText.slice(0, 2000), insertId],
+        ).catch(() => { /* non-critical — column may not exist in older envs */ });
+      }
+      return { id: insertId, reused: false };
+    }
 
     throw new Error("enqueueOcrJob: INSERT returned no rows");
   } finally {

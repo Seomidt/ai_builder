@@ -1324,9 +1324,9 @@ Generate names and content in ${langNote}.`;
     try {
       const orgId  = getOrgId(req);
       const userId = getUserId(req);
-      const { objectKey, filename, contentType, size, context = "chat", fileCount = 1 } = req.body as {
+      const { objectKey, filename, contentType, size, context = "chat", fileCount = 1, questionText } = req.body as {
         objectKey: string; filename: string; contentType: string; size: number;
-        context?: string; fileCount?: number; sourceId?: string;
+        context?: string; fileCount?: number; sourceId?: string; questionText?: string;
       };
 
       if (!objectKey || !filename || !contentType || typeof size !== "number") {
@@ -1407,11 +1407,12 @@ Generate names and content in ${langNote}.`;
             r2Key:       objectKey,
             filename,
             contentType: "application/pdf",
+            questionText: typeof questionText === "string" && questionText.trim() ? questionText.trim() : undefined,
           });
 
           // Fire-and-forget: page-split + parallel OCR runs in background.
           // The pre-downloaded pdfBuf is passed to skip R2 re-download.
-          processOcrJobInline(taskId, pdfBuf, filename, "application/pdf").catch((err: Error) =>
+          processOcrJobInline(taskId, pdfBuf, filename, "application/pdf", orgId).catch((err: Error) =>
             console.error(`[upload/finalize] inline OCR error taskId=${taskId}: ${err.message}`),
           );
 
@@ -1485,16 +1486,106 @@ Generate names and content in ${langNote}.`;
           maxAttempts:  task.maxAttempts ?? 3,
         });
       }
+      // PHASE 5Z.7 — include ocrText + charCount when partial_ready is usable
+      const hasUsablePartial = task.stage === "partial_ready" && !!task.ocrText?.trim();
       return res.json({
         status:       task.status ?? "pending",
         taskId:       task.id,
         stage:        task.stage ?? null,
         attemptCount: task.attemptCount ?? 0,
+        ...(hasUsablePartial ? {
+          ocrText:   task.ocrText,
+          charCount: task.charCount ?? 0,
+        } : {}),
       });
     } catch (e) {
       console.error("[ocr-status] error:", e);
       return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Status opslag fejlede" });
     }
+  });
+
+  // ─── PHASE 5Z.7 — OCR Task SSE stream ────────────────────────────────────────
+  // GET /api/ocr-task-stream?taskId=<id>
+  // Pushes server-sent events for partial_ready + completed + answer_triggered.
+  // Replaces polling critical path on the client.
+  //
+  // Events (text/event-stream):
+  //   { type: "connected",        data: { taskId } }
+  //   { type: "partial_ready",    data: { taskId, charCount, ocrText?, triggerKey } }
+  //   { type: "completed",        data: { taskId, charCount, triggerKey } }
+  //   { type: "answer_triggered", data: { taskId, requestId, triggerKey } }
+  //   { type: "error",            data: { message } }
+  //   { type: "keepalive",        data: {} }
+
+  app.get("/api/ocr-task-stream", async (req: Request, res: Response) => {
+    const orgId  = getOrgId(req);
+    const taskId = (req.query.taskId as string | undefined)?.trim();
+    if (!taskId) {
+      return res.status(400).json({ error_code: "MISSING_TASK_ID", message: "taskId er påkrævet" });
+    }
+
+    // Set SSE headers
+    res.setHeader("Content-Type",  "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection",    "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    const write = (type: string, data: object) => {
+      const payload = JSON.stringify({ type, data });
+      res.write(`data: ${payload}\n\n`);
+      if (typeof (res as any).flush === "function") (res as any).flush();
+    };
+
+    write("connected", { taskId });
+
+    // Register as SSE listener with the in-process push registry
+    const { registerOcrSseListener } = await import("./lib/jobs/ocr-chat-orchestrator");
+    const unregister = registerOcrSseListener(taskId, ({ type, data }) => {
+      write(type, data);
+    });
+
+    // Keepalive every 15 s so proxies don't close the connection
+    const keepalive = setInterval(() => {
+      if (!res.writableEnded) write("keepalive", {});
+    }, 15_000);
+
+    // Also do an immediate status check: if the job is already partial_ready or
+    // completed, push an initial event so the client doesn't have to wait.
+    try {
+      const { Client: PgKA } = await import("pg");
+      const { resolveDbUrl } = await import("./lib/jobs/job-queue");
+      const { getSupabaseSslConfig } = await import("./lib/jobs/ssl-config");
+      const { computeOcrChatTriggerKey } = await import("./lib/jobs/ocr-chat-orchestrator");
+      const pgKA = new PgKA({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
+      await pgKA.connect();
+      const row = await pgKA.query<{
+        status: string; stage: string | null; ocr_text: string | null; char_count: number | null; tenant_id: string;
+      }>(
+        `SELECT status, stage, ocr_text, char_count, tenant_id
+         FROM   chat_ocr_tasks WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+        [taskId, orgId],
+      ).then(r => r.rows[0]).catch(() => undefined).finally(() => pgKA.end().catch(() => {}));
+
+      if (row) {
+        const cc = row.char_count ?? 0;
+        const tk = computeOcrChatTriggerKey(orgId, taskId, cc, row.stage ?? row.status, row.status);
+        if (row.stage === "partial_ready" || (row.status === "running" && row.ocr_text)) {
+          write("partial_ready", { taskId, charCount: cc, ocrText: row.ocr_text?.slice(0, 80_000), triggerKey: tk });
+        }
+        if (row.status === "completed") {
+          write("completed", { taskId, charCount: cc, triggerKey: tk });
+        }
+        if (row.status === "failed" || row.status === "dead_letter") {
+          write("error", { message: "OCR-job fejlede — prøv at uploade filen igen" });
+        }
+      }
+    } catch { /* non-critical — SSE stream is still live */ }
+
+    req.on("close", () => {
+      clearInterval(keepalive);
+      unregister();
+    });
   });
 
   // ─── OCR Job Observability (Phase 5Z-PERF) ───────────────────────────────────
