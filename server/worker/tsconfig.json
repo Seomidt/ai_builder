@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "allowImportingTsExtensions": false,
+    "esModuleInterop": true,
+    "outDir": "../../dist/worker"
+  },
+  "ts-node": {
+    "esm": false,
+    "transpileOnly": true
+  }
+}
