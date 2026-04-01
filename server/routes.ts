@@ -1391,36 +1391,37 @@ Generate names and content in ${langNote}.`;
           });
         }
 
-        // Trin 3: Tom/scannet PDF → Gemini Vision OCR (læser PDF-bytes direkte)
-        console.log(`[upload/finalize] PDF scannet/tom (${nonWsChars} non-ws chars) — Gemini Vision OCR. tenant=${orgId}`);
+        // Trin 3: Tom/scannet PDF → Segment-first async OCR (page-by-page Gemini)
+        // Enqueue the job + fire-and-forget inline processing.
+        // Returns OCR_PENDING immediately — client polls /api/ocr-status.
+        // First page ready in ~3–5 s (partial_ready stage), full doc in 15–45 s.
+        console.log(`[upload/finalize] PDF scannet/tom (${nonWsChars} non-ws chars) — segment-first OCR. tenant=${orgId}`);
         try {
-          const { extractWithGemini, isGeminiAvailable } = await import("./lib/ai/gemini-media");
-          if (!isGeminiAvailable()) {
-            console.error("[upload/finalize] GEMINI_API_KEY ikke konfigureret");
-            return res.json({ mode: "B_FALLBACK", routing: "gemini_not_configured", message: "OCR ikke tilgængeligt — kontakt support", results: [] });
-          }
-          const ocrResult = await extractWithGemini(pdfBuf, filename, "application/pdf");
-          if (!ocrResult.text.trim()) {
-            console.error(`[upload/finalize] Gemini fandt ingen tekst i ${filename}`);
-            return res.json({ mode: "B_FALLBACK", routing: "ocr_empty", message: "Ingen læsbar tekst fundet i dokumentet", results: [] });
-          }
-          console.log(`[upload/finalize] Gemini OCR ok — ${ocrResult.charCount} chars (quality=${ocrResult.quality})`);
-          return res.json({
-            mode:    "direct",
-            routing: "gemini_ocr_sync",
-            results: [{
-              filename,
-              mime_type:      contentType,
-              char_count:     ocrResult.charCount,
-              extracted_text: ocrResult.text,
-              status:         "ok",
-              source:         "gemini_vision",
-            }],
+          const userId = getUserId(req);
+          const { enqueueOcrJob }        = await import("./lib/jobs/job-queue");
+          const { processOcrJobInline }  = await import("./lib/jobs/ocr-inline-processor");
+
+          const { id: taskId } = await enqueueOcrJob({
+            tenantId:    orgId,
+            userId,
+            r2Key:       objectKey,
+            filename,
+            contentType: "application/pdf",
           });
-        } catch (ocrErr) {
-          const msg = ocrErr instanceof Error ? ocrErr.message : String(ocrErr);
-          console.error(`[upload/finalize] Gemini OCR fejlede: ${msg}`);
-          return res.json({ mode: "B_FALLBACK", routing: "gemini_ocr_error", message: `OCR fejlede: ${msg.slice(0, 300)}`, results: [] });
+
+          // Fire-and-forget: page-split + parallel OCR runs in background.
+          // The pre-downloaded pdfBuf is passed to skip R2 re-download.
+          processOcrJobInline(taskId, pdfBuf, filename, "application/pdf").catch((err: Error) =>
+            console.error(`[upload/finalize] inline OCR error taskId=${taskId}: ${err.message}`),
+          );
+
+          console.log(`[upload/finalize] OCR_PENDING taskId=${taskId} — inline processor started`);
+          return res.json({ mode: "OCR_PENDING", taskId, routing: "inline_page_ocr" });
+
+        } catch (enqErr) {
+          const msg = enqErr instanceof Error ? enqErr.message : String(enqErr);
+          console.error(`[upload/finalize] enqueueOcrJob fejlede: ${msg}`);
+          return res.json({ mode: "B_FALLBACK", routing: "enqueue_error", message: `OCR-kø fejlede: ${msg.slice(0, 300)}`, results: [] });
         }
       }
 

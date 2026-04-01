@@ -140,3 +140,42 @@ export async function extractWithGemini(
     quality:   estimateQuality(capped),
   };
 }
+
+/**
+ * Streaming variant — yields text chunks as Gemini produces them.
+ * Use for single-page buffers where partial tokens improve perceived latency.
+ *
+ * @param buffer   Raw file bytes (single page recommended for low first-token latency).
+ * @param filename Original filename.
+ * @param mimeType MIME type string.
+ * @yields Partial text strings as they arrive from Gemini.
+ */
+export async function* extractWithGeminiStream(
+  buffer:   Buffer,
+  filename: string,
+  mimeType: string,
+): AsyncGenerator<string> {
+  const key = getGeminiKey();
+  if (!key) {
+    throw new Error("GEMINI_API_KEY is not configured — cannot run Gemini streaming OCR");
+  }
+
+  const genAI      = new GoogleGenerativeAI(key);
+  const model      = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+  const base64data = buffer.toString("base64");
+  const prompt     = buildPrompt(mimeType, filename);
+
+  const EMPTY_SIGNALS = ["[NO_TEXT_FOUND]", "[NO_SPEECH_FOUND]", "[NO_CONTENT_FOUND]"];
+
+  const streamResult = await model.generateContentStream([
+    { inlineData: { data: base64data, mimeType } },
+    { text: prompt },
+  ]);
+
+  for await (const chunk of streamResult.stream) {
+    const text = chunk.text()?.trim() ?? "";
+    if (text && !EMPTY_SIGNALS.includes(text)) {
+      yield text;
+    }
+  }
+}

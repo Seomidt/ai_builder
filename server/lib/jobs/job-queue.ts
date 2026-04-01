@@ -453,3 +453,58 @@ export async function storeChunks(jobId: string, count: number): Promise<void> {
 export async function logOcrCost(): Promise<void> {}
 export async function estimateOcrCost(): Promise<number> { return 0; }
 export async function archiveOldJobs(): Promise<void> {}
+
+// ── Inline processing helpers ──────────────────────────────────────────────────
+// Used by ocr-inline-processor.ts (fire-and-forget path from upload/finalize).
+
+/**
+ * Atomically mark a pending job as running (inline processor start).
+ * Returns true if the job was successfully claimed, false if it was already
+ * running/completed/failed (safe to call multiple times — idempotent).
+ */
+export async function startJobInline(jobId: string): Promise<boolean> {
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
+  await client.connect();
+  try {
+    const res = await client.query<{ id: string }>(
+      `UPDATE chat_ocr_tasks
+       SET    status        = 'running',
+              started_at    = COALESCE(started_at, now()),
+              attempt_count = attempt_count + 1,
+              updated_at    = now()
+       WHERE  id = $1
+         AND  status = 'pending'
+       RETURNING id`,
+      [jobId],
+    );
+    return res.rowCount === 1;
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+/**
+ * Write partial OCR text to the job row and update the stage.
+ * The client polls for stage === 'partial_ready' to trigger an early chat call.
+ */
+export async function updatePartialText(
+  jobId: string,
+  text:  string,
+  stage: string,
+): Promise<void> {
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
+  await client.connect();
+  try {
+    await client.query(
+      `UPDATE chat_ocr_tasks
+       SET    ocr_text   = $1,
+              char_count = $2,
+              stage      = $3,
+              updated_at = now()
+       WHERE  id = $4`,
+      [text.slice(0, 200_000), text.length, stage, jobId],
+    );
+  } finally {
+    await client.end().catch(() => {});
+  }
+}

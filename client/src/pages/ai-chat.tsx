@@ -861,6 +861,18 @@ export default function AiChatPage() {
                   setOcrStatusLabel(`${sLabel}: ${file.name} (${elapsedSec}s${progress})`);
                 }
 
+                // Early trigger: first page ready — trigger chat without waiting for all pages
+                if (
+                  pollData.status === "running" &&
+                  pollData.stage  === "partial_ready" &&
+                  pollData.ocrText?.trim()
+                ) {
+                  ocrResult = pollData;
+                  setOcrStatusLabel(`Første side klar — starter svar: ${file.name}`);
+                  console.log(`[TRACE-2ocr][${traceId}] partial_ready chars=${pollData.charCount} — early trigger`);
+                  break;
+                }
+
                 if (pollData.status === "completed") { ocrResult = pollData; break; }
                 if (pollData.status === "dead_letter") {
                   setOcrStatusLabel(null);
