@@ -1643,7 +1643,8 @@ Generate names and content in ${langNote}.`;
         confidence_band:     result.confidenceBand,
         needs_manual_review: result.needsManualReview,
         routing_explanation: result.routingExplanation,
-        ...(partialReadiness ? { partial_readiness: partialReadiness } : {}),
+        // Readiness fields are spread flat for direct access AND available nested as partial_readiness
+        ...(partialReadiness ? { partial_readiness: partialReadiness, ...partialReadiness } : {}),
       });
     } catch (err) { handleError(res, err); }
   });
@@ -1731,7 +1732,8 @@ Generate names and content in ${langNote}.`;
         needs_manual_review: result.needsManualReview,
         routing_explanation: result.routingExplanation,
         similar_cases:       result.similarCases,
-        ...(streamReadiness ? { partial_readiness: streamReadiness } : {}),
+        // Readiness fields are spread flat for direct access AND available nested as partial_readiness
+        ...(streamReadiness ? { partial_readiness: streamReadiness, ...streamReadiness } : {}),
       });
       res.end();
     } catch (err) {

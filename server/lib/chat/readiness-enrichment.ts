@@ -100,18 +100,31 @@ export async function enrichResponseWithReadiness(params: {
     // Aggregate: worst-case across all documents
     const aggregated = aggregateReadiness(successfulResults);
 
-    // Eligibility check from the first available version
-    const eligibility = await checkInstantAnswerEligibility({
-      tenantId,
-      knowledgeDocumentVersionId: versionIds[0]!,
-    });
+    // Eligibility check across ALL versions — take worst-case (INV-RE multi-doc correctness)
+    const eligibilityResults = await Promise.allSettled(
+      versionIds.map((versionId) =>
+        checkInstantAnswerEligibility({ tenantId, knowledgeDocumentVersionId: versionId }),
+      ),
+    );
+    const eligibilityValues = eligibilityResults
+      .filter((r): r is PromiseFulfilledResult<Awaited<ReturnType<typeof checkInstantAnswerEligibility>>> =>
+        r.status === "fulfilled",
+      )
+      .map((r) => r.value);
 
-    // Timing policy
+    const eligibility = aggregateEligibility(eligibilityValues);
+
+    // Timing policy — sum retrievalChunksActive across all docs for accurate multi-doc assessment
+    const totalRetrievalChunksActive = successfulResults.reduce(
+      (sum, r) => sum + r.retrievalChunksActive,
+      0,
+    );
+
     const timingResult = evaluateAnswerTiming({
       coveragePercent:       aggregated.coveragePercent,
       segmentsReady:         aggregated.segmentsReady,
       segmentsTotal:         aggregated.segmentsTotal,
-      retrievalChunksActive: successfulResults[0]?.retrievalChunksActive ?? 0,
+      retrievalChunksActive: totalRetrievalChunksActive,
       timeSinceUploadMs,
       fullCompletionBlocked: aggregated.fullCompletionBlocked,
     });
@@ -140,6 +153,58 @@ export async function enrichResponseWithReadiness(params: {
 // ── aggregateReadiness (worst-case across multiple documents) ─────────────────
 
 type ReadinessResult = Awaited<ReturnType<typeof getDocumentReadiness>>;
+type EligibilityResult = Awaited<ReturnType<typeof checkInstantAnswerEligibility>>;
+
+// ── aggregateEligibility (worst-case across multiple docs) ────────────────────
+
+function aggregateEligibility(results: EligibilityResult[]): EligibilityResult {
+  if (!results.length) {
+    return {
+      eligibility:            "not_ready",
+      retrievalChunksActive:  0,
+      coveragePercent:        0,
+      fullCompletionBlocked:  false,
+      hasDeadLetterSegments:  false,
+      firstRetrievalReadyAt:  null,
+      canRefreshForBetterAnswer: false,
+      reason:                 "No eligibility data available",
+    };
+  }
+  if (results.length === 1) return results[0]!;
+
+  // Rank: not_ready(0) < blocked(1) < partial_ready(2) < fully_ready(3)
+  const ELIGIBILITY_RANK: Record<string, number> = {
+    not_ready:     0,
+    blocked:       1,
+    partial_ready: 2,
+    fully_ready:   3,
+  };
+
+  let worst = results[0]!;
+  for (const r of results.slice(1)) {
+    if ((ELIGIBILITY_RANK[r.eligibility] ?? 0) < (ELIGIBILITY_RANK[worst.eligibility] ?? 0)) {
+      worst = r;
+    }
+  }
+
+  return {
+    ...worst,
+    // Sum chunks across all docs
+    retrievalChunksActive: results.reduce((s, r) => s + r.retrievalChunksActive, 0),
+    // Average coverage
+    coveragePercent: Math.round(results.reduce((s, r) => s + r.coveragePercent, 0) / results.length),
+    // Propagate any blocking/dead-letter from any doc
+    fullCompletionBlocked:    results.some((r) => r.fullCompletionBlocked),
+    hasDeadLetterSegments:    results.some((r) => r.hasDeadLetterSegments),
+    // Earliest firstRetrievalReadyAt across all docs
+    firstRetrievalReadyAt: results
+      .map((r) => r.firstRetrievalReadyAt)
+      .filter((ts): ts is string => ts !== null)
+      .sort()[0] ?? null,
+    // Can refresh if any doc still has work pending
+    canRefreshForBetterAnswer: results.some((r) => r.canRefreshForBetterAnswer),
+  };
+}
 
 function aggregateReadiness(results: ReadinessResult[]): ReadinessResult {
   if (results.length === 1) return results[0]!;
