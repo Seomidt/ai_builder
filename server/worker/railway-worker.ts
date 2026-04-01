@@ -22,7 +22,7 @@ console.log(`[railway-worker] poll=${POLL_MS}ms  maxConcurrent=${MAX_CONC}`);
 
 (async () => {
   try {
-    const { startKbWorker } = await import("../lib/knowledge/kb-worker.js");
+    const { startKbWorker } = await import("../lib/knowledge/kb-worker");
     await startKbWorker({ pollIntervalMs: POLL_MS, maxConcurrent: MAX_CONC });
   } catch (err) {
     console.error("[railway-worker] fatal startup error:", err);
