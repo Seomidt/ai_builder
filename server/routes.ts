@@ -3798,8 +3798,20 @@ Generate names and content in ${langNote}.`;
             : new Date(firstCompletedJob.completed_at as unknown as string).getTime()) - createdAtMs
         : null;
 
-      const allDoneMs = (createdAtMs && jobs.every((j) => ["completed", "skipped", "failed", "cancelled"].includes(j.status)))
-        ? nowMs - createdAtMs
+      const TERMINAL_STATUSES = ["completed", "skipped", "failed", "cancelled"];
+      const allJobsTerminal = jobs.length > 0 && jobs.every((j) => TERMINAL_STATUSES.includes(j.status));
+      const lastTerminalCompletedAtMs = allJobsTerminal
+        ? jobs.reduce((max, j) => {
+            if (!j.completed_at) return max;
+            const t = j.completed_at instanceof Date
+              ? j.completed_at.getTime()
+              : new Date(j.completed_at as unknown as string).getTime();
+            return t > max ? t : max;
+          }, 0)
+        : 0;
+      // Use actual last completed_at timestamp instead of now() to avoid overstating/blurring
+      const allDoneMs = (createdAtMs && lastTerminalCompletedAtMs > 0)
+        ? lastTerminalCompletedAtMs - createdAtMs
         : null;
 
       const timeSinceCreatedMs = createdAtMs ? nowMs - createdAtMs : 0;
