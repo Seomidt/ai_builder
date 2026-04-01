@@ -88,6 +88,20 @@ async function buildAll() {
     logLevel: "info",
   });
 
+  console.log("building Railway worker...");
+  await esbuild({
+    entryPoints: ["server/worker/railway-worker.ts"],
+    platform: "node",
+    bundle: true,
+    format: "cjs",
+    outfile: "dist/worker.cjs",
+    define: {
+      "process.env.NODE_ENV": '"production"',
+    },
+    external: externals,
+    logLevel: "info",
+  });
+
   // ── Vercel serverless function ────────────────────────────────────────────────
   // Pre-bundled with esbuild to avoid @vercel/node's ncc re-compilation.
   // api/index.js is committed to git so Vercel never needs to compile TypeScript.
