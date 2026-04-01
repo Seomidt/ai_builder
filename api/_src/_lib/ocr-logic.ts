@@ -23,7 +23,7 @@ import { GetObjectCommand }  from "@aws-sdk/client-s3";
 import {
   updateStage,
   completeJob,
-  failJob,
+  markOcrFailed as failJob,
   type RawOcrTask,
 } from "./ocr-queue.ts";
 import { extractWithGemini }  from "../../../server/lib/ai/gemini-media.ts";
