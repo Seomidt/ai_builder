@@ -1060,8 +1060,10 @@ export default function AiChatPage() {
                   }
                   if (pollData.status === "running" && pollData.stage === "partial_ready" && pollData.ocrText?.trim()) {
                     ocrResult = pollData;
-                    setOcrStatusLabel(`Første side klar — starter svar: ${file.name}`);
-                    console.log(`[TRACE-2ocr][${traceId}] poll partial_ready chars=${pollData.charCount} — early trigger`);
+                    // Set upgrade ref so onSuccess starts completed-upgrade SSE (same as SSE path)
+                    pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
+                    setOcrStatusLabel(null);
+                    console.log(`[TRACE-2ocr][${traceId}] poll partial_ready chars=${pollData.charCount} — early trigger, upgrade ref set`);
                     break;
                   }
                   if (pollData.status === "completed") { ocrResult = pollData; break; }
