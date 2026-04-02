@@ -6,7 +6,7 @@
  * KV HTTP calls are intercepted via global.fetch mock — no real network.
  */
 
-import { test, describe, beforeEach } from "node:test";
+import { test, describe, beforeEach } from "vitest";
 import assert                          from "node:assert/strict";
 
 import {

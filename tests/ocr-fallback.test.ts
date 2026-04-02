@@ -19,7 +19,7 @@
  *    - fallback key based on tenantId:jobId:fallback is stable
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 import { selectInputRoute }        from "../server/lib/chat/input-router.ts";

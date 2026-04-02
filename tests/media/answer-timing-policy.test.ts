@@ -7,7 +7,7 @@
  * INV-ATP2: answer_now_complete only returned when coveragePercent >= 100 AND !blocked.
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   evaluateAnswerTiming,

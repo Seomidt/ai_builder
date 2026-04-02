@@ -5,7 +5,7 @@
  * DB calls are mocked via module stubbing — no real DB connection.
  */
 
-import { test, describe, mock } from "node:test";
+import { test, describe } from "vitest";
 import assert                    from "node:assert/strict";
 
 // ── Pure function tests (no DB) ───────────────────────────────────────────────

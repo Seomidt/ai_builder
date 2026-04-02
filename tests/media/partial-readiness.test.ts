@@ -8,7 +8,7 @@
  * INV-PR2: coveragePercent is always 0–100 (clamped).
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 // ── Re-implement the pure invariant guard (mirrors partial-readiness.ts) ──────

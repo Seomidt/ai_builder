@@ -10,7 +10,7 @@
  *  - failReason is descriptive on rejection
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   isPartialTextUsable,

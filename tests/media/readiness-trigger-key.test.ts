@@ -9,7 +9,7 @@
  *  - Never uses sensitive fields in the key
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   generateTriggerKey,

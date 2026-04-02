@@ -19,7 +19,7 @@
  *    RETRIEVAL_ALLOWED_DOCUMENT_STATUSES (tested in kb-retrieval-gates.test.ts).
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 import { deriveEligibility } from "../../server/lib/media/instant-answer-readiness.ts";

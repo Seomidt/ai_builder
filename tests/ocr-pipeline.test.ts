@@ -10,7 +10,7 @@
  *  4. Dynamic chunking policy selection for large docs (T007)
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   chunkText,

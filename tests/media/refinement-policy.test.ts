@@ -10,7 +10,7 @@
  *  - Human-readable labels for all actions
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   computeRefinementGeneration,

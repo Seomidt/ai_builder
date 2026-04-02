@@ -12,7 +12,7 @@
  *  - answerCompleteness derivation
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 
 // ── Re-export the pure logic from the aggregator for unit testing ──────────────

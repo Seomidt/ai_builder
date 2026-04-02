@@ -11,7 +11,7 @@
  *  4. UX state machine (at state transitions er gyldige)
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   generateTriggerKey,

@@ -8,7 +8,7 @@
  * INV-IAR2: eligibility is never "partial_ready" when retrievalChunksActive === 0.
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { deriveEligibility } from "../../server/lib/media/instant-answer-readiness.ts";
 import type { AggregationResult } from "../../server/lib/media/segment-aggregator.ts";

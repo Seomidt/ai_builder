@@ -8,7 +8,7 @@
  *  3. Trigger key stability — same state → same key, different state → different key
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   computeOcrChatTriggerKey,

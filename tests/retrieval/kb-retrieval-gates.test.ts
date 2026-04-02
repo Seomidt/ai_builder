@@ -27,7 +27,7 @@
  *  a 'processing' doc, only fully-embedded chunks are returned.
  */
 
-import { describe, it } from "node:test";
+import { describe, it } from "vitest";
 import assert from "node:assert/strict";
 import {
   RETRIEVAL_ALLOWED_DOCUMENT_STATUSES,
