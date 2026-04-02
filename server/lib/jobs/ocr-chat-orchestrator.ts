@@ -72,6 +72,16 @@ function pushSseEvent(taskId: string, type: string, data: object): void {
   }
 }
 
+/**
+ * Push an SSE error event when OCR fails (dead_letter / unrecoverable).
+ * Called from ocr-inline-processor.ts at every failJob() call site.
+ * Without this, the SSE channel stays alive with keepalives and the client
+ * never exits the "reading" state.
+ */
+export function pushOcrSseError(taskId: string, message: string): void {
+  pushSseEvent(taskId, "error", { message });
+}
+
 // ── Trigger key ───────────────────────────────────────────────────────────────
 
 /**

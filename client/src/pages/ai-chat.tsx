@@ -926,6 +926,7 @@ export default function AiChatPage() {
               // Forsøger at modtage real-time events fra serveren (nul polling-latency).
               // Falder tilbage til polling-loop hvis SSE ikke virker.
               let sseResolved = false;
+              let sseError: Error | null = null;
               try {
                 const token = await getSessionToken();
                 const sseHeaders: Record<string, string> = { Accept: "text/event-stream" };
@@ -977,6 +978,11 @@ export default function AiChatPage() {
                       }
                       if (type === "error") {
                         console.warn(`[TRACE-2ocr][${traceId}] SSE error event: ${data.message}`);
+                        sseResolved = true;   // prevent polling fallback from starting
+                        sseError = Object.assign(
+                          new Error(data.message ?? "OCR-job fejlede — prøv at uploade filen igen"),
+                          { errorCode: "DOCUMENT_UNREADABLE" },
+                        );
                         reader.cancel().catch(() => {});
                         break outer;
                       }
@@ -1036,6 +1042,9 @@ export default function AiChatPage() {
                   }
                 }
               }
+
+              // Throw SSE error immediately — exact message from server
+              if (sseError) throw sseError;
 
               setOcrStatusLabel(null);
 
