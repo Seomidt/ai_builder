@@ -315,7 +315,8 @@ export async function processOcrJobInline(
         charCount: page1Text.length, pageCount: 1, chunkCount: chunks, provider: "gemini_vision",
       });
       // PHASE 5Z.7 — trigger completed chat event (idempotent)
-      triggerOcrChat({ jobId, tenantId, charCount: page1Text.length, stage: "completed", status: "completed", mode: "complete", triggerReason: "single_page_done" }).catch(() => {});
+      // ocrText MUST be included so the live SSE push reaches the client upgrade handler.
+      triggerOcrChat({ jobId, tenantId, charCount: page1Text.length, stage: "completed", status: "completed", mode: "complete", triggerReason: "single_page_done", ocrText: page1Text.slice(0, 80_000) }).catch(() => {});
       log(jobId, "job_completed", { chars: page1Text.length, totalMs: Date.now() - tJobStart });
       return;
     }
@@ -430,7 +431,8 @@ export async function processOcrJobInline(
       provider: "gemini_vision",
     });
     // PHASE 5Z.7 — trigger completed chat event (idempotent, may already have been triggered by partial)
-    triggerOcrChat({ jobId, tenantId, charCount, stage: "completed", status: "completed", mode: "complete", triggerReason: "multi_page_done" }).catch(() => {});
+    // ocrText MUST be included so the live SSE push carries full text to the client upgrade handler.
+    triggerOcrChat({ jobId, tenantId, charCount, stage: "completed", status: "completed", mode: "complete", triggerReason: "multi_page_done", ocrText: fullText.slice(0, 80_000) }).catch(() => {});
 
     const totalMs = Date.now() - tJobStart;
     log(jobId, "full_completion_at", { ts: new Date().toISOString(), totalMs });

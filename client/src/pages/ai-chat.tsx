@@ -1296,9 +1296,24 @@ export default function AiChatPage() {
                 if (!line.startsWith("data:")) continue;
                 let evt: any;
                 try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
-                if (evt.type === "completed" && evt.data?.ocrText?.trim() && chatMutateRef.current) {
+                if (evt.type === "completed" && chatMutateRef.current) {
                   reader.cancel().catch(() => {});
-                  const fullText = evt.data.ocrText.slice(0, 80_000);
+                  // ocrText may be absent from live SSE push — fetch from status endpoint as fallback
+                  let fullText: string = evt.data?.ocrText ?? "";
+                  if (!fullText.trim()) {
+                    try {
+                      const statusToken = await getSessionToken().catch(() => null);
+                      const statusHeaders: Record<string, string> = {};
+                      if (statusToken) statusHeaders["Authorization"] = `Bearer ${statusToken}`;
+                      const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: statusHeaders, credentials: "include" });
+                      if (sr.ok) {
+                        const sd = await sr.json() as any;
+                        fullText = sd.ocrText ?? sd.ocr_text ?? "";
+                      }
+                    } catch { /* non-fatal */ }
+                  }
+                  if (!fullText.trim()) { break outerUpgrade; } // no text available — abort upgrade
+                  fullText = fullText.slice(0, 80_000);
                   chatMutateRef.current({
                     text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
                     attachments: [],
@@ -1307,6 +1322,7 @@ export default function AiChatPage() {
                       char_count: fullText.length,
                       extracted_text: fullText,
                       status: "ok",
+                      source: "r2_ocr_async",
                     }],
                   });
                   break outerUpgrade;
