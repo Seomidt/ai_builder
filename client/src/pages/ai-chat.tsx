@@ -1123,7 +1123,8 @@ export default function AiChatPage() {
                   char_count:     ocrResult.charCount ?? 0,
                   extracted_text: ocrText,
                   status:         "ok",
-                  source:         "r2_ocr_async",
+                  // Preserve partial marker so server-side safeguard detects partial mode correctly
+                  source:         ocrResult.stage === "partial_ready" ? "ocr_partial" : "r2_ocr_async",
                 });
               }
               console.log(`[TRACE-2ocr][${traceId}] OCR complete chars=${ocrResult.charCount ?? 0} quality=${ocrResult.qualityScore ?? "-"}`);

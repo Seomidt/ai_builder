@@ -18,6 +18,7 @@ import {
 import { eq, and } from "drizzle-orm";
 import type { AccessibleExpert } from "./chat-routing.ts";
 import { AI_MODEL_ROUTES } from "../lib/ai/config.ts";
+import { applyPartialSafeguard } from "../lib/chat/partial-safeguard.ts";
 import {
   shouldRunSimilarity,
   shouldAllowSimilarityByBudget,
@@ -292,8 +293,26 @@ export async function runChatMessage(params: {
     console.log(`[ai:router] model=${docModel} provider=${AI_MODEL_ROUTES.default.provider} key=default use_case=doc_mode streaming=${!!params.onToken}`);
     const t0 = Date.now();
 
-    if (params.onToken) {
-      // ── STREAMING PATH ──────────────────────────────────────────────────────
+    if (params.onToken && isPartialOcr) {
+      // ── PARTIAL OCR MODE: generate → safeguard → emit (NEVER stream raw to client) ──
+      // Architecture contract: the full buffer is validated before any byte reaches the client.
+      const completion = await oai.chat.completions.create({
+        model:       docModel,
+        temperature: 0.1,
+        max_tokens:  2000,
+        messages:    messagesPayload,
+        stream:      false,
+      });
+      aiText = completion.choices[0]?.message?.content ?? "";
+      const safeguarded = applyPartialSafeguard(aiText);
+      if (safeguarded !== aiText) {
+        console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered — rewriting definitive negative before emit`);
+        aiText = safeguarded;
+      }
+      // Emit to client only after safeguard has passed
+      params.onToken(aiText);
+    } else if (params.onToken) {
+      // ── COMPLETE MODE: real token streaming (safeguard not needed) ───────────
       const stream = await oai.chat.completions.create({
         model:       docModel,
         temperature: 0.1,
@@ -307,7 +326,7 @@ export async function runChatMessage(params: {
         if (delta) { params.onToken(delta); aiText += delta; }
       }
     } else {
-      // ── NON-STREAMING PATH (original) ────────────────────────────────────────
+      // ── NON-STREAMING PATH ────────────────────────────────────────────────────
       const completion = await oai.chat.completions.create({
         model:       docModel,
         temperature: 0.1,
@@ -315,38 +334,17 @@ export async function runChatMessage(params: {
         messages:    messagesPayload,
       });
       aiText = completion.choices[0]?.message?.content ?? "";
+      if (isPartialOcr) {
+        const safeguarded = applyPartialSafeguard(aiText);
+        if (safeguarded !== aiText) {
+          console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered (non-stream) — rewriting definitive negative`);
+          aiText = safeguarded;
+        }
+      }
     }
     aiLatencyMs = Date.now() - t0;
 
     console.log(`[chat-runner] DOC_ANSWER_LEN=${aiText.length} latency=${aiLatencyMs}ms isPartialOcr=${isPartialOcr}`);
-    console.log(`[chat-runner] DOC_ANSWER_PREVIEW="${aiText.slice(0, 200).replace(/\n/g, " ")}"`);
-
-    // PARTIAL MODE SAFEGUARD — rewrite definitive negative conclusions when only first page is available.
-    // Covers cases where model ignores prompt instructions and still generates a definitive no-answer.
-    if (isPartialOcr && aiText) {
-      const negativePatterns = [
-        /jeg kan ikke finde det i det uploadede dokument/i,
-        /fremgår ikke af dokumentet/i,
-        /ingen information.*(?:i|om|fra)\s+dokumentet/i,
-        /ikke nævnt i dokumentet/i,
-        /ikke omtalt i dokumentet/i,
-        /dokumentet indeholder ikke/i,
-        /dokumentet nævner ikke/i,
-        /der er ikke.*(?:i|om)\s+dokumentet/i,
-        /ingen oplysninger.*dokumentet/i,
-      ];
-      const hasDefinitiveNegative = negativePatterns.some(p => p.test(aiText));
-      if (hasDefinitiveNegative) {
-        console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered — rewriting definitive negative in partial mode`);
-        aiText = [
-          "Baseret på den del af dokumentet jeg har set endnu, kan jeg ikke finde et direkte svar på dit spørgsmål.",
-          "",
-          "Det er muligt at informationen fremgår af den resterende del af dokumentet, som stadig analyseres.",
-          "",
-          "⏳ Svaret opdateres automatisk når hele dokumentet er færdigbehandlet.",
-        ].join("\n");
-      }
-    }
 
     // TASK 5 — grounding-validering
     if (aiText) {
