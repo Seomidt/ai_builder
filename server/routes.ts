@@ -1586,7 +1586,7 @@ Generate names and content in ${langNote}.`;
           write("partial_ready", { taskId, charCount: cc, ocrText: row.ocr_text?.slice(0, 80_000), triggerKey: tk });
         }
         if (row.status === "completed") {
-          write("completed", { taskId, charCount: cc, triggerKey: tk });
+          write("completed", { taskId, charCount: cc, triggerKey: tk, ...(row.ocr_text ? { ocrText: row.ocr_text.slice(0, 80_000) } : {}) });
         }
         if (row.status === "failed" || row.status === "dead_letter") {
           write("error", { message: "OCR-job fejlede — prøv at uploade filen igen" });

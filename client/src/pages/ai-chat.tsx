@@ -959,19 +959,25 @@ export default function AiChatPage() {
                       if (!type || !data) continue;
 
                       if (type === "partial_ready" && data.ocrText?.trim()) {
-                        ocrResult = { ocrText: data.ocrText, charCount: data.charCount, status: "running", stage: "partial_ready" };
-                        setOcrStatusLabel(`Første side klar — starter svar: ${file.name}`);
-                        console.log(`[TRACE-2ocr][${traceId}] SSE partial_ready chars=${data.charCount}`);
-                        sseResolved = true;
-                        reader.cancel().catch(() => {});
-                        break outer;
+                        // Gem delresultat som fallback, men fortsæt med at lytte efter completed
+                        if (!ocrResult) {
+                          ocrResult = { ocrText: data.ocrText, charCount: data.charCount, status: "running", stage: "partial_ready" };
+                        }
+                        setOcrStatusLabel(`Første side klar — venter på fuld tekst: ${file.name}`);
+                        console.log(`[TRACE-2ocr][${traceId}] SSE partial_ready chars=${data.charCount} — fortsætter til completed`);
                       }
                       if (type === "completed") {
-                        // completed event har ikke ocrText — hent via status-endpoint
-                        const sr = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch(() => null);
-                        if (sr?.ok) ocrResult = await sr.json().catch(() => null);
-                        if (!ocrResult) ocrResult = { status: "completed", charCount: data.charCount };
-                        console.log(`[TRACE-2ocr][${traceId}] SSE completed chars=${data.charCount}`);
+                        // completed event indeholder nu ocrText (full dokument)
+                        if (data.ocrText?.trim()) {
+                          ocrResult = { ocrText: data.ocrText, charCount: data.charCount, status: "completed", stage: "completed" };
+                          console.log(`[TRACE-2ocr][${traceId}] SSE completed med ocrText chars=${data.charCount}`);
+                        } else {
+                          // Fallback: hent via status-endpoint
+                          const sr = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch(() => null);
+                          if (sr?.ok) ocrResult = await sr.json().catch(() => null);
+                          if (!ocrResult) ocrResult = { status: "completed", charCount: data.charCount };
+                          console.log(`[TRACE-2ocr][${traceId}] SSE completed (status-fetch) chars=${data.charCount}`);
+                        }
                         sseResolved = true;
                         reader.cancel().catch(() => {});
                         break outer;

@@ -250,7 +250,7 @@ export async function triggerOcrChat(input: OcrChatTriggerInput): Promise<OcrCha
       taskId:    jobId,
       triggerKey,
       charCount,
-      ...(mode === "partial" && input.ocrText ? { ocrText: input.ocrText.slice(0, 80_000) } : {}),
+      ...(input.ocrText ? { ocrText: input.ocrText.slice(0, 80_000) } : {}),
     });
     pushSseEvent(jobId, "answer_triggered", {
       taskId:        jobId,
