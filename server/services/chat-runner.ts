@@ -114,6 +114,10 @@ export async function runChatMessage(params: {
   const docCtx     = rawDocCtx.filter(d => d.status === "ok" && d.extracted_text?.trim());
   const failedDocs = rawDocCtx.filter(d => d.status !== "ok");
 
+  // Partial OCR mode: document_context contains source:"ocr_partial" → only first page available.
+  // Must NOT generate definitive negative conclusions ("kan ikke finde").
+  const isPartialOcr = rawDocCtx.some(d => (d as any).source === "ocr_partial");
+
   console.log(`[chat-runner] routeType=${params.routeType ?? "legacy"} message_len=${message.length} doc_ctx_ok=${docCtx.length}`);
   if (docCtx.length > 0) {
     const totalChars = docCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0);
@@ -208,23 +212,45 @@ export async function runChatMessage(params: {
     console.log(`[chat-runner] first200="${docCtx[0].extracted_text.slice(0, 200).replace(/\n/g, " ")}"`);
 
     // TASK 4 — STRICT document-only system prompt (ERSTATTER expert-prompt)
-    const docSystemPrompt = [
-      `Du er en AI-ekspert ved navn ${expert.name}.`,
-      `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
-      ``,
-      `=== ABSOLUT BINDENDE REGLER FOR DOKUMENTANALYSE ===`,
-      `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
-      `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
-      `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
-      `REGEL 4: Hvis svaret IKKE fremgår af dokumentet, siger du præcist: "Jeg kan ikke finde det i det uploadede dokument."`,
-      `REGEL 5: Hvis svaret fremgår af dokumentet, citerer du den relevante sætning direkte.`,
-      `REGEL 6: Du MÅ ALDRIG give generiske forklaringer eller bred kontekst, medmindre det fremgår af dokumentet.`,
-      `REGEL 7: Dit svar skal starte med den direkte konklusion, ikke med en forklaring.`,
-      `REGEL 8: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
-      `=== SLUT REGLER ===`,
-      ``,
-      `Svar altid på dansk.`,
-    ].join("\n");
+    // Two versions: partial OCR (first page only) vs. complete document.
+    const docSystemPrompt = isPartialOcr
+      ? [
+          `Du er en AI-ekspert ved navn ${expert.name}.`,
+          `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
+          ``,
+          `=== VIGTIG KONTEKST: DELVIS DOKUMENTANALYSE ===`,
+          `Kun den FØRSTE DEL af dokumentet er udtrukket endnu. Resten analyseres parallelt og vil følge automatisk.`,
+          ``,
+          `=== ABSOLUT BINDENDE REGLER FOR DELVIS DOKUMENTANALYSE ===`,
+          `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
+          `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
+          `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
+          `REGEL 4: Da dokumentet kun er DELVIST tilgængeligt, MÅ DU ALDRIG konkludere endeligt at en information IKKE findes — den kan stå i den del der endnu ikke er behandlet.`,
+          `REGEL 5: Giv foreløbige observationer baseret på den tilgængelige tekst. Præfiks dit svar med "Baseret på den tilgængelige del af dokumentet:".`,
+          `REGEL 6: Hvis du ikke kan finde noget relevant i den tilgængelige del, sig: "Jeg kan ikke finde det i den del af dokumentet jeg har set endnu — det kan stå i den resterende del."`,
+          `REGEL 7: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
+          `REGEL 8: Afslut ALTID dit svar med denne linje: "⏳ Svaret er baseret på den første del af dokumentet og opdateres automatisk når hele dokumentet er analyseret."`,
+          `=== SLUT REGLER ===`,
+          ``,
+          `Svar altid på dansk.`,
+        ].join("\n")
+      : [
+          `Du er en AI-ekspert ved navn ${expert.name}.`,
+          `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
+          ``,
+          `=== ABSOLUT BINDENDE REGLER FOR DOKUMENTANALYSE ===`,
+          `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
+          `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
+          `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
+          `REGEL 4: Hvis svaret IKKE fremgår af dokumentet, siger du præcist: "Jeg kan ikke finde det i det uploadede dokument."`,
+          `REGEL 5: Hvis svaret fremgår af dokumentet, citerer du den relevante sætning direkte.`,
+          `REGEL 6: Du MÅ ALDRIG give generiske forklaringer eller bred kontekst, medmindre det fremgår af dokumentet.`,
+          `REGEL 7: Dit svar skal starte med den direkte konklusion, ikke med en forklaring.`,
+          `REGEL 8: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
+          `=== SLUT REGLER ===`,
+          ``,
+          `Svar altid på dansk.`,
+        ].join("\n");
 
     // TASK 3 — dokument som separat user-besked (højest prioritet)
     const docBlock = docCtx.map(d =>
@@ -235,11 +261,15 @@ export async function runChatMessage(params: {
       { role: "system" as const, content: docSystemPrompt },
       {
         role: "user" as const,
-        content: `=== DOKUMENTINDHOLD START ===\n\n${docBlock}\n\n=== DOKUMENTINDHOLD SLUT ===\n\nOvenstående er det komplette ekstraherede indhold fra det uploadede dokument. Brug dette som eneste kilde.`,
+        content: isPartialOcr
+          ? `=== DELVIST DOKUMENTINDHOLD START ===\n\n${docBlock}\n\n=== DELVIST DOKUMENTINDHOLD SLUT ===\n\nOvenstående er den FØRSTE DEL af det uploadede dokument. Resten af dokumentet analyseres parallelt. Giv foreløbige observationer baseret på den tilgængelige del — undgå endelige konklusioner om hvad dokumentet IKKE indeholder.`
+          : `=== DOKUMENTINDHOLD START ===\n\n${docBlock}\n\n=== DOKUMENTINDHOLD SLUT ===\n\nOvenstående er det komplette ekstraherede indhold fra det uploadede dokument. Brug dette som eneste kilde.`,
       },
       {
         role: "assistant" as const,
-        content: "Jeg har læst dokumentet fuldt ud og forstår indholdet. Jeg er klar til at besvare spørgsmål udelukkende baseret på det faktiske dokumentindhold.",
+        content: isPartialOcr
+          ? "Jeg har læst den første del af dokumentet. Jeg giver foreløbige observationer baseret på det tilgængelige indhold og undgår endelige konklusioner om information der muligvis er i den resterende del."
+          : "Jeg har læst dokumentet fuldt ud og forstår indholdet. Jeg er klar til at besvare spørgsmål udelukkende baseret på det faktiske dokumentindhold.",
       },
       { role: "user" as const, content: message },
     ];
@@ -248,7 +278,9 @@ export async function runChatMessage(params: {
     console.log(`[chat-runner] PAYLOAD_READY: messages=${messagesPayload.length} total_chars=${totalPromptChars} doc_in_payload=true`);
 
     // Hard assertion: bekræft dokument er i payload
-    const docInPayload = messagesPayload[1].content.includes("=== DOKUMENTINDHOLD START ===");
+    const docInPayload = isPartialOcr
+      ? messagesPayload[1].content.includes("=== DELVIST DOKUMENTINDHOLD START ===")
+      : messagesPayload[1].content.includes("=== DOKUMENTINDHOLD START ===");
     if (!docInPayload) {
       throw Object.assign(
         new Error("DOCUMENT_CONTEXT_NOT_INJECTED"),
@@ -286,8 +318,35 @@ export async function runChatMessage(params: {
     }
     aiLatencyMs = Date.now() - t0;
 
-    console.log(`[chat-runner] DOC_ANSWER_LEN=${aiText.length} latency=${aiLatencyMs}ms`);
+    console.log(`[chat-runner] DOC_ANSWER_LEN=${aiText.length} latency=${aiLatencyMs}ms isPartialOcr=${isPartialOcr}`);
     console.log(`[chat-runner] DOC_ANSWER_PREVIEW="${aiText.slice(0, 200).replace(/\n/g, " ")}"`);
+
+    // PARTIAL MODE SAFEGUARD — rewrite definitive negative conclusions when only first page is available.
+    // Covers cases where model ignores prompt instructions and still generates a definitive no-answer.
+    if (isPartialOcr && aiText) {
+      const negativePatterns = [
+        /jeg kan ikke finde det i det uploadede dokument/i,
+        /fremgår ikke af dokumentet/i,
+        /ingen information.*(?:i|om|fra)\s+dokumentet/i,
+        /ikke nævnt i dokumentet/i,
+        /ikke omtalt i dokumentet/i,
+        /dokumentet indeholder ikke/i,
+        /dokumentet nævner ikke/i,
+        /der er ikke.*(?:i|om)\s+dokumentet/i,
+        /ingen oplysninger.*dokumentet/i,
+      ];
+      const hasDefinitiveNegative = negativePatterns.some(p => p.test(aiText));
+      if (hasDefinitiveNegative) {
+        console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered — rewriting definitive negative in partial mode`);
+        aiText = [
+          "Baseret på den del af dokumentet jeg har set endnu, kan jeg ikke finde et direkte svar på dit spørgsmål.",
+          "",
+          "Det er muligt at informationen fremgår af den resterende del af dokumentet, som stadig analyseres.",
+          "",
+          "⏳ Svaret opdateres automatisk når hele dokumentet er færdigbehandlet.",
+        ].join("\n");
+      }
+    }
 
     // TASK 5 — grounding-validering
     if (aiText) {
