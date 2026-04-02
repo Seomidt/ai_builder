@@ -751,7 +751,9 @@ export default function AiChatPage() {
 
   const autoTriggeredKeysRef = useRef<Set<string>>(new Set());
   // chatMutateRef holds a stable reference to chatMutation.mutate (set after hook declaration)
-  const chatMutateRef = useRef<((payload: { text: string; attachments: AttachedFile[]; documentIds?: string[]; triggerKey?: string }) => void) | null>(null);
+  const chatMutateRef = useRef<((payload: { text: string; attachments: AttachedFile[]; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[] }) => void) | null>(null);
+  // Upgrade ref: set when partial_ready break → onSuccess starts upgrade SSE subscription
+  const pendingOcrUpgradeRef = useRef<{ taskId: string; filename: string; mime: string } | null>(null);
 
   const handleAutoTrigger = useCallback((snap: ReadinessSnapshot, isImprovement: boolean) => {
     if (!snap.triggerKey) return;
@@ -823,7 +825,7 @@ export default function AiChatPage() {
   // ── Send ─────────────────────────────────────────────────────────────────────
 
   const chatMutation = useMutation({
-    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string }) => {
+    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[] }) => {
       const traceId = crypto.randomUUID().slice(0, 8);
 
       // ── TRACE STAGE 1: FRONTEND SEND ─────────────────────────────────────
@@ -834,7 +836,8 @@ export default function AiChatPage() {
       // ── Step A: Ekstraher dokumentindhold via direkte R2-upload ───────────
       // Filer uploades ALDRIG igennem Vercel — Browser → R2 direkte via presigned URL.
       // Vercel modtager kun lille JSON (presign-request + finalize-request).
-      let documentContext: any[] = [];
+      // _documentContextOverride: bruges til upgrade-chat (partial→complete) — springer upload over.
+      let documentContext: any[] = payload._documentContextOverride ?? [];
 
       if (docFiles.length > 0) {
         try {
@@ -959,12 +962,15 @@ export default function AiChatPage() {
                       if (!type || !data) continue;
 
                       if (type === "partial_ready" && data.ocrText?.trim()) {
-                        // Gem delresultat som fallback, men fortsæt med at lytte efter completed
-                        if (!ocrResult) {
-                          ocrResult = { ocrText: data.ocrText, charCount: data.charCount, status: "running", stage: "partial_ready" };
-                        }
-                        setOcrStatusLabel(`Første side klar — venter på fuld tekst: ${file.name}`);
-                        console.log(`[TRACE-2ocr][${traceId}] SSE partial_ready chars=${data.charCount} — fortsætter til completed`);
+                        // PATCH B: bræk øjeblikkeligt — brugeren ser svar inden for 3-5 s.
+                        // Upgrade-SSE abonnement starter i onSuccess og henter completed-teksten.
+                        ocrResult = { ocrText: data.ocrText, charCount: data.charCount, status: "running", stage: "partial_ready" };
+                        pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
+                        setOcrStatusLabel(`Delvis analyse klar — ${file.name}`);
+                        console.log(`[TRACE-2ocr][${traceId}] SSE partial_ready chars=${data.charCount} — bryder øjeblikkeligt for hurtig svar`);
+                        sseResolved = true;
+                        reader.cancel().catch(() => {});
+                        break outer;
                       }
                       if (type === "completed") {
                         // completed event indeholder nu ocrText (full dokument)
@@ -1250,6 +1256,53 @@ export default function AiChatPage() {
       // Her sætter vi kun conversationId og rydder OCR-status.
       if (data?.conversation_id) setConversationId(data.conversation_id);
       setOcrStatusLabel(null);
+
+      // ── PATCH B upgrade: hvis vi brækkede på partial_ready, lyt videre efter completed ──
+      const upgrade = pendingOcrUpgradeRef.current;
+      if (upgrade) {
+        pendingOcrUpgradeRef.current = null;
+        const { taskId, filename, mime } = upgrade;
+        (async () => {
+          try {
+            const token = await getSessionToken().catch(() => null);
+            const headers: Record<string, string> = { Accept: "text/event-stream" };
+            if (token) headers["Authorization"] = `Bearer ${token}`;
+            const res = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, { headers, credentials: "include" });
+            if (!res.ok || !res.body) return;
+            const reader  = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = "";
+            outerUpgrade: while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+              const lines = buf.split("\n");
+              buf = lines.pop() ?? "";
+              for (const line of lines) {
+                if (!line.startsWith("data:")) continue;
+                let evt: any;
+                try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+                if (evt.type === "completed" && evt.data?.ocrText?.trim() && chatMutateRef.current) {
+                  reader.cancel().catch(() => {});
+                  const fullText = evt.data.ocrText.slice(0, 80_000);
+                  chatMutateRef.current({
+                    text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
+                    attachments: [],
+                    _documentContextOverride: [{
+                      filename, mime_type: mime,
+                      char_count: fullText.length,
+                      extracted_text: fullText,
+                      status: "ok",
+                    }],
+                  });
+                  break outerUpgrade;
+                }
+                if (evt.type === "error") { reader.cancel().catch(() => {}); break outerUpgrade; }
+              }
+            }
+          } catch { /* non-fatal upgrade failure */ }
+        })();
+      }
     },
     onError: (err: any) => {
       setOcrStatusLabel(null);

@@ -172,7 +172,10 @@ export async function processDirectAttachment(
     };
   }
 
-  if (isTextMime(contentType)) {
+  // Text MIME or octet-stream with a known text extension (e.g. browser sends no MIME for .txt)
+  const textExtensions = new Set([".txt", ".md", ".csv", ".html", ".xml", ".json", ".yaml", ".yml", ".log"]);
+  const fileExt = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+  if (isTextMime(contentType) || (contentType === "application/octet-stream" && textExtensions.has(fileExt))) {
     const text = buf.toString("utf-8").slice(0, 80_000);
     console.log(`[direct-processor] text extracted chars=${text.length}`);
     return {
