@@ -282,8 +282,10 @@ export async function processOcrJobInline(
             model: chunk.model,
           });
           firstPartialEmitted = true;
-          // PHASE 5Z.7 — trigger server-driven chat via orchestrator
-          triggerOcrChat({ jobId, tenantId, charCount: page1Text.length, stage: "partial_ready", status: "running", mode: "partial", triggerReason: "single_page_threshold", ocrText: page1Text }).catch(() => {});
+          // PHASE 5Z.7 — trigger server-driven chat via orchestrator.
+          // MUST be awaited: guarantees partial_ready SSE push fires BEFORE completed SSE push.
+          // Without await, completed's DB ops can finish first → client sees completed before partial_ready.
+          await triggerOcrChat({ jobId, tenantId, charCount: page1Text.length, stage: "partial_ready", status: "running", mode: "partial", triggerReason: "single_page_threshold", ocrText: page1Text }).catch(() => {});
         }
       }
       log(jobId, "single_page_stream_ok", { chars: page1Text.length, ms: Date.now() - tP });
@@ -344,8 +346,9 @@ export async function processOcrJobInline(
             model: chunk.model,
           });
           firstPartialEmitted = true;
-          // PHASE 5Z.7 — trigger server-driven chat via orchestrator
-          triggerOcrChat({ jobId, tenantId, charCount: page1Text.length, stage: "partial_ready", status: "running", mode: "partial", triggerReason: "multi_page_p1_threshold", ocrText: page1Text }).catch(() => {});
+          // PHASE 5Z.7 — trigger server-driven chat via orchestrator.
+          // MUST be awaited: same race-condition fix as single_page path.
+          await triggerOcrChat({ jobId, tenantId, charCount: page1Text.length, stage: "partial_ready", status: "running", mode: "partial", triggerReason: "multi_page_p1_threshold", ocrText: page1Text }).catch(() => {});
         }
       }
     } catch (e) {

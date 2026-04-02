@@ -912,6 +912,7 @@ export default function AiChatPage() {
               const OCR_TIMEOUT = 360_000;
               const ocrStart    = Date.now();
               let ocrResult: any = null;
+              let ocrHandled = false; // set true when partial_ready pushes directly to finalizeResults
 
               // Stage → brugervenlig tekst
               const stageLabel = (stage: string | null | undefined): string => {
@@ -962,12 +963,22 @@ export default function AiChatPage() {
                       if (!type || !data) continue;
 
                       if (type === "partial_ready" && data.ocrText?.trim()) {
-                        // PATCH B: bræk øjeblikkeligt — brugeren ser svar inden for 3-5 s.
-                        // Upgrade-SSE abonnement starter i onSuccess og henter completed-teksten.
-                        ocrResult = { ocrText: data.ocrText, charCount: data.charCount, status: "running", stage: "partial_ready" };
+                        // Build document_context directly — do NOT rely on ocrResult fallthrough chain.
+                        // ocrHandled = true skips the post-SSE ocrResult→finalizeResults block.
+                        const partialText = (data.ocrText as string).slice(0, 80_000);
+                        finalizeResults.push({
+                          filename:       file.name,
+                          mime_type:      file.type || "application/pdf",
+                          char_count:     data.charCount ?? partialText.length,
+                          extracted_text: partialText,
+                          status:         "ok",
+                          source:         "ocr_partial",
+                        });
+                        ocrHandled = true;
+                        ocrResult = { status: "running", stage: "partial_ready" }; // sentinel: passes !ocrResult check
                         pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
-                        setOcrStatusLabel(`Delvis analyse klar — ${file.name}`);
-                        console.log(`[TRACE-2ocr][${traceId}] SSE partial_ready chars=${data.charCount} — bryder øjeblikkeligt for hurtig svar`);
+                        setOcrStatusLabel(null);
+                        console.log(`[TRACE-2ocr][${traceId}] SSE partial_ready chars=${data.charCount} — direct push, bryder øjeblikkeligt`);
                         sseResolved = true;
                         reader.cancel().catch(() => {});
                         break outer;
@@ -1081,8 +1092,8 @@ export default function AiChatPage() {
                 throw Object.assign(new Error("OCR tog for lang tid (>6 min). Prøv igen — store filer kan tage tid."), { errorCode: "DOCUMENT_UNREADABLE" });
               }
 
-              // PHASE A — OCR fallback: server couldn't read document but provides fallback context
-              if (ocrResult.status === "fallback") {
+              // PHASE A — OCR post-processing (skipped when partial_ready already pushed directly)
+              if (!ocrHandled && ocrResult.status === "fallback") {
                 const fallbackMsg = ocrResult.message ?? "Ingen læsbar tekst fundet i dokumentet";
                 const fallbackFilename = ocrResult.filename ?? file.name;
                 console.log(`[TRACE-2ocr][${traceId}] OCR fallback path — building synthetic context for "${fallbackFilename}"`);
@@ -1097,7 +1108,7 @@ export default function AiChatPage() {
                   reason:         "ocr_failed",
                   source:         "r2_ocr_fallback",
                 });
-              } else {
+              } else if (!ocrHandled) {
                 const ocrText = (ocrResult.ocrText ?? "").slice(0, 80_000);
                 if (!ocrText.trim()) {
                   console.error(`[OCR-FAIL][${traceId}] PATH=ocr_empty_text charCount=${ocrResult.charCount} quality=${ocrResult.qualityScore}`);
@@ -1113,7 +1124,7 @@ export default function AiChatPage() {
                   source:         "r2_ocr_async",
                 });
               }
-              console.log(`[TRACE-2ocr][${traceId}] OCR complete chars=${ocrResult.charCount} quality=${ocrResult.qualityScore}`);
+              console.log(`[TRACE-2ocr][${traceId}] OCR complete chars=${ocrResult.charCount ?? 0} quality=${ocrResult.qualityScore ?? "-"}`);
             } else if (finalData.results && finalData.results.length > 0) {
               finalizeResults.push(...finalData.results);
             }
