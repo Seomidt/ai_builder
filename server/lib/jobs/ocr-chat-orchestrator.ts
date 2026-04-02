@@ -29,6 +29,15 @@ import { Client as PgClient } from "pg";
 
 export type OcrTriggerMode = "partial" | "complete";
 
+export interface OcrFallbackInput {
+  jobId:        string;
+  tenantId:     string;
+  /** Error message to surface to SSE client and store in DB. */
+  errorMessage: string;
+  /** filename passed through for client UI. */
+  filename?:    string;
+}
+
 export interface OcrChatTriggerInput {
   jobId:        string;
   tenantId:     string;
@@ -77,9 +86,19 @@ function pushSseEvent(taskId: string, type: string, data: object): void {
  * Called from ocr-inline-processor.ts at every failJob() call site.
  * Without this, the SSE channel stays alive with keepalives and the client
  * never exits the "reading" state.
+ *
+ * @param fallbackPayload  When provided, the client receives fallback: true so it
+ *   continues the chat pipeline with a synthetic context instead of stopping.
  */
-export function pushOcrSseError(taskId: string, message: string): void {
-  pushSseEvent(taskId, "error", { message });
+export function pushOcrSseError(
+  taskId:  string,
+  message: string,
+  fallbackPayload?: { questionText: string; filename: string },
+): void {
+  pushSseEvent(taskId, "error", {
+    message,
+    ...(fallbackPayload ? { fallback: true, ...fallbackPayload } : {}),
+  });
 }
 
 // ── Trigger key ───────────────────────────────────────────────────────────────
@@ -269,4 +288,85 @@ export async function triggerOcrChat(input: OcrChatTriggerInput): Promise<OcrCha
     }));
     return { triggered: false, triggerKey, reason: `db_error: ${(err as Error).message}`, requestId: null };
   }
+}
+
+// ── OCR Failure Fallback ───────────────────────────────────────────────────────
+
+/**
+ * Called from ocr-inline-processor.ts whenever failJob() is invoked.
+ *
+ * Responsibilities:
+ *  1. Read question_text + filename from chat_ocr_tasks (needed for fallback context)
+ *  2. Create a fallback chat_answer_requests row (mode="complete", trigger_reason="ocr_failed_fallback")
+ *  3. Push enriched SSE error event with { fallback: true, questionText, filename }
+ *     so the client continues the chat pipeline with a synthetic "document unreadable" context.
+ *
+ * This eliminates the dead state where:
+ *   chat_ocr_tasks → dead_letter with no answer request AND client spinner never stops.
+ *
+ * INV-FALLBACK1: Always non-fatal — errors are swallowed.
+ * INV-FALLBACK2: Idempotent — uses ON CONFLICT DO NOTHING.
+ */
+export async function triggerOcrChatFallback(input: OcrFallbackInput): Promise<void> {
+  const { jobId, tenantId, errorMessage, filename } = input;
+
+  // Build a stable fallback trigger key
+  const fallbackKey = createHash("sha256")
+    .update(`${tenantId}:${jobId}:fallback`)
+    .digest("hex")
+    .slice(0, 32);
+
+  let questionText = "";
+  let resolvedFilename = filename ?? "";
+
+  // ── Read question_text + filename from chat_ocr_tasks ──────────────────────
+  const readClient = new PgClient({ connectionString: resolveDbUrl(), ssl: getSslConfig() });
+  try {
+    await readClient.connect();
+    const row = await readClient.query<{ question_text: string | null; filename: string | null }>(
+      `SELECT question_text, filename FROM chat_ocr_tasks WHERE id = $1 LIMIT 1`,
+      [jobId],
+    );
+    if (row.rows[0]) {
+      questionText      = row.rows[0].question_text ?? "";
+      resolvedFilename  = resolvedFilename || (row.rows[0].filename ?? "");
+    }
+  } catch (e) {
+    console.warn(`[ocr-fallback] could not read chat_ocr_tasks for jobId=${jobId}: ${(e as Error).message}`);
+  } finally {
+    await readClient.end().catch(() => {});
+  }
+
+  // ── Insert fallback answer request (idempotent) ────────────────────────────
+  try {
+    await insertAnswerRequestIfNew(tenantId, jobId, fallbackKey, "complete", "ocr_failed_fallback");
+  } catch (e) {
+    console.warn(`[ocr-fallback] insertAnswerRequest failed for jobId=${jobId}: ${(e as Error).message}`);
+  }
+
+  // ── Stamp ocr_chat_trigger_key on chat_ocr_tasks so observability is correct ─
+  try {
+    await stampOcrTaskTrigger(jobId, fallbackKey, false).catch(() => {});
+  } catch { /* non-fatal */ }
+
+  // ── Push enriched SSE error event → client continues with fallback context ──
+  const hasFallbackContext = Boolean(questionText.trim() || resolvedFilename);
+  pushOcrSseError(
+    jobId,
+    errorMessage,
+    hasFallbackContext
+      ? { questionText, filename: resolvedFilename }
+      : undefined,
+  );
+
+  console.log(JSON.stringify({
+    ts:           new Date().toISOString(),
+    svc:          "ocr-orchestrator",
+    jobId,
+    event:        "ocr_fallback_triggered",
+    fallbackKey,
+    hasQuestion:  Boolean(questionText),
+    filename:     resolvedFilename,
+    errorMessage: errorMessage.slice(0, 100),
+  }));
 }

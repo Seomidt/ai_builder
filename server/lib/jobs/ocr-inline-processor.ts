@@ -26,7 +26,7 @@
 import { extractWithGemini, extractWithGeminiStream } from "../ai/gemini-media.ts";
 import { isPartialTextUsable }                        from "../media/partial-text-readiness.ts";
 import { splitPdfIntoPages }   from "../media/pdf-page-splitter.ts";
-import { triggerOcrChat, pushOcrSseError } from "./ocr-chat-orchestrator.ts";
+import { triggerOcrChat, pushOcrSseError, triggerOcrChatFallback } from "./ocr-chat-orchestrator.ts";
 import {
   startJobInline,
   updateStage,
@@ -234,8 +234,9 @@ export async function processOcrJobInline(
       log(jobId, "single_call_ok", { chars: charCount, ms: Date.now() - t });
 
       if (!text.trim()) {
-        await failJob(jobId, "Ingen læsbar tekst fundet i dokumentet", false);
-        pushOcrSseError(jobId, "Ingen læsbar tekst fundet i dokumentet");
+        const errMsg = "Ingen læsbar tekst fundet i dokumentet";
+        await failJob(jobId, errMsg, false);
+        await triggerOcrChatFallback({ jobId, tenantId, errorMessage: errMsg, filename }).catch(() => {});
         return;
       }
 
@@ -288,8 +289,9 @@ export async function processOcrJobInline(
       log(jobId, "single_page_stream_ok", { chars: page1Text.length, ms: Date.now() - tP });
 
       if (!page1Text.trim()) {
-        await failJob(jobId, "Ingen læsbar tekst fundet i dokumentet", false);
-        pushOcrSseError(jobId, "Ingen læsbar tekst fundet i dokumentet");
+        const errMsg = "Ingen læsbar tekst fundet i dokumentet";
+        await failJob(jobId, errMsg, false);
+        await triggerOcrChatFallback({ jobId, tenantId, errorMessage: errMsg, filename }).catch(() => {});
         return;
       }
 
@@ -403,8 +405,9 @@ export async function processOcrJobInline(
     const fullText = allTexts.join("\n\n");
 
     if (!fullText.trim()) {
-      await failJob(jobId, "Ingen læsbar tekst fundet i dokumentet", false);
-      pushOcrSseError(jobId, "Ingen læsbar tekst fundet i dokumentet");
+      const errMsg = "Ingen læsbar tekst fundet i dokumentet";
+      await failJob(jobId, errMsg, false);
+      await triggerOcrChatFallback({ jobId, tenantId, errorMessage: errMsg, filename }).catch(() => {});
       return;
     }
 
@@ -438,6 +441,12 @@ export async function processOcrJobInline(
     log(jobId, "job_failed", { error: msg });
     const retryable = !msg.includes("Ingen læsbar tekst") && !msg.includes("Unsupported content");
     await failJob(jobId, msg.slice(0, 500), retryable);
-    if (!retryable) pushOcrSseError(jobId, msg.slice(0, 200));
+    // Fallback for non-retryable failures — client exits loading state and gets a useful answer
+    if (!retryable) {
+      await triggerOcrChatFallback({ jobId, tenantId, errorMessage: msg.slice(0, 200), filename }).catch(() => {});
+    } else {
+      // Retryable: still push basic SSE error (no fallback — job will be retried)
+      pushOcrSseError(jobId, msg.slice(0, 200));
+    }
   }
 }

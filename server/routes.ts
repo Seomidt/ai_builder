@@ -1336,8 +1336,20 @@ Generate names and content in ${langNote}.`;
         return res.status(403).json({ error_code: "FORBIDDEN", message: "Ugyldig object key" });
       }
 
+      // ── Central input routing decision (PHASE D) ─────────────────────────────
+      // selectInputRoute is the single source of truth for pipeline selection.
+      // INV-IR1: text/plain NEVER enters scanned_pdf_ocr_path.
+      const { selectInputRoute } = await import("./lib/chat/input-router");
+      const _initialRoute = selectInputRoute({ mimeType: contentType, filename, sizeBytes: size });
+      console.log(`[upload/finalize] central-route=${_initialRoute.route} reason=${_initialRoute.reason} tenant=${orgId}`);
+
+      // Guard: text and code files never enter the PDF/OCR branch regardless of content-type quirks
+      const _isTextOrCode = _initialRoute.route === "direct_text_fast_path" ||
+                            _initialRoute.route === "code_text_fast_path";
+
       // ── PDF: Hybrid tilgang — native tekst-ekstraktion → fallback til async OCR ─
-      const isPdf = contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
+      const isPdf = !_isTextOrCode &&
+        (contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf"));
       if (isPdf) {
         // ── Download PDF fra R2 (shared buffer for both pdf-parse and Gemini OCR) ──
         let pdfBuf: Buffer = Buffer.alloc(0);

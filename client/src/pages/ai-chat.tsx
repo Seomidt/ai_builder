@@ -977,12 +977,27 @@ export default function AiChatPage() {
                         break outer;
                       }
                       if (type === "error") {
-                        console.warn(`[TRACE-2ocr][${traceId}] SSE error event: ${data.message}`);
+                        console.warn(`[TRACE-2ocr][${traceId}] SSE error event: ${data.message} fallback=${data.fallback}`);
                         sseResolved = true;   // prevent polling fallback from starting
-                        sseError = Object.assign(
-                          new Error(data.message ?? "OCR-job fejlede — prøv at uploade filen igen"),
-                          { errorCode: "DOCUMENT_UNREADABLE" },
-                        );
+                        if (data.fallback) {
+                          // PHASE A — OCR failed but server provides fallback path.
+                          // Continue chat pipeline with synthetic "document unreadable" context.
+                          ocrResult = {
+                            status:       "fallback",
+                            fallback:     true,
+                            questionText: data.questionText ?? "",
+                            filename:     data.filename ?? file.name,
+                            message:      data.message ?? "Dokumentet kunne ikke læses",
+                            ocrText:      null,
+                            charCount:    0,
+                          };
+                          console.log(`[TRACE-2ocr][${traceId}] SSE fallback path — continuing chat with synthetic context`);
+                        } else {
+                          sseError = Object.assign(
+                            new Error(data.message ?? "OCR-job fejlede — prøv at uploade filen igen"),
+                            { errorCode: "DOCUMENT_UNREADABLE" },
+                          );
+                        }
                         reader.cancel().catch(() => {});
                         break outer;
                       }
@@ -1053,20 +1068,36 @@ export default function AiChatPage() {
                 throw Object.assign(new Error("OCR tog for lang tid (>6 min). Prøv igen — store filer kan tage tid."), { errorCode: "DOCUMENT_UNREADABLE" });
               }
 
-              const ocrText = (ocrResult.ocrText ?? "").slice(0, 80_000);
-              if (!ocrText.trim()) {
-                console.error(`[OCR-FAIL][${traceId}] PATH=ocr_empty_text charCount=${ocrResult.charCount} quality=${ocrResult.qualityScore}`);
-                throw Object.assign(new Error("OCR fandt ingen læsbar tekst i dokumentet. Tjek at PDF-filen ikke er krypteret."), { errorCode: "DOCUMENT_UNREADABLE" });
-              }
+              // PHASE A — OCR fallback: server couldn't read document but provides fallback context
+              if (ocrResult.status === "fallback") {
+                const fallbackMsg = ocrResult.message ?? "Ingen læsbar tekst fundet i dokumentet";
+                const fallbackFilename = ocrResult.filename ?? file.name;
+                console.log(`[TRACE-2ocr][${traceId}] OCR fallback path — building synthetic context for "${fallbackFilename}"`);
+                setOcrStatusLabel(null);
+                finalizeResults.push({
+                  filename:       fallbackFilename,
+                  mime_type:      file.type || "application/pdf",
+                  char_count:     0,
+                  extracted_text: `[DOKUMENT UEGNET TIL TEKSTUDTRÆK: ${fallbackFilename}]\n\n${fallbackMsg}\n\nJeg kunne ikke læse nogen brugbar tekst i dokumentet. Dokumentet kan være scannet, tomt eller uegnet til tekstudtræk. Upload gerne en mere læsbar version eller stil et nyt spørgsmål.`,
+                  status:         "fallback",
+                  source:         "r2_ocr_fallback",
+                });
+              } else {
+                const ocrText = (ocrResult.ocrText ?? "").slice(0, 80_000);
+                if (!ocrText.trim()) {
+                  console.error(`[OCR-FAIL][${traceId}] PATH=ocr_empty_text charCount=${ocrResult.charCount} quality=${ocrResult.qualityScore}`);
+                  throw Object.assign(new Error("OCR fandt ingen læsbar tekst i dokumentet. Tjek at PDF-filen ikke er krypteret."), { errorCode: "DOCUMENT_UNREADABLE" });
+                }
 
-              finalizeResults.push({
-                filename:       file.name,
-                mime_type:      file.type || "application/pdf",
-                char_count:     ocrResult.charCount ?? 0,
-                extracted_text: ocrText,
-                status:         "ok",
-                source:         "r2_ocr_async",
-              });
+                finalizeResults.push({
+                  filename:       file.name,
+                  mime_type:      file.type || "application/pdf",
+                  char_count:     ocrResult.charCount ?? 0,
+                  extracted_text: ocrText,
+                  status:         "ok",
+                  source:         "r2_ocr_async",
+                });
+              }
               console.log(`[TRACE-2ocr][${traceId}] OCR complete chars=${ocrResult.charCount} quality=${ocrResult.qualityScore}`);
             } else if (finalData.results && finalData.results.length > 0) {
               finalizeResults.push(...finalData.results);
@@ -1080,7 +1111,10 @@ export default function AiChatPage() {
           }
 
           // HARD STOP: ingen gyldige dokumenter
-          const validEntries = documentContext.filter((r: any) => r.status === "ok" && r.extracted_text?.trim());
+          // "fallback" status er gyldig — modellen svarer med "dokumentet kunne ikke læses" besked
+          const validEntries = documentContext.filter((r: any) =>
+            (r.status === "ok" || r.status === "fallback") && r.extracted_text?.trim()
+          );
           if (validEntries.length === 0) {
             const errorEntry = documentContext.find((r: any) => r.status === "error" && r.message);
             const hasOcrSource = documentContext.some((r: any) => r.source === "r2_ocr_async");
