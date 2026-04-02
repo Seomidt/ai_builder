@@ -24,7 +24,7 @@
  */
 
 import { extractWithGemini, extractWithGeminiStream } from "../ai/gemini-media.ts";
-import { isPartialTextUsable }                        from "../media/partial-text-readiness.ts";
+import { isPartialTextUsable, shouldStartPartialAnswer } from "../media/partial-text-readiness.ts";
 import { splitPdfIntoPages }   from "../media/pdf-page-splitter.ts";
 import { triggerOcrChat, pushOcrSseError, triggerOcrChatFallback } from "./ocr-chat-orchestrator.ts";
 import {
@@ -206,11 +206,12 @@ async function processAllPagesStreaming(
  * @param contentType  MIME type (must be application/pdf for page splitting)
  */
 export async function processOcrJobInline(
-  jobId:       string,
-  buffer:      Buffer,
-  filename:    string,
-  contentType: string,
-  tenantId = "unknown",
+  jobId:        string,
+  buffer:       Buffer,
+  filename:     string,
+  contentType:  string,
+  tenantId    = "unknown",
+  questionText = "",
 ): Promise<void> {
   const tJobStart = Date.now();
   log(jobId, "job_start", { filename, contentType, bytes: buffer.length });
@@ -270,14 +271,19 @@ export async function processOcrJobInline(
       )) {
         page1Text += chunk.textDelta;
 
-        // Emit partial_ready as soon as threshold is crossed (do NOT wait for completion)
-        if (!firstPartialEmitted && isPartialTextUsable(page1Text, 0)) {
+        // PHASE 5Z.8 — question-aware gate: do NOT emit partial_ready from intro-only text.
+        const singlePageGate = shouldStartPartialAnswer({
+          questionText, partialOcrText: page1Text, pageIndex: 0, filename, mimeType: contentType,
+        });
+        log(jobId, "single_page_gate", { allow: singlePageGate.allow, reason: singlePageGate.reason, chars: page1Text.length });
+        if (!firstPartialEmitted && singlePageGate.allow) {
           await updatePartialText(jobId, page1Text, "partial_ready");
           await upsertOcrProgress(jobId, tenantId, 0, page1Text, "partial_ready");
           log(jobId, "single_page_first_partial_at", {
             ts: new Date().toISOString(),
             upload_to_first_streamed_ocr_text_ms: Date.now() - tJobStart,
             chars: page1Text.length,
+            gateReason: singlePageGate.reason,
             streamSeq: chunk.streamSeq,
             model: chunk.model,
           });
@@ -335,7 +341,12 @@ export async function processOcrJobInline(
       )) {
         page1Text += chunk.textDelta;
 
-        if (!firstPartialEmitted && isPartialTextUsable(page1Text, 0)) {
+        // PHASE 5Z.8 — question-aware gate: do NOT emit partial_ready from intro-only text.
+        const multiPageGate = shouldStartPartialAnswer({
+          questionText, partialOcrText: page1Text, pageIndex: 0, filename, mimeType: contentType,
+        });
+        log(jobId, "multi_page_p1_gate", { allow: multiPageGate.allow, reason: multiPageGate.reason, chars: page1Text.length });
+        if (!firstPartialEmitted && multiPageGate.allow) {
           await updatePartialText(jobId, page1Text, "partial_ready");
           // Write progress for page 0
           await upsertOcrProgress(jobId, tenantId, 0, page1Text, "partial_ready");
@@ -343,6 +354,7 @@ export async function processOcrJobInline(
             ts: new Date().toISOString(),
             upload_to_first_streamed_ocr_text_ms: Date.now() - tJobStart,
             chars: page1Text.length,
+            gateReason: multiPageGate.reason,
             streamSeq: chunk.streamSeq,
             model: chunk.model,
           });

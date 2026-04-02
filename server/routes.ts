@@ -1424,7 +1424,8 @@ Generate names and content in ${langNote}.`;
 
           // Fire-and-forget: page-split + parallel OCR runs in background.
           // The pre-downloaded pdfBuf is passed to skip R2 re-download.
-          processOcrJobInline(taskId, pdfBuf, filename, "application/pdf", orgId).catch((err: Error) =>
+          const qtArg = typeof questionText === "string" && questionText.trim() ? questionText.trim() : "";
+          processOcrJobInline(taskId, pdfBuf, filename, "application/pdf", orgId, qtArg).catch((err: Error) =>
             console.error(`[upload/finalize] inline OCR error taskId=${taskId}: ${err.message}`),
           );
 
