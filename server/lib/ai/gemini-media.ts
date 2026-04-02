@@ -106,7 +106,7 @@ function estimateQuality(text: string): number {
 
 // ── Main export ────────────────────────────────────────────────────────────────
 
-const GEMINI_MODEL = "gemini-2.0-flash";
+const GEMINI_MODEL = "gemini-2.5-flash";
 
 /**
  * Extract text/content from a file buffer using Gemini multimodal.
