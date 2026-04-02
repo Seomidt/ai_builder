@@ -983,8 +983,9 @@ export default function AiChatPage() {
                           // PHASE A — OCR failed but server provides fallback path.
                           // Continue chat pipeline with synthetic "document unreadable" context.
                           ocrResult = {
-                            status:       "fallback",
+                            status:       "unsupported",
                             fallback:     true,
+                            reason:       "ocr_failed",
                             questionText: data.questionText ?? "",
                             filename:     data.filename ?? file.name,
                             message:      data.message ?? "Dokumentet kunne ikke læses",
@@ -1079,7 +1080,9 @@ export default function AiChatPage() {
                   mime_type:      file.type || "application/pdf",
                   char_count:     0,
                   extracted_text: `[DOKUMENT UEGNET TIL TEKSTUDTRÆK: ${fallbackFilename}]\n\n${fallbackMsg}\n\nJeg kunne ikke læse nogen brugbar tekst i dokumentet. Dokumentet kan være scannet, tomt eller uegnet til tekstudtræk. Upload gerne en mere læsbar version eller stil et nyt spørgsmål.`,
-                  status:         "fallback",
+                  status:         "unsupported",
+                  fallback:       true,
+                  reason:         "ocr_failed",
                   source:         "r2_ocr_fallback",
                 });
               } else {
@@ -1111,9 +1114,9 @@ export default function AiChatPage() {
           }
 
           // HARD STOP: ingen gyldige dokumenter
-          // "fallback" status er gyldig — modellen svarer med "dokumentet kunne ikke læses" besked
+          // fallback entries (status=unsupported + fallback:true) er gyldige — modellen svarer med "dokument uegnet" besked
           const validEntries = documentContext.filter((r: any) =>
-            (r.status === "ok" || r.status === "fallback") && r.extracted_text?.trim()
+            (r.status === "ok" || (r.status === "unsupported" && r.fallback === true)) && r.extracted_text?.trim()
           );
           if (validEntries.length === 0) {
             const errorEntry = documentContext.find((r: any) => r.status === "error" && r.message);
