@@ -229,10 +229,10 @@ export async function runChatMessage(params: {
           `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
           `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
           `REGEL 4: Da dokumentet kun er DELVIST tilgængeligt, MÅ DU ALDRIG konkludere endeligt at en information IKKE findes — den kan stå i den del der endnu ikke er behandlet.`,
-          `REGEL 5: Giv foreløbige observationer baseret på den tilgængelige tekst. Præfiks dit svar med "Baseret på den tilgængelige del af dokumentet:".`,
-          `REGEL 6: Hvis du ikke kan finde noget relevant i den tilgængelige del, sig: "Jeg kan ikke finde det i den del af dokumentet jeg har set endnu — det kan stå i den resterende del."`,
+          `REGEL 5: Giv ALTID et konkret, foreløbigt svar baseret på den tilgængelige tekst. Begynd dit svar med hvad du KAN se i dokumentet.`,
+          `REGEL 6: Du MÅ ALDRIG sige at du ikke kan finde noget — skriv i stedet hvad du ser, og at resten af dokumentet analyseres.`,
           `REGEL 7: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
-          `REGEL 8: Afslut ALTID dit svar med denne linje: "⏳ Svaret er baseret på den første del af dokumentet og opdateres automatisk når hele dokumentet er analyseret."`,
+          `REGEL 8: Afslut ALTID dit svar med denne linje: "⏳ Baseret på den første del — svaret opdateres automatisk når hele dokumentet er analyseret."`,
           `=== SLUT REGLER ===`,
           ``,
           `Svar altid på dansk.`,
@@ -311,14 +311,15 @@ export async function runChatMessage(params: {
         const delta = chunk.choices[0]?.delta?.content ?? "";
         if (delta) { params.onToken(delta); aiText += delta; }
       }
-      // Post-stream safeguard check: if AI made a definitive negative claim, replace with provisional
+      // Post-stream safeguard check: if AI made a definitive negative claim, replace with a neutral message
       const safeguarded = applyPartialSafeguard(aiText);
       if (safeguarded !== aiText) {
         console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered after streaming — sending replace event`);
-        aiText = safeguarded;
-        // Signal client to replace streamed content with provisional answer
-        if (params.onSafeguardReplace) params.onSafeguardReplace(safeguarded);
-        else params.onToken("\n\n---\n" + safeguarded); // fallback if no replace handler
+        // Use a neutral message that doesn't look like the old provisional text
+        const neutralReplacement = "Jeg har set den første del af dokumentet. Det fulde svar genereres automatisk når hele dokumentet er analyseret.\n\n⏳ Opdateres automatisk...";
+        aiText = neutralReplacement;
+        if (params.onSafeguardReplace) params.onSafeguardReplace(neutralReplacement);
+        else params.onToken("\n\n" + neutralReplacement);
       }
     } else if (params.onToken) {
       // ── COMPLETE MODE: real token streaming (safeguard not needed) ───────────
