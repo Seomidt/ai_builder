@@ -124,10 +124,10 @@ function ConfidenceBadge({ band }: { band: ConfidenceBand }) {
 // ─── Refinement Badge (Phase 5Z.5) ────────────────────────────────────────────
 
 /**
- * Shows the refinement state of an answer:
- *  gen=1 → Partial (first page only)
- *  gen=2 → Improved (more context added)
- *  gen=3 → Complete (full document)
+ * Shows the refinement state of an answer.
+ * gen=1 (partial) → no badge shown (internal OCR state, not user-facing)
+ * gen=2 → "Forbedret"
+ * gen>=2 + completeness=complete → "Fuldt svar"
  */
 function RefinementBadge({
   completeness, generation, coverage, cacheHit,
@@ -137,9 +137,11 @@ function RefinementBadge({
   coverage?:     number;
   cacheHit?:     boolean;
 }) {
+  // Never show badge for first-generation answers (gen=1 or unset).
+  // "Delsvar" with a fake percentage exposes internal OCR state to users.
+  if (!generation || generation < 2) return null;
+
   if (!completeness || completeness === "complete") {
-    // Only show if we have a generation marker
-    if (!generation || generation < 2) return null;
     return (
       <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-green-400 border-green-400/30 bg-green-400/10">
         <CheckCircle2 className="w-3 h-3" />Fuldt svar
@@ -148,18 +150,9 @@ function RefinementBadge({
     );
   }
 
-  if (generation === 2) {
-    return (
-      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-blue-400 border-blue-400/30 bg-blue-400/10">
-        <TrendingUp className="w-3 h-3" />Forbedret
-        {coverage != null && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
-      </span>
-    );
-  }
-
   return (
-    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-amber-400 border-amber-400/30 bg-amber-400/10">
-      <Hourglass className="w-3 h-3" />Delsvar
+    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-blue-400 border-blue-400/30 bg-blue-400/10">
+      <TrendingUp className="w-3 h-3" />Forbedret
       {coverage != null && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
       {cacheHit && <span className="opacity-50 ml-0.5">·cache</span>}
     </span>
@@ -981,7 +974,7 @@ export default function AiChatPage() {
                         ocrResult = { status: "running", stage: "partial_ready" }; // sentinel: passes !ocrResult check
                         pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
                         setOcrStatusLabel(null);
-                        console.log(`[TRACE-2ocr][${traceId}] SSE partial_ready chars=${data.charCount} — direct push, bryder øjeblikkeligt`);
+                        console.log(`[OCR:partial_ready received] taskId=${taskId} chars=${data.charCount} — partial answer queued, upgrade polling will start after onSuccess`);
                         sseResolved = true;
                         reader.cancel().catch(() => {});
                         break outer;
@@ -990,13 +983,15 @@ export default function AiChatPage() {
                         // completed event indeholder nu ocrText (full dokument)
                         if (data.ocrText?.trim()) {
                           ocrResult = { ocrText: data.ocrText, charCount: data.charCount, status: "completed", stage: "completed" };
-                          console.log(`[TRACE-2ocr][${traceId}] SSE completed med ocrText chars=${data.charCount}`);
+                          console.log(`[OCR:completed detected] taskId=${taskId} ocrText=YES chars=${data.charCount}`);
                         } else {
                           // Fallback: hent via status-endpoint
+                          console.log(`[OCR:completed detected] taskId=${taskId} ocrText=NO — fallback fetch from /api/ocr-status`);
                           const sr = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch(() => null);
                           if (sr?.ok) ocrResult = await sr.json().catch(() => null);
                           if (!ocrResult) ocrResult = { status: "completed", charCount: data.charCount };
-                          console.log(`[TRACE-2ocr][${traceId}] SSE completed (status-fetch) chars=${data.charCount}`);
+                          const fetchedLen = (ocrResult as any)?.ocrText?.length ?? 0;
+                          console.log(`[OCR:fallback fetch done] taskId=${taskId} fetched_chars=${fetchedLen}`);
                         }
                         sseResolved = true;
                         reader.cancel().catch(() => {});
@@ -1239,13 +1234,16 @@ export default function AiChatPage() {
             } else if (event.type === "done") {
               doneData = event as ChatResponse & { _trace?: any };
               const isRefined = (event.refinement_generation ?? 1) >= 2;
+              // Also supersede provisional when this is the upgrade mutation completing.
+              // isUpgradeAttemptRef.current is true throughout the upgrade mutation's streaming.
+              const isUpgradeCompletion = isUpgradeAttemptRef.current;
               setMessages(prev => prev.map(m => {
                 if (m.id === streamMsgId) {
                   // Current message: finalise it
                   return { ...m, text: streamText, isStreaming: false, response: doneData ?? undefined };
                 }
-                // Phase 5Z.5 — supersede earlier assistant answers when a refined one arrives
-                if (isRefined && m.role === "assistant" && !m.isError && !m.isStreaming && m.id !== streamMsgId) {
+                // Supersede earlier assistant answers when a refined or upgrade answer arrives
+                if ((isRefined || isUpgradeCompletion) && m.role === "assistant" && !m.isError && !m.isStreaming && m.id !== streamMsgId) {
                   return { ...m, isSuperseded: true };
                 }
                 return m;
@@ -1289,9 +1287,9 @@ export default function AiChatPage() {
         pendingOcrUpgradeRef.current = null;
         const { taskId, filename, mime } = upgrade;
 
-        // Capture chatMutation.mutate directly in this closure — avoids any possible
-        // ref staleness and guarantees the live mutate function is used.
-        const triggerUpgradeMutation = chatMutation.mutate;
+        // Use mutateAsync so the retry loop can await each attempt.
+        // Captures directly from chatMutation — no ref indirection.
+        const triggerUpgradeMutation = chatMutation.mutateAsync;
 
         (async () => {
           const label = `[upgrade:${taskId.slice(-8)}]`;
@@ -1332,22 +1330,21 @@ export default function AiChatPage() {
             });
 
             if (!fullText.trim()) {
-              console.error(`${label} [OCR completed] upgrade aborted — no OCR text returned after polling`);
+              console.error(`${label} [OCR completed] ocrText=empty — upgrade aborted after all polling retries`);
               setMessages(prev => [...prev, {
                 id: crypto.randomUUID(), role: "assistant" as const,
-                text: "Det komplette dokument var ikke klar inden for tidsfristen. Det delvise svar ovenfor er fortsat gyldigt.",
+                text: "Det komplette svar kunne ikke hentes automatisk. Prøv igen om lidt.",
                 timestamp: new Date(),
               }]);
               return;
             }
 
-            console.log(`${label} [OCR completed] fullText chars=${fullText.length}`);
-            console.log(`${label} [Triggering complete answer] launching upgrade mutation`);
+            console.log(`${label} [OCR completed] ocrText=YES chars=${fullText.length}`);
 
-            isUpgradeAttemptRef.current = true;
-            triggerUpgradeMutation({
+            // ── Retry loop — up to 3 attempts, 2s between each ──────────────────
+            const upgradePayload = {
               text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
-              attachments: [],
+              attachments: [] as any[],
               _documentContextOverride: [{
                 filename, mime_type: mime,
                 char_count: fullText.length,
@@ -1355,10 +1352,41 @@ export default function AiChatPage() {
                 status: "ok",
                 source: "r2_ocr_async",
               }],
-            } as any);
-            console.log(`${label} [Triggering complete answer] mutation dispatched — awaiting AI response`);
+            };
+
+            const MAX_ATTEMPTS = 3;
+            let lastError: unknown = null;
+
+            for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+              if (attempt > 1) {
+                console.log(`${label} [Triggering complete answer] retry attempt ${attempt}/${MAX_ATTEMPTS} — waiting 2s`);
+                await new Promise(r => setTimeout(r, 2_000));
+              } else {
+                console.log(`${label} [Triggering complete answer] attempt ${attempt}/${MAX_ATTEMPTS}`);
+              }
+              try {
+                isUpgradeAttemptRef.current = true;
+                await triggerUpgradeMutation(upgradePayload as any);
+                // onSuccess fires before mutateAsync resolves — log here is belt-and-suspenders
+                console.log(`${label} [Complete answer finished] mutation succeeded on attempt ${attempt}`);
+                lastError = null;
+                break;
+              } catch (attemptErr) {
+                lastError = attemptErr;
+                console.error(`${label} [Triggering complete answer] attempt ${attempt} failed:`, attemptErr);
+              }
+            }
+
+            if (lastError) {
+              console.error(`${label} [Complete answer finished — TERMINAL FAILURE] all ${MAX_ATTEMPTS} attempts exhausted`);
+              setMessages(prev => [...prev, {
+                id: crypto.randomUUID(), role: "assistant" as const,
+                text: "Det komplette svar kunne ikke hentes automatisk. Det delvise svar ovenfor er fortsat gyldigt — prøv at sende dit spørgsmål igen.",
+                timestamp: new Date(),
+              }]);
+            }
           } catch (err) {
-            console.error(`${label} upgrade IIFE threw:`, err);
+            console.error(`${label} upgrade IIFE threw unexpectedly:`, err);
           }
         })();
       }
@@ -1383,16 +1411,12 @@ export default function AiChatPage() {
 
       // ── Upgrade-mutation guard ─────────────────────────────────────────────
       // If this error came from the background upgrade mutation (partial → complete),
-      // show a discrete inline message instead of a red destructive toast.
-      // The partial answer remains visible above the error message.
+      // reset the flag and log — but do NOT add an inline message here.
+      // The retry loop in the upgrade IIFE handles the final fallback message
+      // after all attempts are exhausted, avoiding duplicate error messages.
       if (isUpgradeAttemptRef.current) {
         isUpgradeAttemptRef.current = false;
-        console.error(`[upgrade] [Complete answer finished — ERROR] code=${code} msg=${serverMsg.slice(0, 120)}`);
-        setMessages(prev => [...prev, {
-          id: crypto.randomUUID(), role: "assistant" as const,
-          text: "Det komplette svar kunne ikke hentes automatisk. Det delvise svar ovenfor er fortsat gyldigt — prøv at sende dit spørgsmål igen for at få et fuldt svar.",
-          timestamp: new Date(),
-        }]);
+        console.error(`[upgrade] mutation attempt failed — retry loop will decide next action. code=${code} msg=${serverMsg.slice(0, 120)}`);
         return;
       }
 

@@ -224,3 +224,81 @@ describe("Test 7 — pending status is treated as not-yet-ready", () => {
     assert.equal(result, "Færdig.");
   });
 });
+
+// ─── Test 8: full chain — partial_ready then completed ─────────────────────────
+// Bug scenario: scanned PDF → partial_ready fires early → later completed arrives.
+// pollForCompletedOcr is called AFTER partial answer is shown, so it starts polling
+// from a "still running" state and must detect completed and return full OCR text.
+
+describe("Test 8 — full upgrade chain: running (partial_ready) → completed", () => {
+  it("returns full OCR text after partial_ready sentinel followed by completed", async () => {
+    // Simulates the state at the start of polling:
+    // job was in partial_ready (still running OCR) when polling starts
+    const fetcher = buildFetcher([
+      { status: "running", stage: "partial_ready" },   // job still running at poll start
+      { status: "running", stage: "chunking" },
+      { status: "running", stage: "embedding" },
+      { status: "completed", ocrText: "Fuldstændigt dokument — alle 87 sider.", charCount: 1200 },
+    ]);
+    const logger = makeLogger();
+    const result = await pollForCompletedOcr("task-014", fetcher, { ...FAST_OPTS, logger: logger.fn });
+    assert.ok(result.includes("Fuldstændigt dokument"), "must return the full completed text");
+    assert.ok(result.trim().length > 0, "result must be non-empty");
+    assert.ok(!logger.entries.some(e => e.level === "error"), "no errors expected on normal completion");
+  });
+
+  it("handles transition: partial_ready → brief completed-but-empty → completed-with-text", async () => {
+    const fetcher = buildFetcher([
+      { status: "running", stage: "partial_ready" },
+      { status: "completed", ocrText: "" },            // briefly completed but text not written yet
+      { status: "completed", ocrText: "Nu er teksten klar.", charCount: 18 },
+    ]);
+    const logger = makeLogger();
+    const result = await pollForCompletedOcr("task-015", fetcher, { ...FAST_OPTS, emptyTextRetries: 3, logger: logger.fn });
+    assert.equal(result, "Nu er teksten klar.", "must return text after empty-then-populated sequence");
+    assert.ok(logger.entries.some(e => e.level === "warn" && e.message.includes("empty ocrText")),
+      "must warn about the briefly empty ocrText");
+  });
+});
+
+// ─── Test 9: mutation-retry precondition — poll returns non-empty before caller retries ──
+// Verifies that pollForCompletedOcr returns a non-empty string in conditions where
+// the mutation retry loop would be triggered. The actual mutation retry is in the
+// React component (not testable in vitest), but we verify the polling contract.
+
+describe("Test 9 — polling contract: non-empty text is always returned if completed is reachable", () => {
+  it("returns non-empty text even after multiple fetch errors before completion", async () => {
+    let calls = 0;
+    const fetcher = async (_: string): Promise<OcrStatusResponse> => {
+      calls++;
+      if (calls === 1) throw new Error("Connection refused");       // network error
+      if (calls === 2) throw new Error("Gateway timeout");          // another error
+      if (calls === 3) return { status: "running", stage: "ocr" }; // back to normal
+      return { status: "completed", ocrText: "Endelig — fuld tekst.", charCount: 20 };
+    };
+    const logger = makeLogger();
+    const result = await pollForCompletedOcr("task-016", fetcher, { ...FAST_OPTS, logger: logger.fn });
+    assert.equal(result, "Endelig — fuld tekst.");
+    assert.ok(logger.entries.filter(e => e.level === "warn").length >= 2,
+      "must warn at least twice about fetch errors");
+    assert.ok(!logger.entries.some(e => e.level === "error"),
+      "no error logged when recovery was possible");
+  });
+
+  it("emptyTextRetries=5 exhausted → returns '' and logs error — caller must show fallback UI", async () => {
+    // Simulates completed with DB lag that never resolves (text stays empty forever).
+    // This is the case where the retry loop in the upgrade IIFE shows the fallback message.
+    const fetcher = buildFetcher([
+      { status: "completed", ocrText: "" },
+    ]);
+    const logger = makeLogger();
+    const result = await pollForCompletedOcr("task-017", fetcher, {
+      ...FAST_OPTS, emptyTextRetries: 5, emptyTextRetryMs: 1, logger: logger.fn,
+    });
+    assert.equal(result, "", "must return empty string when text never arrives");
+    const errors = logger.entries.filter(e => e.level === "error");
+    assert.ok(errors.length > 0, "must log at least one error — no silent no-op");
+    assert.ok(errors.some(e => e.message.includes("always empty") || e.message.includes("empty")),
+      "error must reference the empty ocrText problem");
+  });
+});
