@@ -1,7 +1,9 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { db } from "../db.ts";
-import { sql } from "drizzle-orm";
+import { sql, eq, and, isNull } from "drizzle-orm";
+import { aiCustomerPricingConfigs } from "../../shared/schema.ts";
+import { modelUsageSummary, tenantUsageSummary, dailySpendSummary } from "../lib/admin/ai-analytics.ts";
 import { getPlatformIntegrationsStatus } from "../lib/integrations/platform-integrations-status.ts";
 import { getPlatformHealth } from "../lib/integrations/integrations-health.ts";
 
@@ -546,6 +548,163 @@ export function registerAdminRoutes(app: Express): void {
     try {
       const results = await checkAllRunawayProtection();
       res.json({ data: results });
+    } catch (err) {
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
+    }
+  });
+
+  // ── AI Billing Analytics ──────────────────────────────────────────────────
+  //
+  // All three endpoints read from ai_billing_usage (immutable billing ledger).
+  // Supports optional ?from=&to= ISO date range filtering.
+  // Results are aggregated in Postgres — no in-process computation.
+
+  // GET /api/admin/ai/usage/models
+  // Per-provider+model aggregate: cost, revenue, margin, token counts
+  app.get("/api/admin/ai/usage/models", async (req: Request, res: Response) => {
+    const from = req.query.from as string | undefined;
+    const to   = req.query.to   as string | undefined;
+    try {
+      const data = await modelUsageSummary(from, to);
+      res.json({ data });
+    } catch (err) {
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
+    }
+  });
+
+  // GET /api/admin/ai/usage/tenants[?tenantId=<id>]
+  // Per-tenant, per-model breakdown of cost, revenue, margin
+  app.get("/api/admin/ai/usage/tenants", async (req: Request, res: Response) => {
+    const tenantId = req.query.tenantId as string | undefined;
+    const from     = req.query.from     as string | undefined;
+    const to       = req.query.to       as string | undefined;
+    try {
+      const data = await tenantUsageSummary(tenantId, from, to);
+      res.json({ data });
+    } catch (err) {
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
+    }
+  });
+
+  // GET /api/admin/ai/usage/daily[?days=30]
+  // Day-by-day aggregate of cost, revenue, margin — newest first
+  app.get("/api/admin/ai/usage/daily", async (req: Request, res: Response) => {
+    const days = parseInt(String(req.query.days ?? "30"), 10);
+    const from = req.query.from as string | undefined;
+    const to   = req.query.to   as string | undefined;
+    try {
+      const data = await dailySpendSummary(days, from, to);
+      res.json({ data });
+    } catch (err) {
+      adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
+    }
+  });
+
+  // POST /api/admin/ai/pricing/update
+  // Deactivates the previous pricing config for the tenant and inserts a new one.
+  // Immutable — never updates in place. Audit trail is preserved in old rows.
+  //
+  // Body: {
+  //   tenantId?:                string   (null/absent = global config)
+  //   pricingMode:              "cost_plus_multiplier" | "fixed_markup" | "per_1k_tokens"
+  //   multiplier?:              number
+  //   fixedMarkupUsd?:          number
+  //   pricePer1kInputTokensUsd?:  number
+  //   pricePer1kOutputTokensUsd?: number
+  //   minimumChargeUsd?:        number
+  //   notes?:                   string
+  //   createdBy?:               string
+  // }
+  const PricingUpdateSchema = z.object({
+    tenantId:                  z.string().optional().nullable(),
+    pricingMode:               z.enum(["cost_plus_multiplier", "fixed_markup", "per_1k_tokens"]),
+    multiplier:                z.number().positive().optional().nullable(),
+    fixedMarkupUsd:            z.number().min(0).optional().nullable(),
+    pricePer1kInputTokensUsd:  z.number().min(0).optional().nullable(),
+    pricePer1kOutputTokensUsd: z.number().min(0).optional().nullable(),
+    minimumChargeUsd:          z.number().min(0).optional().nullable(),
+    notes:                     z.string().max(500).optional().nullable(),
+    createdBy:                 z.string().optional().nullable(),
+  });
+
+  app.post("/api/admin/ai/pricing/update", async (req: Request, res: Response) => {
+    const parse = PricingUpdateSchema.safeParse(req.body);
+    if (!parse.success) {
+      adminErr(res, 422, "VALIDATION_ERROR", parse.error.issues.map((i) => i.message).join("; "));
+      return;
+    }
+
+    const {
+      tenantId,
+      pricingMode,
+      multiplier,
+      fixedMarkupUsd,
+      pricePer1kInputTokensUsd,
+      pricePer1kOutputTokensUsd,
+      minimumChargeUsd,
+      notes,
+      createdBy,
+    } = parse.data;
+
+    const isGlobal = !tenantId;
+    const scope    = isGlobal ? "global" : "tenant";
+
+    try {
+      // 1. Deactivate existing active config for this scope/tenant (immutability: never update)
+      if (isGlobal) {
+        await db
+          .update(aiCustomerPricingConfigs)
+          .set({ isActive: false })
+          .where(
+            and(
+              eq(aiCustomerPricingConfigs.scope,    "global"),
+              eq(aiCustomerPricingConfigs.isActive,  true),
+              isNull(aiCustomerPricingConfigs.tenantId),
+            ),
+          );
+      } else {
+        await db
+          .update(aiCustomerPricingConfigs)
+          .set({ isActive: false })
+          .where(
+            and(
+              eq(aiCustomerPricingConfigs.scope,    "tenant"),
+              eq(aiCustomerPricingConfigs.isActive,  true),
+              eq(aiCustomerPricingConfigs.tenantId!, tenantId!),
+            ),
+          );
+      }
+
+      // 2. Insert new active config row (new version)
+      const [inserted] = await db
+        .insert(aiCustomerPricingConfigs)
+        .values({
+          tenantId:                  tenantId ?? null,
+          scope,
+          isActive:                  true,
+          pricingMode,
+          multiplier:                multiplier !== undefined && multiplier !== null
+            ? String(multiplier) : null,
+          fixedMarkupUsd:            fixedMarkupUsd !== undefined && fixedMarkupUsd !== null
+            ? String(fixedMarkupUsd) : null,
+          pricePer1kInputTokensUsd:  pricePer1kInputTokensUsd !== undefined && pricePer1kInputTokensUsd !== null
+            ? String(pricePer1kInputTokensUsd) : null,
+          pricePer1kOutputTokensUsd: pricePer1kOutputTokensUsd !== undefined && pricePer1kOutputTokensUsd !== null
+            ? String(pricePer1kOutputTokensUsd) : null,
+          minimumChargeUsd:          minimumChargeUsd !== undefined && minimumChargeUsd !== null
+            ? String(minimumChargeUsd) : null,
+          notes:                     notes ?? null,
+          createdBy:                 createdBy ?? null,
+        })
+        .returning({ id: aiCustomerPricingConfigs.id });
+
+      res.status(201).json({
+        ok:          true,
+        pricingId:   inserted?.id ?? null,
+        scope,
+        tenantId:    tenantId ?? null,
+        pricingMode,
+      });
     } catch (err) {
       adminErr(res, 500, "INTERNAL_ERROR", "Internal server error", err);
     }
