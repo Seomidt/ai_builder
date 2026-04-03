@@ -1,12 +1,11 @@
 [phases.setup]
-nixPkgs = ["nodejs_22"]
+nixPkgs = ["nodejs_20"]
 
 [phases.install]
-cmds = ["npm install"]
+cmds = ["npm install --include=dev"]
 
 [phases.build]
 cmds = ["npm run build"]
 
 [start]
-# Railway: Express API (alle /api/*) + OCR-worker startes via KB_WORKER=true
 cmd = "npm start"

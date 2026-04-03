@@ -23,6 +23,24 @@
 import pg from "pg";
 import { generateQueryEmbedding, cosineSimilarity } from "./kb-embeddings.ts";
 
+/**
+ * Authoritative list of document statuses eligible for retrieval.
+ * 'processing' is included (Phase 5Z.2) so that partially-ready documents
+ * with active, embedded chunks can be queried before full completion.
+ * 'superseded', 'failed', 'draft', 'dead_letter' are intentionally excluded.
+ */
+export const RETRIEVAL_ALLOWED_DOCUMENT_STATUSES = ["ready", "active", "processing"] as const;
+export type RetrievalAllowedDocumentStatus = typeof RETRIEVAL_ALLOWED_DOCUMENT_STATUSES[number];
+
+/**
+ * SQL IN-clause fragment derived from RETRIEVAL_ALLOWED_DOCUMENT_STATUSES.
+ * All 4 retrieval SQL gates use this constant to avoid drift between the
+ * exported type and the actual SQL filter.
+ * Safe for string interpolation: values are compile-time `as const` string literals.
+ */
+const RETRIEVAL_STATUSES_SQL = RETRIEVAL_ALLOWED_DOCUMENT_STATUSES.map((s) => `'${s}'`).join(", ");
+// => "'ready', 'active', 'processing'"
+
 export interface KbSearchResult {
   chunkId:             string;
   knowledgeBaseId:     string;
@@ -149,7 +167,7 @@ async function vectorFirstSearch(params: {
                 AND ke.embedding_vector_pgv   IS NOT NULL
          INNER JOIN knowledge_documents kd
                  ON kd.id             = kc.knowledge_document_id
-                AND kd.document_status IN ('ready', 'active')
+                AND kd.document_status IN (${RETRIEVAL_STATUSES_SQL})
          WHERE kc.tenant_id    = $1
            AND kc.chunk_active = TRUE
            AND kc.chunk_text   IS NOT NULL
@@ -195,7 +213,7 @@ async function vectorFirstSearch(params: {
                 AND ke.embedding_vector   IS NOT NULL
          INNER JOIN knowledge_documents kd
                  ON kd.id = kc.knowledge_document_id
-                AND kd.document_status IN ('ready', 'active')
+                AND kd.document_status IN (${RETRIEVAL_STATUSES_SQL})
          WHERE kc.tenant_id    = $1
            AND kc.chunk_active = TRUE
            AND kc.chunk_text   IS NOT NULL
@@ -307,7 +325,7 @@ async function _lexicalSearchWithClient(
      FROM knowledge_chunks kc
      INNER JOIN knowledge_documents kd
              ON kd.id = kc.knowledge_document_id
-            AND kd.document_status IN ('ready', 'active')
+            AND kd.document_status IN (${RETRIEVAL_STATUSES_SQL})
      WHERE kc.tenant_id    = $1
        AND kc.chunk_active = TRUE
        AND kc.chunk_text   IS NOT NULL
@@ -392,7 +410,7 @@ export async function searchByAsset(params: {
                 AND ke.embedding_vector_pgv   IS NOT NULL
          INNER JOIN knowledge_documents kd
                  ON kd.id             = kc.knowledge_document_id
-                AND kd.document_status IN ('ready', 'active')
+                AND kd.document_status IN (${RETRIEVAL_STATUSES_SQL})
          WHERE kc.tenant_id    = $1
            AND kc.knowledge_document_id != ${ kbIds?.length ? 5 : 4 }
            AND kc.chunk_active = TRUE

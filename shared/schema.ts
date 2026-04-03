@@ -6867,6 +6867,11 @@ export const chatOcrTasks = pgTable(
     createdAt:       timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     startedAt:       timestamp("started_at", { withTimezone: true }),
     completedAt:     timestamp("completed_at", { withTimezone: true }),
+    // PHASE 5Z.7 — server-driven orchestration fields
+    questionText:              text("question_text"),
+    partialReadyWrittenAt:     timestamp("partial_ready_written_at", { withTimezone: true }),
+    ocrChatTriggerAttemptedAt: timestamp("ocr_chat_trigger_attempted_at", { withTimezone: true }),
+    ocrChatTriggerKey:         text("ocr_chat_trigger_key"),
   },
   (t) => [
     index("cot_status_created_idx").on(t.status, t.createdAt),
@@ -6900,3 +6905,150 @@ export const chatOcrChunks = pgTable(
     uniqueIndex("coc_task_chunk_uq").on(t.taskId, t.chunkIndex),
   ],
 );
+
+// ─── chat_conversation_attachments ───────────────────────────────────────────
+// Server-side store for processed attachment context per conversation.
+// Written when a chat message arrives with document_context (sync OCR path).
+// Read on subsequent turns so the system remembers the conversation has a doc.
+
+export const chatConversationAttachments = pgTable(
+  "chat_conversation_attachments",
+  {
+    id:             varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    conversationId: text("conversation_id").notNull(),
+    tenantId:       text("tenant_id").notNull(),
+    filename:       text("filename").notNull(),
+    mimeType:       text("mime_type").notNull().default("application/pdf"),
+    extractedText:  text("extracted_text").notNull(),
+    charCount:      integer("char_count").notNull(),
+    status:         text("status").notNull().default("completed"),
+    createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("cca_conv_idx").on(t.conversationId),
+    index("cca_tenant_conv_idx").on(t.tenantId, t.conversationId),
+    check("cca_status_check", sql`${t.status} IN ('completed','failed')`),
+  ],
+);
+
+export type ChatConversationAttachment = typeof chatConversationAttachments.$inferSelect;
+
+// ─── chat_route_decisions ─────────────────────────────────────────────────────
+// Audit log for every routing decision made by the automatic router.
+// Enables debugging, analytics, and routing quality measurement.
+
+export const chatRouteDecisions = pgTable(
+  "chat_route_decisions",
+  {
+    id:             varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId:       text("tenant_id").notNull(),
+    conversationId: text("conversation_id"),
+    userId:         text("user_id").notNull(),
+    routeType:      text("route_type").notNull(),
+    attachmentIds:  text("attachment_ids").array(),
+    expertIds:      text("expert_ids").array(),
+    routeReason:    text("route_reason").notNull(),
+    expertScore:    numeric("expert_score", { precision: 6, scale: 2 }),
+    hasAttachment:  boolean("has_attachment").notNull().default(false),
+    hasExperts:     boolean("has_experts").notNull().default(false),
+    createdAt:      timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("crd_tenant_created_idx").on(t.tenantId, t.createdAt),
+    index("crd_conv_idx").on(t.conversationId),
+  ],
+);
+
+export type ChatRouteDecision = typeof chatRouteDecisions.$inferSelect;
+
+// ─── chat_ocr_progress ────────────────────────────────────────────────────────
+// PHASE 5Z.6 — Per-page streaming progress for all pages (not just page 1).
+// Written per-batch as Gemini streams tokens. Append-safe via version column.
+// Enables: replay, pause/resume, fine-grained refinement triggers.
+
+export const chatOcrProgress = pgTable(
+  "chat_ocr_progress",
+  {
+    id:              varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId:        varchar("tenant_id").notNull(),
+    documentId:      varchar("document_id").notNull(),
+    pageIndex:       integer("page_index").notNull(),
+    textAccumulated: text("text_accumulated"),
+    charCount:       integer("char_count").notNull().default(0),
+    status:          text("status").notNull().default("streaming"),
+    version:         integer("version").notNull().default(1),
+    createdAt:       timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt:       timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("cop_doc_page_uq").on(t.documentId, t.pageIndex),
+    index("cop_tenant_idx").on(t.tenantId),
+    check("cop_status_check", sql`${t.status} IN ('streaming','partial_ready','completed')`),
+  ],
+);
+export const insertChatOcrProgressSchema = createInsertSchema(chatOcrProgress).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertChatOcrProgress = z.infer<typeof insertChatOcrProgressSchema>;
+export type ChatOcrProgress = typeof chatOcrProgress.$inferSelect;
+
+// ─── chat_answer_generations ──────────────────────────────────────────────────
+// PHASE 5Z.6 — Append-only log of every AI answer generated.
+// Enables: replay, audit, determinism verification.
+// NEVER update existing rows — always append a new row.
+
+export const chatAnswerGenerations = pgTable(
+  "chat_answer_generations",
+  {
+    id:               varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId:         varchar("tenant_id").notNull(),
+    queryHash:        text("query_hash").notNull(),
+    refinementGenKey: text("refinement_gen_key").notNull(),
+    answer:           text("answer").notNull(),
+    completeness:     text("completeness").notNull(),
+    coveragePct:      numeric("coverage_pct", { precision: 5, scale: 2 }),
+    createdAt:        timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index("cag_tenant_query_idx").on(t.tenantId, t.queryHash),
+    index("cag_gen_key_idx").on(t.refinementGenKey),
+    index("cag_tenant_created_idx").on(t.tenantId, t.createdAt),
+  ],
+);
+export const insertChatAnswerGenerationSchema = createInsertSchema(chatAnswerGenerations).omit({ id: true, createdAt: true });
+export type InsertChatAnswerGeneration = z.infer<typeof insertChatAnswerGenerationSchema>;
+export type ChatAnswerGeneration = typeof chatAnswerGenerations.$inferSelect;
+
+// ─── chat_answer_requests ──────────────────────────────────────────────────────
+// PHASE 5Z.7 — Server-driven OCR→Chat orchestration.
+// One row per OCR trigger key + query hash. Idempotency guard: if a request
+// already exists for (task_id, trigger_key), no duplicate is created.
+// status lifecycle: pending → running → completed | failed | superseded
+
+export const chatAnswerRequests = pgTable(
+  "chat_answer_requests",
+  {
+    id:            varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+    tenantId:      varchar("tenant_id").notNull(),
+    taskId:        varchar("task_id").notNull(),
+    triggerKey:    text("trigger_key").notNull(),
+    mode:          text("mode").notNull().default("partial"), // 'partial' | 'complete'
+    status:        text("status").notNull().default("pending"), // pending|running|completed|failed|superseded
+    triggerReason: text("trigger_reason"),
+    errorCode:     text("error_code"),
+    errorMessage:  text("error_message"),
+    createdAt:     timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    startedAt:     timestamp("started_at", { withTimezone: true }),
+    completedAt:   timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    // One active request per task+trigger_key (idempotency)
+    uniqueIndex("car_task_trigger_uq").on(t.taskId, t.triggerKey),
+    index("car_tenant_idx").on(t.tenantId),
+    index("car_task_idx").on(t.taskId),
+    index("car_status_idx").on(t.status),
+    check("car_mode_check",   sql`${t.mode}   IN ('partial','complete')`),
+    check("car_status_check", sql`${t.status} IN ('pending','running','completed','failed','superseded')`),
+  ],
+);
+export const insertChatAnswerRequestSchema = createInsertSchema(chatAnswerRequests).omit({ id: true, createdAt: true });
+export type InsertChatAnswerRequest = z.infer<typeof insertChatAnswerRequestSchema>;
+export type ChatAnswerRequest = typeof chatAnswerRequests.$inferSelect;

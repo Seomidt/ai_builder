@@ -18,6 +18,7 @@ import {
 import { eq, and } from "drizzle-orm";
 import type { AccessibleExpert } from "./chat-routing.ts";
 import { AI_MODEL_ROUTES } from "../lib/ai/config.ts";
+import { applyPartialSafeguard } from "../lib/chat/partial-safeguard.ts";
 import {
   shouldRunSimilarity,
   shouldAllowSimilarityByBudget,
@@ -80,17 +81,33 @@ interface DocumentContextItem {
   message?:       string;
 }
 
+// Virtual expert used when routing is attachment_first with no available experts.
+const VIRTUAL_ATTACHMENT_EXPERT: AccessibleExpert = {
+  id:            "__virtual_attachment__",
+  name:          "Dokumentanalytiker",
+  description:   "Automatisk dokumentanalyse",
+  category:      "document",
+  routingHints:  null,
+  departmentId:  null,
+  enabledForChat: true,
+};
+
 export async function runChatMessage(params: {
   message: string;
-  expert: AccessibleExpert;
+  /** null allowed for attachment_first routing when no experts are configured. */
+  expert: AccessibleExpert | null;
   organizationId: string;
   userId: string;
   conversationId?: string | null;
   routingExplanation: string;
   documentContext?: DocumentContextItem[];
+  routeType?: string;
   useCase?: import("../lib/ai/types").AiUseCase;
+  /** SSE streaming callback — when provided, AI call uses stream=true and calls this per token */
+  onToken?: (delta: string) => void;
 }): Promise<ChatRunResult> {
-  const { message, expert, organizationId, userId, routingExplanation } = params;
+  const expert = params.expert ?? VIRTUAL_ATTACHMENT_EXPERT;
+  const { message, organizationId, userId, routingExplanation } = params;
   const startMs = Date.now();
 
   // ── Document context validation + injection ────────────────────────────────
@@ -98,8 +115,11 @@ export async function runChatMessage(params: {
   const docCtx     = rawDocCtx.filter(d => d.status === "ok" && d.extracted_text?.trim());
   const failedDocs = rawDocCtx.filter(d => d.status !== "ok");
 
-  // TASK 4 — debug log ALTID
-  console.log(`[chat-runner] message_len=${message.length} doc_ctx_raw=${rawDocCtx.length} doc_ctx_ok=${docCtx.length}`);
+  // Partial OCR mode: document_context contains source:"ocr_partial" → only first page available.
+  // Must NOT generate definitive negative conclusions ("kan ikke finde").
+  const isPartialOcr = rawDocCtx.some(d => (d as any).source === "ocr_partial");
+
+  console.log(`[chat-runner] routeType=${params.routeType ?? "legacy"} message_len=${message.length} doc_ctx_ok=${docCtx.length}`);
   if (docCtx.length > 0) {
     const totalChars = docCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0);
     console.log(`[chat-runner] total_doc_chars=${totalChars} first200="${docCtx[0].extracted_text.slice(0, 200).replace(/\n/g, " ")}"`);
@@ -108,56 +128,71 @@ export async function runChatMessage(params: {
     console.warn(`[chat-runner] failed_docs:`, failedDocs.map(d => `${d.filename}:${d.status}:${d.message}`).join(", "));
   }
 
-  // TASK 5 — hard assertion
-  if (rawDocCtx.length > 0 && docCtx.length === 0) {
+  // Only throw if caller explicitly passed attachments that all failed (request-level docs)
+  // Do NOT throw for stored attachments from DB (they come pre-filtered as valid).
+  if (rawDocCtx.length > 0 && docCtx.length === 0 && failedDocs.length > 0) {
     const reason = failedDocs.map(d => d.message).filter(Boolean).join("; ")
       || "Ingen tekst kunne udtrækkes";
     throw Object.assign(new Error(reason), { errorCode: "DOCUMENT_UNREADABLE" });
   }
 
   // ── 1. Load full expert record ─────────────────────────────────────────────
-  const [fullExpert] = await db
-    .select()
-    .from(architectureProfiles)
-    .where(
-      and(
-        eq(architectureProfiles.id, expert.id),
-        eq(architectureProfiles.organizationId, organizationId),
-      ),
-    )
-    .limit(1);
+  // Virtual expert (attachment_first with no configured experts) skips DB lookup.
+  const isVirtualExpert = expert.id === "__virtual_attachment__";
 
-  if (!fullExpert) throw new Error("Expert not found during chat execution.");
-
-  // ── 2. Build prompt (reuse existing prompt builder) ────────────────────────
   const { buildExpertPromptFromSnapshot, buildExpertPrompt } = await import(
     "../lib/ai/expert-prompt-builder"
   );
 
   let builtPrompt: Awaited<ReturnType<typeof buildExpertPromptFromSnapshot>>;
 
-  // Prefer live version snapshot — same behavior as /api/experts/:id/test
-  const targetVersionId = fullExpert.currentVersionId;
-
-  if (targetVersionId) {
-    const [version] = await db
+  if (isVirtualExpert) {
+    // Minimal prompt — doc mode will fully override the system prompt anyway.
+    builtPrompt = buildExpertPromptFromSnapshot({
+      identity: { name: "Dokumentanalytiker", language: "da" },
+      ai: {
+        goal: "Analyser uploadede dokumenter og besvar spørgsmål baseret på indholdet.",
+        instructions: "Svar udelukkende baseret på det uploadede dokument. Svar på dansk.",
+        output_style: "Klar, præcis og struktureret.",
+      },
+      routing:  { managed_by_platform: true },
+      rules:    [],
+      sources:  [],
+      metadata: { rule_count: 0, source_count: 0 },
+    });
+  } else {
+    const [fullExpert] = await db
       .select()
-      .from(expertVersions)
+      .from(architectureProfiles)
       .where(
         and(
-          eq(expertVersions.id, targetVersionId),
-          eq(expertVersions.organizationId, organizationId),
+          eq(architectureProfiles.id, expert.id),
+          eq(architectureProfiles.organizationId, organizationId),
         ),
       )
       .limit(1);
 
-    if (version) {
-      builtPrompt = buildExpertPromptFromSnapshot(version.configJson as any);
+    if (!fullExpert) throw new Error("Expert not found during chat execution.");
+
+    const targetVersionId = fullExpert.currentVersionId;
+    if (targetVersionId) {
+      const [version] = await db
+        .select()
+        .from(expertVersions)
+        .where(
+          and(
+            eq(expertVersions.id, targetVersionId),
+            eq(expertVersions.organizationId, organizationId),
+          ),
+        )
+        .limit(1);
+
+      builtPrompt = version
+        ? buildExpertPromptFromSnapshot(version.configJson as any)
+        : await buildFromLive(fullExpert, organizationId, buildExpertPrompt);
     } else {
       builtPrompt = await buildFromLive(fullExpert, organizationId, buildExpertPrompt);
     }
-  } else {
-    builtPrompt = await buildFromLive(fullExpert, organizationId, buildExpertPrompt);
   }
 
   // ── 3. Kør AI-kald ────────────────────────────────────────────────────────
@@ -178,23 +213,45 @@ export async function runChatMessage(params: {
     console.log(`[chat-runner] first200="${docCtx[0].extracted_text.slice(0, 200).replace(/\n/g, " ")}"`);
 
     // TASK 4 — STRICT document-only system prompt (ERSTATTER expert-prompt)
-    const docSystemPrompt = [
-      `Du er en AI-ekspert ved navn ${expert.name}.`,
-      `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
-      ``,
-      `=== ABSOLUT BINDENDE REGLER FOR DOKUMENTANALYSE ===`,
-      `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
-      `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
-      `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
-      `REGEL 4: Hvis svaret IKKE fremgår af dokumentet, siger du præcist: "Jeg kan ikke finde det i det uploadede dokument."`,
-      `REGEL 5: Hvis svaret fremgår af dokumentet, citerer du den relevante sætning direkte.`,
-      `REGEL 6: Du MÅ ALDRIG give generiske forklaringer eller bred kontekst, medmindre det fremgår af dokumentet.`,
-      `REGEL 7: Dit svar skal starte med den direkte konklusion, ikke med en forklaring.`,
-      `REGEL 8: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
-      `=== SLUT REGLER ===`,
-      ``,
-      `Svar altid på dansk.`,
-    ].join("\n");
+    // Two versions: partial OCR (first page only) vs. complete document.
+    const docSystemPrompt = isPartialOcr
+      ? [
+          `Du er en AI-ekspert ved navn ${expert.name}.`,
+          `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
+          ``,
+          `=== VIGTIG KONTEKST: DELVIS DOKUMENTANALYSE ===`,
+          `Kun den FØRSTE DEL af dokumentet er udtrukket endnu. Resten analyseres parallelt og vil følge automatisk.`,
+          ``,
+          `=== ABSOLUT BINDENDE REGLER FOR DELVIS DOKUMENTANALYSE ===`,
+          `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
+          `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
+          `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
+          `REGEL 4: Da dokumentet kun er DELVIST tilgængeligt, MÅ DU ALDRIG konkludere endeligt at en information IKKE findes — den kan stå i den del der endnu ikke er behandlet.`,
+          `REGEL 5: Giv foreløbige observationer baseret på den tilgængelige tekst. Præfiks dit svar med "Baseret på den tilgængelige del af dokumentet:".`,
+          `REGEL 6: Hvis du ikke kan finde noget relevant i den tilgængelige del, sig: "Jeg kan ikke finde det i den del af dokumentet jeg har set endnu — det kan stå i den resterende del."`,
+          `REGEL 7: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
+          `REGEL 8: Afslut ALTID dit svar med denne linje: "⏳ Svaret er baseret på den første del af dokumentet og opdateres automatisk når hele dokumentet er analyseret."`,
+          `=== SLUT REGLER ===`,
+          ``,
+          `Svar altid på dansk.`,
+        ].join("\n")
+      : [
+          `Du er en AI-ekspert ved navn ${expert.name}.`,
+          `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
+          ``,
+          `=== ABSOLUT BINDENDE REGLER FOR DOKUMENTANALYSE ===`,
+          `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
+          `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
+          `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
+          `REGEL 4: Hvis svaret IKKE fremgår af dokumentet, siger du præcist: "Jeg kan ikke finde det i det uploadede dokument."`,
+          `REGEL 5: Hvis svaret fremgår af dokumentet, citerer du den relevante sætning direkte.`,
+          `REGEL 6: Du MÅ ALDRIG give generiske forklaringer eller bred kontekst, medmindre det fremgår af dokumentet.`,
+          `REGEL 7: Dit svar skal starte med den direkte konklusion, ikke med en forklaring.`,
+          `REGEL 8: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
+          `=== SLUT REGLER ===`,
+          ``,
+          `Svar altid på dansk.`,
+        ].join("\n");
 
     // TASK 3 — dokument som separat user-besked (højest prioritet)
     const docBlock = docCtx.map(d =>
@@ -205,11 +262,15 @@ export async function runChatMessage(params: {
       { role: "system" as const, content: docSystemPrompt },
       {
         role: "user" as const,
-        content: `=== DOKUMENTINDHOLD START ===\n\n${docBlock}\n\n=== DOKUMENTINDHOLD SLUT ===\n\nOvenstående er det komplette ekstraherede indhold fra det uploadede dokument. Brug dette som eneste kilde.`,
+        content: isPartialOcr
+          ? `=== DELVIST DOKUMENTINDHOLD START ===\n\n${docBlock}\n\n=== DELVIST DOKUMENTINDHOLD SLUT ===\n\nOvenstående er den FØRSTE DEL af det uploadede dokument. Resten af dokumentet analyseres parallelt. Giv foreløbige observationer baseret på den tilgængelige del — undgå endelige konklusioner om hvad dokumentet IKKE indeholder.`
+          : `=== DOKUMENTINDHOLD START ===\n\n${docBlock}\n\n=== DOKUMENTINDHOLD SLUT ===\n\nOvenstående er det komplette ekstraherede indhold fra det uploadede dokument. Brug dette som eneste kilde.`,
       },
       {
         role: "assistant" as const,
-        content: "Jeg har læst dokumentet fuldt ud og forstår indholdet. Jeg er klar til at besvare spørgsmål udelukkende baseret på det faktiske dokumentindhold.",
+        content: isPartialOcr
+          ? "Jeg har læst den første del af dokumentet. Jeg giver foreløbige observationer baseret på det tilgængelige indhold og undgår endelige konklusioner om information der muligvis er i den resterende del."
+          : "Jeg har læst dokumentet fuldt ud og forstår indholdet. Jeg er klar til at besvare spørgsmål udelukkende baseret på det faktiske dokumentindhold.",
       },
       { role: "user" as const, content: message },
     ];
@@ -218,7 +279,9 @@ export async function runChatMessage(params: {
     console.log(`[chat-runner] PAYLOAD_READY: messages=${messagesPayload.length} total_chars=${totalPromptChars} doc_in_payload=true`);
 
     // Hard assertion: bekræft dokument er i payload
-    const docInPayload = messagesPayload[1].content.includes("=== DOKUMENTINDHOLD START ===");
+    const docInPayload = isPartialOcr
+      ? messagesPayload[1].content.includes("=== DELVIST DOKUMENTINDHOLD START ===")
+      : messagesPayload[1].content.includes("=== DOKUMENTINDHOLD START ===");
     if (!docInPayload) {
       throw Object.assign(
         new Error("DOCUMENT_CONTEXT_NOT_INJECTED"),
@@ -227,19 +290,61 @@ export async function runChatMessage(params: {
     }
 
     const docModel = AI_MODEL_ROUTES.default.model;
-    console.log(`[ai:router] model=${docModel} provider=${AI_MODEL_ROUTES.default.provider} key=default use_case=doc_mode`);
+    console.log(`[ai:router] model=${docModel} provider=${AI_MODEL_ROUTES.default.provider} key=default use_case=doc_mode streaming=${!!params.onToken}`);
     const t0 = Date.now();
-    const completion = await oai.chat.completions.create({
-      model: docModel,
-      temperature: 0.1,
-      max_tokens: 2000,
-      messages: messagesPayload,
-    });
-    aiLatencyMs = Date.now() - t0;
-    aiText = completion.choices[0]?.message?.content ?? "";
 
-    console.log(`[chat-runner] DOC_ANSWER_LEN=${aiText.length} latency=${aiLatencyMs}ms`);
-    console.log(`[chat-runner] DOC_ANSWER_PREVIEW="${aiText.slice(0, 200).replace(/\n/g, " ")}"`);
+    if (params.onToken && isPartialOcr) {
+      // ── PARTIAL OCR MODE: generate → safeguard → emit (NEVER stream raw to client) ──
+      // Architecture contract: the full buffer is validated before any byte reaches the client.
+      const completion = await oai.chat.completions.create({
+        model:       docModel,
+        temperature: 0.1,
+        max_tokens:  2000,
+        messages:    messagesPayload,
+        stream:      false,
+      });
+      aiText = completion.choices[0]?.message?.content ?? "";
+      const safeguarded = applyPartialSafeguard(aiText);
+      if (safeguarded !== aiText) {
+        console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered — rewriting definitive negative before emit`);
+        aiText = safeguarded;
+      }
+      // Emit to client only after safeguard has passed
+      params.onToken(aiText);
+    } else if (params.onToken) {
+      // ── COMPLETE MODE: real token streaming (safeguard not needed) ───────────
+      const stream = await oai.chat.completions.create({
+        model:       docModel,
+        temperature: 0.1,
+        max_tokens:  2000,
+        messages:    messagesPayload,
+        stream:      true,
+      });
+      aiText = "";
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (delta) { params.onToken(delta); aiText += delta; }
+      }
+    } else {
+      // ── NON-STREAMING PATH ────────────────────────────────────────────────────
+      const completion = await oai.chat.completions.create({
+        model:       docModel,
+        temperature: 0.1,
+        max_tokens:  2000,
+        messages:    messagesPayload,
+      });
+      aiText = completion.choices[0]?.message?.content ?? "";
+      if (isPartialOcr) {
+        const safeguarded = applyPartialSafeguard(aiText);
+        if (safeguarded !== aiText) {
+          console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered (non-stream) — rewriting definitive negative`);
+          aiText = safeguarded;
+        }
+      }
+    }
+    aiLatencyMs = Date.now() - t0;
+
+    console.log(`[chat-runner] DOC_ANSWER_LEN=${aiText.length} latency=${aiLatencyMs}ms isPartialOcr=${isPartialOcr}`);
 
     // TASK 5 — grounding-validering
     if (aiText) {
@@ -254,18 +359,40 @@ export async function runChatMessage(params: {
     }
   } else {
     // ── NORMAL MODE: runAiCall via Responses API ──────────────────────────────
-    const { runAiCall } = await import("../lib/ai/runner");
-    // Use the caller-supplied useCase; default to "grounded_chat" for backward compat.
-    // Non-grounded use cases (validation/analysis/classification) bypass the docCtx gate.
     const resolvedUseCase = params.useCase ?? "grounded_chat";
-    console.log(`[chat-runner] NORMAL_MODE useCase=${resolvedUseCase}`);
+    console.log(`[chat-runner] NORMAL_MODE useCase=${resolvedUseCase} streaming=${!!params.onToken}`);
     const t0 = Date.now();
-    const aiResult = await runAiCall(
-      { feature: "ai-chat", useCase: resolvedUseCase, tenantId: organizationId, userId },
-      { systemPrompt: builtPrompt.systemPrompt, userInput: message },
-    );
+
+    if (params.onToken) {
+      // ── STREAMING PATH: direct OpenAI streaming (bypasses runAiCall) ─────────
+      const { getOpenAIClient } = await import("../lib/openai-client");
+      const oai = getOpenAIClient();
+      const normalModel = AI_MODEL_ROUTES.default.model;
+      const stream = await oai.chat.completions.create({
+        model:       normalModel,
+        temperature: 0.3,
+        max_tokens:  2000,
+        messages: [
+          { role: "system", content: builtPrompt.systemPrompt },
+          { role: "user",   content: message },
+        ],
+        stream: true,
+      });
+      aiText = "";
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (delta) { params.onToken(delta); aiText += delta; }
+      }
+    } else {
+      // ── NON-STREAMING PATH (original) ────────────────────────────────────────
+      const { runAiCall } = await import("../lib/ai/runner");
+      const aiResult = await runAiCall(
+        { feature: "ai-chat", useCase: resolvedUseCase, tenantId: organizationId, userId },
+        { systemPrompt: builtPrompt.systemPrompt, userInput: message },
+      );
+      aiText = aiResult.text;
+    }
     aiLatencyMs = Date.now() - t0;
-    aiText = aiResult.text;
   }
 
   const [, retrievalResult] = await Promise.all([
@@ -323,6 +450,26 @@ export async function runChatMessage(params: {
     confidenceBand,
     existingConversationId: params.conversationId ?? null,
   });
+
+  // ── Persist document context for follow-up questions ──────────────────────
+  // Only save when this request carried fresh document context (not from DB store).
+  if (docCtx.length > 0 && !params.conversationId) {
+    // New conversation: save all valid attachments for future turns.
+    const { saveConversationAttachment } = await import("../lib/chat/attachment-state");
+    await Promise.allSettled(
+      docCtx.map((d) =>
+        saveConversationAttachment({
+          conversationId,
+          tenantId:      organizationId,
+          filename:      d.filename,
+          mimeType:      d.mime_type,
+          extractedText: d.extracted_text,
+          charCount:     d.char_count,
+        }),
+      ),
+    );
+    console.log(`[chat-runner] Saved ${docCtx.length} attachment(s) to conversation ${conversationId}`);
+  }
 
   // ── Storage 1.7: Similar Cases — intent-based, cached, rate-limited ─────────
 

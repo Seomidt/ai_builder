@@ -1,15 +1,19 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useMutation } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import {
   Send, Bot, User, ChevronDown, ChevronUp, ShieldAlert, BookOpen,
   AlertTriangle, CheckCircle2, HelpCircle, Paperclip, X,
-  FileText, Image, Video, Sparkles,
+  FileText, Image, Video, Sparkles, Zap, RefreshCw, Clock, WifiOff,
+  TrendingUp, Hourglass,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
+import { getSessionToken } from "@/lib/supabase";
 import { useToast } from "@/hooks/use-toast";
+import { useReadinessStream, type ReadinessSnapshot, type ReadinessUxState } from "@/hooks/use-readiness-stream";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,10 +21,13 @@ interface ChatSource { id: string; name: string; sourceType?: string }
 interface ChatRule   { id: string; title: string }
 type ConfidenceBand  = "high" | "medium" | "low" | "unknown";
 
+type RouteType = "attachment_first" | "hybrid" | "expert_auto" | "processing" | "not_ready" | "no_context";
+
 interface ChatResponse {
   answer: string;
   document_validation?: string | null;
   conversation_id: string;
+  route_type?: RouteType;
   expert: { id: string; name: string; category: string | null };
   source?: { type: "expert" | "system"; name?: string };
   used_sources: ChatSource[];
@@ -30,12 +37,29 @@ interface ChatResponse {
   confidence_band: ConfidenceBand;
   needs_manual_review: boolean;
   routing_explanation: string;
+  // Phase 5Z.3 — progressive answer metadata (camelCase from enrichment spread)
+  answerCompleteness?:    "none" | "partial" | "complete";
+  sourceCoveragePercent?: number;
+  partialWarning?:        string | null;
+  hasFailedSegments?:     boolean;
+  fullCompletionBlocked?: boolean;
+  isPartial?:             boolean;
+  canRefreshForBetterAnswer?: boolean;
+  triggerKeyUsed?:        string | null;
+  answerGeneration?:      number;
+  // Phase 5Z.5 — refinement metadata (snake_case from API, mirrors above)
+  answer_completeness?:    "partial" | "complete";
+  refinement_generation?:  number;
+  supersedes_generation?:  number | null;
+  source_coverage_percent?: number;
+  partial_warning?:        string | null;
+  _answer_cache_hit?:      boolean;
 }
 
 interface AttachedFile {
   id: string;
   file: File;
-  type: "document" | "image" | "video" | "audio";
+  type: "document" | "image" | "video";
   status: "ready" | "uploading" | "processing" | "done" | "failed";
   previewUrl?: string;
 }
@@ -49,6 +73,8 @@ interface ChatMessage {
   timestamp: Date;
   isError?: boolean;
   isStreaming?: boolean;
+  /** Phase 5Z.5 — true when a newer refined/final answer has superseded this one. */
+  isSuperseded?: boolean;
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -56,21 +82,18 @@ interface ChatMessage {
 const MAX_SIZE_MB = 25;
 const ACCEPT_DOCS  = ".pdf,.doc,.docx,.txt,.csv,.xlsx,.xls";
 const ACCEPT_IMG   = "image/jpeg,image/png,image/gif,image/webp";
-const ACCEPT_VIDEO = "video/mp4,video/quicktime,video/x-msvideo,video/webm";
-const ACCEPT_AUDIO = "audio/mpeg,audio/wav,audio/ogg,audio/mp4,audio/webm";
-const ACCEPT_ALL   = `${ACCEPT_DOCS},${ACCEPT_IMG},${ACCEPT_VIDEO},${ACCEPT_AUDIO}`;
+const ACCEPT_VIDEO = "video/mp4,video/quicktime,video/x-msvideo";
+const ACCEPT_ALL   = `${ACCEPT_DOCS},${ACCEPT_IMG},${ACCEPT_VIDEO}`;
 
 function fileType(f: File): AttachedFile["type"] {
   if (f.type.startsWith("image/")) return "image";
   if (f.type.startsWith("video/")) return "video";
-  if (f.type.startsWith("audio/")) return "audio";
   return "document";
 }
 
 function fileIcon(type: AttachedFile["type"]) {
   if (type === "image") return <Image className="w-3.5 h-3.5 text-blue-400" />;
   if (type === "video") return <Video className="w-3.5 h-3.5 text-purple-400" />;
-  if (type === "audio") return <Video className="w-3.5 h-3.5 text-green-400" />;
   return <FileText className="w-3.5 h-3.5 text-primary" />;
 }
 
@@ -93,6 +116,51 @@ function ConfidenceBadge({ band }: { band: ConfidenceBand }) {
   return (
     <span className={cn("inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium", color)}>
       <Icon className="w-3 h-3" />{label}
+    </span>
+  );
+}
+
+// ─── Refinement Badge (Phase 5Z.5) ────────────────────────────────────────────
+
+/**
+ * Shows the refinement state of an answer:
+ *  gen=1 → Partial (first page only)
+ *  gen=2 → Improved (more context added)
+ *  gen=3 → Complete (full document)
+ */
+function RefinementBadge({
+  completeness, generation, coverage, cacheHit,
+}: {
+  completeness?: "partial" | "complete";
+  generation?:   number;
+  coverage?:     number;
+  cacheHit?:     boolean;
+}) {
+  if (!completeness || completeness === "complete") {
+    // Only show if we have a generation marker
+    if (!generation || generation < 2) return null;
+    return (
+      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-green-400 border-green-400/30 bg-green-400/10">
+        <CheckCircle2 className="w-3 h-3" />Fuldt svar
+        {coverage != null && coverage > 0 && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
+      </span>
+    );
+  }
+
+  if (generation === 2) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-blue-400 border-blue-400/30 bg-blue-400/10">
+        <TrendingUp className="w-3 h-3" />Forbedret
+        {coverage != null && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-amber-400 border-amber-400/30 bg-amber-400/10">
+      <Hourglass className="w-3 h-3" />Delsvar
+      {coverage != null && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
+      {cacheHit && <span className="opacity-50 ml-0.5">·cache</span>}
     </span>
   );
 }
@@ -270,6 +338,25 @@ function ValidationCard({ vm, warnings }: { vm: ValidationCardViewModel; warning
 
 // ─── Status Badge (non-validation cards) ──────────────────────────────────────
 
+const ROUTE_BADGE: Record<RouteType, { label: string; className: string }> = {
+  attachment_first: { label: "Dokumentsvar",     className: "text-blue-400 border-blue-400/30 bg-blue-400/10" },
+  hybrid:           { label: "Hybrid",            className: "text-violet-400 border-violet-400/30 bg-violet-400/10" },
+  expert_auto:      { label: "Ekspertsvar",       className: "text-emerald-400 border-emerald-400/30 bg-emerald-400/10" },
+  processing:       { label: "Behandler...",      className: "text-amber-400 border-amber-400/30 bg-amber-400/10" },
+  not_ready:        { label: "Fejl i dokument",   className: "text-red-400 border-red-400/30 bg-red-400/10" },
+  no_context:       { label: "Ingen kontekst",    className: "text-muted-foreground border-border bg-muted/30" },
+};
+
+function RoutingBadge({ routeType }: { routeType?: RouteType }) {
+  if (!routeType || routeType === "expert_auto") return null;
+  const cfg = ROUTE_BADGE[routeType];
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs border rounded-full px-2 py-0.5 font-medium ${cfg.className}`}>
+      {cfg.label}
+    </span>
+  );
+}
+
 function StatusBadge({ response }: { response: ChatResponse }) {
   if (response.needs_manual_review) {
     return (
@@ -318,7 +405,16 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
                 ? (response.source?.name ?? response.expert.name)
                 : "Systemsvar"}
           </span>
-          <StatusBadge response={response} />
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <RefinementBadge
+              completeness={response.answer_completeness ?? (response.answerCompleteness as "partial" | "complete" | undefined)}
+              generation={response.refinement_generation}
+              coverage={response.source_coverage_percent ?? response.sourceCoveragePercent}
+              cacheHit={response._answer_cache_hit}
+            />
+            <RoutingBadge routeType={response.route_type} />
+            <StatusBadge response={response} />
+          </div>
         </div>
 
         {response.warnings.map((w, i) => (
@@ -326,6 +422,14 @@ function AnswerCard({ response, text }: { response: ChatResponse; text: string }
             <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />{w}
           </div>
         ))}
+
+        {/* Phase 5Z.5 — Partial answer trust state */}
+        {(response.partial_warning ?? response.partialWarning) && (
+          <div className="flex items-center gap-1.5 text-xs text-amber-400/80">
+            <Hourglass className="w-3 h-3 shrink-0" />
+            {response.partial_warning ?? response.partialWarning}
+          </div>
+        )}
 
         <div className="text-sm leading-relaxed whitespace-pre-wrap text-foreground" data-testid="text-chat-answer">
           {text}
@@ -445,24 +549,45 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
   }
 
   return (
-    <div className="mb-6 last:mb-0 flex justify-start" data-testid={`msg-assistant-${msg.id}`}>
+    <div
+      className={cn("mb-6 last:mb-0 flex justify-start transition-opacity duration-300",
+        msg.isSuperseded && "opacity-40")}
+      data-testid={`msg-assistant-${msg.id}`}
+    >
       <div className="flex items-end gap-2 max-w-[88%]">
-        <div className="shrink-0 w-7 h-7 rounded-full bg-muted flex items-center justify-center mb-0.5">
+        <div className={cn(
+          "shrink-0 w-7 h-7 rounded-full bg-muted flex items-center justify-center mb-0.5",
+          msg.isSuperseded && "opacity-60",
+        )}>
           <Bot className="w-3.5 h-3.5 text-primary" />
         </div>
-        <div className={cn(
-          "rounded-2xl border bg-card px-4 py-3 shadow-sm rounded-bl-sm",
-          msg.isError && "border-red-400/30 bg-red-400/5"
-        )}>
-          {msg.isError ? (
-            <div className="flex items-start gap-2 text-sm text-red-400">
-              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />{msg.text}
-            </div>
-          ) : msg.response ? (
-            <AnswerCard response={msg.response} text={msg.text} />
-          ) : (
-            <p className="text-sm text-foreground">{msg.text}</p>
+        <div className="flex flex-col gap-1">
+          {/* Phase 5Z.5 — superseded label */}
+          {msg.isSuperseded && (
+            <span className="text-xs text-muted-foreground/60 flex items-center gap-1 pl-1">
+              <TrendingUp className="w-3 h-3" />Erstattet af opdateret svar
+            </span>
           )}
+          <div className={cn(
+            "rounded-2xl border bg-card px-4 py-3 shadow-sm rounded-bl-sm",
+            msg.isError && "border-red-400/30 bg-red-400/5",
+            msg.isSuperseded && "border-border/40",
+          )}>
+            {msg.isError ? (
+              <div className="flex items-start gap-2 text-sm text-red-400">
+                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />{msg.text}
+              </div>
+            ) : msg.isStreaming ? (
+              <p className="text-sm text-foreground whitespace-pre-wrap">
+                {msg.text || <span className="text-muted-foreground text-xs">Skriver...</span>}
+                <span className="inline-block w-0.5 h-4 bg-primary/70 ml-0.5 align-middle animate-pulse" />
+              </p>
+            ) : msg.response ? (
+              <AnswerCard response={msg.response} text={msg.text} />
+            ) : (
+              <p className="text-sm text-foreground">{msg.text}</p>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -488,6 +613,108 @@ function TypingIndicator() {
   );
 }
 
+// ─── Readiness Stream Banner (Phase 5Z.3) ─────────────────────────────────────
+
+interface ReadinessStreamBannerProps {
+  uxState:   ReadinessUxState;
+  snapshot:  ReadinessSnapshot | null;
+  isConnected: boolean;
+  onRefreshAnswer?: () => void;
+}
+
+function ReadinessStreamBanner({ uxState, snapshot, isConnected, onRefreshAnswer }: ReadinessStreamBannerProps) {
+  if (uxState === "idle" || uxState === "complete_answer_available") return null;
+
+  const coveragePct  = snapshot?.coveragePercent ?? 0;
+  const segsReady    = snapshot?.segmentsReady ?? 0;
+  const segsTotal    = snapshot?.segmentsTotal ?? 0;
+  const partialWarn  = snapshot?.partialWarning;
+  const canRefresh   = snapshot?.canRefreshForBetterAnswer ?? false;
+  const isBlocked    = snapshot?.fullCompletionBlocked ?? false;
+
+  if (uxState === "dead_letter_document") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-red-500 bg-red-50 dark:bg-red-950/30 rounded-md mx-4 mb-2" data-testid="readiness-banner-dead-letter">
+        <AlertTriangle className="w-4 h-4 shrink-0" />
+        <span>Dokumentet kunne ikke behandles fuldt ud. Svar baseres på tilgængeligt indhold.</span>
+      </div>
+    );
+  }
+
+  if (uxState === "failed_document") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-orange-500 bg-orange-50 dark:bg-orange-950/30 rounded-md mx-4 mb-2" data-testid="readiness-banner-failed">
+        <AlertTriangle className="w-4 h-4 shrink-0" />
+        <span>Behandling fejlede for dele af dokumentet. Forsøger igen automatisk…</span>
+      </div>
+    );
+  }
+
+  if (uxState === "blocked_partial_answer") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-amber-600 bg-amber-50 dark:bg-amber-950/30 rounded-md mx-4 mb-2" data-testid="readiness-banner-blocked">
+        <WifiOff className="w-4 h-4 shrink-0" />
+        <span>Fuld dokumentbehandling er blokeret. Svaret er baseret på delvist tilgængeligt indhold.</span>
+      </div>
+    );
+  }
+
+  if (uxState === "improving_answer") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-blue-500 bg-blue-50 dark:bg-blue-950/30 rounded-md mx-4 mb-2" data-testid="readiness-banner-improving">
+        <RefreshCw className="w-4 h-4 shrink-0 animate-spin" />
+        <span>Forbedrer svar med mere indhold ({coveragePct}% dækning)…</span>
+      </div>
+    );
+  }
+
+  if (uxState === "partial_answer_available") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-primary/80 bg-primary/5 rounded-md mx-4 mb-2" data-testid="readiness-banner-partial">
+        <Zap className="w-4 h-4 shrink-0 text-primary" />
+        <span className="flex-1">
+          {partialWarn ?? `Delvist svar: ${coveragePct}% af dokumentet er klar (${segsReady}/${segsTotal} segmenter)`}
+          {isBlocked && " · Fuld behandling er blokeret"}
+        </span>
+        {canRefresh && onRefreshAnswer && (
+          <button
+            onClick={onRefreshAnswer}
+            className="text-primary hover:underline shrink-0"
+            data-testid="button-refresh-answer"
+          >
+            Opdater svar
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (uxState === "connecting_to_document_stream") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-muted-foreground" data-testid="readiness-banner-connecting">
+        <Clock className="w-4 h-4 shrink-0 animate-pulse" />
+        <span>Forbinder til dokumentstream…</span>
+      </div>
+    );
+  }
+
+  if (uxState === "processing_document") {
+    return (
+      <div className="flex items-center gap-2 px-4 py-2 text-sm text-muted-foreground animate-pulse" data-testid="readiness-banner-processing">
+        <svg className="w-4 h-4 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+        <span>
+          Behandler dokument{segsTotal > 0 ? ` — ${segsReady}/${segsTotal} segmenter klar` : "…"}
+        </span>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 // ─── Empty State ──────────────────────────────────────────────────────────────
 
 function EmptyState() {
@@ -507,6 +734,7 @@ function EmptyState() {
 
 export default function AiChatPage() {
   const { toast } = useToast();
+  const [location] = useLocation();
   const [messages, setMessages]           = useState<ChatMessage[]>([]);
   const [input, setInput]                 = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
@@ -514,6 +742,49 @@ export default function AiChatPage() {
   const [ocrStatusLabel, setOcrStatusLabel] = useState<string | null>(null);
   const bottomRef   = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // ── Phase 5Z.3 — Document readiness monitoring ────────────────────────────
+  // Activate when URL contains ?monitorDocumentId=<kb-doc-id>
+  const monitorDocumentId = new URLSearchParams(
+    typeof window !== "undefined" ? window.location.search : "",
+  ).get("monitorDocumentId");
+
+  const autoTriggeredKeysRef = useRef<Set<string>>(new Set());
+  // chatMutateRef holds a stable reference to chatMutation.mutate (set after hook declaration)
+  const chatMutateRef = useRef<((payload: { text: string; attachments: AttachedFile[]; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[] }) => void) | null>(null);
+  // Upgrade ref: set when partial_ready break → onSuccess starts upgrade SSE subscription
+  const pendingOcrUpgradeRef = useRef<{ taskId: string; filename: string; mime: string } | null>(null);
+
+  const handleAutoTrigger = useCallback((snap: ReadinessSnapshot, isImprovement: boolean) => {
+    if (!snap.triggerKey) return;
+    if (autoTriggeredKeysRef.current.has(snap.triggerKey)) return; // idempotent
+    if (!chatMutateRef.current) return; // mutation not ready yet
+    autoTriggeredKeysRef.current.add(snap.triggerKey);
+
+    const defaultQuestion = isImprovement
+      ? "Opdater analysen med det nyeste indhold fra dokumentet."
+      : "Hvad indeholder dokumentet? Giv en præcis analyse baseret på det tilgængelige indhold.";
+
+    chatMutateRef.current({
+      text:        defaultQuestion,
+      attachments: [],
+      documentIds: monitorDocumentId ? [monitorDocumentId] : [],
+      triggerKey:  snap.triggerKey,
+    });
+  }, [monitorDocumentId]);
+
+  const { uxState, snapshot, isConnected, answerGeneration, duplicatesPrevented } =
+    useReadinessStream({
+      documentId:         monitorDocumentId,
+      onAutoTrigger:      handleAutoTrigger,
+      autoTriggerEnabled: !ocrStatusLabel,
+    });
+
+  const handleRefreshAnswer = useCallback(() => {
+    if (!snapshot?.triggerKey || !snapshot.canRefreshForBetterAnswer) return;
+    autoTriggeredKeysRef.current.delete(snapshot.triggerKey);
+    handleAutoTrigger(snapshot, true);
+  }, [snapshot, handleAutoTrigger]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -554,7 +825,7 @@ export default function AiChatPage() {
   // ── Send ─────────────────────────────────────────────────────────────────────
 
   const chatMutation = useMutation({
-    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string }) => {
+    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[] }) => {
       const traceId = crypto.randomUUID().slice(0, 8);
 
       // ── TRACE STAGE 1: FRONTEND SEND ─────────────────────────────────────
@@ -565,20 +836,17 @@ export default function AiChatPage() {
       // ── Step A: Ekstraher dokumentindhold via direkte R2-upload ───────────
       // Filer uploades ALDRIG igennem Vercel — Browser → R2 direkte via presigned URL.
       // Vercel modtager kun lille JSON (presign-request + finalize-request).
-      let documentContext: any[] = [];
+      // _documentContextOverride: bruges til upgrade-chat (partial→complete) — springer upload over.
+      let documentContext: any[] = payload._documentContextOverride ?? [];
 
-      // Behandl billeder og video/lyd som dokumenter — upload til R2 og analyser via Gemini
-      const videoFiles = payload.attachments.filter(a => a.type === "video" || a.type === "audio");
-      const allUploadFiles = [...docFiles, ...imgFiles, ...videoFiles];
-
-      if (allUploadFiles.length > 0) {
+      if (docFiles.length > 0) {
         try {
-          console.log(`[TRACE-2a][${traceId}] starting direct-to-R2 upload for ${allUploadFiles.length} file(s) (${docFiles.length} docs, ${imgFiles.length} images, ${videoFiles.length} videos)`);
+          console.log(`[TRACE-2a][${traceId}] starting direct-to-R2 upload for ${docFiles.length} file(s)`);
 
-          // Upload alle filer (dokumenter + billeder) direkte til R2 og finaliser
+          // Upload alle doc-filer direkte til R2 og finaliser
           const finalizeResults: any[] = [];
 
-          for (const af of allUploadFiles) {
+          for (const af of docFiles) {
             const file = af.file;
 
             // ── 1. Hent presigned URL ─────────────────────────────────────
@@ -618,6 +886,8 @@ export default function AiChatPage() {
               size:        file.size,
               context:     "chat",
               fileCount:   docFiles.length,
+              // PHASE 5Z.7 — question passed at upload time for server-driven orchestration
+              questionText: payload.text?.trim() || undefined,
             });
             if (!finalRes.ok) {
               const errBody = await finalRes.json().catch(() => ({})) as any;
@@ -627,12 +897,6 @@ export default function AiChatPage() {
             const finalData = await finalRes.json() as { mode: string; results?: any[]; message?: string; taskId?: string };
             console.log(`[TRACE-2f][${traceId}] finalize OK mode=${finalData.mode} results=${finalData.results?.length ?? 0} msg=${finalData.message ?? "-"}`);
 
-            // Trigger OCR worker on-demand to save costs (only run when needed)
-            if (finalData.mode === "OCR_PENDING") {
-              console.log(`[TRACE-2trigger][${traceId}] triggering OCR worker on-demand`);
-              fetch("/api/ocr-worker", { method: "POST" }).catch(() => {});
-            }
-
             // ── B_FALLBACK: OCR-task creation failed (DB/queue error) ─────
             if (finalData.mode === "B_FALLBACK") {
               const reason = finalData.message ?? "OCR-systemet er ikke tilgængeligt. Prøv igen om lidt.";
@@ -640,14 +904,15 @@ export default function AiChatPage() {
               throw Object.assign(new Error(reason), { errorCode: "DOCUMENT_UNREADABLE" });
             }
 
-            // ── OCR_PENDING: scanned PDF → poll async OCR job ─────────────
+            // ── OCR_PENDING: scanned PDF → SSE-stream + polling-fallback ─────
             if (finalData.mode === "OCR_PENDING" && finalData.taskId) {
               const taskId = finalData.taskId;
-              console.log(`[TRACE-2ocr][${traceId}] OCR_PENDING taskId=${taskId} polling...`);
+              console.log(`[TRACE-2ocr][${traceId}] OCR_PENDING taskId=${taskId} SSE-subscribe...`);
 
-              const OCR_TIMEOUT   = 600_000; // 10 minutes for Enterprise documents
-              const ocrStart      = Date.now();
-              let ocrResult: any  = null;
+              const OCR_TIMEOUT = 360_000;
+              const ocrStart    = Date.now();
+              let ocrResult: any = null;
+              let ocrHandled = false; // set true when partial_ready pushes directly to finalizeResults
 
               // Stage → brugervenlig tekst
               const stageLabel = (stage: string | null | undefined): string => {
@@ -661,78 +926,208 @@ export default function AiChatPage() {
 
               setOcrStatusLabel(`Behandler scannet PDF: ${file.name}`);
 
-              while (Date.now() - ocrStart < OCR_TIMEOUT) {
-                // Adaptive polling: hurtig start → langsom ved ventetid
-                const elapsed = Date.now() - ocrStart;
-                const pollMs  = elapsed < 10_000 ? 1_500
-                              : elapsed < 30_000 ? 3_000
-                              : 6_000;
-                await new Promise<void>((r) => setTimeout(r, pollMs));
+              // ── PHASE 5Z.7: SSE-baseret subscription ─────────────────────
+              // Forsøger at modtage real-time events fra serveren (nul polling-latency).
+              // Falder tilbage til polling-loop hvis SSE ikke virker.
+              let sseResolved = false;
+              let sseError: Error | null = null;
+              try {
+                const token = await getSessionToken();
+                const sseHeaders: Record<string, string> = { Accept: "text/event-stream" };
+                if (token) sseHeaders["Authorization"] = `Bearer ${token}`;
 
-                const elapsedSec = Math.round((Date.now() - ocrStart) / 1000);
-
-                const pollRes = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch((e: any) => {
-                  console.warn(`[TRACE-2ocr][${traceId}] poll error: ${e?.message}`);
-                  return null;
+                const sseRes = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, {
+                  headers: sseHeaders,
+                  credentials: "include",
+                  signal: AbortSignal.timeout(OCR_TIMEOUT),
                 });
-                if (!pollRes) continue;
-                const pollData = await pollRes.json() as any;
-                console.log(`[TRACE-2ocr][${traceId}] poll status=${pollData.status} stage=${pollData.stage ?? "-"} elapsed=${elapsedSec}s`);
 
-                // Update label based on live stage (Phase 5X: also handle 'processing')
-                if (pollData.status === "running" || pollData.status === "pending" || pollData.status === "processing") {
-                  const sLabel = stageLabel(pollData.stage);
-                  setOcrStatusLabel(`${sLabel}: ${file.name} (${elapsedSec}s)`);
-                }
+                if (sseRes.ok && sseRes.body) {
+                  const reader  = sseRes.body.getReader();
+                  const decoder = new TextDecoder();
+                  let   buf     = "";
 
-                if (pollData.status === "completed") { ocrResult = pollData; break; }
-                if (pollData.status === "dead_letter") {
-                  setOcrStatusLabel(null);
-                  console.error(`[OCR-FAIL][${traceId}] PATH=dead_letter reason="${pollData.errorReason}" attempts=${pollData.attemptCount}/${pollData.maxAttempts}`);
-                  throw Object.assign(
-                    new Error(pollData.errorReason ?? "PDF kan ikke læses — for mange fejlede forsøg"),
-                    { errorCode: "DOCUMENT_UNREADABLE" },
-                  );
-                }
-                if (pollData.status === "retryable_failed") {
-                  // Phase 5X: 'retryable_failed' → worker vil hente den igen, bliv ved med at polle
-                  setOcrStatusLabel(`Prøver igen: ${file.name} (forsøg ${(pollData.attemptCount ?? 0) + 1}/${pollData.maxAttempts ?? 3})`);
-                  continue;
-                }
-                if (pollData.status === "failed") {
-                  // 'failed' med retries planlagt → bliv ved med at polle
-                  if (pollData.nextRetryAt) {
-                    setOcrStatusLabel(`Prøver igen: ${file.name} (forsøg ${(pollData.attemptCount ?? 0) + 1}/${pollData.maxAttempts ?? 3})`);
-                    continue;
+                  outer: while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buf += decoder.decode(value, { stream: true });
+                    const lines = buf.split("\n");
+                    buf = lines.pop() ?? "";
+
+                    for (const line of lines) {
+                      if (!line.startsWith("data:")) continue;
+                      let evt: any;
+                      try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+
+                      const { type, data } = evt;
+                      if (!type || !data) continue;
+
+                      if (type === "partial_ready" && data.ocrText?.trim()) {
+                        // Build document_context directly — do NOT rely on ocrResult fallthrough chain.
+                        // ocrHandled = true skips the post-SSE ocrResult→finalizeResults block.
+                        const partialText = (data.ocrText as string).slice(0, 80_000);
+                        finalizeResults.push({
+                          filename:       file.name,
+                          mime_type:      file.type || "application/pdf",
+                          char_count:     data.charCount ?? partialText.length,
+                          extracted_text: partialText,
+                          status:         "ok",
+                          source:         "ocr_partial",
+                        });
+                        ocrHandled = true;
+                        ocrResult = { status: "running", stage: "partial_ready" }; // sentinel: passes !ocrResult check
+                        pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
+                        setOcrStatusLabel(null);
+                        console.log(`[TRACE-2ocr][${traceId}] SSE partial_ready chars=${data.charCount} — direct push, bryder øjeblikkeligt`);
+                        sseResolved = true;
+                        reader.cancel().catch(() => {});
+                        break outer;
+                      }
+                      if (type === "completed") {
+                        // completed event indeholder nu ocrText (full dokument)
+                        if (data.ocrText?.trim()) {
+                          ocrResult = { ocrText: data.ocrText, charCount: data.charCount, status: "completed", stage: "completed" };
+                          console.log(`[TRACE-2ocr][${traceId}] SSE completed med ocrText chars=${data.charCount}`);
+                        } else {
+                          // Fallback: hent via status-endpoint
+                          const sr = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch(() => null);
+                          if (sr?.ok) ocrResult = await sr.json().catch(() => null);
+                          if (!ocrResult) ocrResult = { status: "completed", charCount: data.charCount };
+                          console.log(`[TRACE-2ocr][${traceId}] SSE completed (status-fetch) chars=${data.charCount}`);
+                        }
+                        sseResolved = true;
+                        reader.cancel().catch(() => {});
+                        break outer;
+                      }
+                      if (type === "error") {
+                        console.warn(`[TRACE-2ocr][${traceId}] SSE error event: ${data.message} fallback=${data.fallback}`);
+                        sseResolved = true;   // prevent polling fallback from starting
+                        if (data.fallback) {
+                          // PHASE A — OCR failed but server provides fallback path.
+                          // Continue chat pipeline with synthetic "document unreadable" context.
+                          ocrResult = {
+                            status:       "unsupported",
+                            fallback:     true,
+                            reason:       "ocr_failed",
+                            questionText: data.questionText ?? "",
+                            filename:     data.filename ?? file.name,
+                            message:      data.message ?? "Dokumentet kunne ikke læses",
+                            ocrText:      null,
+                            charCount:    0,
+                          };
+                          console.log(`[TRACE-2ocr][${traceId}] SSE fallback path — continuing chat with synthetic context`);
+                        } else {
+                          sseError = Object.assign(
+                            new Error(data.message ?? "OCR-job fejlede — prøv at uploade filen igen"),
+                            { errorCode: "DOCUMENT_UNREADABLE" },
+                          );
+                        }
+                        reader.cancel().catch(() => {});
+                        break outer;
+                      }
+                      if (type === "keepalive") {
+                        const elapsedSec = Math.round((Date.now() - ocrStart) / 1000);
+                        setOcrStatusLabel(`Læser tekst via AI: ${file.name} (${elapsedSec}s)`);
+                      }
+                    }
                   }
-                  setOcrStatusLabel(null);
-                  console.error(`[OCR-FAIL][${traceId}] PATH=failed_no_retry reason="${pollData.errorReason}" attempts=${pollData.attemptCount}/${pollData.maxAttempts}`);
-                  throw Object.assign(new Error(pollData.errorReason ?? "PDF OCR fejlede"), { errorCode: "DOCUMENT_UNREADABLE" });
+                }
+              } catch (sseErr: any) {
+                console.warn(`[TRACE-2ocr][${traceId}] SSE fejlede (falder tilbage til polling): ${sseErr?.message}`);
+              }
+
+              // ── Polling-fallback: bruges hvis SSE fejlede ──────────────────
+              if (!sseResolved) {
+                console.log(`[TRACE-2ocr][${traceId}] SSE-fallback: starter polling for taskId=${taskId}`);
+                while (Date.now() - ocrStart < OCR_TIMEOUT) {
+                  const elapsed = Date.now() - ocrStart;
+                  const pollMs  = elapsed < 10_000 ? 1_500 : elapsed < 30_000 ? 3_000 : 6_000;
+                  await new Promise<void>((r) => setTimeout(r, pollMs));
+
+                  const elapsedSec = Math.round((Date.now() - ocrStart) / 1000);
+                  const pollRes = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch((e: any) => {
+                    console.warn(`[TRACE-2ocr][${traceId}] poll error: ${e?.message}`);
+                    return null;
+                  });
+                  if (!pollRes) continue;
+                  const pollData = await pollRes.json() as any;
+                  console.log(`[TRACE-2ocr][${traceId}] poll status=${pollData.status} stage=${pollData.stage ?? "-"} elapsed=${elapsedSec}s`);
+
+                  if (pollData.status === "running" || pollData.status === "pending") {
+                    const sLabel   = stageLabel(pollData.stage);
+                    const progress = pollData.chunksProcessed > 0 ? ` · ${pollData.chunksProcessed} blokke` : "";
+                    setOcrStatusLabel(`${sLabel}: ${file.name} (${elapsedSec}s${progress})`);
+                  }
+                  if (pollData.status === "running" && pollData.stage === "partial_ready" && pollData.ocrText?.trim()) {
+                    ocrResult = pollData;
+                    // Set upgrade ref so onSuccess starts completed-upgrade SSE (same as SSE path)
+                    pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
+                    setOcrStatusLabel(null);
+                    console.log(`[TRACE-2ocr][${traceId}] poll partial_ready chars=${pollData.charCount} — early trigger, upgrade ref set`);
+                    break;
+                  }
+                  if (pollData.status === "completed") { ocrResult = pollData; break; }
+                  if (pollData.status === "dead_letter") {
+                    setOcrStatusLabel(null);
+                    console.error(`[OCR-FAIL][${traceId}] PATH=dead_letter reason="${pollData.errorReason}"`);
+                    throw Object.assign(new Error(pollData.errorReason ?? "PDF kan ikke læses — for mange fejlede forsøg"), { errorCode: "DOCUMENT_UNREADABLE" });
+                  }
+                  if (pollData.status === "failed") {
+                    if (pollData.nextRetryAt) {
+                      setOcrStatusLabel(`Prøver igen: ${file.name} (forsøg ${(pollData.attemptCount ?? 0) + 1}/${pollData.maxAttempts ?? 3})`);
+                      continue;
+                    }
+                    setOcrStatusLabel(null);
+                    console.error(`[OCR-FAIL][${traceId}] PATH=failed_no_retry reason="${pollData.errorReason}"`);
+                    throw Object.assign(new Error(pollData.errorReason ?? "PDF OCR fejlede"), { errorCode: "DOCUMENT_UNREADABLE" });
+                  }
                 }
               }
+
+              // Throw SSE error immediately — exact message from server
+              if (sseError) throw sseError;
 
               setOcrStatusLabel(null);
 
               if (!ocrResult) {
-                console.error(`[OCR-FAIL][${traceId}] PATH=timeout elapsed=180s task never completed`);
-                throw Object.assign(new Error("Analysen af det store dokument tager længere tid end forventet. Prøv igen om et øjeblik, eller tjek status i Storage."), { errorCode: "DOCUMENT_UNREADABLE" });
+                console.error(`[OCR-FAIL][${traceId}] PATH=timeout elapsed=360s task never completed`);
+                throw Object.assign(new Error("OCR tog for lang tid (>6 min). Prøv igen — store filer kan tage tid."), { errorCode: "DOCUMENT_UNREADABLE" });
               }
 
-              const ocrText = (ocrResult.ocrText ?? "").slice(0, 80_000);
-              if (!ocrText.trim()) {
-                console.error(`[OCR-FAIL][${traceId}] PATH=ocr_empty_text charCount=${ocrResult.charCount} quality=${ocrResult.qualityScore}`);
-                throw Object.assign(new Error("OCR fandt ingen læsbar tekst i dokumentet. Tjek at PDF-filen ikke er krypteret."), { errorCode: "DOCUMENT_UNREADABLE" });
-              }
+              // PHASE A — OCR post-processing (skipped when partial_ready already pushed directly)
+              if (!ocrHandled && ocrResult.status === "fallback") {
+                const fallbackMsg = ocrResult.message ?? "Ingen læsbar tekst fundet i dokumentet";
+                const fallbackFilename = ocrResult.filename ?? file.name;
+                console.log(`[TRACE-2ocr][${traceId}] OCR fallback path — building synthetic context for "${fallbackFilename}"`);
+                setOcrStatusLabel(null);
+                finalizeResults.push({
+                  filename:       fallbackFilename,
+                  mime_type:      file.type || "application/pdf",
+                  char_count:     0,
+                  extracted_text: `[DOKUMENT UEGNET TIL TEKSTUDTRÆK: ${fallbackFilename}]\n\n${fallbackMsg}\n\nJeg kunne ikke læse nogen brugbar tekst i dokumentet. Dokumentet kan være scannet, tomt eller uegnet til tekstudtræk. Upload gerne en mere læsbar version eller stil et nyt spørgsmål.`,
+                  status:         "unsupported",
+                  fallback:       true,
+                  reason:         "ocr_failed",
+                  source:         "r2_ocr_fallback",
+                });
+              } else if (!ocrHandled) {
+                const ocrText = (ocrResult.ocrText ?? "").slice(0, 80_000);
+                if (!ocrText.trim()) {
+                  console.error(`[OCR-FAIL][${traceId}] PATH=ocr_empty_text charCount=${ocrResult.charCount} quality=${ocrResult.qualityScore}`);
+                  throw Object.assign(new Error("OCR fandt ingen læsbar tekst i dokumentet. Tjek at PDF-filen ikke er krypteret."), { errorCode: "DOCUMENT_UNREADABLE" });
+                }
 
-              finalizeResults.push({
-                filename:       file.name,
-                mime_type:      file.type || "application/pdf",
-                char_count:     ocrResult.charCount ?? 0,
-                extracted_text: ocrText,
-                status:         "ok",
-                source:         "r2_ocr_async",
-              });
-              console.log(`[TRACE-2ocr][${traceId}] OCR complete chars=${ocrResult.charCount} quality=${ocrResult.qualityScore}`);
+                finalizeResults.push({
+                  filename:       file.name,
+                  mime_type:      file.type || "application/pdf",
+                  char_count:     ocrResult.charCount ?? 0,
+                  extracted_text: ocrText,
+                  status:         "ok",
+                  // Preserve partial marker so server-side safeguard detects partial mode correctly
+                  source:         ocrResult.stage === "partial_ready" ? "ocr_partial" : "r2_ocr_async",
+                });
+              }
+              console.log(`[TRACE-2ocr][${traceId}] OCR complete chars=${ocrResult.charCount ?? 0} quality=${ocrResult.qualityScore ?? "-"}`);
             } else if (finalData.results && finalData.results.length > 0) {
               finalizeResults.push(...finalData.results);
             }
@@ -745,7 +1140,10 @@ export default function AiChatPage() {
           }
 
           // HARD STOP: ingen gyldige dokumenter
-          const validEntries = documentContext.filter((r: any) => r.status === "ok" && r.extracted_text?.trim());
+          // fallback entries (status=unsupported + fallback:true) er gyldige — modellen svarer med "dokument uegnet" besked
+          const validEntries = documentContext.filter((r: any) =>
+            (r.status === "ok" || (r.status === "unsupported" && r.fallback === true)) && r.extracted_text?.trim()
+          );
           if (validEntries.length === 0) {
             const errorEntry = documentContext.find((r: any) => r.status === "error" && r.message);
             const hasOcrSource = documentContext.some((r: any) => r.source === "r2_ocr_async");
@@ -766,129 +1164,175 @@ export default function AiChatPage() {
       // ── Step B: Byg besked-tekst ───────────────────────────────────────────
       const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";
 
-      // ── TRACE STAGE 3: CHAT REQUEST (SSE streaming) ──────────────────────
-      console.log(`[TRACE-3][${traceId}] sending /api/chat/stream message_len=${fullMessage.length} document_context_len=${documentContext.length}`);
+      // ── TRACE STAGE 3: CHAT REQUEST (streaming) ───────────────────────────
+      console.log(`[TRACE-3][${traceId}] streaming /api/chat/stream message_len=${fullMessage.length} document_context_len=${documentContext.length}`);
 
-      // ── Step C: Stream svar fra /api/chat/stream via SSE ──────────────────
-      const { getSessionToken } = await import("@/lib/supabase");
-      const token = await getSessionToken();
-      const streamHeaders: Record<string, string> = { "Content-Type": "application/json" };
-      if (token) streamHeaders["Authorization"] = `Bearer ${token}`;
+      // ── Step C: SSE-streaming til /api/chat/stream ─────────────────────────
+      // Tilføj streaming-placeholder INDEN vi sender, så brugeren ser noget med det samme
+      const streamMsgId = crypto.randomUUID();
+      setMessages(prev => [...prev, {
+        id: streamMsgId, role: "assistant" as const,
+        text: "", isStreaming: true, timestamp: new Date(),
+      }]);
 
-      const streamRes = await fetch("/api/chat/stream", {
-        method: "POST",
-        headers: streamHeaders,
-        body: JSON.stringify({
+      let doneData: (ChatResponse & { _trace?: any }) | null = null;
+
+      try {
+        const res = await apiRequest("POST", "/api/chat/stream", {
           message: fullMessage,
           conversation_id: conversationId ?? null,
           document_context: documentContext,
           context: {
-            document_ids: [],
+            document_ids: payload.documentIds ?? [],
             preferred_expert_id: null,
-            attachment_count: payload.attachments.length,
-            attachment_types: Array.from(new Set(payload.attachments.map(a => a.type))),
-            use_case: (payload.useCase ?? "grounded_chat") as any,
           },
-          _trace_id: traceId,
-        }),
-      });
+          ...(payload.triggerKey ? { idempotency_key: `${payload.triggerKey}:${fullMessage.slice(0, 64)}` } : {}),
+        });
 
-      if (!streamRes.ok || !streamRes.body) {
-        const errBody = await streamRes.json().catch(() => ({})) as any;
-        throw Object.assign(
-          new Error(errBody?.message ?? `Chat fejlede (HTTP ${streamRes.status})`),
-          { errorCode: errBody?.error_code ?? "CHAT_FAILED" },
-        );
-      }
+        const reader  = res.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer    = "";
+        let streamText = "";
 
-      // ── Stream tokens progressively into a temporary message ──────────────
-      const streamMsgId = crypto.randomUUID();
-      setMessages(prev => [...prev, {
-        id: streamMsgId,
-        role: "assistant" as const,
-        text: "",
-        timestamp: new Date(),
-        isStreaming: true,
-      }]);
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop()!;
 
-      const reader = streamRes.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let accumulatedText = "";
-      let finalData: ChatResponse | null = null;
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const raw = line.slice(6).trim();
+            if (!raw) continue;
+            let event: any;
+            try { event = JSON.parse(raw); } catch { continue; }
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const event = JSON.parse(line.slice(6)) as { type: string; text?: string; message?: string; error_code?: string } & Partial<ChatResponse>;
-            if (event.type === "token" && event.text) {
-              accumulatedText += event.text;
+            if (event.type === "delta") {
+              streamText += event.text;
               setMessages(prev => prev.map(m =>
-                m.id === streamMsgId ? { ...m, text: accumulatedText } : m
+                m.id === streamMsgId ? { ...m, text: streamText } : m
               ));
+            } else if (event.type === "status" && event.text) {
+              setOcrStatusLabel(event.text);
+            } else if (event.type === "gated") {
+              // Routing gate: processing/no_context — show as assistant info message
+              const gatedMsg = event.message ?? "Forespørgslen kan ikke behandles i øjeblikket.";
+              setMessages(prev => [
+                ...prev.filter(m => m.id !== streamMsgId),
+                { id: streamMsgId, role: "assistant" as const, text: gatedMsg, timestamp: new Date() },
+              ]);
+              // Synthesise a fake done response so onSuccess/cleanup runs
+              doneData = {
+                answer: gatedMsg,
+                conversation_id: "",
+                route_type: event.routeType,
+                expert: { id: "", name: "", category: null },
+                used_sources: [], used_rules: [], warnings: [],
+                latency_ms: 0, confidence_band: "unknown",
+                needs_manual_review: false,
+                routing_explanation: event.routeType ?? "gated",
+              } as any;
             } else if (event.type === "done") {
-              finalData = {
-                answer:              event.answer ?? accumulatedText,
-                conversation_id:     event.conversation_id ?? "",
-                expert:              event.expert ?? { id: "", name: "", category: null },
-                used_sources:        event.used_sources ?? [],
-                used_rules:          event.used_rules ?? [],
-                warnings:            event.warnings ?? [],
-                latency_ms:          event.latency_ms ?? 0,
-                confidence_band:     event.confidence_band ?? "unknown",
-                needs_manual_review: event.needs_manual_review ?? false,
-                routing_explanation: event.routing_explanation ?? "",
-              } as ChatResponse;
-              // Replace streaming message with final message including metadata
-              setMessages(prev => prev.map(m =>
-                m.id === streamMsgId
-                  ? { ...m, text: finalData!.answer, response: finalData!, isStreaming: false }
-                  : m
-              ));
+              doneData = event as ChatResponse & { _trace?: any };
+              const isRefined = (event.refinement_generation ?? 1) >= 2;
+              setMessages(prev => prev.map(m => {
+                if (m.id === streamMsgId) {
+                  // Current message: finalise it
+                  return { ...m, text: streamText, isStreaming: false, response: doneData ?? undefined };
+                }
+                // Phase 5Z.5 — supersede earlier assistant answers when a refined one arrives
+                if (isRefined && m.role === "assistant" && !m.isError && !m.isStreaming && m.id !== streamMsgId) {
+                  return { ...m, isSuperseded: true };
+                }
+                return m;
+              }));
             } else if (event.type === "error") {
-              throw Object.assign(
-                new Error(event.message ?? "Streaming fejlede"),
-                { errorCode: event.error_code ?? "STREAM_ERROR" },
-              );
+              throw Object.assign(new Error(event.message ?? "Ukendt fejl"), { errorCode: event.errorCode });
             }
-          } catch (parseErr) {
-            // Ignore malformed SSE lines
           }
         }
+      } catch (streamErr) {
+        // Fjern streaming-placeholder ved fejl — onError tilføjer fejlbesked
+        setMessages(prev => prev.filter(m => m.id !== streamMsgId));
+        throw streamErr;
       }
 
-      if (!finalData) {
-        // Stream ended without done event — use accumulated text
-        finalData = {
-          answer:              accumulatedText,
-          conversation_id:     "",
-          expert:              { id: "", name: "", category: null },
-          used_sources:        [],
-          used_rules:          [],
-          warnings:            [],
-          latency_ms:          0,
-          confidence_band:     "unknown",
-          needs_manual_review: false,
-          routing_explanation: "",
-        } as ChatResponse;
-        setMessages(prev => prev.map(m =>
-          m.id === streamMsgId ? { ...m, text: accumulatedText, isStreaming: false } : m
-        ));
+      // ── TRACE STAGE 5: SERVER RESPONSE ────────────────────────────────────
+      if (doneData) {
+        console.log(`[TRACE-5][${traceId}] streaming done conversation_id=${doneData.conversation_id} answer_len=${doneData.answer?.length}`);
       }
 
-      console.log(`[TRACE-5][${traceId}] stream complete answer_len=${finalData.answer?.length ?? 0}`);
-      return finalData;
+      return doneData ?? ({ answer: "", conversation_id: "", expert: { id: "", name: "", category: null }, used_sources: [], used_rules: [], warnings: [], latency_ms: 0, confidence_band: "unknown", needs_manual_review: false, routing_explanation: "" } as ChatResponse);
     },
     onSuccess: (data) => {
-      // SSE streaming already inserts the message progressively.
-      // We only update the conversation_id here.
-      if (data.conversation_id) setConversationId(data.conversation_id);
+      // Besked er allerede tilføjet til messages via streaming-callback.
+      // Her sætter vi kun conversationId og rydder OCR-status.
+      if (data?.conversation_id) setConversationId(data.conversation_id);
+      setOcrStatusLabel(null);
+
+      // ── PATCH B upgrade: hvis vi brækkede på partial_ready, lyt videre efter completed ──
+      const upgrade = pendingOcrUpgradeRef.current;
+      if (upgrade) {
+        pendingOcrUpgradeRef.current = null;
+        const { taskId, filename, mime } = upgrade;
+        (async () => {
+          try {
+            const token = await getSessionToken().catch(() => null);
+            const headers: Record<string, string> = { Accept: "text/event-stream" };
+            if (token) headers["Authorization"] = `Bearer ${token}`;
+            const res = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, { headers, credentials: "include" });
+            if (!res.ok || !res.body) return;
+            const reader  = res.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = "";
+            outerUpgrade: while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              buf += decoder.decode(value, { stream: true });
+              const lines = buf.split("\n");
+              buf = lines.pop() ?? "";
+              for (const line of lines) {
+                if (!line.startsWith("data:")) continue;
+                let evt: any;
+                try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+                if (evt.type === "completed" && chatMutateRef.current) {
+                  reader.cancel().catch(() => {});
+                  // ocrText may be absent from live SSE push — fetch from status endpoint as fallback
+                  let fullText: string = evt.data?.ocrText ?? "";
+                  if (!fullText.trim()) {
+                    try {
+                      const statusToken = await getSessionToken().catch(() => null);
+                      const statusHeaders: Record<string, string> = {};
+                      if (statusToken) statusHeaders["Authorization"] = `Bearer ${statusToken}`;
+                      const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: statusHeaders, credentials: "include" });
+                      if (sr.ok) {
+                        const sd = await sr.json() as any;
+                        fullText = sd.ocrText ?? sd.ocr_text ?? "";
+                      }
+                    } catch { /* non-fatal */ }
+                  }
+                  if (!fullText.trim()) { break outerUpgrade; } // no text available — abort upgrade
+                  fullText = fullText.slice(0, 80_000);
+                  chatMutateRef.current({
+                    text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
+                    attachments: [],
+                    _documentContextOverride: [{
+                      filename, mime_type: mime,
+                      char_count: fullText.length,
+                      extracted_text: fullText,
+                      status: "ok",
+                      source: "r2_ocr_async",
+                    }],
+                  });
+                  break outerUpgrade;
+                }
+                if (evt.type === "error") { reader.cancel().catch(() => {}); break outerUpgrade; }
+              }
+            }
+          } catch { /* non-fatal upgrade failure */ }
+        })();
+      }
     },
     onError: (err: any) => {
       setOcrStatusLabel(null);
@@ -927,6 +1371,9 @@ export default function AiChatPage() {
     },
   });
 
+  // Set chatMutateRef so handleAutoTrigger (declared before chatMutation) can use it
+  chatMutateRef.current = chatMutation.mutate as typeof chatMutateRef.current;
+
   const handleSend = () => {
     const text = input.trim();
     if ((!text && attachments.length === 0) || chatMutation.isPending) return;
@@ -951,6 +1398,7 @@ export default function AiChatPage() {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
   };
 
+  const hasStreamingMessage = messages.some(m => m.isStreaming);
   const isEmpty = messages.length === 0 && !chatMutation.isPending;
   const canSend = (input.trim().length > 0 || attachments.length > 0) && !chatMutation.isPending;
 
@@ -988,12 +1436,24 @@ export default function AiChatPage() {
         <div className="mx-auto w-full max-w-3xl sm:max-w-4xl min-h-full flex flex-col">
           {isEmpty ? (
             <div className="flex-1 flex items-center justify-center py-8 -translate-y-[10%]">
-              <EmptyState />
+              {monitorDocumentId && uxState !== "idle" ? (
+                <div className="w-full max-w-md space-y-3">
+                  <ReadinessStreamBanner
+                    uxState={uxState}
+                    snapshot={snapshot}
+                    isConnected={isConnected}
+                    onRefreshAnswer={handleRefreshAnswer}
+                  />
+                  <EmptyState />
+                </div>
+              ) : (
+                <EmptyState />
+              )}
             </div>
           ) : (
             <div className="pt-6">
               {messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)}
-              {chatMutation.isPending && !ocrStatusLabel && <TypingIndicator />}
+              {chatMutation.isPending && !ocrStatusLabel && !hasStreamingMessage && <TypingIndicator />}
               {ocrStatusLabel && (
                 <div className="flex items-center gap-2 px-4 py-2 text-sm text-muted-foreground animate-pulse" data-testid="status-ocr-pending">
                   <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
@@ -1002,6 +1462,15 @@ export default function AiChatPage() {
                   </svg>
                   {ocrStatusLabel}
                 </div>
+              )}
+              {/* Phase 5Z.3 — Readiness banner shown during/after processing */}
+              {monitorDocumentId && (
+                <ReadinessStreamBanner
+                  uxState={uxState}
+                  snapshot={snapshot}
+                  isConnected={isConnected}
+                  onRefreshAnswer={handleRefreshAnswer}
+                />
               )}
             </div>
           )}
@@ -1061,7 +1530,7 @@ export default function AiChatPage() {
           </div>
 
           <p className="text-xs text-muted-foreground/30 text-center">
-            Understøtter dokumenter, billeder, video og lyd · AI-analyse op til 18 MB
+            Understøtter dokumenter, billeder og tekst · Max {MAX_SIZE_MB} MB
           </p>
 
         </div>{/* /max-w */}

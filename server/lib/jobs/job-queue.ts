@@ -242,7 +242,16 @@ export async function enqueueOcrJob(
       if (existing.rows[0]) return { id: existing.rows[0].id, reused: true };
     }
 
-    if (insertId) return { id: insertId, reused: false };
+    if (insertId) {
+      // PHASE 5Z.7 — store question text for server-driven orchestration
+      if (payload.questionText) {
+        await client.query(
+          `UPDATE chat_ocr_tasks SET question_text = $1 WHERE id = $2`,
+          [payload.questionText.slice(0, 2000), insertId],
+        ).catch(() => { /* non-critical — column may not exist in older envs */ });
+      }
+      return { id: insertId, reused: false };
+    }
 
     throw new Error("enqueueOcrJob: INSERT returned no rows");
   } finally {
@@ -453,3 +462,102 @@ export async function storeChunks(jobId: string, count: number): Promise<void> {
 export async function logOcrCost(): Promise<void> {}
 export async function estimateOcrCost(): Promise<number> { return 0; }
 export async function archiveOldJobs(): Promise<void> {}
+
+// ── OCR Progress table (PHASE 5Z.6) ───────────────────────────────────────────
+
+/**
+ * Upsert per-page streaming progress into chat_ocr_progress.
+ *
+ * Uses INSERT ... ON CONFLICT (document_id, page_index) DO UPDATE with
+ * optimistic version increment — safe for concurrent batch writes.
+ * Non-critical: failures must not propagate to the caller.
+ */
+export async function upsertOcrProgress(
+  documentId:      string,
+  tenantId:        string,
+  pageIndex:       number,
+  textAccumulated: string,
+  status:          "streaming" | "partial_ready" | "completed",
+): Promise<void> {
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
+  try {
+    await client.connect();
+    await client.query(
+      `INSERT INTO chat_ocr_progress
+         (document_id, tenant_id, page_index, text_accumulated, char_count, status, version, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, 1, now())
+       ON CONFLICT (document_id, page_index)
+       DO UPDATE SET
+         text_accumulated = EXCLUDED.text_accumulated,
+         char_count       = EXCLUDED.char_count,
+         status           = EXCLUDED.status,
+         version          = chat_ocr_progress.version + 1,
+         updated_at       = now()
+       WHERE chat_ocr_progress.document_id = EXCLUDED.document_id
+         AND chat_ocr_progress.page_index  = EXCLUDED.page_index`,
+      [documentId, tenantId, pageIndex, textAccumulated.slice(0, 200_000), textAccumulated.length, status],
+    );
+  } catch (e) {
+    const msg = (e as Error).message;
+    if (!msg.includes("does not exist") && !msg.includes("relation") && !msg.includes("ENOTFOUND") && !msg.includes("ECONNREFUSED")) {
+      console.warn(JSON.stringify({ ts: new Date().toISOString(), svc: "job-queue", event: "upsert_progress_warn", error: msg }));
+    }
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+// ── Inline processing helpers ──────────────────────────────────────────────────
+// Used by ocr-inline-processor.ts (fire-and-forget path from upload/finalize).
+
+/**
+ * Atomically mark a pending job as running (inline processor start).
+ * Returns true if the job was successfully claimed, false if it was already
+ * running/completed/failed (safe to call multiple times — idempotent).
+ */
+export async function startJobInline(jobId: string): Promise<boolean> {
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
+  await client.connect();
+  try {
+    const res = await client.query<{ id: string }>(
+      `UPDATE chat_ocr_tasks
+       SET    status        = 'running',
+              started_at    = COALESCE(started_at, now()),
+              attempt_count = attempt_count + 1,
+              updated_at    = now()
+       WHERE  id = $1
+         AND  status = 'pending'
+       RETURNING id`,
+      [jobId],
+    );
+    return res.rowCount === 1;
+  } finally {
+    await client.end().catch(() => {});
+  }
+}
+
+/**
+ * Write partial OCR text to the job row and update the stage.
+ * The client polls for stage === 'partial_ready' to trigger an early chat call.
+ */
+export async function updatePartialText(
+  jobId: string,
+  text:  string,
+  stage: string,
+): Promise<void> {
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
+  await client.connect();
+  try {
+    await client.query(
+      `UPDATE chat_ocr_tasks
+       SET    ocr_text   = $1,
+              char_count = $2,
+              stage      = $3,
+              updated_at = now()
+       WHERE  id = $4`,
+      [text.slice(0, 200_000), text.length, stage, jobId],
+    );
+  } finally {
+    await client.end().catch(() => {});
+  }
+}

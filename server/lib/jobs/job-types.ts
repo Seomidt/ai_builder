@@ -48,6 +48,8 @@ export interface OcrJobPayload {
   contentType: string;
   /** SHA-256 of file content — enables idempotent deduplication within a tenant. */
   fileHash?:   string;
+  /** PHASE 5Z.7 — user question at upload time, stored for server-driven orchestration. */
+  questionText?: string;
 }
 
 // ── OCR job row (from DB) ─────────────────────────────────────────────────────

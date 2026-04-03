@@ -1,286 +1,152 @@
 /**
- * chat-ocr-worker.ts — Railway-native OCR polling worker.
+ * chat-ocr-worker.ts — PHASE 5Z.7
  *
- * Polls chat_ocr_tasks for pending jobs and processes them in-process.
- * This replaces the Vercel serverless ocr-worker.ts for Railway deployments.
+ * In-process polling worker for chat_ocr_tasks.
+ * Started from server/index.ts when CHAT_OCR_WORKER=true or ON_RAILWAY=true.
  *
- * Pipeline per job:
- *   1. Claim job (FOR UPDATE SKIP LOCKED)
- *   2. Fetch PDF/image from R2
- *   3. Extract text (pdf-parse for text PDFs, OpenAI Vision for scanned/images)
- *   4. Mark completed with extracted text
+ * Flow per cycle:
+ *  1. Query pending (or failed + eligible) chat_ocr_tasks
+ *  2. For each: download from R2, call processOcrJobInline()
+ *  3. processOcrJobInline → startJobInline() claims atomically (WHERE status='pending')
+ *     If two workers race, only one wins — the other returns early (no-op)
  *
- * Start via: CHAT_OCR_WORKER=true (env flag in Railway)
+ * Safety invariants:
+ *  - Never crashes the web server — all errors caught + logged
+ *  - Concurrency controlled by _maxConcurrent semaphore
+ *  - Idempotent: processOcrJobInline's startJobInline() is atomic
  */
 
-import { claimJobs, updateStage, completeJob, failJob } from "./job-queue.ts";
-import type { RawOcrTask } from "./job-queue.ts";
+import { Client as PgClient }         from "pg";
+import { resolveDbUrl }               from "./job-queue.ts";
+import { getSupabaseSslConfig }        from "./ssl-config.ts";
+import { processOcrJobInline }         from "./ocr-inline-processor.ts";
 
-let _intervalId: ReturnType<typeof setInterval> | null = null;
+// ── State ──────────────────────────────────────────────────────────────────────
 
-const POLL_MS       = parseInt(process.env.CHAT_OCR_POLL_MS   ?? "4000", 10);
-const MAX_CONCURRENT = parseInt(process.env.CHAT_OCR_MAX_CONC ?? "3",    10);
+let _intervalId:    ReturnType<typeof setInterval> | null = null;
+let _cycleRunning = false;
+let _maxConcurrent = 3;
 
-function log(msg: string, extra: Record<string, unknown> = {}): void {
-  console.log(JSON.stringify({ ts: new Date().toISOString(), svc: "chat-ocr-worker", msg, ...extra }));
-}
+// ── Public API ─────────────────────────────────────────────────────────────────
 
-export function startChatOcrWorker(): void {
+export function startChatOcrWorker(opts?: {
+  pollIntervalMs?: number;
+  maxConcurrent?:  number;
+}): void {
   if (_intervalId) return;
-  log("starting", { pollMs: POLL_MS, maxConcurrent: MAX_CONCURRENT });
+  const pollMs = opts?.pollIntervalMs
+    ?? parseInt(process.env.CHAT_OCR_POLL_INTERVAL_MS ?? "5000", 10);
+  _maxConcurrent = opts?.maxConcurrent
+    ?? parseInt(process.env.CHAT_OCR_MAX_CONCURRENT ?? "3", 10);
+
+  console.log(`[chat-ocr-worker] starting — poll=${pollMs}ms  maxConcurrent=${_maxConcurrent}`);
 
   _intervalId = setInterval(() => {
-    runCycle().catch((err) =>
-      log("cycle_error", { error: (err as Error).message }),
-    );
-  }, POLL_MS);
+    if (_cycleRunning) return;
+    _cycleRunning = true;
+    runWorkerCycle()
+      .catch((err) => console.error("[chat-ocr-worker] cycle error:", err))
+      .finally(() => { _cycleRunning = false; });
+  }, pollMs);
 }
 
 export function stopChatOcrWorker(): void {
   if (_intervalId) { clearInterval(_intervalId); _intervalId = null; }
-  log("stopped");
+  console.log("[chat-ocr-worker] stopped");
 }
 
 // ── Cycle ──────────────────────────────────────────────────────────────────────
 
-async function runCycle(): Promise<void> {
-  const jobs = await claimJobs(MAX_CONCURRENT);
-  if (jobs.length === 0) return;
-
-  log("jobs_claimed", { count: jobs.length });
-  await Promise.all(jobs.map((job) =>
-    processOcrJob(job).catch((err) =>
-      log("job_unhandled_crash", { jobId: job.id, error: (err as Error).message }),
-    ),
-  ));
+interface PendingRow {
+  id:           string;
+  tenant_id:    string;
+  r2_key:       string;
+  filename:     string;
+  content_type: string;
 }
 
-// ── Job processor ──────────────────────────────────────────────────────────────
+async function runWorkerCycle(): Promise<void> {
+  const jobs = await claimPendingJobs(_maxConcurrent);
+  if (jobs.length === 0) return;
 
-async function processOcrJob(job: RawOcrTask): Promise<void> {
-  const start = Date.now();
-  log("job_started", { jobId: job.id, filename: job.filename, contentType: job.content_type });
+  console.log(`[chat-ocr-worker] claimed ${jobs.length} job(s)`);
 
+  await Promise.all(jobs.map((job) => processJob(job)));
+}
+
+/**
+ * Fetch pending (or failed+eligible) jobs without locking —
+ * processOcrJobInline → startJobInline() does the atomic claim.
+ */
+async function claimPendingJobs(limit: number): Promise<PendingRow[]> {
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
+  await client.connect();
   try {
-    await updateStage(job.id, "ocr");
-
-    // 1. Fetch file from R2
-    const buffer = await fetchFromR2(job.r2_key);
-
-    // 2. Extract text based on content type
-    let extractedText = "";
-    const isPdf = job.content_type === "application/pdf" || job.filename?.toLowerCase().endsWith(".pdf");
-    const isImage = job.content_type?.startsWith("image/");
-
-    if (isPdf) {
-      extractedText = await extractPdfText(buffer, job.id);
-    } else if (isImage) {
-      extractedText = await extractImageText(buffer, job.content_type, job.id);
-    } else {
-      // Fallback: try as text
-      extractedText = buffer.toString("utf-8").trim();
-    }
-
-    if (!extractedText || extractedText.trim().length < 10) {
-      // If pdf-parse returned nothing, try OpenAI Vision as fallback (scanned PDF)
-      if (isPdf) {
-        log("pdf_parse_empty_trying_vision", { jobId: job.id });
-        extractedText = await extractPdfViaVision(buffer, job.id);
-      }
-    }
-
-    if (!extractedText || extractedText.trim().length === 0) {
-      throw new Error("Ingen tekst kunne udtrækkes fra dokumentet. Dokumentet kan være krypteret eller tomt.");
-    }
-
-    await updateStage(job.id, "storing");
-
-    const charCount  = extractedText.length;
-    const wordCount  = extractedText.split(/\s+/).filter(Boolean).length;
-    const chunkCount = Math.ceil(wordCount / 900);
-
-    await completeJob(job.id, {
-      ocrText:      extractedText.slice(0, 200_000), // cap at 200k chars
-      qualityScore: 0.95,
-      charCount,
-      pageCount:    1,
-      chunkCount,
-      provider:     "railway-ocr-worker",
-    });
-
-    log("job_completed", { jobId: job.id, charCount, durationMs: Date.now() - start });
-  } catch (err) {
-    const reason = (err as Error).message ?? String(err);
-    log("job_failed", { jobId: job.id, error: reason, durationMs: Date.now() - start });
-    await failJob(job.id, reason, true).catch(() => {});
+    const res = await client.query<PendingRow>(
+      `SELECT id, tenant_id, r2_key, filename, content_type
+       FROM   chat_ocr_tasks
+       WHERE  status IN ('pending', 'failed')
+         AND  (next_retry_at IS NULL OR next_retry_at <= now())
+         AND  attempt_count < max_attempts
+       ORDER  BY created_at ASC
+       LIMIT  $1`,
+      [limit],
+    );
+    return res.rows;
+  } finally {
+    await client.end().catch(() => {});
   }
 }
 
-// ── R2 fetch ───────────────────────────────────────────────────────────────────
+async function processJob(job: PendingRow): Promise<void> {
+  const { id, tenant_id, r2_key, filename, content_type } = job;
+  try {
+    const buffer = await downloadFromR2(r2_key);
+    await processOcrJobInline(id, buffer, filename, content_type, tenant_id);
+  } catch (err) {
+    console.error(
+      `[chat-ocr-worker] job ${id} failed:`,
+      (err as Error).message,
+    );
+    // Mark failed so retry logic can pick it up next cycle
+    await markJobFailed(id, (err as Error).message).catch(() => {});
+  }
+}
 
-async function fetchFromR2(r2Key: string): Promise<Buffer> {
-  const { R2_CONFIGURED, R2_BUCKET, r2Client } = await import("../r2/r2-client");
-  if (!R2_CONFIGURED) throw new Error("R2 storage not configured");
+// ── R2 download ────────────────────────────────────────────────────────────────
+
+async function downloadFromR2(r2Key: string): Promise<Buffer> {
+  const { r2Client, R2_BUCKET, R2_CONFIGURED } = await import("../r2/r2-client");
+  if (!R2_CONFIGURED) throw new Error("R2 not configured — cannot download OCR file");
 
   const { GetObjectCommand } = await import("@aws-sdk/client-s3");
   const resp = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: r2Key }));
+  if (!resp.Body) throw new Error(`R2 returned empty body for key: ${r2Key}`);
 
-  const chunks: Buffer[] = [];
-  const stream = resp.Body as NodeJS.ReadableStream;
-  await new Promise<void>((res, rej) => {
-    stream.on("data", (c: Buffer) => chunks.push(c));
-    stream.on("end", res);
-    stream.on("error", rej);
-  });
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of resp.Body as AsyncIterable<Uint8Array>) {
+    chunks.push(chunk);
+  }
   return Buffer.concat(chunks);
 }
 
-// ── PDF text extraction ────────────────────────────────────────────────────────
+// ── Failure stamp ──────────────────────────────────────────────────────────────
 
-// pdf-parse is kept external in esbuild (not bundled) so require() works correctly
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const _pdfParse: (buf: Buffer) => Promise<{ text: string; numpages: number }> =
-  require("pdf-parse");
-
-async function extractPdfText(buffer: Buffer, jobId: string): Promise<string> {
+async function markJobFailed(jobId: string, reason: string): Promise<void> {
+  const client = new PgClient({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
+  await client.connect();
   try {
-    const result = await _pdfParse(buffer);
-    const text = result.text?.trim() ?? "";
-    log("pdf_parse_result", { jobId, chars: text.length, pages: result.numpages });
-    return text;
-  } catch (err) {
-    log("pdf_parse_error", { jobId, error: (err as Error).message });
-    return "";
+    await client.query(
+      `UPDATE chat_ocr_tasks
+       SET    status        = 'failed',
+              error_reason  = $1,
+              next_retry_at = now() + interval '2 minutes',
+              updated_at    = now()
+       WHERE  id = $2
+         AND  status = 'running'`,
+      [reason.slice(0, 1000), jobId],
+    );
+  } finally {
+    await client.end().catch(() => {});
   }
-}
-
-// ── Image OCR via OpenAI Vision ────────────────────────────────────────────────
-
-async function extractImageText(buffer: Buffer, mimeType: string, jobId: string): Promise<string> {
-  const { isOpenAIAvailable, getOpenAIClient } = await import("../openai-client.ts");
-  if (!isOpenAIAvailable()) {
-    throw new Error("OpenAI API key not configured — cannot perform OCR on image");
-  }
-
-  const supportedTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
-  if (!supportedTypes.includes(mimeType)) {
-    throw new Error(`OCR not supported for MIME type '${mimeType}'`);
-  }
-
-  const base64  = buffer.toString("base64");
-  const dataUrl = `data:${mimeType};base64,${base64}`;
-  const client  = getOpenAIClient();
-
-  log("vision_ocr_start", { jobId, mimeType, bufferKb: Math.round(buffer.length / 1024) });
-
-  const response = await client.chat.completions.create({
-    model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "user",
-        content: [
-          { type: "image_url", image_url: { url: dataUrl, detail: "high" } },
-          { type: "text", text: "Extract all text visible in this image. Return only the extracted text verbatim, preserving structure where possible. If no text is present, return the single word: EMPTY" },
-        ],
-      },
-    ],
-    max_tokens: 4096,
-  });
-
-  const extracted = response.choices[0]?.message?.content?.trim() ?? "";
-  if (!extracted || extracted === "EMPTY") return "";
-  log("vision_ocr_done", { jobId, chars: extracted.length });
-  return extracted;
-}
-
-// ── Scanned PDF via OpenAI gpt-4o (primary fallback for scanned PDFs) ────────
-// gpt-4o supports PDF as base64 inline data via the file content type.
-// This is used when pdf-parse returns empty text (scanned/image-based PDFs).
-
-async function extractPdfViaVision(buffer: Buffer, jobId: string): Promise<string> {
-  // Gemini natively supports PDF inline_data — use as primary fallback for scanned PDFs.
-  // OpenAI chat.completions does not support application/pdf MIME type in image_url.
-  return extractPdfViaGemini(buffer, jobId);
-}
-
-async function extractPdfViaOpenAI(
-  buffer: Buffer,
-  jobId: string,
-  client: import("openai").default,
-): Promise<string> {
-  log("openai_ocr_start", { jobId, bufferKb: Math.round(buffer.length / 1024) });
-
-  // gpt-4o supports PDF as base64 via chat.completions with image_url content type
-  // This is the standard API path that works on all OpenAI accounts
-  const base64 = buffer.toString("base64");
-
-  const completion = await client.chat.completions.create({
-    model: "gpt-4o",
-    max_tokens: 16000,
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "image_url",
-            image_url: {
-              url: `data:application/pdf;base64,${base64}`,
-              detail: "high",
-            },
-          } as any,
-          {
-            type: "text",
-            text: "Extract ALL text content from this PDF document verbatim, preserving paragraph structure. If no text is present, return the single word: EMPTY",
-          },
-        ],
-      },
-    ],
-  });
-
-  const extracted = completion.choices[0]?.message?.content?.trim() ?? "";
-  if (!extracted || extracted === "EMPTY") return "";
-  log("openai_ocr_done", { jobId, chars: extracted.length });
-  return extracted;
-}
-
-// ── Scanned PDF via Gemini (secondary fallback) ────────────────────────────────
-
-async function extractPdfViaGemini(buffer: Buffer, jobId: string): Promise<string> {
-  const GEMINI_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_AI_API_KEY ?? "";
-  if (!GEMINI_KEY) {
-    throw new Error("No AI provider available for scanned PDF OCR (set OPENAI_API_KEY or GEMINI_API_KEY)");
-  }
-
-  log("gemini_ocr_start", { jobId, bufferKb: Math.round(buffer.length / 1024) });
-
-  const base64 = buffer.toString("base64");
-  const body = {
-    contents: [{
-      parts: [
-        { text: "Extract ALL text content from this PDF document. Return only the extracted text verbatim, preserving paragraph structure. If no text is present, return the single word: EMPTY" },
-        { inline_data: { mime_type: "application/pdf", data: base64 } },
-      ],
-    }],
-    generationConfig: { maxOutputTokens: 8192 },
-  };
-
-  log("gemini_ocr_request_sent", { jobId, bodySize: JSON.stringify(body).length });
-
-  const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_KEY}`,
-    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
-  );
-
-  log("gemini_ocr_response_received", { jobId, status: resp.status, ok: resp.ok });
-
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`Gemini OCR failed: ${resp.status} ${errText.slice(0, 200)}`);
-  }
-
-  const data = await resp.json() as any;
-  const extracted = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ?? "";
-  if (!extracted || extracted === "EMPTY") return "";
-  log("gemini_ocr_done", { jobId, chars: extracted.length });
-  return extracted;
 }

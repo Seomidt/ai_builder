@@ -1324,9 +1324,9 @@ Generate names and content in ${langNote}.`;
     try {
       const orgId  = getOrgId(req);
       const userId = getUserId(req);
-      const { objectKey, filename, contentType, size, context = "chat", fileCount = 1 } = req.body as {
+      const { objectKey, filename, contentType, size, context = "chat", fileCount = 1, questionText } = req.body as {
         objectKey: string; filename: string; contentType: string; size: number;
-        context?: string; fileCount?: number; sourceId?: string;
+        context?: string; fileCount?: number; sourceId?: string; questionText?: string;
       };
 
       if (!objectKey || !filename || !contentType || typeof size !== "number") {
@@ -1336,36 +1336,106 @@ Generate names and content in ${langNote}.`;
         return res.status(403).json({ error_code: "FORBIDDEN", message: "Ugyldig object key" });
       }
 
-      // ── Manus-Only: Force all PDFs to async OCR pipeline ──────────────────
-      const isPdf = contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
+      // ── Central input routing decision (PHASE D) ─────────────────────────────
+      // selectInputRoute is the single source of truth for pipeline selection.
+      // INV-IR1: text/plain NEVER enters scanned_pdf_ocr_path.
+      const { selectInputRoute } = await import("./lib/chat/input-router");
+      const _initialRoute = selectInputRoute({ mimeType: contentType, filename, sizeBytes: size });
+      console.log(`[upload/finalize] central-route=${_initialRoute.route} reason=${_initialRoute.reason} tenant=${orgId}`);
+
+      // Guard: text and code files never enter the PDF/OCR branch regardless of content-type quirks
+      const _isTextOrCode = _initialRoute.route === "direct_text_fast_path" ||
+                            _initialRoute.route === "code_text_fast_path";
+
+      // ── PDF: Hybrid tilgang — native tekst-ekstraktion → fallback til async OCR ─
+      const isPdf = !_isTextOrCode &&
+        (contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf"));
       if (isPdf) {
-        console.log(`[upload/finalize] PDF — routing to async OCR. tenant=${orgId} key=${objectKey}`);
+        // ── Download PDF fra R2 (shared buffer for both pdf-parse and Gemini OCR) ──
+        let pdfBuf: Buffer = Buffer.alloc(0);
         try {
-          const { enqueueOcrJob } = await import("./lib/jobs/job-queue");
-          const ocrResult = await enqueueOcrJob({
-            tenantId:    orgId,
-            userId:      userId,
-            r2Key:       objectKey,
-            filename:    filename,
-            contentType: contentType,
-            fileHash:    undefined,
-          });
-          const { id: taskId, reused } = ocrResult;
-          console.log(`[upload/finalize] OCR task created taskId=${taskId} reused=${reused}`);
+          const { r2Client: r2c, R2_BUCKET: r2bucket, R2_CONFIGURED: r2ok } = await import("./lib/r2/r2-client");
+          if (r2ok) {
+            const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+            const r2resp = await r2c.send(new GetObjectCommand({ Bucket: r2bucket, Key: objectKey }));
+            if (r2resp.Body) {
+              const bufs: Buffer[] = [];
+              for await (const chunk of r2resp.Body as AsyncIterable<Uint8Array>) {
+                bufs.push(Buffer.from(chunk));
+              }
+              pdfBuf = Buffer.concat(bufs);
+            }
+          }
+        } catch (r2Err) {
+          console.error(`[upload/finalize] R2 download fejlede: ${(r2Err as Error).message}`);
+          return res.status(500).json({ error_code: "R2_ERROR", message: "Kunne ikke downloade fil til behandling" });
+        }
+
+        if (!pdfBuf.length) {
+          return res.status(500).json({ error_code: "R2_EMPTY", message: "R2 returnerede tom fil" });
+        }
+
+        // Trin 1: Forsøg native tekst-ekstraktion med pdf-parse (hurtig, præcis)
+        let embeddedText = "";
+        try {
+          const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string }>;
+          const parsed   = await pdfParse(pdfBuf);
+          embeddedText   = (parsed.text ?? "").trim();
+        } catch (parseErr) {
+          console.warn(`[upload/finalize] pdf-parse fejlede (fortsætter til Gemini): ${(parseErr as Error).message}`);
+        }
+
+        // Trin 2: Native PDF (indlejret tekst) → returnér direkte
+        const nonWsChars = embeddedText.replace(/\s+/g, "").length;
+        if (nonWsChars >= 120) {
+          console.log(`[upload/finalize] PDF native tekst ok — ${embeddedText.length} chars (${nonWsChars} non-ws). Returnerer direkte.`);
           return res.json({
-            mode:    "OCR_PENDING",
-            routing: "Manus-Only Async Pipeline (Enterprise Security)",
-            taskId,
-            reused,
-            pollUrl: `/api/ocr-status?id=${taskId}`,
-            message: reused
-              ? "Dette dokument er allerede i systemet. Hentet fra eksisterende behandling."
-              : "Dokumentet er modtaget. Manus analyserer det nu i baggrunden.",
+            mode:    "direct",
+            routing: "native_pdf_text",
+            results: [{
+              filename,
+              mime_type:      contentType,
+              char_count:     embeddedText.length,
+              extracted_text: embeddedText.slice(0, 80_000),
+              status:         "ok",
+              source:         "r2_pdf_parse",
+            }],
           });
-        } catch (ocrErr) {
-          const msg = ocrErr instanceof Error ? ocrErr.message : String(ocrErr);
-          console.error(`[upload/finalize] OCR task creation failed: ${msg}`);
-          return res.json({ mode: "B_FALLBACK", routing: "ocr_task_error", message: `Fejl ved oprettelse af opgave: ${msg.slice(0, 300)}`, results: [] });
+        }
+
+        // Trin 3: Tom/scannet PDF → Segment-first async OCR (page-by-page Gemini)
+        // Enqueue the job + fire-and-forget inline processing.
+        // Returns OCR_PENDING immediately — client polls /api/ocr-status.
+        // First page ready in ~3–5 s (partial_ready stage), full doc in 15–45 s.
+        console.log(`[upload/finalize] PDF scannet/tom (${nonWsChars} non-ws chars) — segment-first OCR. tenant=${orgId}`);
+        try {
+          const userId = getUserId(req);
+          const { enqueueOcrJob }        = await import("./lib/jobs/job-queue");
+          const { processOcrJobInline }  = await import("./lib/jobs/ocr-inline-processor");
+
+          const { id: taskId } = await enqueueOcrJob({
+            tenantId:    orgId,
+            userId,
+            r2Key:       objectKey,
+            filename,
+            contentType: "application/pdf",
+            questionText: typeof questionText === "string" && questionText.trim() ? questionText.trim() : undefined,
+          });
+
+          // Fire-and-forget: page-split + parallel OCR runs in background.
+          // The pre-downloaded pdfBuf is passed to skip R2 re-download.
+          const qtArg = typeof questionText === "string" && questionText.trim() ? questionText.trim() : "";
+          processOcrJobInline(taskId, pdfBuf, filename, "application/pdf", orgId, qtArg).catch((err: Error) =>
+            console.error(`[upload/finalize] inline OCR error taskId=${taskId}: ${err.message}`),
+          );
+
+          console.log(`[upload/finalize] OCR_PENDING taskId=${taskId} — inline processor started`);
+          return res.json({ mode: "OCR_PENDING", taskId, routing: "inline_page_ocr" });
+
+        } catch (enqErr) {
+          const msg = enqErr instanceof Error ? enqErr.message : String(enqErr);
+          console.error(`[upload/finalize] enqueueOcrJob fejlede: ${msg}`);
+          return res.json({ mode: "B_FALLBACK", routing: "enqueue_error", message: `OCR-kø fejlede: ${msg.slice(0, 300)}`, results: [] });
         }
       }
 
@@ -1429,11 +1499,17 @@ Generate names and content in ${langNote}.`;
           maxAttempts:  task.maxAttempts ?? 3,
         });
       }
+      // PHASE 5Z.7 — include ocrText + charCount when partial_ready is usable
+      const hasUsablePartial = task.stage === "partial_ready" && !!task.ocrText?.trim();
       return res.json({
         status:       task.status ?? "pending",
         taskId:       task.id,
         stage:        task.stage ?? null,
         attemptCount: task.attemptCount ?? 0,
+        ...(hasUsablePartial ? {
+          ocrText:   task.ocrText,
+          charCount: task.charCount ?? 0,
+        } : {}),
       });
     } catch (e) {
       console.error("[ocr-status] error:", e);
@@ -1441,209 +1517,532 @@ Generate names and content in ${langNote}.`;
     }
   });
 
+  // ─── PHASE 5Z.7 — OCR Task SSE stream ────────────────────────────────────────
+  // GET /api/ocr-task-stream?taskId=<id>
+  // Pushes server-sent events for partial_ready + completed + answer_triggered.
+  // Replaces polling critical path on the client.
+  //
+  // Events (text/event-stream):
+  //   { type: "connected",        data: { taskId } }
+  //   { type: "partial_ready",    data: { taskId, charCount, ocrText?, triggerKey } }
+  //   { type: "completed",        data: { taskId, charCount, triggerKey } }
+  //   { type: "answer_triggered", data: { taskId, requestId, triggerKey } }
+  //   { type: "error",            data: { message } }
+  //   { type: "keepalive",        data: {} }
+
+  app.get("/api/ocr-task-stream", async (req: Request, res: Response) => {
+    const orgId  = getOrgId(req);
+    const taskId = (req.query.taskId as string | undefined)?.trim();
+    if (!taskId) {
+      return res.status(400).json({ error_code: "MISSING_TASK_ID", message: "taskId er påkrævet" });
+    }
+
+    // Set SSE headers
+    res.setHeader("Content-Type",  "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection",    "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    const write = (type: string, data: object) => {
+      const payload = JSON.stringify({ type, data });
+      res.write(`data: ${payload}\n\n`);
+      if (typeof (res as any).flush === "function") (res as any).flush();
+    };
+
+    write("connected", { taskId });
+
+    // Register as SSE listener with the in-process push registry
+    const { registerOcrSseListener } = await import("./lib/jobs/ocr-chat-orchestrator");
+    const unregister = registerOcrSseListener(taskId, ({ type, data }) => {
+      write(type, data);
+    });
+
+    // Keepalive every 15 s so proxies don't close the connection
+    const keepalive = setInterval(() => {
+      if (!res.writableEnded) write("keepalive", {});
+    }, 15_000);
+
+    // Also do an immediate status check: if the job is already partial_ready or
+    // completed, push an initial event so the client doesn't have to wait.
+    try {
+      const { Client: PgKA } = await import("pg");
+      const { resolveDbUrl } = await import("./lib/jobs/job-queue");
+      const { getSupabaseSslConfig } = await import("./lib/jobs/ssl-config");
+      const { computeOcrChatTriggerKey } = await import("./lib/jobs/ocr-chat-orchestrator");
+      const pgKA = new PgKA({ connectionString: resolveDbUrl(), ssl: getSupabaseSslConfig() });
+      await pgKA.connect();
+      const row = await pgKA.query<{
+        status: string; stage: string | null; ocr_text: string | null; char_count: number | null; tenant_id: string;
+      }>(
+        `SELECT status, stage, ocr_text, char_count, tenant_id
+         FROM   chat_ocr_tasks WHERE id = $1 AND tenant_id = $2 LIMIT 1`,
+        [taskId, orgId],
+      ).then(r => r.rows[0]).catch(() => undefined).finally(() => pgKA.end().catch(() => {}));
+
+      if (row) {
+        const cc = row.char_count ?? 0;
+        const tk = computeOcrChatTriggerKey(orgId, taskId, cc, row.stage ?? row.status, row.status);
+        if (row.stage === "partial_ready" || (row.status === "running" && row.ocr_text)) {
+          write("partial_ready", { taskId, charCount: cc, ocrText: row.ocr_text?.slice(0, 80_000), triggerKey: tk });
+        }
+        if (row.status === "completed") {
+          write("completed", { taskId, charCount: cc, triggerKey: tk, ...(row.ocr_text ? { ocrText: row.ocr_text.slice(0, 80_000) } : {}) });
+        }
+        if (row.status === "failed" || row.status === "dead_letter") {
+          write("error", { message: "OCR-job fejlede — prøv at uploade filen igen" });
+        }
+      }
+    } catch { /* non-critical — SSE stream is still live */ }
+
+    req.on("close", () => {
+      clearInterval(keepalive);
+      unregister();
+    });
+  });
+
+  // ─── OCR Job Observability (Phase 5Z-PERF) ───────────────────────────────────
+  // GET /api/ocr-job-debug?id=<taskId>
+  // Returns full segmentation/performance facts for a chat_ocr_tasks job.
+
+  app.get("/api/ocr-job-debug", async (req: Request, res: Response) => {
+    try {
+      const orgId  = getOrgId(req);
+      const taskId = req.query.id as string;
+      if (!taskId) {
+        return res.status(400).json({ error_code: "MISSING_ID", message: "id query parameter krævet" });
+      }
+      const { getJob } = await import("./lib/jobs/job-queue");
+      const task = await getJob(taskId);
+      if (!task) {
+        return res.status(404).json({ error_code: "NOT_FOUND", message: `OCR task ${taskId} ikke fundet` });
+      }
+      if (task.tenantId !== orgId) {
+        return res.status(403).json({ error_code: "FORBIDDEN", message: "Adgang nægtet" });
+      }
+
+      const startedAt   = task.startedAt   ? new Date(task.startedAt).getTime()   : null;
+      const completedAt = task.completedAt  ? new Date(task.completedAt).getTime() : null;
+      const createdAt   = task.createdAt    ? new Date(task.createdAt).getTime()   : null;
+
+      const waitBeforeClaimMs = (startedAt && createdAt)   ? startedAt - createdAt     : null;
+      const processingDurationMs = (completedAt && startedAt) ? completedAt - startedAt : null;
+
+      return res.json({
+        jobId:               task.id,
+        status:              task.status,
+        stage:               task.stage ?? null,
+        filename:            task.filename,
+        contentType:         task.contentType,
+        provider:            task.provider ?? null,
+        plannerDecision:     task.charCount && task.charCount > 0 ? "single_segment_fast_path" : "pending",
+        segmentsTotal:       1,
+        segmentsPending:     task.status === "pending"   ? 1 : 0,
+        segmentsProcessing:  task.status === "running"   ? 1 : 0,
+        segmentsCompleted:   task.status === "completed" ? 1 : 0,
+        segmentsRetrievalReady: task.status === "completed" ? 1 : 0,
+        coveragePercent:     task.status === "completed" ? 100 : 0,
+        charCount:           task.charCount  ?? null,
+        chunkCount:          task.chunkCount ?? null,
+        qualityScore:        task.qualityScore ? parseFloat(task.qualityScore) : null,
+        attemptCount:        task.attemptCount,
+        maxAttempts:         task.maxAttempts,
+        nextRetryAt:         task.nextRetryAt ?? null,
+        lastError:           task.lastError   ?? null,
+        createdAt:           task.createdAt,
+        startedAt:           task.startedAt   ?? null,
+        completedAt:         task.completedAt  ?? null,
+        waitBeforeClaimMs,
+        processingDurationMs,
+        firstRetrievalReadyAt:         task.completedAt ?? null,
+        timeToFirstRetrievalReadyMs:   (completedAt && createdAt) ? completedAt - createdAt : null,
+      });
+    } catch (e) {
+      console.error("[ocr-job-debug] error:", e);
+      return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Debug opslag fejlede" });
+    }
+  });
+
   // ─── AI Chat ──────────────────────────────────────────────────────────────────
+  // Shared document context schema (used by both /api/chat and /api/chat/stream)
+  const documentContextSchema = z.object({
+    filename:       z.string(),
+    mime_type:      z.string(),
+    char_count:     z.number(),
+    extracted_text: z.string(),
+    status:         z.enum(["ok", "unsupported", "error"]),
+    message:        z.string().optional(),
+    source:         z.string().optional(),
+  });
+
+  const chatBodySchema = z.object({
+    message:          z.string().min(1, "Besked er påkrævet").max(4000),
+    conversation_id:  z.string().optional().nullable(),
+    document_context: z.array(documentContextSchema).optional().default([]),
+    context: z.object({
+      document_ids:        z.array(z.string()).optional().default([]),
+      preferred_expert_id: z.string().optional().nullable(),
+    }).optional().default({}),
+    // Phase 5Z.3 — Idempotency key prevents duplicate AI calls for the same readiness generation
+    idempotency_key: z.string().max(256).optional().nullable(),
+  });
+
+  // ── Phase 5Z.3 — Chat idempotency cache ─────────────────────────────────────
+  // Keyed by: `${orgId}:${idempotency_key}`. TTL: 10 minutes (covers reconnect window).
+  // Only non-streaming /api/chat responses are cached. Streaming cannot be replayed byte-for-byte.
+  const _chatIdempotencyCache = new Map<string, { ts: number; payload: object }>();
+  const CHAT_IDEM_TTL_MS = 10 * 60 * 1000;
+
+  function _chatIdemGet(orgId: string, key: string | null | undefined) {
+    if (!key) return null;
+    const cacheKey = `${orgId}:${key}`;
+    const entry = _chatIdempotencyCache.get(cacheKey);
+    if (!entry) return null;
+    if (Date.now() - entry.ts > CHAT_IDEM_TTL_MS) { _chatIdempotencyCache.delete(cacheKey); return null; }
+    return entry.payload;
+  }
+
+  function _chatIdemSet(orgId: string, key: string | null | undefined, payload: object) {
+    if (!key) return;
+    const cacheKey = `${orgId}:${key}`;
+    _chatIdempotencyCache.set(cacheKey, { ts: Date.now(), payload });
+    // Prune old entries (keep cache bounded to 500 entries)
+    if (_chatIdempotencyCache.size > 500) {
+      const oldest = [..._chatIdempotencyCache.entries()]
+        .sort((a, b) => a[1].ts - b[1].ts)
+        .slice(0, 100)
+        .map(([k]) => k);
+      oldest.forEach(k => _chatIdempotencyCache.delete(k));
+    }
+  }
+
+  // ── Phase 5Z.6 — Distributed answer cache + fine-grained refinement key ──────
+  // Replaces in-memory answer-cache.ts with Replit KV-backed distributed cache.
+  // Fine-grained key: hash(docIds + charCount + coveragePct/10 + completeness)
+  // TTL: 5 min partial, 30 min complete. Multi-instance safe.
+  const {
+    getCachedAnswerDistributed: _answerCacheGet,
+    setCachedAnswerDistributed: _answerCacheSet,
+    hashQuery:                  _hashQuery,
+  } = await import("./lib/media/answer-cache-distributed.ts");
+
+  const {
+    computeFineGrainedRefinementKey: _computeFineKey,
+    shouldTriggerRefinement:         _shouldTrigger,
+  } = await import("./lib/media/refinement-policy.ts");
+
+  const { appendAnswerGeneration: _appendAnswerGen } = await import("./lib/media/answer-generation-log.ts");
+
+  /**
+   * Derives a stable refinement generation integer (1–3) from readiness enrichment fields.
+   * Consistent with computeRefinementGeneration() in refinement-policy.ts.
+   */
+  function _derivedRefinementGen(enrichment: any): number {
+    if (!enrichment) return 1;
+    if (enrichment.answerCompleteness === "complete") return 3;
+    if ((enrichment.coveragePercent ?? 0) >= 50)      return 2;
+    return 1;
+  }
+
+  /**
+   * PHASE 5Z.6 — Fine-grained refinement key using hash(docIds+charCount+cov/10+status).
+   * Changes when context meaningfully changes — not just on coverage bucket jumps.
+   */
+  function _refinementGenKey(enrichment: any, docIds: string): string {
+    const ids      = docIds ? docIds.split(",").filter(Boolean) : [];
+    const charCnt  = (enrichment?.charCount ?? 0) as number;
+    const covPct   = (enrichment?.coveragePercent ?? 0) as number;
+    const status   = enrichment?.answerCompleteness === "complete" ? "completed" : "partial";
+    return _computeFineKey(ids, charCnt, covPct, status);
+  }
 
   app.post("/api/chat", async (req: Request, res: Response) => {
     try {
-      const documentContextSchema = z.object({
-        filename:       z.string(),
-        mime_type:      z.string(),
-        char_count:     z.number(),
-        extracted_text: z.string(),
-        status:         z.enum(["ok", "unsupported", "error"]),
-        message:        z.string().optional(),
-      });
-
-      const body = z.object({
-        message:          z.string().min(1, "Besked er påkrævet").max(4000),
-        conversation_id:  z.string().optional().nullable(),
-        document_context: z.array(documentContextSchema).optional().default([]),
-        context: z.object({
-          document_ids:        z.array(z.string()).optional().default([]),
-          preferred_expert_id: z.string().optional().nullable(),
-        }).optional().default({}),
-      }).parse(req.body);
-
+      const body   = chatBodySchema.parse(req.body);
       const orgId  = getOrgId(req);
       const userId = getUserId(req);
 
-      const {
-        listAccessibleExpertsForUser,
-        scoreExpertsForMessage,
-        selectBestExpert,
-        verifyExpertAccess,
-      } = await import("./services/chat-routing");
+      // ── Phase 5Z.3 — Idempotency check (non-streaming) ──────────────────────
+      const idemKey = body.idempotency_key ?? null;
+      const cached  = _chatIdemGet(orgId, idemKey);
+      if (cached) {
+        return res.json({ ...cached, _idempotent: true });
+      }
 
-      // 1. List all experts this user can access
-      const accessible = await listAccessibleExpertsForUser({ organizationId: orgId });
+      const { resolveRouteDecision } = await import("./lib/chat/route-decision");
+      const { runChatMessage }        = await import("./services/chat-runner");
 
-      if (accessible.length === 0) {
-        return res.status(422).json({
-          error_code: "NO_EXPERTS_AVAILABLE",
-          message: "Ingen AI-eksperter er tilgængelige for din organisation.",
+      // ── Automatic routing (RULE A-E) ────────────────────────────────────────
+      const decision = await resolveRouteDecision({
+        message:           body.message,
+        organizationId:    orgId,
+        userId,
+        conversationId:    body.conversation_id ?? null,
+        documentContext:   body.document_context as any[],
+        preferredExpertId: body.context?.preferred_expert_id ?? null,
+      });
+
+      // ── Gated responses (no AI call) ─────────────────────────────────────
+      if (!decision.requiresAiCall) {
+        return res.status(decision.routeType === "processing" ? 202 : 200).json({
+          route_type:      decision.routeType,
+          gating_message:  decision.gatingMessage,
+          routing_explanation: decision.routingExplanation,
         });
       }
 
-      // 2. Verify preferred expert hint (client hint — never trusted blindly)
-      let selectedExpert = null;
-      const hint = body.context?.preferred_expert_id;
-      if (hint) {
-        selectedExpert = await verifyExpertAccess({ expertId: hint, organizationId: orgId });
+      // ── Phase 5Z.5/6 — Readiness enrichment (needed for answer cache key) ──
+      const { enrichResponseWithReadiness } = await import("./lib/chat/readiness-enrichment");
+      const partialReadiness = await enrichResponseWithReadiness({
+        tenantId:    orgId,
+        documentIds: body.context?.document_ids ?? [],
+      });
+      const _docIds     = [...(body.context?.document_ids ?? [])].sort().join(",");
+      const _queryHash  = _hashQuery(body.message);
+      const _genKey     = _refinementGenKey(partialReadiness, _docIds);
+      const _complt     = (partialReadiness as any)?.answerCompleteness ?? "partial";
+      const _refGen     = _derivedRefinementGen(partialReadiness);
+      const _covPct     = (partialReadiness as any)?.coveragePercent ?? 0;
+
+      // ── Phase 5Z.6 — Distributed answer cache check (before AI call) ──────
+      const _answerCacheKey = {
+        tenantId:         orgId,
+        queryHash:        _queryHash,
+        refinementGenKey: _genKey,
+        docIds:           _docIds,
+        mode:             _complt as "partial" | "complete",
+      };
+      const _cacheResult  = _docIds.length > 0 ? await _answerCacheGet(_answerCacheKey) : { hit: false, answer: null, source: "miss" as const };
+      const _cachedAnswer = _cacheResult.answer;
+      if (_cacheResult.hit && _cachedAnswer) {
+        const _cachedResp: object = {
+          answer:                 _cachedAnswer.text,
+          conversation_id:        body.conversation_id ?? null,
+          route_type:             decision.routeType,
+          routing_explanation:    decision.routingExplanation,
+          // Phase 5Z.5/6 — Refinement metadata
+          answer_completeness:    _cachedAnswer.answerCompleteness,
+          refinement_generation:  _cachedAnswer.refinementGeneration,
+          supersedes_generation:  null,
+          source_coverage_percent: _cachedAnswer.coveragePercent,
+          partial_warning:        _cachedAnswer.answerCompleteness === "partial"
+            ? "Baseret på delvist behandlet dokument" : null,
+          trigger_key_used:       idemKey ?? null,
+          answer_generation:      { partial: _cachedAnswer.answerCompleteness === "partial", generation: _cachedAnswer.refinementGeneration },
+          _answer_cache_hit:      true,
+          cache_source:           _cacheResult.source,
+          refinement_trigger_reason: "cache_hit",
+          ...(partialReadiness ? { partial_readiness: partialReadiness, ...partialReadiness } : {}),
+        };
+        _chatIdemSet(orgId, idemKey, _cachedResp);
+        return res.json(_cachedResp);
       }
 
-      // 3. Score and route if no verified hint
-      let routingExplanation = "Ekspert valgt via brugerpræference.";
-      if (!selectedExpert) {
-        const scored = scoreExpertsForMessage(accessible, body.message);
-        const routing = selectBestExpert(scored);
-        if (!routing) {
-          return res.status(422).json({
-            error_code: "NO_RELEVANT_EXPERT",
-            message: "Ingen relevant ekspert fundet til din forespørgsel.",
-          });
-        }
-        selectedExpert = routing.expert;
-        routingExplanation = routing.explanation;
-      }
-
-      // 4. Execute via chat-runner (reuses existing orchestration)
-      const { runChatMessage } = await import("./services/chat-runner");
-
+      // ── Execute AI call ──────────────────────────────────────────────────
       const result = await runChatMessage({
         message:         body.message,
-        expert:          selectedExpert,
+        expert:          decision.primaryExpert,
         organizationId:  orgId,
         userId,
         conversationId:  body.conversation_id ?? null,
-        routingExplanation,
-        documentContext: body.document_context ?? [],
+        routingExplanation: decision.routingExplanation,
+        documentContext: decision.documentContext,
+        routeType:       decision.routeType,
       });
 
-      return res.json({
-        answer:          result.answer,
-        conversation_id: result.conversationId,
+      const chatResponse: object = {
+        answer:              result.answer,
+        conversation_id:     result.conversationId,
+        route_type:          decision.routeType,
         expert: {
           id:       result.expert.id,
           name:     result.expert.name,
           category: result.expert.category,
         },
-        used_sources:       result.usedSources,
-        used_rules:         result.usedRules,
-        warnings:           result.warnings,
-        latency_ms:         result.latencyMs,
-        confidence_band:    result.confidenceBand,
+        used_sources:        result.usedSources,
+        used_rules:          result.usedRules,
+        warnings:            result.warnings,
+        latency_ms:          result.latencyMs,
+        confidence_band:     result.confidenceBand,
         needs_manual_review: result.needsManualReview,
         routing_explanation: result.routingExplanation,
-      });
+        // Phase 5Z.3 — Idempotency
+        trigger_key_used:    idemKey ?? null,
+        // Phase 5Z.6 — Refinement metadata
+        answer_completeness:        _complt,
+        refinement_generation:      _refGen,
+        supersedes_generation:      null,
+        source_coverage_percent:    _covPct,
+        partial_warning:            _complt === "partial" && _docIds.length > 0
+          ? "Baseret på delvist behandlet dokument" : null,
+        answer_generation:          { partial: _complt === "partial", generation: _refGen },
+        _answer_cache_hit:          false,
+        cache_source:               "miss",
+        refinement_trigger_reason:  "new_answer",
+        // Readiness fields spread flat + nested
+        ...(partialReadiness ? { partial_readiness: partialReadiness, ...partialReadiness } : {}),
+      };
+
+      // ── Store in distributed cache + answer generation log ────────────────
+      _chatIdemSet(orgId, idemKey, chatResponse);
+      if (_docIds.length > 0 && result.answer) {
+        _answerCacheSet(_answerCacheKey, {
+          text:                  result.answer,
+          answerCompleteness:    _complt as "partial" | "complete",
+          coveragePercent:       _covPct,
+          refinementGeneration:  _refGen,
+          createdAt:             new Date().toISOString(),
+        }).catch(() => {});
+        // Phase 5Z.6 — Append-only generation log (fire-and-forget)
+        _appendAnswerGen({
+          tenantId:         orgId,
+          queryHash:        _queryHash,
+          refinementGenKey: _genKey,
+          answer:           result.answer,
+          completeness:     _complt as "partial" | "complete",
+          coveragePct:      _covPct,
+        }).catch(() => {});
+      }
+      return res.json(chatResponse);
     } catch (err) { handleError(res, err); }
   });
 
-  // POST /api/chat/stream — SSE streaming variant of /api/chat
-  // Sends tokens progressively via Server-Sent Events so the UI renders partial answers immediately.
+  // POST /api/chat/stream — SSE streaming variant (automatic routing)
+  // Events: {"type":"status","text":"..."} | {"type":"delta","text":"..."} | {"type":"done",...} | {"type":"error",...}
   app.post("/api/chat/stream", async (req: Request, res: Response) => {
-    try {
-      const documentContextSchema = z.object({
-        filename:       z.string(),
-        mime_type:      z.string(),
-        char_count:     z.number(),
-        extracted_text: z.string(),
-        status:         z.enum(["ok", "unsupported", "error"]),
-        message:        z.string().optional(),
-      });
-      const body = z.object({
-        message:          z.string().min(1).max(4000),
-        conversation_id:  z.string().optional().nullable(),
-        document_context: z.array(documentContextSchema).optional().default([]),
-        context: z.object({
-          document_ids:        z.array(z.string()).optional().default([]),
-          preferred_expert_id: z.string().optional().nullable(),
-        }).optional().default({}),
-      }).parse(req.body);
+    res.setHeader("Content-Type",      "text/event-stream");
+    res.setHeader("Cache-Control",     "no-cache");
+    res.setHeader("Connection",        "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
 
+    const sendEvent = (data: object) => {
+      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch { /* client disconnected */ }
+    };
+
+    try {
+      const body   = chatBodySchema.parse(req.body);
       const orgId  = getOrgId(req);
       const userId = getUserId(req);
 
-      const {
-        listAccessibleExpertsForUser,
-        scoreExpertsForMessage,
-        selectBestExpert,
-        verifyExpertAccess,
-      } = await import("./services/chat-routing");
+      const { resolveRouteDecision }    = await import("./lib/chat/route-decision");
+      const { getRoutingStatusMessage } = await import("./lib/chat/hybrid-context-builder");
+      const { runChatMessage }          = await import("./services/chat-runner");
 
-      const accessible = await listAccessibleExpertsForUser({ organizationId: orgId });
-      if (accessible.length === 0) {
-        return res.status(422).json({ error_code: "NO_EXPERTS_AVAILABLE", message: "Ingen AI-eksperter er tilg\u00e6ngelige." });
-      }
+      // ── Automatic routing (RULE A-E) ─────────────────────────────────────
+      sendEvent({ type: "status", text: "Analyserer forespørgsel..." });
 
-      let selectedExpert = null;
-      const hint = body.context?.preferred_expert_id;
-      if (hint) selectedExpert = await verifyExpertAccess({ expertId: hint, organizationId: orgId });
-
-      let routingExplanation = "Ekspert valgt via brugerpr\u00e6ference.";
-      if (!selectedExpert) {
-        const scored = scoreExpertsForMessage(accessible, body.message);
-        const routing = selectBestExpert(scored);
-        if (!routing) return res.status(422).json({ error_code: "NO_RELEVANT_EXPERT", message: "Ingen relevant ekspert fundet." });
-        selectedExpert = routing.expert;
-        routingExplanation = routing.explanation;
-      }
-
-      // Set SSE headers immediately — browser starts receiving data right away
-      res.writeHead(200, {
-        "Content-Type":      "text/event-stream; charset=utf-8",
-        "Cache-Control":     "no-cache, no-transform",
-        "Connection":        "keep-alive",
-        "X-Accel-Buffering": "no",
+      const decision = await resolveRouteDecision({
+        message:           body.message,
+        organizationId:    orgId,
+        userId,
+        conversationId:    body.conversation_id ?? null,
+        documentContext:   body.document_context as any[],
+        preferredExpertId: body.context?.preferred_expert_id ?? null,
       });
-      res.flushHeaders();
 
-      const sendEvent = (type: string, data: Record<string, unknown>) => {
-        res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
-        if (typeof (res as any).flush === "function") (res as any).flush();
-      };
-
-      const { runChatMessageStream } = await import("./services/chat-runner");
-
-      await runChatMessageStream(
-        {
-          message:         body.message,
-          expert:          selectedExpert,
-          organizationId:  orgId,
-          userId,
-          conversationId:  body.conversation_id ?? null,
-          routingExplanation,
-          documentContext: body.document_context ?? [],
-        },
-        {
-          onToken: (token) => sendEvent("token", { text: token }),
-          onDone:  (result) => {
-            sendEvent("done", {
-              answer:              result.answer,
-              conversation_id:     result.conversationId,
-              expert:              result.expert,
-              used_sources:        result.usedSources,
-              used_rules:          result.usedRules,
-              warnings:            result.warnings,
-              latency_ms:          result.latencyMs,
-              confidence_band:     result.confidenceBand,
-              needs_manual_review: result.needsManualReview,
-              routing_explanation: result.routingExplanation,
-            });
-            res.end();
-          },
-          onError: (err) => {
-            sendEvent("error", { message: err.message, error_code: (err as any).errorCode ?? "UNKNOWN" });
-            res.end();
-          },
-        },
-      );
-    } catch (err) {
-      if (!res.headersSent) {
-        handleError(res, err);
-      } else {
-        res.write(`data: ${JSON.stringify({ type: "error", message: err instanceof Error ? err.message : String(err) })}\n\n`);
-        res.end();
+      // ── Gated responses ──────────────────────────────────────────────────
+      if (!decision.requiresAiCall) {
+        sendEvent({
+          type:       "gated",
+          routeType:  decision.routeType,
+          message:    decision.gatingMessage,
+        });
+        return res.end();
       }
+
+      sendEvent({
+        type:      "status",
+        text:      getRoutingStatusMessage(decision.routeType),
+        routeType: decision.routeType,
+      });
+
+      // ── Execute AI call with streaming ───────────────────────────────────
+      const result = await runChatMessage({
+        message:         body.message,
+        expert:          decision.primaryExpert,
+        organizationId:  orgId,
+        userId,
+        conversationId:  body.conversation_id ?? null,
+        routingExplanation: decision.routingExplanation,
+        documentContext: decision.documentContext,
+        routeType:       decision.routeType,
+        onToken: (delta) => sendEvent({ type: "delta", text: delta }),
+      });
+
+      const { enrichResponseWithReadiness: enrichStream } = await import("./lib/chat/readiness-enrichment");
+      const streamReadiness = await enrichStream({
+        tenantId:    orgId,
+        documentIds: body.context?.document_ids ?? [],
+      });
+
+      const _sDocIds   = [...(body.context?.document_ids ?? [])].sort().join(",");
+      const _sComplt   = (streamReadiness as any)?.answerCompleteness ?? "partial";
+      const _sRefGen   = _derivedRefinementGen(streamReadiness);
+      const _sCovPct   = (streamReadiness as any)?.coveragePercent ?? 0;
+      const _sGenKey   = _refinementGenKey(streamReadiness, _sDocIds);
+      const _sQueryHash = _hashQuery(body.message);
+
+      // Phase 5Z.6 — Store in distributed cache + append generation log (fire-and-forget)
+      if (_sDocIds.length > 0 && result.answer) {
+        _answerCacheSet({
+          tenantId:         orgId,
+          queryHash:        _sQueryHash,
+          refinementGenKey: _sGenKey,
+          docIds:           _sDocIds,
+          mode:             _sComplt as "partial" | "complete",
+        }, {
+          text:                 result.answer,
+          answerCompleteness:   _sComplt as "partial" | "complete",
+          coveragePercent:      _sCovPct,
+          refinementGeneration: _sRefGen,
+          createdAt:            new Date().toISOString(),
+        }).catch(() => {});
+        _appendAnswerGen({
+          tenantId:         orgId,
+          queryHash:        _sQueryHash,
+          refinementGenKey: _sGenKey,
+          answer:           result.answer,
+          completeness:     _sComplt as "partial" | "complete",
+          coveragePct:      _sCovPct,
+        }).catch(() => {});
+      }
+
+      sendEvent({
+        type:                "done",
+        answer:              result.answer,
+        conversation_id:     result.conversationId,
+        route_type:          decision.routeType,
+        expert:              { id: result.expert.id, name: result.expert.name, category: result.expert.category },
+        used_sources:        result.usedSources,
+        used_rules:          result.usedRules,
+        warnings:            result.warnings,
+        latency_ms:          result.latencyMs,
+        confidence_band:     result.confidenceBand,
+        needs_manual_review: result.needsManualReview,
+        routing_explanation: result.routingExplanation,
+        similar_cases:       result.similarCases,
+        // Phase 5Z.3 — Idempotency
+        trigger_key_used:    body.idempotency_key ?? null,
+        // Phase 5Z.6 — Refinement metadata
+        answer_completeness:        _sComplt,
+        refinement_generation:      _sRefGen,
+        supersedes_generation:      null,
+        source_coverage_percent:    _sCovPct,
+        partial_warning:            _sComplt === "partial" && _sDocIds.length > 0
+          ? "Baseret på delvist behandlet dokument" : null,
+        answer_generation:          { partial: _sComplt === "partial", generation: _sRefGen },
+        cache_source:               "miss",
+        refinement_trigger_reason:  "new_answer",
+        // Readiness fields spread flat + nested
+        ...(streamReadiness ? { partial_readiness: streamReadiness, ...streamReadiness } : {}),
+      });
+      res.end();
+    } catch (err) {
+      const msg  = err instanceof Error ? err.message : String(err);
+      const code = (err as any)?.errorCode ?? "CHAT_ERROR";
+      sendEvent({ type: "error", errorCode: code, message: msg });
+      res.end();
     }
   });
 
@@ -3620,6 +4019,425 @@ Generate names and content in ${langNote}.`;
       return res.json({ results, total: results.length });
     } catch (err) {
       return handleError(res, err);
+    }
+  });
+
+  // GET /api/kb/document-debug?id=<knowledgeDocumentId>
+  // Returns partial-readiness + timing metrics for a knowledge document.
+  // Phase 5Z.2 observability endpoint.
+  app.get("/api/kb/document-debug", async (req: Request, res: Response) => {
+    try {
+      const orgId      = getOrgId(req);
+      const documentId = req.query["id"] as string;
+      if (!documentId) {
+        return res.status(400).json({ error_code: "MISSING_ID", message: "id query parameter krævet" });
+      }
+
+      const { db: dbInst }        = await import("./db");
+      const { knowledgeDocuments, knowledgeDocumentVersions } = await import("../shared/schema");
+      const { eq, and }           = await import("drizzle-orm");
+
+      // Tenant-scoped document lookup
+      const [doc] = await dbInst
+        .select()
+        .from(knowledgeDocuments)
+        .where(
+          and(
+            eq(knowledgeDocuments.id, documentId),
+            eq(knowledgeDocuments.tenantId, orgId),
+          ),
+        )
+        .limit(1);
+
+      if (!doc) {
+        return res.status(404).json({ error_code: "NOT_FOUND", message: `Dokument ${documentId} ikke fundet` });
+      }
+
+      const versionId = doc.currentVersionId;
+      if (!versionId) {
+        return res.json({
+          documentId,
+          documentStatus: doc.documentStatus,
+          hasVersion:     false,
+          message:        "Ingen aktiv version fundet",
+        });
+      }
+
+      const [ver] = await dbInst
+        .select()
+        .from(knowledgeDocumentVersions)
+        .where(
+          and(
+            eq(knowledgeDocumentVersions.id, versionId),
+            eq(knowledgeDocumentVersions.tenantId, orgId),
+          ),
+        )
+        .limit(1);
+
+      const { getDocumentAggregation } = await import("./lib/media/segment-aggregator");
+      const { evaluateAnswerTiming, WAIT_TIMEOUT_MS } = await import("./lib/media/answer-timing-policy");
+      const { checkInstantAnswerEligibility } = await import("./lib/media/instant-answer-readiness");
+
+      const agg         = await getDocumentAggregation({ tenantId: orgId, knowledgeDocumentVersionId: versionId });
+      const eligibility = await checkInstantAnswerEligibility({ tenantId: orgId, knowledgeDocumentVersionId: versionId });
+
+      // Compute timing from job data
+      const jobs          = agg.jobDetails ?? [];
+      const createdAtMs   = ver?.createdAt ? new Date(ver.createdAt as unknown as string).getTime() : null;
+      const nowMs         = Date.now();
+
+      const firstCompletedJob = jobs
+        .filter((j) => j.status === "completed" && j.completed_at)
+        .sort((a, b) => {
+          const aMs = a.completed_at instanceof Date ? a.completed_at.getTime() : 0;
+          const bMs = b.completed_at instanceof Date ? b.completed_at.getTime() : 0;
+          return aMs - bMs;
+        })[0];
+
+      const firstSegmentReadyMs  = (createdAtMs && firstCompletedJob?.completed_at)
+        ? (firstCompletedJob.completed_at instanceof Date
+            ? firstCompletedJob.completed_at.getTime()
+            : new Date(firstCompletedJob.completed_at as unknown as string).getTime()) - createdAtMs
+        : null;
+
+      const TERMINAL_STATUSES = ["completed", "skipped", "failed", "cancelled"];
+      const allJobsTerminal = jobs.length > 0 && jobs.every((j) => TERMINAL_STATUSES.includes(j.status));
+      const lastTerminalCompletedAtMs = allJobsTerminal
+        ? jobs.reduce((max, j) => {
+            if (!j.completed_at) return max;
+            const t = j.completed_at instanceof Date
+              ? j.completed_at.getTime()
+              : new Date(j.completed_at as unknown as string).getTime();
+            return t > max ? t : max;
+          }, 0)
+        : 0;
+      // Use actual last completed_at timestamp instead of now() to avoid overstating/blurring
+      const allDoneMs = (createdAtMs && lastTerminalCompletedAtMs > 0)
+        ? lastTerminalCompletedAtMs - createdAtMs
+        : null;
+
+      const timeSinceCreatedMs = createdAtMs ? nowMs - createdAtMs : 0;
+
+      const timingResult = evaluateAnswerTiming({
+        coveragePercent:       agg.coveragePercent,
+        segmentsReady:         agg.segmentsCompleted,
+        segmentsTotal:         agg.segmentsTotal,
+        retrievalChunksActive: agg.retrievalChunksActive,
+        timeSinceUploadMs:     timeSinceCreatedMs,
+        fullCompletionBlocked: agg.fullCompletionBlocked,
+      });
+
+      // upload_to_first_partial_answer_ms: time from upload to first retrieval-producing job completing
+      const firstRetrievalReadyMs = (createdAtMs && agg.firstRetrievalReadyAt)
+        ? new Date(agg.firstRetrievalReadyAt).getTime() - createdAtMs
+        : null;
+
+      // retrieval_query_wait_ms: remaining time in the WAIT_TIMEOUT window before forced answer
+      const retrievalQueryWaitMs = Math.max(0, WAIT_TIMEOUT_MS - timeSinceCreatedMs);
+
+      return res.json({
+        documentId,
+        versionId,
+        documentStatus:              doc.documentStatus,
+        aggregatedDocumentStatus:    agg.documentStatus,
+        answerCompleteness:          agg.answerCompleteness,
+        coveragePercent:             agg.coveragePercent,
+        segmentsTotal:               agg.segmentsTotal,
+        segmentsCompleted:           agg.segmentsCompleted,
+        segmentsFailed:              agg.segmentsFailed,
+        segmentsProcessing:          agg.segmentsProcessing,
+        segmentsQueued:              agg.segmentsQueued,
+        segmentsDeadLetter:          agg.segmentsDeadLetter,
+        hasFailedSegments:           agg.hasFailedSegments,
+        hasDeadLetterSegments:       agg.hasDeadLetterSegments,
+        fullCompletionBlocked:       agg.fullCompletionBlocked,
+        retrievalChunksActive:       agg.retrievalChunksActive,
+        firstRetrievalReadyAt:       agg.firstRetrievalReadyAt,
+        invariantViolations:         agg.invariantViolations,
+        instantAnswerEligibility:    eligibility.eligibility,
+        canRefreshForBetterAnswer:   eligibility.canRefreshForBetterAnswer,
+        answer_timing_policy_result: {
+          decision:        timingResult.decision,
+          reason:          timingResult.reason,
+          coveragePercent: timingResult.coveragePercent,
+        },
+        timing: {
+          upload_to_first_segment_ready_ms:   firstSegmentReadyMs,
+          upload_to_first_retrieval_ready_ms: firstRetrievalReadyMs,
+          upload_to_first_partial_answer_ms:  firstRetrievalReadyMs,
+          upload_to_full_completion_ms:       allDoneMs,
+          time_since_upload_ms:              timeSinceCreatedMs,
+          retrieval_query_wait_ms:           retrievalQueryWaitMs,
+        },
+      });
+    } catch (err) {
+      console.error("[kb/document-debug] error:", err);
+      return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Debug opslag fejlede" });
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // GET /api/readiness-stream — SSE real-time readiness updates (Phase 5Z.3)
+  //
+  // Streams document readiness changes to the client as Server-Sent Events.
+  // Authenticated, tenant-scoped. Polls DB on 1.5s interval, emits only when
+  // state materially changes. Auto-closes after terminal state or max 15 min.
+  //
+  // Query params:
+  //   documentId — ID of the knowledge document to monitor
+  //
+  // Events:
+  //   connected        — initial confirmation (always first)
+  //   status_snapshot  — current state (always after connected)
+  //   partial_ready    — emitted when first retrieval-ready chunks appear
+  //   readiness_progress — emitted on coverage improvements
+  //   completed        — document fully processed
+  //   failed           — document failed (with retries remaining)
+  //   dead_letter      — document permanently failed
+  //   blocked          — fullCompletionBlocked=true
+  //   keepalive        — heartbeat every 15s for idle connections
+  //   error            — error during readiness check
+  // ─────────────────────────────────────────────────────────────────────────────
+  app.get("/api/readiness-stream", async (req: Request, res: Response) => {
+    const orgId      = getOrgId(req);
+    const documentId = req.query["documentId"] as string | undefined;
+
+    if (!documentId) {
+      res.status(400).json({ error_code: "MISSING_DOCUMENT_ID", message: "documentId query parameter krævet" });
+      return;
+    }
+
+    // ── SSE headers ────────────────────────────────────────────────────────
+    res.setHeader("Content-Type",      "text/event-stream");
+    res.setHeader("Cache-Control",     "no-cache");
+    res.setHeader("Connection",        "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+
+    const sendEvent = (eventType: string, data: object) => {
+      try {
+        res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // client disconnected — will be cleaned up by close handler
+      }
+    };
+
+    // ── Observability counters ─────────────────────────────────────────────
+    let streamConnectCount    = 0;
+    let streamReconnectCount  = 0;
+    let pollCount             = 0;
+    let lastTriggerKey: string | null   = null;
+    let lastDocumentStatus: string | null = null;
+    let lastCoveragePercent   = -1;
+    let isTerminated          = false;
+    const startedAt           = Date.now();
+
+    // ── Cleanup ────────────────────────────────────────────────────────────
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
+    let keepaliveInterval: ReturnType<typeof setInterval> | null = null;
+    const MAX_DURATION_MS  = 15 * 60 * 1000; // 15 min
+    const POLL_INTERVAL_MS = 1_500;
+    const KEEPALIVE_MS     = 15_000;
+
+    function cleanup() {
+      if (isTerminated) return;
+      isTerminated = true;
+      if (pollInterval)      clearInterval(pollInterval);
+      if (keepaliveInterval) clearInterval(keepaliveInterval);
+      try { res.end(); } catch { /* already closed */ }
+    }
+
+    req.on("close",   cleanup);
+    req.on("error",   cleanup);
+    res.on("finish",  cleanup);
+
+    // ── Verify document belongs to tenant ──────────────────────────────────
+    try {
+      const { db: dbInst }          = await import("./db");
+      const { knowledgeDocuments }  = await import("../shared/schema");
+      const { eq, and }             = await import("drizzle-orm");
+
+      const [doc] = await dbInst
+        .select({ id: knowledgeDocuments.id, currentVersionId: knowledgeDocuments.currentVersionId })
+        .from(knowledgeDocuments)
+        .where(and(
+          eq(knowledgeDocuments.id, documentId),
+          eq(knowledgeDocuments.tenantId, orgId),
+        ))
+        .limit(1);
+
+      if (!doc) {
+        sendEvent("error", { error_code: "NOT_FOUND", message: `Dokument ${documentId} ikke fundet` });
+        cleanup();
+        return;
+      }
+
+      // ── Confirm connected ────────────────────────────────────────────────
+      streamConnectCount++;
+      sendEvent("connected", {
+        documentId,
+        tenantId:         orgId,
+        connectedAt:      new Date().toISOString(),
+        streamConnectCount,
+      });
+
+      // ── Poll function ────────────────────────────────────────────────────
+      const poll = async () => {
+        if (isTerminated) return;
+        if (Date.now() - startedAt > MAX_DURATION_MS) {
+          sendEvent("error", { error_code: "TIMEOUT", message: "Stream max duration reached" });
+          cleanup();
+          return;
+        }
+
+        pollCount++;
+
+        try {
+          // Re-fetch doc for latest versionId (may have changed)
+          const { knowledgeDocuments: kd2 } = await import("../shared/schema");
+          const [latestDoc] = await dbInst
+            .select({ id: kd2.id, currentVersionId: kd2.currentVersionId, createdAt: kd2.createdAt })
+            .from(kd2)
+            .where(and(eq(kd2.id, documentId), eq(kd2.tenantId, orgId)))
+            .limit(1);
+
+          if (!latestDoc?.currentVersionId) {
+            // No version yet — document still initializing
+            sendEvent("readiness_progress", {
+              documentId,
+              documentStatus:    "not_started",
+              answerCompleteness: "none",
+              isPartial:         false,
+              segmentsReady:     0,
+              segmentsTotal:     0,
+              coveragePercent:   0,
+              retrievalChunksActive: 0,
+              canAutoStartChat:  false,
+              triggerKey:        null,
+            });
+            return;
+          }
+
+          // Aggregate readiness state
+          const { getDocumentAggregation } = await import("./lib/media/segment-aggregator");
+          const { deriveEligibility }       = await import("./lib/media/instant-answer-readiness");
+          const { generateTriggerKey }      = await import("./lib/media/readiness-trigger-key");
+
+          const agg = await getDocumentAggregation({
+            tenantId:                    orgId,
+            knowledgeDocumentVersionId:  latestDoc.currentVersionId,
+          });
+
+          const eligibility = deriveEligibility(agg);
+          const triggerResult = generateTriggerKey({
+            documentId,
+            documentStatus:        agg.documentStatus,
+            coveragePercent:       agg.coveragePercent,
+            firstRetrievalReadyAt: agg.firstRetrievalReadyAt,
+            retrievalChunksActive: agg.retrievalChunksActive,
+          });
+
+          const createdAtMs = latestDoc.createdAt
+            ? (latestDoc.createdAt instanceof Date
+                ? latestDoc.createdAt.getTime()
+                : new Date(latestDoc.createdAt as string).getTime())
+            : null;
+          const nowMs = Date.now();
+          const timeToFirstRetrievalReadyMs = (createdAtMs && agg.firstRetrievalReadyAt)
+            ? new Date(agg.firstRetrievalReadyAt).getTime() - createdAtMs
+            : null;
+
+          const payload = {
+            documentId,
+            documentStatus:       agg.documentStatus,
+            answerCompleteness:   agg.answerCompleteness,
+            isPartial:            agg.answerCompleteness === "partial",
+            segmentsReady:        agg.segmentsCompleted,
+            segmentsTotal:        agg.segmentsTotal,
+            coveragePercent:      agg.coveragePercent,
+            retrievalChunksActive: agg.retrievalChunksActive,
+            hasFailedSegments:    agg.hasFailedSegments,
+            hasDeadLetterSegments: agg.hasDeadLetterSegments,
+            fullCompletionBlocked: agg.fullCompletionBlocked,
+            firstRetrievalReadyAt: agg.firstRetrievalReadyAt,
+            timeToFirstRetrievalReadyMs,
+            partialWarning:       eligibility.eligibility === "partial_ready"
+              ? `Kun ${agg.coveragePercent}% af dokumentet er behandlet endnu.`
+              : null,
+            canAutoStartChat:     eligibility.eligibility === "partial_ready" || eligibility.eligibility === "fully_ready",
+            canRefreshForBetterAnswer: eligibility.canRefreshForBetterAnswer,
+            triggerKey:           triggerResult.key,
+            triggerKeyDescription: triggerResult.description,
+            eligibility:          eligibility.eligibility,
+            pollCount,
+            timeSinceConnectMs:   nowMs - startedAt,
+          };
+
+          const statusChanged   = agg.documentStatus !== lastDocumentStatus;
+          const coverageChanged = agg.coveragePercent !== lastCoveragePercent;
+          const keyChanged      = triggerResult.key   !== lastTriggerKey;
+          const isFirstPoll     = pollCount === 1;
+
+          // ── Determine event type ─────────────────────────────────────────
+          let eventType: string;
+
+          if (isFirstPoll) {
+            eventType = "status_snapshot";
+          } else if (agg.documentStatus === "completed" && statusChanged) {
+            eventType = "completed";
+          } else if ((agg.documentStatus === "failed" || agg.documentStatus === "retryable_failed") && statusChanged) {
+            eventType = "failed";
+          } else if (agg.documentStatus === "dead_letter" && statusChanged) {
+            eventType = "dead_letter";
+          } else if (agg.fullCompletionBlocked && agg.retrievalChunksActive === 0 && statusChanged) {
+            eventType = "blocked";
+          } else if (
+            lastCoveragePercent === 0 && agg.coveragePercent > 0 && agg.retrievalChunksActive > 0
+          ) {
+            // First retrieval-ready chunks appeared
+            eventType = "partial_ready";
+          } else if (keyChanged) {
+            // Coverage bucket improved
+            eventType = "readiness_progress";
+          } else {
+            // No material change — skip emission (avoids noisy duplicate events)
+            return;
+          }
+
+          sendEvent(eventType, payload);
+          lastTriggerKey     = triggerResult.key;
+          lastDocumentStatus = agg.documentStatus;
+          lastCoveragePercent = agg.coveragePercent;
+
+          // ── Auto-close on terminal state ─────────────────────────────────
+          if (
+            agg.documentStatus === "completed" ||
+            agg.documentStatus === "dead_letter" ||
+            (agg.documentStatus === "failed" && !agg.hasFailedSegments)
+          ) {
+            // Allow client to receive the event, then close
+            setTimeout(() => cleanup(), 3_000);
+          }
+
+        } catch (pollErr) {
+          console.error("[readiness-stream] poll error:", pollErr);
+          sendEvent("error", { error_code: "POLL_ERROR", message: "Intern fejl under readiness-tjek" });
+        }
+      };
+
+      // ── Start immediately + schedule ───────────────────────────────────
+      await poll();
+      pollInterval      = setInterval(poll, POLL_INTERVAL_MS);
+      keepaliveInterval = setInterval(() => {
+        if (!isTerminated) {
+          sendEvent("keepalive", { ts: new Date().toISOString(), pollCount });
+        }
+      }, KEEPALIVE_MS);
+
+    } catch (err) {
+      console.error("[readiness-stream] setup error:", err);
+      sendEvent("error", { error_code: "INTERNAL_ERROR", message: "Stream opsætning fejlede" });
+      cleanup();
     }
   });
 

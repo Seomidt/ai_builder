@@ -1,19 +1,17 @@
 import { defineConfig } from "vitest/config";
+import path from "path";
 
 export default defineConfig({
   test: {
-    globals: true,
     environment: "node",
     include: ["tests/**/*.test.ts"],
-    exclude: ["node_modules", "dist"],
-    coverage: {
-      provider: "v8",
-      reporter: ["text", "json", "html"],
-      include: ["server/lib/media/**/*.ts"],
-      exclude: ["**/*.test.ts", "**/node_modules/**"],
-    },
+    exclude: ["**/node_modules/**", "client/**"],
+    globals: false,
+    pool: "forks",
   },
   resolve: {
-    extensions: [".ts", ".tsx", ".js"],
+    alias: {
+      "@shared": path.resolve(import.meta.dirname, "shared"),
+    },
   },
 });

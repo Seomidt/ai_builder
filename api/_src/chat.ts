@@ -323,16 +323,20 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   }
 
   // ── Step 2: Vælg ekspert ──────────────────────────────────────────────────
+  const EXPERT_MATCH_THRESHOLD = 6; // Mirror of server/lib/chat/expert-router.ts
   let expert: Expert;
+  let expertScore = 0;
   const prefId = body.context?.preferred_expert_id;
 
   if (prefId) {
     expert = experts.find(e => e.id === prefId) ?? experts[0];
+    expertScore = scoreExpert(expert, message);
   } else {
     const scored = experts
       .map(e => ({ expert: e, score: scoreExpert(e, message) }))
       .sort((a, b) => b.score - a.score);
-    expert = scored[0].expert;
+    expert      = scored[0].expert;
+    expertScore = scored[0].score;
   }
 
   const routingExplanation =
@@ -382,6 +386,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     return json(res, {
       answer:               "Du skal uploade et dokument for at kunne validere.",
       conversation_id:      body.conversation_id ?? crypto.randomUUID(),
+      route_type:           "no_context",
       expert:               { id: "", name: "", category: null },
       source:               { type: "system" },
       used_sources:         [],
@@ -395,6 +400,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       reason:               "DOCUMENT_REQUIRED",
     });
   }
+
+  // ── Determine route_type (mirrors RULE A-E from server/lib/chat/route-decision.ts) ──
+  const hasRelevantExpert = expertScore >= EXPERT_MATCH_THRESHOLD;
+  const routeType: string =
+    docCtx.length > 0 && hasRelevantExpert ? "hybrid"
+    : docCtx.length > 0                   ? "attachment_first"
+    : hasRelevantExpert                    ? "expert_auto"
+    :                                        "expert_auto"; // Always proceed — no_context gate in Express
+
+  console.log(`[chat] route_type=${routeType} expertScore=${expertScore} docCtx=${docCtx.length}`);
 
   // ── Step 4: System-prompt ─────────────────────────────────────────────────
   // Dokument-mode: ERSTAT expert-prompt med STRICT document-only prompt.
@@ -934,6 +949,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     answer:              finalAnswer,
     document_validation: validationText,
     conversation_id:     conversationId,
+    route_type:          routeType,
     expert:              { id: expert.id, name: expert.name, category: expert.category ?? null },
     source:              responseSource,
     used_sources:        [],

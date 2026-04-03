@@ -22,7 +22,6 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { authenticate }                         from "./_lib/auth.ts";
 import { json, err }                            from "./_lib/response.ts";
 import { getOcrTask }                           from "./_lib/ocr-queue.ts";
-import { getOcrTaskStatus }                     from "../../server/lib/media/media-persistence.ts";
 
 // ── CORS ─────────────────────────────────────────────────────────────────────
 
@@ -51,39 +50,21 @@ export default async function handler(
   const taskId = url.searchParams.get("id") ?? "";
   if (!taskId) return err(res, 400, "MISSING_ID", "id query parameter krævet");
 
-  // Try legacy chat_ocr_tasks first
   const task = await getOcrTask(taskId);
 
   if (!task) {
-    // Fall back to Phase 5Y media_processing_jobs
-    const mediaTask = await getOcrTaskStatus(taskId);
-    if (!mediaTask) return err(res, 404, "NOT_FOUND", "Opgave ikke fundet");
-
-    if (mediaTask.status === "completed") {
-      // Read-path protection: Filter out known simulated/fake outputs
-      const text = mediaTask.result || "";
-      const isSimulated = text.includes("Analysen er gennemført") || 
-                          text.includes("simulated") || 
-                          text.includes("placeholder") ||
-                          text.includes("Dette er en simuleret");
-                          
-      if (isSimulated) {
-        return json(res, { status: "failed", taskId, errorReason: "Ugyldigt output (simuleret data opdaget)" });
-      }
-
-      return json(res, { status: "completed", taskId, ocrText: mediaTask.result ?? "", charCount: (mediaTask.result ?? "").length, completedAt: new Date().toISOString() });
-    }
-    if (mediaTask.status === "dead_letter" || mediaTask.status === "failed") {
-      return json(res, { status: mediaTask.status, taskId, errorReason: mediaTask.error ?? "Permanent fejl" });
-    }
-    if (mediaTask.status === "retryable_failed") {
-      return json(res, { status: "retryable_failed", taskId, errorReason: mediaTask.error ?? "Midlertidig fejl — prøver igen" });
-    }
-    return json(res, { status: mediaTask.status, taskId, stage: mediaTask.stage ?? null });
+    return err(res, 404, "NOT_FOUND", "Opgave ikke fundet");
   }
 
-  // Tenant isolation — user must belong to the same tenant
-  if (task.tenantId !== auth.user.organizationId) {
+  // Tenant isolation — verify user owns this task.
+  // Primary check: userId from JWT (always reliable, no DB lookup needed).
+  // Fallback check: tenantId match (works when org UUID is correctly resolved).
+  // This dual-check prevents 403 when lookupMembership() returns a slug fallback
+  // instead of the real org UUID (which would cause tenantId mismatch even for the
+  // legitimate owner).
+  const userMatch   = task.userId   === auth.user.id;
+  const tenantMatch = task.tenantId === auth.user.organizationId;
+  if (!userMatch && !tenantMatch) {
     return err(res, 403, "FORBIDDEN", "Ingen adgang til denne OCR-opgave");
   }
 
