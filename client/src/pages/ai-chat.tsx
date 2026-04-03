@@ -75,6 +75,8 @@ interface ChatMessage {
   isStreaming?: boolean;
   /** Phase 5Z.5 — true when a newer refined/final answer has superseded this one. */
   isSuperseded?: boolean;
+  /** OCR partial mode — show animated processing card instead of provisional text */
+  isProcessingPlaceholder?: boolean;
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -517,9 +519,50 @@ function AttachmentChip({ file, onRemove }: { file: AttachedFile; onRemove?: () 
     </div>
   );
 }
-
-// ─── Message Bubble ───────────────────────────────────────────────────────────
-
+// ─── OCR Processing Card ───────────────────────────────────────────────────────────────────────────────
+/**
+ * Shown while OCR is still processing the full document.
+ * Replaces the old "Jeg har kun analyseret..." provisional text.
+ */
+function OcrProcessingCard() {
+  const [phase, setPhase] = useState(0);
+  const steps = [
+    "Læser dokumentets sider...",
+    "Analyserer tekst og struktur...",
+    "Identificerer nøgleoplysninger...",
+    "Forbereder fuldt svar...",
+  ];
+  useEffect(() => {
+    const t = setInterval(() => setPhase(p => (p + 1) % steps.length), 2800);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div className="space-y-3 py-0.5">
+      <div className="flex items-center gap-2">
+        <svg className="w-4 h-4 animate-spin shrink-0 text-primary/70" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+        <span className="text-sm font-medium text-foreground">Analyserer dokument</span>
+      </div>
+      <p className="text-sm text-muted-foreground transition-all duration-500">
+        {steps[phase]}
+      </p>
+      <div className="flex gap-1 pt-0.5">
+        {steps.map((_, i) => (
+          <div
+            key={i}
+            className={cn(
+              "h-1 rounded-full transition-all duration-500",
+              i <= phase ? "bg-primary/60 flex-1" : "bg-muted flex-[0.4]",
+            )}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+// ─── Message Bubble ───────────────────────────────────────────────────────────────────────────────
 function MessageBubble({ msg }: { msg: ChatMessage }) {
   if (msg.role === "user") {
     return (
@@ -577,6 +620,8 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
                 {msg.text || <span className="text-muted-foreground text-xs">Skriver...</span>}
                 <span className="inline-block w-0.5 h-4 bg-primary/70 ml-0.5 align-middle animate-pulse" />
               </p>
+            ) : msg.isProcessingPlaceholder && !msg.isSuperseded ? (
+              <OcrProcessingCard />
             ) : msg.response ? (
               <AnswerCard response={msg.response} text={msg.text} />
             ) : (
@@ -1231,10 +1276,18 @@ export default function AiChatPage() {
             } else if (event.type === "done") {
               doneData = event as ChatResponse & { _trace?: any };
               const isRefined = (event.refinement_generation ?? 1) >= 2;
+              const isPartialOcrAnswer = event.answer_completeness === "partial";
               setMessages(prev => prev.map(m => {
                 if (m.id === streamMsgId) {
                   // Current message: finalise it
-                  return { ...m, text: streamText, isStreaming: false, response: doneData ?? undefined };
+                  // If partial OCR answer, mark as processing placeholder (shows animated card)
+                  return {
+                    ...m,
+                    text: streamText,
+                    isStreaming: false,
+                    response: doneData ?? undefined,
+                    isProcessingPlaceholder: isPartialOcrAnswer,
+                  };
                 }
                 // Phase 5Z.5 — supersede earlier assistant answers when a refined one arrives
                 if (isRefined && m.role === "assistant" && !m.isError && !m.isStreaming && m.id !== streamMsgId) {
