@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
 import { getSessionToken } from "@/lib/supabase";
+import { pollForCompletedOcr } from "@shared/upgrade-chain";
 import { useToast } from "@/hooks/use-toast";
 import { useReadinessStream, type ReadinessSnapshot, type ReadinessUxState } from "@/hooks/use-readiness-stream";
 
@@ -1275,88 +1276,55 @@ export default function AiChatPage() {
       // Reset upgrade flag — mutation succeeded (whether initial or upgrade)
       isUpgradeAttemptRef.current = false;
 
-      // ── PATCH B upgrade: hvis vi brækkede på partial_ready, lyt videre efter completed ──
+      // ── Upgrade: partial_ready broke the initial SSE → now poll until completed ──
+      // Uses pollForCompletedOcr (shared/upgrade-chain.ts) which retries up to 8 min.
+      // Replaces the old SSE-based approach which timed out after 90s for large PDFs.
       const upgrade = pendingOcrUpgradeRef.current;
       if (upgrade) {
         pendingOcrUpgradeRef.current = null;
         const { taskId, filename, mime } = upgrade;
         (async () => {
+          const label = `[upgrade:${taskId.slice(-8)}]`;
           try {
-            const token = await getSessionToken().catch(() => null);
-            const authHeaders = (tok: string | null): Record<string, string> =>
-              tok ? { Authorization: `Bearer ${tok}` } : {};
+            console.log(`${label} upgrade started for "${filename}" (polling /api/ocr-status)`);
 
-            // ── Fast-path: check if task is ALREADY completed before opening SSE ───
-            // This avoids a race where completed fires before the upgrade SSE registers.
-            let fullText = "";
-            try {
-              const preCheckTok = await getSessionToken().catch(() => null);
-              const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, {
-                headers: authHeaders(preCheckTok), credentials: "include",
-                signal: AbortSignal.timeout(8_000),
-              });
-              if (sr.ok) {
-                const sd = await sr.json() as any;
-                if (sd.status === "completed" && (sd.ocrText ?? sd.ocr_text ?? "").trim()) {
-                  fullText = (sd.ocrText ?? sd.ocr_text ?? "").slice(0, 80_000);
-                }
-              }
-            } catch { /* non-fatal — fall through to SSE */ }
-
-            if (!fullText.trim()) {
-              // ── SSE path: wait for completed event (90s timeout) ─────────────────
-              const sseHeaders: Record<string, string> = { Accept: "text/event-stream", ...authHeaders(token) };
-              const res = await fetch(
-                `/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`,
-                { headers: sseHeaders, credentials: "include", signal: AbortSignal.timeout(90_000) },
+            // Build a fetchStatus function that calls /api/ocr-status with auth headers.
+            const fetchStatus = async (id: string) => {
+              const tok = await getSessionToken().catch(() => null);
+              const headers: Record<string, string> = tok ? { Authorization: `Bearer ${tok}` } : {};
+              const sr = await fetch(
+                `/api/ocr-status?id=${encodeURIComponent(id)}`,
+                { headers, credentials: "include", signal: AbortSignal.timeout(12_000) },
               );
-              if (!res.ok || !res.body) return;
-              const reader  = res.body.getReader();
-              const decoder = new TextDecoder();
-              let buf = "";
-              outerUpgrade: while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                buf += decoder.decode(value, { stream: true });
-                const lines = buf.split("\n");
-                buf = lines.pop() ?? "";
-                for (const line of lines) {
-                  if (!line.startsWith("data:")) continue;
-                  let evt: any;
-                  try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
-                  if (evt.type === "completed") {
-                    reader.cancel().catch(() => {});
-                    fullText = evt.data?.ocrText ?? "";
-                    break outerUpgrade;
-                  }
-                  if (evt.type === "error") { reader.cancel().catch(() => {}); break outerUpgrade; }
-                }
-              }
-            }
+              if (!sr.ok) throw new Error(`ocr-status HTTP ${sr.status}`);
+              return sr.json();
+            };
 
-            // ── Retry: if fullText still empty, poll status endpoint up to 3× ─────
+            const fullText = await pollForCompletedOcr(taskId, fetchStatus, {
+              deadlineMs:       8 * 60 * 1_000,
+              initialPollMs:    3_000,
+              maxPollMs:        10_000,
+              backoffFactor:    1.4,
+              emptyTextRetries: 5,
+              emptyTextRetryMs: 2_000,
+              logger: ({ level, message, data }) => {
+                const msg = `${label} ${message}`;
+                if (level === "error")      console.error(msg, data ?? "");
+                else if (level === "warn")  console.warn(msg, data ?? "");
+                else                        console.log(msg, data ?? "");
+              },
+            });
+
             if (!fullText.trim()) {
-              for (let attempt = 0; attempt < 3 && !fullText.trim(); attempt++) {
-                await new Promise<void>(r => setTimeout(r, 2_000));
-                try {
-                  const retryTok = await getSessionToken().catch(() => null);
-                  const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, {
-                    headers: authHeaders(retryTok), credentials: "include",
-                    signal: AbortSignal.timeout(8_000),
-                  });
-                  if (sr.ok) {
-                    const sd = await sr.json() as any;
-                    fullText = (sd.ocrText ?? sd.ocr_text ?? "").trim()
-                      ? (sd.ocrText ?? sd.ocr_text ?? "").slice(0, 80_000)
-                      : "";
-                  }
-                } catch { /* retry anyway */ }
-              }
+              console.error(`${label} upgrade aborted — no OCR text after polling`);
+              return;
+            }
+            if (!chatMutateRef.current) {
+              console.error(`${label} chatMutateRef is null — cannot launch upgrade mutation`);
+              return;
             }
 
-            // If still no text after all retries — silently skip upgrade
-            if (!fullText.trim() || !chatMutateRef.current) return;
-
+            console.log(`${label} launching full-document mutation chars=${fullText.length}`);
             isUpgradeAttemptRef.current = true;
             chatMutateRef.current({
               text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
@@ -1369,7 +1337,10 @@ export default function AiChatPage() {
                 source: "r2_ocr_async",
               }],
             });
-          } catch { /* non-fatal upgrade failure */ }
+            console.log(`${label} mutation launched`);
+          } catch (err) {
+            console.error(`${label} upgrade IIFE threw:`, err);
+          }
         })();
       }
     },
