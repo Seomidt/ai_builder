@@ -1392,93 +1392,32 @@ export default function AiChatPage() {
               return { done: false, text: "", error: false };
             };
 
-            // ── Step 1: Try SSE with long timeout (55s) ──
-            // Stay connected long enough to catch the completed event directly.
-            // Vercel proxy cuts SSE at ~30s, so polling fallback handles the rest.
-            let sseDelivered = false;
-            try {
-              const sseHeaders: Record<string, string> = { Accept: "text/event-stream" };
-              if (token) sseHeaders["Authorization"] = `Bearer ${token}`;
-              const ctrl = new AbortController();
-              const sseTimer = setTimeout(() => ctrl.abort(), 55_000);
-              console.log(`[UPGRADE-${upgradeId}] Connecting SSE ocr-task-stream`);
-              try {
-                const res = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, {
-                  headers: sseHeaders, credentials: "include", signal: ctrl.signal,
-                });
-                if (res.ok && res.body) {
-                  const reader  = res.body.getReader();
-                  const decoder = new TextDecoder();
-                  let buf = "";
-                  sseLoop: while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) { console.log(`[UPGRADE-${upgradeId}] SSE done`); break; }
-                    buf += decoder.decode(value, { stream: true });
-                    const lines = buf.split("\n");
-                    buf = lines.pop() ?? "";
-                    for (const line of lines) {
-                      if (!line.startsWith("data:")) continue;
-                      let evt: any;
-                      try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
-                      console.log(`[UPGRADE-${upgradeId}] SSE evt=${evt.type}`);
-                      if (evt.type === "completed") {
-                        clearTimeout(sseTimer);
-                        sseDelivered = true;
-                        reader.cancel().catch(() => {});
-                        let fullText: string = evt.data?.ocrText ?? "";
-                        if (!fullText) {
-                          // ocrText missing in SSE event — fetch from status endpoint
-                          const p = await pollOnce();
-                          if (!p.error) fullText = p.text;
-                        }
-                        console.log(`[UPGRADE-${upgradeId}] SSE completed chars=${fullText.length}`);
-                        triggerUpgrade(fullText);
-                        break sseLoop;
-                      }
-                      if (evt.type === "error") {
-                        clearTimeout(sseTimer);
-                        console.warn(`[UPGRADE-${upgradeId}] SSE error: ${JSON.stringify(evt.data)}`);
-                        reader.cancel().catch(() => {});
-                        break sseLoop;
-                      }
-                    }
-                  }
-                } else {
-                  console.warn(`[UPGRADE-${upgradeId}] SSE not ok: ${res.status}`);
-                }
-              } catch (e: any) {
-                if (e?.name !== "AbortError") console.warn(`[UPGRADE-${upgradeId}] SSE error:`, e?.message);
-                else console.log(`[UPGRADE-${upgradeId}] SSE aborted after 55s timeout`);
-              } finally {
-                clearTimeout(sseTimer);
-              }
-            } catch { /* outer SSE guard */ }
-
-            // ── Step 2: Polling fallback ──
-            if (!sseDelivered) {
-              console.log(`[UPGRADE-${upgradeId}] Starting polling fallback`);
-              const tStart = Date.now();
-              const MAX_MS = 5 * 60 * 1000; // 5 minutes
-              let n = 0;
-              while (Date.now() - tStart < MAX_MS) {
-                await new Promise(r => setTimeout(r, 2_000));
-                n++;
-                console.log(`[UPGRADE-${upgradeId}] Poll #${n} t=${Math.round((Date.now()-tStart)/1000)}s`);
-                const { done, text, error } = await pollOnce();
-                if (error) {
-                  console.warn(`[UPGRADE-${upgradeId}] OCR failed — aborting upgrade`);
-                  setOcrStatusLabel(null);
-                  break;
-                }
-                if (done) {
-                  triggerUpgrade(text);
-                  break;
-                }
-              }
-              if (Date.now() - tStart >= MAX_MS) {
-                console.warn(`[UPGRADE-${upgradeId}] Polling timed out`);
+            // ── Direct polling for OCR completion ──
+            // SSE through Vercel proxy is unreliable (30s timeout). Poll directly instead.
+            console.log(`[UPGRADE-${upgradeId}] Starting direct polling`);
+            const tStart = Date.now();
+            const MAX_MS = 5 * 60 * 1000; // 5 minutes
+            let n = 0;
+            let upgraded = false;
+            while (Date.now() - tStart < MAX_MS) {
+              await new Promise(r => setTimeout(r, 2_000));
+              n++;
+              console.log(`[UPGRADE-${upgradeId}] Poll #${n} t=${Math.round((Date.now()-tStart)/1000)}s`);
+              const { done, text, error } = await pollOnce();
+              if (error) {
+                console.warn(`[UPGRADE-${upgradeId}] OCR failed — aborting upgrade`);
                 setOcrStatusLabel(null);
+                break;
               }
+              if (done) {
+                upgraded = true;
+                triggerUpgrade(text);
+                break;
+              }
+            }
+            if (!upgraded && Date.now() - tStart >= MAX_MS) {
+              console.warn(`[UPGRADE-${upgradeId}] Polling timed out after 5 minutes`);
+              setOcrStatusLabel(null);
             }
           } catch (e) {
             console.error(`[UPGRADE] Upgrade flow error:`, e);
