@@ -943,6 +943,15 @@ export async function runChatMessageStream(
       aiLatencyMs = Date.now() - t0;
       console.log(`[chat-runner:stream] DOC_ANSWER_LEN=${aiText.length} latency=${aiLatencyMs}ms`);
 
+      const isPartialOcr = rawDocCtx.some(d => (d as any).source === "ocr_partial");
+      if (isPartialOcr) {
+        const safeguarded = applyPartialSafeguard(aiText);
+        if (safeguarded !== aiText) {
+          console.warn(`[chat-runner:stream] PARTIAL_SAFEGUARD triggered — rewriting definitive negative before emit`);
+          aiText = safeguarded;
+        }
+      }
+
       if (aiText) aiText = validateDocumentGrounding(aiText, docCtx[0].extracted_text);
       if (!aiText) {
         callbacks.onError(Object.assign(new Error("AI returnerede tomt svar"), { errorCode: "AI_EMPTY_RESPONSE" }));
