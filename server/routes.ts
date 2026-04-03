@@ -1968,6 +1968,7 @@ Generate names and content in ${langNote}.`;
         documentContext: decision.documentContext,
         routeType:       decision.routeType,
         onToken: (delta) => sendEvent({ type: "delta", text: delta }),
+        onSafeguardReplace: (text) => sendEvent({ type: "replace", text }),
       });
 
       const { enrichResponseWithReadiness: enrichStream } = await import("./lib/chat/readiness-enrichment");

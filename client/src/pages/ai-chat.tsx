@@ -621,7 +621,16 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
                 <span className="inline-block w-0.5 h-4 bg-primary/70 ml-0.5 align-middle animate-pulse" />
               </p>
             ) : msg.isProcessingPlaceholder && !msg.isSuperseded ? (
-              <OcrProcessingCard />
+              <>
+                <AnswerCard response={msg.response!} text={msg.text} />
+                <div className="flex items-center gap-1.5 mt-2 text-xs text-amber-400/80">
+                  <svg className="w-3 h-3 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Analyserer resten af dokumentet… svaret opdateres automatisk
+                </div>
+              </>
             ) : msg.response ? (
               <AnswerCard response={msg.response} text={msg.text} />
             ) : (
@@ -1250,6 +1259,12 @@ export default function AiChatPage() {
 
             if (event.type === "delta") {
               streamText += event.text;
+              setMessages(prev => prev.map(m =>
+                m.id === streamMsgId ? { ...m, text: streamText } : m
+              ));
+            } else if (event.type === "replace" && event.text) {
+              // Partial safeguard triggered server-side — replace streamed content with provisional text
+              streamText = event.text;
               setMessages(prev => prev.map(m =>
                 m.id === streamMsgId ? { ...m, text: streamText } : m
               ));

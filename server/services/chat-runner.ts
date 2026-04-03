@@ -105,6 +105,8 @@ export async function runChatMessage(params: {
   useCase?: import("../lib/ai/types").AiUseCase;
   /** SSE streaming callback — when provided, AI call uses stream=true and calls this per token */
   onToken?: (delta: string) => void;
+  /** Called when partial-safeguard triggers AFTER streaming — client must replace streamed content */
+  onSafeguardReplace?: (replacementText: string) => void;
 }): Promise<ChatRunResult> {
   const expert = params.expert ?? VIRTUAL_ATTACHMENT_EXPERT;
   const { message, organizationId, userId, routingExplanation } = params;
@@ -294,23 +296,30 @@ export async function runChatMessage(params: {
     const t0 = Date.now();
 
     if (params.onToken && isPartialOcr) {
-      // ── PARTIAL OCR MODE: generate → safeguard → emit (NEVER stream raw to client) ──
-      // Architecture contract: the full buffer is validated before any byte reaches the client.
-      const completion = await oai.chat.completions.create({
+      // ── PARTIAL OCR MODE: stream tokens immediately, apply safeguard at end ──
+      // Stream in real-time so user sees tokens immediately (like ChatGPT).
+      // If safeguard triggers at the end, send a replace event to clear the streamed content.
+      const stream = await oai.chat.completions.create({
         model:       docModel,
         temperature: 0.1,
         max_tokens:  2000,
         messages:    messagesPayload,
-        stream:      false,
+        stream:      true,
       });
-      aiText = completion.choices[0]?.message?.content ?? "";
+      aiText = "";
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (delta) { params.onToken(delta); aiText += delta; }
+      }
+      // Post-stream safeguard check: if AI made a definitive negative claim, replace with provisional
       const safeguarded = applyPartialSafeguard(aiText);
       if (safeguarded !== aiText) {
-        console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered — rewriting definitive negative before emit`);
+        console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered after streaming — sending replace event`);
         aiText = safeguarded;
+        // Signal client to replace streamed content with provisional answer
+        if (params.onSafeguardReplace) params.onSafeguardReplace(safeguarded);
+        else params.onToken("\n\n---\n" + safeguarded); // fallback if no replace handler
       }
-      // Emit to client only after safeguard has passed
-      params.onToken(aiText);
     } else if (params.onToken) {
       // ── COMPLETE MODE: real token streaming (safeguard not needed) ───────────
       const stream = await oai.chat.completions.create({
