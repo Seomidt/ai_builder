@@ -1538,6 +1538,115 @@ Generate names and content in ${langNote}.`;
     } catch (err) { handleError(res, err); }
   });
 
+  // POST /api/chat/stream — SSE streaming variant of /api/chat
+  // Sends tokens progressively via Server-Sent Events so the UI renders partial answers immediately.
+  app.post("/api/chat/stream", async (req: Request, res: Response) => {
+    try {
+      const documentContextSchema = z.object({
+        filename:       z.string(),
+        mime_type:      z.string(),
+        char_count:     z.number(),
+        extracted_text: z.string(),
+        status:         z.enum(["ok", "unsupported", "error"]),
+        message:        z.string().optional(),
+      });
+      const body = z.object({
+        message:          z.string().min(1).max(4000),
+        conversation_id:  z.string().optional().nullable(),
+        document_context: z.array(documentContextSchema).optional().default([]),
+        context: z.object({
+          document_ids:        z.array(z.string()).optional().default([]),
+          preferred_expert_id: z.string().optional().nullable(),
+        }).optional().default({}),
+      }).parse(req.body);
+
+      const orgId  = getOrgId(req);
+      const userId = getUserId(req);
+
+      const {
+        listAccessibleExpertsForUser,
+        scoreExpertsForMessage,
+        selectBestExpert,
+        verifyExpertAccess,
+      } = await import("./services/chat-routing");
+
+      const accessible = await listAccessibleExpertsForUser({ organizationId: orgId });
+      if (accessible.length === 0) {
+        return res.status(422).json({ error_code: "NO_EXPERTS_AVAILABLE", message: "Ingen AI-eksperter er tilg\u00e6ngelige." });
+      }
+
+      let selectedExpert = null;
+      const hint = body.context?.preferred_expert_id;
+      if (hint) selectedExpert = await verifyExpertAccess({ expertId: hint, organizationId: orgId });
+
+      let routingExplanation = "Ekspert valgt via brugerpr\u00e6ference.";
+      if (!selectedExpert) {
+        const scored = scoreExpertsForMessage(accessible, body.message);
+        const routing = selectBestExpert(scored);
+        if (!routing) return res.status(422).json({ error_code: "NO_RELEVANT_EXPERT", message: "Ingen relevant ekspert fundet." });
+        selectedExpert = routing.expert;
+        routingExplanation = routing.explanation;
+      }
+
+      // Set SSE headers immediately — browser starts receiving data right away
+      res.writeHead(200, {
+        "Content-Type":      "text/event-stream; charset=utf-8",
+        "Cache-Control":     "no-cache, no-transform",
+        "Connection":        "keep-alive",
+        "X-Accel-Buffering": "no",
+      });
+      res.flushHeaders();
+
+      const sendEvent = (type: string, data: Record<string, unknown>) => {
+        res.write(`data: ${JSON.stringify({ type, ...data })}\n\n`);
+        if (typeof (res as any).flush === "function") (res as any).flush();
+      };
+
+      const { runChatMessageStream } = await import("./services/chat-runner");
+
+      await runChatMessageStream(
+        {
+          message:         body.message,
+          expert:          selectedExpert,
+          organizationId:  orgId,
+          userId,
+          conversationId:  body.conversation_id ?? null,
+          routingExplanation,
+          documentContext: body.document_context ?? [],
+        },
+        {
+          onToken: (token) => sendEvent("token", { text: token }),
+          onDone:  (result) => {
+            sendEvent("done", {
+              answer:              result.answer,
+              conversation_id:     result.conversationId,
+              expert:              result.expert,
+              used_sources:        result.usedSources,
+              used_rules:          result.usedRules,
+              warnings:            result.warnings,
+              latency_ms:          result.latencyMs,
+              confidence_band:     result.confidenceBand,
+              needs_manual_review: result.needsManualReview,
+              routing_explanation: result.routingExplanation,
+            });
+            res.end();
+          },
+          onError: (err) => {
+            sendEvent("error", { message: err.message, error_code: (err as any).errorCode ?? "UNKNOWN" });
+            res.end();
+          },
+        },
+      );
+    } catch (err) {
+      if (!res.headersSent) {
+        handleError(res, err);
+      } else {
+        res.write(`data: ${JSON.stringify({ type: "error", message: err instanceof Error ? err.message : String(err) })}\n\n`);
+        res.end();
+      }
+    }
+  });
+
   // GET /api/chat/conversations — list conversations for current user
   app.get("/api/chat/conversations", async (req: Request, res: Response) => {
     try {

@@ -48,6 +48,7 @@ interface ChatMessage {
   response?: ChatResponse;
   timestamp: Date;
   isError?: boolean;
+  isStreaming?: boolean;
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -680,11 +681,8 @@ export default function AiChatPage() {
 
                 // Update label based on live stage (Phase 5X: also handle 'processing')
                 if (pollData.status === "running" || pollData.status === "pending" || pollData.status === "processing") {
-                  const sLabel   = stageLabel(pollData.stage);
-                  const progress = pollData.chunksProcessed > 0
-                    ? ` · ${pollData.chunksProcessed} blokke`
-                    : "";
-                  setOcrStatusLabel(`${sLabel}: ${file.name} (${elapsedSec}s${progress})`);
+                  const sLabel = stageLabel(pollData.stage);
+                  setOcrStatusLabel(`${sLabel}: ${file.name} (${elapsedSec}s)`);
                 }
 
                 if (pollData.status === "completed") { ocrResult = pollData; break; }
@@ -768,40 +766,129 @@ export default function AiChatPage() {
       // ── Step B: Byg besked-tekst ───────────────────────────────────────────
       const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";
 
-      // ── TRACE STAGE 3: CHAT REQUEST ───────────────────────────────────────
-      console.log(`[TRACE-3][${traceId}] sending /api/chat message_len=${fullMessage.length} document_context_len=${documentContext.length}`);
+      // ── TRACE STAGE 3: CHAT REQUEST (SSE streaming) ──────────────────────
+      console.log(`[TRACE-3][${traceId}] sending /api/chat/stream message_len=${fullMessage.length} document_context_len=${documentContext.length}`);
 
-      // ── Step C: Send til /api/chat med dokument-kontekst ───────────────────
-      const res = await apiRequest("POST", "/api/chat", {
-        message: fullMessage,
-        conversation_id: conversationId ?? null,
-        document_context: documentContext,
-        context: {
-          document_ids: [],
-          preferred_expert_id: null,
-          attachment_count: payload.attachments.length,
-          attachment_types: Array.from(new Set(payload.attachments.map(a => a.type))),
-          use_case: (payload.useCase ?? "grounded_chat") as any,
-        },
-        _trace_id: traceId,
+      // ── Step C: Stream svar fra /api/chat/stream via SSE ──────────────────
+      const { getSessionToken } = await import("@/lib/supabase");
+      const token = await getSessionToken();
+      const streamHeaders: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) streamHeaders["Authorization"] = `Bearer ${token}`;
+
+      const streamRes = await fetch("/api/chat/stream", {
+        method: "POST",
+        headers: streamHeaders,
+        body: JSON.stringify({
+          message: fullMessage,
+          conversation_id: conversationId ?? null,
+          document_context: documentContext,
+          context: {
+            document_ids: [],
+            preferred_expert_id: null,
+            attachment_count: payload.attachments.length,
+            attachment_types: Array.from(new Set(payload.attachments.map(a => a.type))),
+            use_case: (payload.useCase ?? "grounded_chat") as any,
+          },
+          _trace_id: traceId,
+        }),
       });
-      const data = await res.json() as ChatResponse & { _trace?: any };
 
-      // ── TRACE STAGE 5: SERVER RESPONSE ────────────────────────────────────
-      console.log(`[TRACE-5][${traceId}] server _trace:`, JSON.stringify((data as any)._trace ?? "none"));
-      console.log(`[TRACE-5][${traceId}] final_answer_first100="${data.answer?.slice(0,100)}"`);
+      if (!streamRes.ok || !streamRes.body) {
+        const errBody = await streamRes.json().catch(() => ({})) as any;
+        throw Object.assign(
+          new Error(errBody?.message ?? `Chat fejlede (HTTP ${streamRes.status})`),
+          { errorCode: errBody?.error_code ?? "CHAT_FAILED" },
+        );
+      }
 
-      return data;
+      // ── Stream tokens progressively into a temporary message ──────────────
+      const streamMsgId = crypto.randomUUID();
+      setMessages(prev => [...prev, {
+        id: streamMsgId,
+        role: "assistant" as const,
+        text: "",
+        timestamp: new Date(),
+        isStreaming: true,
+      }]);
+
+      const reader = streamRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let accumulatedText = "";
+      let finalData: ChatResponse | null = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const event = JSON.parse(line.slice(6)) as { type: string; text?: string; message?: string; error_code?: string } & Partial<ChatResponse>;
+            if (event.type === "token" && event.text) {
+              accumulatedText += event.text;
+              setMessages(prev => prev.map(m =>
+                m.id === streamMsgId ? { ...m, text: accumulatedText } : m
+              ));
+            } else if (event.type === "done") {
+              finalData = {
+                answer:              event.answer ?? accumulatedText,
+                conversation_id:     event.conversation_id ?? "",
+                expert:              event.expert ?? { id: "", name: "", category: null },
+                used_sources:        event.used_sources ?? [],
+                used_rules:          event.used_rules ?? [],
+                warnings:            event.warnings ?? [],
+                latency_ms:          event.latency_ms ?? 0,
+                confidence_band:     event.confidence_band ?? "unknown",
+                needs_manual_review: event.needs_manual_review ?? false,
+                routing_explanation: event.routing_explanation ?? "",
+              } as ChatResponse;
+              // Replace streaming message with final message including metadata
+              setMessages(prev => prev.map(m =>
+                m.id === streamMsgId
+                  ? { ...m, text: finalData!.answer, response: finalData!, isStreaming: false }
+                  : m
+              ));
+            } else if (event.type === "error") {
+              throw Object.assign(
+                new Error(event.message ?? "Streaming fejlede"),
+                { errorCode: event.error_code ?? "STREAM_ERROR" },
+              );
+            }
+          } catch (parseErr) {
+            // Ignore malformed SSE lines
+          }
+        }
+      }
+
+      if (!finalData) {
+        // Stream ended without done event — use accumulated text
+        finalData = {
+          answer:              accumulatedText,
+          conversation_id:     "",
+          expert:              { id: "", name: "", category: null },
+          used_sources:        [],
+          used_rules:          [],
+          warnings:            [],
+          latency_ms:          0,
+          confidence_band:     "unknown",
+          needs_manual_review: false,
+          routing_explanation: "",
+        } as ChatResponse;
+        setMessages(prev => prev.map(m =>
+          m.id === streamMsgId ? { ...m, text: accumulatedText, isStreaming: false } : m
+        ));
+      }
+
+      console.log(`[TRACE-5][${traceId}] stream complete answer_len=${finalData.answer?.length ?? 0}`);
+      return finalData;
     },
     onSuccess: (data) => {
-      setConversationId(data.conversation_id);
-      setMessages(prev => [...prev, {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        text: data.answer,
-        response: data,
-        timestamp: new Date(),
-      }]);
+      // SSE streaming already inserts the message progressively.
+      // We only update the conversation_id here.
+      if (data.conversation_id) setConversationId(data.conversation_id);
     },
     onError: (err: any) => {
       setOcrStatusLabel(null);
