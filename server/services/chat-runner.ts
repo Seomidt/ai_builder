@@ -18,7 +18,7 @@ import {
 import { eq, and } from "drizzle-orm";
 import type { AccessibleExpert } from "./chat-routing.ts";
 import { AI_MODEL_ROUTES } from "../lib/ai/config.ts";
-import { applyPartialSafeguard } from "../lib/chat/partial-safeguard.ts";
+import { applyPartialSafeguard, isDefinitiveNegative } from "../lib/chat/partial-safeguard.ts";
 import {
   shouldRunSimilarity,
   shouldAllowSimilarityByBudget,
@@ -311,15 +311,11 @@ export async function runChatMessage(params: {
         const delta = chunk.choices[0]?.delta?.content ?? "";
         if (delta) { params.onToken(delta); aiText += delta; }
       }
-      // Post-stream safeguard check: if AI made a definitive negative claim, replace with a neutral message
-      const safeguarded = applyPartialSafeguard(aiText);
-      if (safeguarded !== aiText) {
-        console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered after streaming — sending replace event`);
-        // Use a neutral message that doesn't look like the old provisional text
-        const neutralReplacement = "Jeg har set den første del af dokumentet. Det fulde svar genereres automatisk når hele dokumentet er analyseret.\n\n⏳ Opdateres automatisk...";
-        aiText = neutralReplacement;
-        if (params.onSafeguardReplace) params.onSafeguardReplace(neutralReplacement);
-        else params.onToken("\n\n" + neutralReplacement);
+      // Safeguard check: log only — do NOT replace streamed content.
+      // The system prompt already forbids definitive negative claims.
+      // Replacing streamed content mid-stream creates a bad UX (text jumps).
+      if (isDefinitiveNegative(aiText)) {
+        console.warn(`[chat-runner] PARTIAL_SAFEGUARD detected after streaming — keeping streamed text (prompt-level prevention active)`);
       }
     } else if (params.onToken) {
       // ── COMPLETE MODE: real token streaming (safeguard not needed) ───────────
