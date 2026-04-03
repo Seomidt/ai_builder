@@ -1273,6 +1273,11 @@ export default function AiChatPage() {
       // Her sætter vi kun conversationId og rydder OCR-status.
       if (data?.conversation_id) setConversationId(data.conversation_id);
       setOcrStatusLabel(null);
+
+      // Log whether this was an upgrade mutation completing successfully
+      if (isUpgradeAttemptRef.current) {
+        console.log(`[upgrade] [Complete answer finished] AI responded successfully chars=${data?.answer?.length ?? 0}`);
+      }
       // Reset upgrade flag — mutation succeeded (whether initial or upgrade)
       isUpgradeAttemptRef.current = false;
 
@@ -1283,6 +1288,11 @@ export default function AiChatPage() {
       if (upgrade) {
         pendingOcrUpgradeRef.current = null;
         const { taskId, filename, mime } = upgrade;
+
+        // Capture chatMutation.mutate directly in this closure — avoids any possible
+        // ref staleness and guarantees the live mutate function is used.
+        const triggerUpgradeMutation = chatMutation.mutate;
+
         (async () => {
           const label = `[upgrade:${taskId.slice(-8)}]`;
           try {
@@ -1292,16 +1302,22 @@ export default function AiChatPage() {
             const fetchStatus = async (id: string) => {
               const tok = await getSessionToken().catch(() => null);
               const headers: Record<string, string> = tok ? { Authorization: `Bearer ${tok}` } : {};
-              const sr = await fetch(
-                `/api/ocr-status?id=${encodeURIComponent(id)}`,
-                { headers, credentials: "include", signal: AbortSignal.timeout(12_000) },
-              );
-              if (!sr.ok) throw new Error(`ocr-status HTTP ${sr.status}`);
-              return sr.json();
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), 12_000);
+              try {
+                const sr = await fetch(
+                  `/api/ocr-status?id=${encodeURIComponent(id)}`,
+                  { headers, credentials: "include", signal: controller.signal },
+                );
+                if (!sr.ok) throw new Error(`ocr-status HTTP ${sr.status}`);
+                return sr.json();
+              } finally {
+                clearTimeout(timer);
+              }
             };
 
             const fullText = await pollForCompletedOcr(taskId, fetchStatus, {
-              deadlineMs:       8 * 60 * 1_000,
+              deadlineMs:       10 * 60 * 1_000,
               initialPollMs:    3_000,
               maxPollMs:        10_000,
               backoffFactor:    1.4,
@@ -1316,17 +1332,20 @@ export default function AiChatPage() {
             });
 
             if (!fullText.trim()) {
-              console.error(`${label} upgrade aborted — no OCR text after polling`);
-              return;
-            }
-            if (!chatMutateRef.current) {
-              console.error(`${label} chatMutateRef is null — cannot launch upgrade mutation`);
+              console.error(`${label} [OCR completed] upgrade aborted — no OCR text returned after polling`);
+              setMessages(prev => [...prev, {
+                id: crypto.randomUUID(), role: "assistant" as const,
+                text: "Det komplette dokument var ikke klar inden for tidsfristen. Det delvise svar ovenfor er fortsat gyldigt.",
+                timestamp: new Date(),
+              }]);
               return;
             }
 
-            console.log(`${label} launching full-document mutation chars=${fullText.length}`);
+            console.log(`${label} [OCR completed] fullText chars=${fullText.length}`);
+            console.log(`${label} [Triggering complete answer] launching upgrade mutation`);
+
             isUpgradeAttemptRef.current = true;
-            chatMutateRef.current({
+            triggerUpgradeMutation({
               text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
               attachments: [],
               _documentContextOverride: [{
@@ -1336,8 +1355,8 @@ export default function AiChatPage() {
                 status: "ok",
                 source: "r2_ocr_async",
               }],
-            });
-            console.log(`${label} mutation launched`);
+            } as any);
+            console.log(`${label} [Triggering complete answer] mutation dispatched — awaiting AI response`);
           } catch (err) {
             console.error(`${label} upgrade IIFE threw:`, err);
           }
@@ -1364,12 +1383,16 @@ export default function AiChatPage() {
 
       // ── Upgrade-mutation guard ─────────────────────────────────────────────
       // If this error came from the background upgrade mutation (partial → complete),
-      // AND there is already a valid partial answer visible, do NOT show an error state.
-      // The partial answer remains intact — the user sees a complete response once the
-      // upgrade retries or the next interaction triggers it.
+      // show a discrete inline message instead of a red destructive toast.
+      // The partial answer remains visible above the error message.
       if (isUpgradeAttemptRef.current) {
         isUpgradeAttemptRef.current = false;
-        console.warn(`[upgrade] mutation failed (suppressed toast) code=${code} msg=${serverMsg.slice(0, 80)}`);
+        console.error(`[upgrade] [Complete answer finished — ERROR] code=${code} msg=${serverMsg.slice(0, 120)}`);
+        setMessages(prev => [...prev, {
+          id: crypto.randomUUID(), role: "assistant" as const,
+          text: "Det komplette svar kunne ikke hentes automatisk. Det delvise svar ovenfor er fortsat gyldigt — prøv at sende dit spørgsmål igen for at få et fuldt svar.",
+          timestamp: new Date(),
+        }]);
         return;
       }
 
