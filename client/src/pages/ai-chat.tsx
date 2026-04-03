@@ -1326,7 +1326,7 @@ export default function AiChatPage() {
         const { taskId, filename, mime } = upgrade;
         const upgradeId = crypto.randomUUID().slice(0, 8);
         console.log(`[UPGRADE-${upgradeId}] Starting upgrade flow taskId=${taskId}`);
-        setOcrStatusLabel("Afventer fuld dokumentanalyse...");
+        // Processing card in message bubble handles the visual — no need for bottom status label
         (async () => {
           try {
             const token = await getSessionToken().catch(() => null);
