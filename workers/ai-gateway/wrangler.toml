@@ -1,0 +1,55 @@
+# wrangler.toml — Cloudflare Worker: AI Routing Gateway
+# Deploy: npx wrangler deploy
+
+name = "blissops-ai-gateway"
+main = "worker.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+# All requests to /api/* are intercepted and routed through the gateway.
+
+[[routes]]
+  pattern = "api.blissops.com/api/*"
+  zone_name = "blissops.com"
+
+# ── Environment variables (non-secret) ───────────────────────────────────────
+
+[vars]
+  BACKEND_URL = "https://blissops-production.up.railway.app"
+
+# ── Secrets (set via: npx wrangler secret put GATEWAY_SECRET) ────────────────
+# GATEWAY_SECRET — injected into every proxied request for backend auth
+
+# ── KV Namespace bindings ─────────────────────────────────────────────────────
+# Binding name must match Env.AI_ROUTING in worker.ts.
+#
+# Create: npx wrangler kv namespace create AI_ROUTING
+# Then replace <namespace-id> with the output ID.
+
+[[kv_namespaces]]
+  binding = "AI_ROUTING"
+  id      = "<namespace-id>"
+
+  # Preview namespace for local dev (npx wrangler dev)
+  preview_id = "<preview-namespace-id>"
+
+# ── Per-environment overrides ─────────────────────────────────────────────────
+
+[env.production]
+  [env.production.vars]
+    BACKEND_URL = "https://blissops-production.up.railway.app"
+
+[env.staging]
+  [env.staging.vars]
+    BACKEND_URL = "https://blissops-staging.up.railway.app"
+
+# ── Observability ─────────────────────────────────────────────────────────────
+
+[observability]
+  enabled = true
+
+# ── Limits ────────────────────────────────────────────────────────────────────
+
+[limits]
+  cpu_ms = 50   # Gateway is I/O bound — no heavy compute needed
