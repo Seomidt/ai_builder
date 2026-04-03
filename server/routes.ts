@@ -1978,8 +1978,10 @@ Generate names and content in ${langNote}.`;
       });
 
       const _sDocIds   = [...(body.context?.document_ids ?? [])].sort().join(",");
-      const _sComplt   = (streamReadiness as any)?.answerCompleteness ?? "partial";
-      const _sRefGen   = _derivedRefinementGen(streamReadiness);
+      // Detect upgrade call: document_context has source=r2_ocr_async (full OCR complete)
+      const _isUpgradeCall = (body.document_context ?? []).some((d: any) => d.source === "r2_ocr_async");
+      const _sComplt   = _isUpgradeCall ? "complete" : ((streamReadiness as any)?.answerCompleteness ?? "partial");
+      const _sRefGen   = _isUpgradeCall ? 3 : _derivedRefinementGen(streamReadiness);
       const _sCovPct   = (streamReadiness as any)?.coveragePercent ?? 0;
       const _sGenKey   = _refinementGenKey(streamReadiness, _sDocIds);
       const _sQueryHash = _hashQuery(body.message);
