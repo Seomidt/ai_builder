@@ -156,13 +156,8 @@ function RefinementBadge({
     );
   }
 
-  return (
-    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-amber-400 border-amber-400/30 bg-amber-400/10">
-      <Hourglass className="w-3 h-3" />Delsvar
-      {coverage != null && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
-      {cacheHit && <span className="opacity-50 ml-0.5">·cache</span>}
-    </span>
-  );
+  // Delsvar badge removed — customers don't need to see partial-answer state
+  return null;
 }
 
 // ─── Validation parser ────────────────────────────────────────────────────────
@@ -1055,7 +1050,7 @@ export default function AiChatPage() {
 
                   if (pollData.status === "running" || pollData.status === "pending") {
                     const sLabel   = stageLabel(pollData.stage);
-                    const progress = pollData.chunksProcessed > 0 ? ` · ${pollData.chunksProcessed} blokke` : "";
+                    const progress = ""; // chunksProcessed progress removed — always 0 for image-based PDFs
                     setOcrStatusLabel(`${sLabel}: ${file.name} (${elapsedSec}s${progress})`);
                   }
                   if (pollData.status === "running" && pollData.stage === "partial_ready" && pollData.ocrText?.trim()) {
