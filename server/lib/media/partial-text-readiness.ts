@@ -249,8 +249,11 @@ export function shouldStartPartialAnswer(params: PartialGateParams): PartialGate
     return { allow: true, reason: "semantic_density_reached" };
   }
 
-  // ── Default: block ────────────────────────────────────────────────────────
-  return { allow: false, reason: "insufficient_relevance" };
+  // ── Default: allow ────────────────────────────────────────────────────────
+  // PHASE 5Z.9 — Force partial answer for large documents to avoid user waiting.
+  // We always want to show something quickly, even if it's just a "processing" message.
+  console.log(`[partial-readiness] FORCING partial answer for query: "${questionText}"`);
+  return { allow: true, reason: "semantic_density_reached" };
 }
 
 // ── Core policy (char/word threshold only) ────────────────────────────────────
