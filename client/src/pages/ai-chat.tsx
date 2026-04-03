@@ -1392,15 +1392,15 @@ export default function AiChatPage() {
               return { done: false, text: "", error: false };
             };
 
-            // ── Step 1: Try SSE with short timeout (8s) ──
-            // If OCR is already completed when we connect, the immediate status check will push 'completed'.
-            // If not, we wait briefly then fall through to polling.
+            // ── Step 1: Try SSE with long timeout (55s) ──
+            // Stay connected long enough to catch the completed event directly.
+            // Vercel proxy cuts SSE at ~30s, so polling fallback handles the rest.
             let sseDelivered = false;
             try {
               const sseHeaders: Record<string, string> = { Accept: "text/event-stream" };
               if (token) sseHeaders["Authorization"] = `Bearer ${token}`;
               const ctrl = new AbortController();
-              const sseTimer = setTimeout(() => ctrl.abort(), 8_000);
+              const sseTimer = setTimeout(() => ctrl.abort(), 55_000);
               console.log(`[UPGRADE-${upgradeId}] Connecting SSE ocr-task-stream`);
               try {
                 const res = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, {
@@ -1448,7 +1448,7 @@ export default function AiChatPage() {
                 }
               } catch (e: any) {
                 if (e?.name !== "AbortError") console.warn(`[UPGRADE-${upgradeId}] SSE error:`, e?.message);
-                else console.log(`[UPGRADE-${upgradeId}] SSE aborted after 8s timeout`);
+                else console.log(`[UPGRADE-${upgradeId}] SSE aborted after 55s timeout`);
               } finally {
                 clearTimeout(sseTimer);
               }
@@ -1461,7 +1461,7 @@ export default function AiChatPage() {
               const MAX_MS = 5 * 60 * 1000; // 5 minutes
               let n = 0;
               while (Date.now() - tStart < MAX_MS) {
-                await new Promise(r => setTimeout(r, 3_000));
+                await new Promise(r => setTimeout(r, 2_000));
                 n++;
                 console.log(`[UPGRADE-${upgradeId}] Poll #${n} t=${Math.round((Date.now()-tStart)/1000)}s`);
                 const { done, text, error } = await pollOnce();
