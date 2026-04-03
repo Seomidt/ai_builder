@@ -83,15 +83,72 @@ export function isDefinitiveNegative(text: string): boolean {
 }
 
 /**
+ * Marker appended to every partial-mode response via REGEL 8.
+ * When present, the AI already signalled provisionality → we exempt responses
+ * that contain ONLY a guarded "not-found-yet" claim (REGEL 6) combined with
+ * the upgrade footer. A definitive negative WITHOUT the footer is still replaced.
+ */
+export const PARTIAL_UPGRADE_FOOTER_MARKER =
+  "⏳ Svaret er baseret på den første del af dokumentet og opdateres automatisk";
+
+/**
+ * Returns true if the response already carries the REGEL 8 provisional footer
+ * AND does NOT contain a clearly definitive absence claim (e.g. "fremgår ikke",
+ * "indeholder ikke" — patterns that are invalid even in partial mode).
+ *
+ * Exempted: "Informationen er muligvis i den resterende del..." (REGEL 6 safe phrasing)
+ * Not exempted: "Informationen fremgår ikke af dokumentet" (definitive claim)
+ */
+function isAlreadyProvisional(text: string): boolean {
+  return text.includes(PARTIAL_UPGRADE_FOOTER_MARKER);
+}
+
+/** Definitive-negative patterns that are ALWAYS invalid, even with the footer */
+const ALWAYS_INVALID_PATTERNS: readonly RegExp[] = [
+  // Absence-in-document (definitive, not REGEL 6 safe phrasing)
+  /fremgår\s+ikke/i,
+  /fremkommer\s+ikke/i,
+  /optræder\s+ikke/i,
+  /forekommer\s+ikke\b/i,
+  /(?:dokumentet|teksten|filen)\s+(?:indeholder|nævner|omtaler|beskriver|angiver|oplyser)\s+ikke/i,
+  /(?:indeholder|nævner|omtaler|beskriver|angiver|oplyser)\s+ikke.{0,60}(?:dokumentet|teksten|filen)/i,
+  // Denial of existence
+  /\beksisterer\s+ikke\b/i,
+  /\bfindes\s+ikke\s+i\b/i,
+  // English fallbacks
+  /\bcannot\s+find\b/i,
+  /\bdocument\s+does\s+not\s+(?:contain|mention|include)\b/i,
+] as const;
+
+function isAlwaysInvalidNegative(text: string): boolean {
+  return ALWAYS_INVALID_PATTERNS.some(p => p.test(text));
+}
+
+/**
  * If `text` is a definitive negative, returns the canonical provisional answer.
  * Otherwise returns `text` unchanged.
+ *
+ * Logic:
+ *  1. If text already carries the REGEL 8 provisional footer AND has no always-invalid
+ *     pattern → exempt (the AI followed instructions correctly).
+ *  2. If text has any PARTIAL_NEGATIVE_PATTERNS → replace with provisional template.
+ *  3. Otherwise → pass through unchanged.
  *
  * Must be called on the FULL generated buffer, before any bytes are sent to the client.
  */
 export function applyPartialSafeguard(text: string): string {
   if (!text?.trim()) return text;
+
+  // Step 1: Exempt responses that already signal provisionality (REGEL 8 footer present)
+  // and contain no always-invalid definitive absence claim.
+  if (isAlreadyProvisional(text) && !isAlwaysInvalidNegative(text)) {
+    return text;
+  }
+
+  // Step 2: Replace if any definitive negative pattern matches.
   if (isDefinitiveNegative(text)) {
     return PARTIAL_PROVISIONAL_ANSWER;
   }
+
   return text;
 }

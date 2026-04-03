@@ -19,6 +19,7 @@ import {
   isDefinitiveNegative,
   PARTIAL_PROVISIONAL_ANSWER,
   PARTIAL_NEGATIVE_PATTERNS,
+  PARTIAL_UPGRADE_FOOTER_MARKER,
 } from "../server/lib/chat/partial-safeguard.ts";
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -243,5 +244,106 @@ describe("Test 5 — SSE path preserves source='ocr_partial' marker", () => {
       },
     ];
     assert.equal(detectIsPartialOcr(upgradeCtx), false);
+  });
+});
+
+// ─── Test 6: REGEL 8 footer exemption ────────────────────────────────────────
+// When the AI correctly follows REGEL 8 (adds ⏳ footer) AND avoids always-invalid
+// patterns (e.g. uses REGEL 6 safe phrasing), the safeguard should NOT replace the answer.
+
+describe("Test 6 — REGEL 8 footer: exempts provisionally-marked responses", () => {
+  const FOOTER = PARTIAL_UPGRADE_FOOTER_MARKER;
+
+  it("response with REGEL 8 footer + REGEL 6 safe phrasing → NOT replaced", () => {
+    const text =
+      `Baseret på den tilgængelige del af dokumentet: Kontrakten dækker 3 år.\n\n` +
+      `Informationen er muligvis i den resterende del af dokumentet, som endnu ikke er analyseret.\n\n` +
+      `${FOOTER} når hele dokumentet er analyseret.`;
+    const result = applyPartialSafeguard(text);
+    assert.equal(result, text, "response with REGEL 8 footer + safe REGEL 6 phrasing must not be replaced");
+  });
+
+  it("response with footer AND useful partial content → NOT replaced", () => {
+    const text =
+      `Baseret på den tilgængelige del: betalingsdato er den 15. hver måned.\n\n` +
+      `${FOOTER} når hele dokumentet er analyseret.`;
+    const result = applyPartialSafeguard(text);
+    assert.equal(result, text, "useful partial answer with footer must pass through unchanged");
+  });
+
+  it("response with footer + 'fremgår ikke' → still replaced (always-invalid pattern)", () => {
+    const text =
+      `Det fremgår ikke af dokumentet.\n\n` +
+      `${FOOTER} når hele dokumentet er analyseret.`;
+    const result = applyPartialSafeguard(text);
+    assert.equal(result, PARTIAL_PROVISIONAL_ANSWER,
+      "always-invalid pattern (fremgår ikke) must still be replaced even with footer");
+  });
+
+  it("response with footer + 'indeholder ikke' → still replaced (always-invalid pattern)", () => {
+    const text =
+      `Dokumentet indeholder ikke oplysninger om dette.\n\n` +
+      `${FOOTER} når hele dokumentet er analyseret.`;
+    const result = applyPartialSafeguard(text);
+    assert.equal(result, PARTIAL_PROVISIONAL_ANSWER,
+      "always-invalid pattern (indeholder ikke) must still be replaced even with footer");
+  });
+
+  it("response WITHOUT footer but with 'kan ikke finde' → replaced (no exemption)", () => {
+    const text = "Jeg kan ikke finde det i den del af dokumentet jeg har set endnu.";
+    const result = applyPartialSafeguard(text);
+    assert.equal(result, PARTIAL_PROVISIONAL_ANSWER,
+      "without footer, 'kan ikke finde' is still a PARTIAL_NEGATIVE_PATTERN and must be replaced");
+  });
+
+  it("PARTIAL_UPGRADE_FOOTER_MARKER is a non-empty string matching REGEL 8 suffix", () => {
+    assert.ok(typeof PARTIAL_UPGRADE_FOOTER_MARKER === "string", "must be a string");
+    assert.ok(PARTIAL_UPGRADE_FOOTER_MARKER.length > 0, "must be non-empty");
+    assert.ok(PARTIAL_UPGRADE_FOOTER_MARKER.includes("⏳"), "must include the ⏳ symbol");
+    assert.ok(PARTIAL_UPGRADE_FOOTER_MARKER.includes("første del"), "must reference first part");
+  });
+});
+
+// ─── Test 7: REGEL 6 safe phrasing is correctly NOT a pattern match ───────────
+// Validates that the reworded REGEL 6 phrase doesn't trigger partial-safeguard patterns.
+
+describe("Test 7 — REGEL 6 safe phrasing: no false-positive pattern matches", () => {
+  it("REGEL 6 reworded phrase does NOT match isDefinitiveNegative", () => {
+    const regel6Phrase =
+      "Informationen er muligvis i den resterende del af dokumentet, som endnu ikke er analyseret.";
+    assert.equal(
+      isDefinitiveNegative(regel6Phrase),
+      false,
+      "REGEL 6 safe phrasing must NOT be flagged as a definitive negative",
+    );
+  });
+
+  it("old REGEL 6 phrase WOULD have triggered pattern (regression guard)", () => {
+    const oldPhrase = "Jeg kan ikke finde det i den del af dokumentet jeg har set endnu — det kan stå i den resterende del.";
+    assert.equal(
+      isDefinitiveNegative(oldPhrase),
+      true,
+      "old REGEL 6 phrasing WAS a false positive — this confirms the fix was necessary",
+    );
+  });
+
+  it("REGEL 5 prefix + useful content passes through", () => {
+    const answer =
+      "Baseret på den tilgængelige del af dokumentet: Kontraktperioden er 2 år med mulighed for forlængelse.";
+    assert.equal(applyPartialSafeguard(answer), answer, "useful partial answer must not be touched");
+  });
+
+  it("mix of useful content + old problematic phrase → still replaced", () => {
+    // Even if there's useful content, the definitive negative pattern poisons the whole answer.
+    const mixed =
+      "Kontrakten starter 1. januar. Jeg kan ikke finde betalingsvilkårene i dokumentet.";
+    const result = applyPartialSafeguard(mixed);
+    assert.equal(result, PARTIAL_PROVISIONAL_ANSWER,
+      "mixed answer with definitive negative (without footer) must be replaced");
+  });
+
+  it("empty text is returned as-is", () => {
+    assert.equal(applyPartialSafeguard(""), "");
+    assert.equal(applyPartialSafeguard("   "), "   ");
   });
 });

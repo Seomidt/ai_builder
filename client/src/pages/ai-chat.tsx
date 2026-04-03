@@ -754,6 +754,8 @@ export default function AiChatPage() {
   const chatMutateRef = useRef<((payload: { text: string; attachments: AttachedFile[]; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[] }) => void) | null>(null);
   // Upgrade ref: set when partial_ready break → onSuccess starts upgrade SSE subscription
   const pendingOcrUpgradeRef = useRef<{ taskId: string; filename: string; mime: string } | null>(null);
+  // Set to true while an upgrade mutation is in flight — suppresses error toast in onError
+  const isUpgradeAttemptRef = useRef(false);
 
   const handleAutoTrigger = useCallback((snap: ReadinessSnapshot, isImprovement: boolean) => {
     if (!snap.triggerKey) return;
@@ -1270,6 +1272,8 @@ export default function AiChatPage() {
       // Her sætter vi kun conversationId og rydder OCR-status.
       if (data?.conversation_id) setConversationId(data.conversation_id);
       setOcrStatusLabel(null);
+      // Reset upgrade flag — mutation succeeded (whether initial or upgrade)
+      isUpgradeAttemptRef.current = false;
 
       // ── PATCH B upgrade: hvis vi brækkede på partial_ready, lyt videre efter completed ──
       const upgrade = pendingOcrUpgradeRef.current;
@@ -1279,57 +1283,92 @@ export default function AiChatPage() {
         (async () => {
           try {
             const token = await getSessionToken().catch(() => null);
-            const headers: Record<string, string> = { Accept: "text/event-stream" };
-            if (token) headers["Authorization"] = `Bearer ${token}`;
-            const res = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, { headers, credentials: "include" });
-            if (!res.ok || !res.body) return;
-            const reader  = res.body.getReader();
-            const decoder = new TextDecoder();
-            let buf = "";
-            outerUpgrade: while (true) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buf += decoder.decode(value, { stream: true });
-              const lines = buf.split("\n");
-              buf = lines.pop() ?? "";
-              for (const line of lines) {
-                if (!line.startsWith("data:")) continue;
-                let evt: any;
-                try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
-                if (evt.type === "completed" && chatMutateRef.current) {
-                  reader.cancel().catch(() => {});
-                  // ocrText may be absent from live SSE push — fetch from status endpoint as fallback
-                  let fullText: string = evt.data?.ocrText ?? "";
-                  if (!fullText.trim()) {
-                    try {
-                      const statusToken = await getSessionToken().catch(() => null);
-                      const statusHeaders: Record<string, string> = {};
-                      if (statusToken) statusHeaders["Authorization"] = `Bearer ${statusToken}`;
-                      const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: statusHeaders, credentials: "include" });
-                      if (sr.ok) {
-                        const sd = await sr.json() as any;
-                        fullText = sd.ocrText ?? sd.ocr_text ?? "";
-                      }
-                    } catch { /* non-fatal */ }
-                  }
-                  if (!fullText.trim()) { break outerUpgrade; } // no text available — abort upgrade
-                  fullText = fullText.slice(0, 80_000);
-                  chatMutateRef.current({
-                    text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
-                    attachments: [],
-                    _documentContextOverride: [{
-                      filename, mime_type: mime,
-                      char_count: fullText.length,
-                      extracted_text: fullText,
-                      status: "ok",
-                      source: "r2_ocr_async",
-                    }],
-                  });
-                  break outerUpgrade;
+            const authHeaders = (tok: string | null): Record<string, string> =>
+              tok ? { Authorization: `Bearer ${tok}` } : {};
+
+            // ── Fast-path: check if task is ALREADY completed before opening SSE ───
+            // This avoids a race where completed fires before the upgrade SSE registers.
+            let fullText = "";
+            try {
+              const preCheckTok = await getSessionToken().catch(() => null);
+              const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, {
+                headers: authHeaders(preCheckTok), credentials: "include",
+                signal: AbortSignal.timeout(8_000),
+              });
+              if (sr.ok) {
+                const sd = await sr.json() as any;
+                if (sd.status === "completed" && (sd.ocrText ?? sd.ocr_text ?? "").trim()) {
+                  fullText = (sd.ocrText ?? sd.ocr_text ?? "").slice(0, 80_000);
                 }
-                if (evt.type === "error") { reader.cancel().catch(() => {}); break outerUpgrade; }
+              }
+            } catch { /* non-fatal — fall through to SSE */ }
+
+            if (!fullText.trim()) {
+              // ── SSE path: wait for completed event (90s timeout) ─────────────────
+              const sseHeaders: Record<string, string> = { Accept: "text/event-stream", ...authHeaders(token) };
+              const res = await fetch(
+                `/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`,
+                { headers: sseHeaders, credentials: "include", signal: AbortSignal.timeout(90_000) },
+              );
+              if (!res.ok || !res.body) return;
+              const reader  = res.body.getReader();
+              const decoder = new TextDecoder();
+              let buf = "";
+              outerUpgrade: while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                const lines = buf.split("\n");
+                buf = lines.pop() ?? "";
+                for (const line of lines) {
+                  if (!line.startsWith("data:")) continue;
+                  let evt: any;
+                  try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+                  if (evt.type === "completed") {
+                    reader.cancel().catch(() => {});
+                    fullText = evt.data?.ocrText ?? "";
+                    break outerUpgrade;
+                  }
+                  if (evt.type === "error") { reader.cancel().catch(() => {}); break outerUpgrade; }
+                }
               }
             }
+
+            // ── Retry: if fullText still empty, poll status endpoint up to 3× ─────
+            if (!fullText.trim()) {
+              for (let attempt = 0; attempt < 3 && !fullText.trim(); attempt++) {
+                await new Promise<void>(r => setTimeout(r, 2_000));
+                try {
+                  const retryTok = await getSessionToken().catch(() => null);
+                  const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, {
+                    headers: authHeaders(retryTok), credentials: "include",
+                    signal: AbortSignal.timeout(8_000),
+                  });
+                  if (sr.ok) {
+                    const sd = await sr.json() as any;
+                    fullText = (sd.ocrText ?? sd.ocr_text ?? "").trim()
+                      ? (sd.ocrText ?? sd.ocr_text ?? "").slice(0, 80_000)
+                      : "";
+                  }
+                } catch { /* retry anyway */ }
+              }
+            }
+
+            // If still no text after all retries — silently skip upgrade
+            if (!fullText.trim() || !chatMutateRef.current) return;
+
+            isUpgradeAttemptRef.current = true;
+            chatMutateRef.current({
+              text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
+              attachments: [],
+              _documentContextOverride: [{
+                filename, mime_type: mime,
+                char_count: fullText.length,
+                extracted_text: fullText,
+                status: "ok",
+                source: "r2_ocr_async",
+              }],
+            });
           } catch { /* non-fatal upgrade failure */ }
         })();
       }
@@ -1349,6 +1388,17 @@ export default function AiChatPage() {
 
       if (businessBlockMsg) {
         setMessages(prev => [...prev, { id: crypto.randomUUID(), role: "assistant", text: businessBlockMsg, timestamp: new Date() }]);
+        return;
+      }
+
+      // ── Upgrade-mutation guard ─────────────────────────────────────────────
+      // If this error came from the background upgrade mutation (partial → complete),
+      // AND there is already a valid partial answer visible, do NOT show an error state.
+      // The partial answer remains intact — the user sees a complete response once the
+      // upgrade retries or the next interaction triggers it.
+      if (isUpgradeAttemptRef.current) {
+        isUpgradeAttemptRef.current = false;
+        console.warn(`[upgrade] mutation failed (suppressed toast) code=${code} msg=${serverMsg.slice(0, 80)}`);
         return;
       }
 

@@ -228,7 +228,7 @@ export async function runChatMessage(params: {
           `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
           `REGEL 4: Da dokumentet kun er DELVIST tilgængeligt, MÅ DU ALDRIG konkludere endeligt at en information IKKE findes — den kan stå i den del der endnu ikke er behandlet.`,
           `REGEL 5: Giv foreløbige observationer baseret på den tilgængelige tekst. Præfiks dit svar med "Baseret på den tilgængelige del af dokumentet:".`,
-          `REGEL 6: Hvis du ikke kan finde noget relevant i den tilgængelige del, sig: "Jeg kan ikke finde det i den del af dokumentet jeg har set endnu — det kan stå i den resterende del."`,
+          `REGEL 6: Hvis du ikke kan finde noget relevant i den tilgængelige del, sig: "Informationen er muligvis i den resterende del af dokumentet, som endnu ikke er analyseret."`,
           `REGEL 7: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
           `REGEL 8: Afslut ALTID dit svar med denne linje: "⏳ Svaret er baseret på den første del af dokumentet og opdateres automatisk når hele dokumentet er analyseret."`,
           `=== SLUT REGLER ===`,

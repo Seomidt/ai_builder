@@ -70,8 +70,9 @@ export interface RouteDecision {
 /** Extract only valid (status=ok, non-empty text) items from the request payload. */
 function getValidRequestAttachments(documentContext: DocumentContextItem[]): DocumentContextItem[] {
   return documentContext.filter(
-    // Minimum 5 chars — accepts short text/plain files; 50 was too aggressive for direct reads.
-    (d) => d.status === "ok" && (d.extracted_text?.trim().length ?? 0) >= 5,
+    // Minimum 1 char — any non-empty text (including very short files like single words)
+    // must reach answer generation. 5-char threshold was silently discarding valid short content.
+    (d) => d.status === "ok" && (d.extracted_text?.trim().length ?? 0) >= 1,
   );
 }
 
