@@ -959,7 +959,20 @@ export default function AiChatPage() {
                       const { type, data } = evt;
                       if (!type || !data) continue;
 
-                      if (type === "partial_ready" && data.ocrText?.trim()) {
+                      // ── Log EVERY SSE event so we can verify completed is received ──────────
+                      // Unknown event types must NOT be silently swallowed.
+                      if (type !== "keepalive") {
+                        console.log(`[OCR:SSE] taskId=${taskId} type=${type} charCount=${data.charCount ?? "-"} stage=${data.stage ?? "-"}`);
+                      }
+
+                      if (type === "partial_ready") {
+                        // TASK 6 safety: gate runs ONLY inside this branch.
+                        // The completed branch below is completely separate and NEVER gated.
+                        if (!data.ocrText?.trim()) {
+                          console.warn(`[OCR:partial_ready] taskId=${taskId} ocrText=EMPTY — ignoring, waiting for completed`);
+                          // continue SSE loop — do not generate provisional from empty text
+                          continue;
+                        }
                         const partialText = (data.ocrText as string).slice(0, 80_000);
 
                         // Gate: only generate a provisional answer if the partial OCR text
@@ -973,7 +986,7 @@ export default function AiChatPage() {
                         });
 
                         if (!gate.allowed) {
-                          console.log(`[OCR:partial_ready] gate=BLOCKED reason=${gate.reason} — skipping provisional, waiting for completed OCR`);
+                          console.log(`[OCR:partial_ready] taskId=${taskId} gate=BLOCKED reason=${gate.reason} — skipping provisional, waiting for completed`);
                           // Do NOT break — continue SSE loop to wait for completed event
                           continue;
                         }
@@ -992,31 +1005,51 @@ export default function AiChatPage() {
                         ocrResult = { status: "running", stage: "partial_ready" }; // sentinel: passes !ocrResult check
                         pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
                         setOcrStatusLabel(null);
-                        console.log(`[OCR:partial_ready received] gate=OK taskId=${taskId} chars=${data.charCount} — partial answer queued`);
+                        console.log(`[OCR:partial_ready] taskId=${taskId} gate=OK chars=${data.charCount} — provisional queued, upgrade ref set`);
                         sseResolved = true;
                         reader.cancel().catch(() => {});
                         break outer;
                       }
+
+                      // ── TASK 6: completed is NEVER gated — runs unconditionally ───────────
                       if (type === "completed") {
-                        // completed event indeholder nu ocrText (full dokument)
+                        // completed event contains ocrText (full document).
+                        // Gate cannot reach this branch — it only runs inside partial_ready above.
+                        console.log(`[OCR:completed] taskId=${taskId} inline_ocrText=${data.ocrText?.trim() ? "YES" : "NO"} chars=${data.charCount ?? 0}`);
                         if (data.ocrText?.trim()) {
                           ocrResult = { ocrText: data.ocrText, charCount: data.charCount, status: "completed", stage: "completed" };
-                          console.log(`[OCR:completed detected] taskId=${taskId} ocrText=YES chars=${data.charCount}`);
+                          console.log(`[OCR:completed] taskId=${taskId} ocrText=YES chars=${data.charCount} — using inline text`);
                         } else {
-                          // Fallback: hent via status-endpoint
-                          console.log(`[OCR:completed detected] taskId=${taskId} ocrText=NO — fallback fetch from /api/ocr-status`);
-                          const sr = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch(() => null);
-                          if (sr?.ok) ocrResult = await sr.json().catch(() => null);
-                          if (!ocrResult) ocrResult = { status: "completed", charCount: data.charCount };
-                          const fetchedLen = (ocrResult as any)?.ocrText?.length ?? 0;
-                          console.log(`[OCR:fallback fetch done] taskId=${taskId} fetched_chars=${fetchedLen}`);
+                          // completed but no inline text — retry fetching from /api/ocr-status
+                          // DB write can be slightly delayed; up to 3 retries with 2s gaps.
+                          console.log(`[OCR:completed] taskId=${taskId} ocrText=NO — fetching from /api/ocr-status (up to 3 retries)`);
+                          const FETCH_RETRIES = 3;
+                          for (let ri = 1; ri <= FETCH_RETRIES; ri++) {
+                            if (ri > 1) {
+                              console.log(`[OCR:completed] taskId=${taskId} fallback retry ${ri}/${FETCH_RETRIES} — waiting 2s`);
+                              await new Promise(r => setTimeout(r, 2_000));
+                            }
+                            const sr = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch(() => null);
+                            const fetched: any = sr?.ok ? await sr.json().catch(() => null) : null;
+                            const fetchedLen = fetched?.ocrText?.length ?? 0;
+                            console.log(`[OCR:completed] taskId=${taskId} fallback fetch retry=${ri} fetched_chars=${fetchedLen} status=${fetched?.status ?? "null"}`);
+                            if (fetched?.ocrText?.trim()) {
+                              ocrResult = fetched;
+                              break;
+                            }
+                          }
+                          if (!ocrResult) {
+                            // All retries exhausted — proceed with empty sentinel so post-processing throws DOCUMENT_UNREADABLE
+                            console.error(`[OCR:completed] taskId=${taskId} ocrText=EMPTY after ${FETCH_RETRIES} retries — pipeline will surface error`);
+                            ocrResult = { status: "completed", charCount: data.charCount };
+                          }
                         }
                         sseResolved = true;
                         reader.cancel().catch(() => {});
                         break outer;
                       }
                       if (type === "error") {
-                        console.warn(`[TRACE-2ocr][${traceId}] SSE error event: ${data.message} fallback=${data.fallback}`);
+                        console.warn(`[OCR:SSE error] taskId=${taskId} message="${data.message}" fallback=${data.fallback}`);
                         sseResolved = true;   // prevent polling fallback from starting
                         if (data.fallback) {
                           // PHASE A — OCR failed but server provides fallback path.
@@ -1031,7 +1064,7 @@ export default function AiChatPage() {
                             ocrText:      null,
                             charCount:    0,
                           };
-                          console.log(`[TRACE-2ocr][${traceId}] SSE fallback path — continuing chat with synthetic context`);
+                          console.log(`[OCR:SSE error] taskId=${taskId} fallback=true — continuing with synthetic context`);
                         } else {
                           sseError = Object.assign(
                             new Error(data.message ?? "OCR-job fejlede — prøv at uploade filen igen"),
@@ -1044,6 +1077,9 @@ export default function AiChatPage() {
                       if (type === "keepalive") {
                         const elapsedSec = Math.round((Date.now() - ocrStart) / 1000);
                         setOcrStatusLabel(`Læser tekst via AI: ${file.name} (${elapsedSec}s)`);
+                      } else if (type !== "partial_ready" && type !== "completed" && type !== "error") {
+                        // Catch-all: log unrecognized event types so protocol changes are visible
+                        console.warn(`[OCR:SSE] taskId=${taskId} unrecognized event type="${type}" — ignored`);
                       }
                     }
                   }
@@ -1301,11 +1337,10 @@ export default function AiChatPage() {
       if (data?.conversation_id) setConversationId(data.conversation_id);
       setOcrStatusLabel(null);
 
-      // Log whether this was an upgrade mutation completing successfully
-      if (isUpgradeAttemptRef.current) {
-        console.log(`[upgrade] [Complete answer finished] AI responded successfully chars=${data?.answer?.length ?? 0}`);
-      }
       // Reset upgrade flag — mutation succeeded (whether initial or upgrade)
+      // NOTE: intentionally reset BEFORE checking pendingOcrUpgradeRef so the upgrade
+      // IIFE's isUpgradeAttemptRef.current = true (set just before mutateAsync) is not
+      // overwritten by a stale onSuccess from a PREVIOUS mutation.
       isUpgradeAttemptRef.current = false;
 
       // ── Upgrade: partial_ready broke the initial SSE → now poll until completed ──
@@ -1316,6 +1351,8 @@ export default function AiChatPage() {
         pendingOcrUpgradeRef.current = null;
         const { taskId, filename, mime } = upgrade;
 
+        console.log(`[upgrade:${taskId.slice(-8)}] onSuccess: upgrade ref consumed — starting IIFE for "${filename}"`);
+
         // Use mutateAsync so the retry loop can await each attempt.
         // Captures directly from chatMutation — no ref indirection.
         const triggerUpgradeMutation = chatMutation.mutateAsync;
@@ -1323,7 +1360,7 @@ export default function AiChatPage() {
         (async () => {
           const label = `[upgrade:${taskId.slice(-8)}]`;
           try {
-            console.log(`${label} upgrade started for "${filename}" (polling /api/ocr-status)`);
+            console.log(`${label} [A] polling /api/ocr-status for taskId=${taskId}`);
 
             // Build a fetchStatus function that calls /api/ocr-status with auth headers.
             const fetchStatus = async (id: string) => {
@@ -1358,8 +1395,10 @@ export default function AiChatPage() {
               },
             });
 
+            // [B/C] OCR completed result from pollForCompletedOcr
             if (!fullText.trim()) {
-              console.error(`${label} [OCR completed] ocrText=empty — upgrade aborted after all polling retries`);
+              // [I] terminal: OCR completed but text never arrived
+              console.error(`${label} [I] terminal — ocrText empty after all retries, taskId=${taskId}`);
               setMessages(prev => [...prev, {
                 id: crypto.randomUUID(), role: "assistant" as const,
                 text: "Det komplette svar kunne ikke hentes automatisk. Prøv igen om lidt.",
@@ -1368,9 +1407,10 @@ export default function AiChatPage() {
               return;
             }
 
-            console.log(`${label} [OCR completed] ocrText=YES chars=${fullText.length}`);
+            console.log(`${label} [B] OCR completed — ocrText=YES chars=${fullText.length} taskId=${taskId}`);
+            console.log(`${label} [C] ocrText chars=${fullText.length} — proceeding to upgrade mutation`);
 
-            // ── Retry loop — up to 3 attempts, 2s between each ──────────────────
+            // ── [F/G/H] Retry loop — up to 3 attempts, 2s between each ─────────
             const upgradePayload = {
               text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
               attachments: [] as any[],
@@ -1388,26 +1428,29 @@ export default function AiChatPage() {
 
             for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
               if (attempt > 1) {
-                console.log(`${label} [Triggering complete answer] retry attempt ${attempt}/${MAX_ATTEMPTS} — waiting 2s`);
+                console.log(`${label} [F] retry attempt ${attempt}/${MAX_ATTEMPTS} — waiting 2s`);
                 await new Promise(r => setTimeout(r, 2_000));
               } else {
-                console.log(`${label} [Triggering complete answer] attempt ${attempt}/${MAX_ATTEMPTS}`);
+                console.log(`${label} [F] upgrade mutation attempt ${attempt}/${MAX_ATTEMPTS} taskId=${taskId}`);
               }
               try {
                 isUpgradeAttemptRef.current = true;
+                console.log(`${label} [F] calling mutateAsync for upgrade (attempt ${attempt})`);
                 await triggerUpgradeMutation(upgradePayload as any);
-                // onSuccess fires before mutateAsync resolves — log here is belt-and-suspenders
-                console.log(`${label} [Complete answer finished] mutation succeeded on attempt ${attempt}`);
+                // [G] success — onSuccess fires before mutateAsync resolves, this is belt-and-suspenders
+                console.log(`${label} [G] upgrade mutation succeeded on attempt ${attempt}`);
                 lastError = null;
                 break;
               } catch (attemptErr) {
+                // [H] per-attempt failure
                 lastError = attemptErr;
-                console.error(`${label} [Triggering complete answer] attempt ${attempt} failed:`, attemptErr);
+                console.error(`${label} [H] upgrade mutation attempt ${attempt} failed:`, attemptErr);
               }
             }
 
             if (lastError) {
-              console.error(`${label} [Complete answer finished — TERMINAL FAILURE] all ${MAX_ATTEMPTS} attempts exhausted`);
+              // [I] terminal: all mutation attempts failed
+              console.error(`${label} [I] terminal — all ${MAX_ATTEMPTS} upgrade mutation attempts failed, taskId=${taskId}`);
               setMessages(prev => [...prev, {
                 id: crypto.randomUUID(), role: "assistant" as const,
                 text: "Det komplette svar kunne ikke hentes automatisk. Det delvise svar ovenfor er fortsat gyldigt — prøv at sende dit spørgsmål igen.",
@@ -1415,7 +1458,8 @@ export default function AiChatPage() {
               }]);
             }
           } catch (err) {
-            console.error(`${label} upgrade IIFE threw unexpectedly:`, err);
+            // [I] terminal: unexpected IIFE exception — no silent swallow
+            console.error(`${label} [I] terminal — upgrade IIFE threw unexpectedly, taskId=${taskId}:`, err);
           }
         })();
       }
