@@ -1266,106 +1266,156 @@ export default function AiChatPage() {
       if (data?.conversation_id) setConversationId(data.conversation_id);
       setOcrStatusLabel(null);
 
-      // ── PATCH B upgrade: hvis vi brækkede på partial_ready, lyt videre efter completed ──
+      // ── UPGRADE: polling-based OCR completion detection (SSE through Vercel proxy is unreliable) ──
       const upgrade = pendingOcrUpgradeRef.current;
       if (upgrade) {
         pendingOcrUpgradeRef.current = null;
         const { taskId, filename, mime } = upgrade;
+        const upgradeId = crypto.randomUUID().slice(0, 8);
+        console.log(`[UPGRADE-${upgradeId}] Starting upgrade flow taskId=${taskId}`);
+        setOcrStatusLabel("Afventer fuld dokumentanalyse...");
         (async () => {
           try {
             const token = await getSessionToken().catch(() => null);
-            // Helper to trigger the upgrade chat
-            const triggerUpgrade = async (fullText: string) => {
-              if (!fullText.trim() || !chatMutateRef.current) return;
-              fullText = fullText.slice(0, 80_000);
+
+            // ── Helper: fire the upgrade chat mutation ──
+            const triggerUpgrade = (fullText: string) => {
+              console.log(`[UPGRADE-${upgradeId}] triggerUpgrade chars=${fullText.length} hasMutate=${!!chatMutateRef.current}`);
+              setOcrStatusLabel(null);
+              if (!chatMutateRef.current) {
+                console.error(`[UPGRADE-${upgradeId}] chatMutateRef.current is null — cannot fire upgrade`);
+                return;
+              }
               chatMutateRef.current({
                 text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
                 attachments: [],
                 _documentContextOverride: [{
                   filename, mime_type: mime,
                   char_count: fullText.length,
-                  extracted_text: fullText,
+                  extracted_text: fullText.slice(0, 80_000),
                   status: "ok",
                   source: "r2_ocr_async",
                 }],
               });
             };
 
-            // Helper to poll status
-            const pollStatus = async (): Promise<string | null> => {
+            // ── Helper: poll /api/ocr-status ──
+            // Returns: ocrText string (may be empty) if completed, "ERROR" if failed, null if still running
+            const pollOnce = async (): Promise<{ done: boolean; text: string; error: boolean }> => {
               try {
-                const statusHeaders: Record<string, string> = {};
-                if (token) statusHeaders["Authorization"] = `Bearer ${token}`;
-                const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: statusHeaders, credentials: "include" });
-                if (sr.ok) {
-                  const sd = await sr.json() as any;
-                  if (sd.status === "completed") {
-                    return sd.ocrText ?? sd.ocr_text ?? "";
-                  }
-                  if (sd.status === "failed" || sd.status === "dead_letter") {
-                    return "ERROR";
-                  }
+                const h: Record<string, string> = {};
+                if (token) h["Authorization"] = `Bearer ${token}`;
+                const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: h, credentials: "include" });
+                if (!sr.ok) {
+                  console.warn(`[UPGRADE-${upgradeId}] poll HTTP ${sr.status}`);
+                  return { done: false, text: "", error: false };
                 }
-              } catch { /* non-fatal */ }
-              return null;
+                const sd = await sr.json() as any;
+                console.log(`[UPGRADE-${upgradeId}] poll status=${sd.status} stage=${sd.stage ?? "-"} chars=${(sd.ocrText ?? "").length}`);
+                if (sd.status === "completed") {
+                  return { done: true, text: sd.ocrText ?? sd.ocr_text ?? "", error: false };
+                }
+                if (sd.status === "failed" || sd.status === "dead_letter") {
+                  return { done: true, text: "", error: true };
+                }
+              } catch (e) {
+                console.warn(`[UPGRADE-${upgradeId}] poll error:`, e);
+              }
+              return { done: false, text: "", error: false };
             };
 
-            // 1. Try SSE first
-            let sseCompleted = false;
+            // ── Step 1: Try SSE with short timeout (8s) ──
+            // If OCR is already completed when we connect, the immediate status check will push 'completed'.
+            // If not, we wait briefly then fall through to polling.
+            let sseDelivered = false;
             try {
-              const headers: Record<string, string> = { Accept: "text/event-stream" };
-              if (token) headers["Authorization"] = `Bearer ${token}`;
-              const res = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, { headers, credentials: "include" });
-              if (res.ok && res.body) {
-                const reader  = res.body.getReader();
-                const decoder = new TextDecoder();
-                let buf = "";
-                outerUpgrade: while (true) {
-                  const { done, value } = await reader.read();
-                  if (done) break;
-                  buf += decoder.decode(value, { stream: true });
-                  const lines = buf.split("\n");
-                  buf = lines.pop() ?? "";
-                  for (const line of lines) {
-                    if (!line.startsWith("data:")) continue;
-                    let evt: any;
-                    try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
-                    if (evt.type === "completed") {
-                      sseCompleted = true;
-                      reader.cancel().catch(() => {});
-                      let fullText: string = evt.data?.ocrText ?? "";
-                      if (!fullText.trim()) {
-                        const polled = await pollStatus();
-                        if (polled && polled !== "ERROR") fullText = polled;
+              const sseHeaders: Record<string, string> = { Accept: "text/event-stream" };
+              if (token) sseHeaders["Authorization"] = `Bearer ${token}`;
+              const ctrl = new AbortController();
+              const sseTimer = setTimeout(() => ctrl.abort(), 8_000);
+              console.log(`[UPGRADE-${upgradeId}] Connecting SSE ocr-task-stream`);
+              try {
+                const res = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, {
+                  headers: sseHeaders, credentials: "include", signal: ctrl.signal,
+                });
+                if (res.ok && res.body) {
+                  const reader  = res.body.getReader();
+                  const decoder = new TextDecoder();
+                  let buf = "";
+                  sseLoop: while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) { console.log(`[UPGRADE-${upgradeId}] SSE done`); break; }
+                    buf += decoder.decode(value, { stream: true });
+                    const lines = buf.split("\n");
+                    buf = lines.pop() ?? "";
+                    for (const line of lines) {
+                      if (!line.startsWith("data:")) continue;
+                      let evt: any;
+                      try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+                      console.log(`[UPGRADE-${upgradeId}] SSE evt=${evt.type}`);
+                      if (evt.type === "completed") {
+                        clearTimeout(sseTimer);
+                        sseDelivered = true;
+                        reader.cancel().catch(() => {});
+                        let fullText: string = evt.data?.ocrText ?? "";
+                        if (!fullText) {
+                          // ocrText missing in SSE event — fetch from status endpoint
+                          const p = await pollOnce();
+                          if (!p.error) fullText = p.text;
+                        }
+                        console.log(`[UPGRADE-${upgradeId}] SSE completed chars=${fullText.length}`);
+                        triggerUpgrade(fullText);
+                        break sseLoop;
                       }
-                      await triggerUpgrade(fullText);
-                      break outerUpgrade;
-                    }
-                    if (evt.type === "error") { 
-                      sseCompleted = true; // Stop polling
-                      reader.cancel().catch(() => {}); 
-                      break outerUpgrade; 
+                      if (evt.type === "error") {
+                        clearTimeout(sseTimer);
+                        console.warn(`[UPGRADE-${upgradeId}] SSE error: ${JSON.stringify(evt.data)}`);
+                        reader.cancel().catch(() => {});
+                        break sseLoop;
+                      }
                     }
                   }
+                } else {
+                  console.warn(`[UPGRADE-${upgradeId}] SSE not ok: ${res.status}`);
                 }
+              } catch (e: any) {
+                if (e?.name !== "AbortError") console.warn(`[UPGRADE-${upgradeId}] SSE error:`, e?.message);
+                else console.log(`[UPGRADE-${upgradeId}] SSE aborted after 8s timeout`);
+              } finally {
+                clearTimeout(sseTimer);
               }
-            } catch { /* SSE failed, fallback to polling */ }
+            } catch { /* outer SSE guard */ }
 
-            // 2. Fallback to polling if SSE disconnected prematurely (e.g. Vercel 30s timeout)
-            if (!sseCompleted) {
-              const start = Date.now();
-              const MAX_POLL_MS = 5 * 60 * 1000; // 5 minutes
-              while (Date.now() - start < MAX_POLL_MS) {
-                await new Promise(r => setTimeout(r, 5000));
-                const polled = await pollStatus();
-                if (polled === "ERROR") break;
-                if (polled) {
-                  await triggerUpgrade(polled);
+            // ── Step 2: Polling fallback ──
+            if (!sseDelivered) {
+              console.log(`[UPGRADE-${upgradeId}] Starting polling fallback`);
+              const tStart = Date.now();
+              const MAX_MS = 5 * 60 * 1000; // 5 minutes
+              let n = 0;
+              while (Date.now() - tStart < MAX_MS) {
+                await new Promise(r => setTimeout(r, 3_000));
+                n++;
+                console.log(`[UPGRADE-${upgradeId}] Poll #${n} t=${Math.round((Date.now()-tStart)/1000)}s`);
+                const { done, text, error } = await pollOnce();
+                if (error) {
+                  console.warn(`[UPGRADE-${upgradeId}] OCR failed — aborting upgrade`);
+                  setOcrStatusLabel(null);
+                  break;
+                }
+                if (done) {
+                  triggerUpgrade(text);
                   break;
                 }
               }
+              if (Date.now() - tStart >= MAX_MS) {
+                console.warn(`[UPGRADE-${upgradeId}] Polling timed out`);
+                setOcrStatusLabel(null);
+              }
             }
-          } catch { /* non-fatal upgrade failure */ }
+          } catch (e) {
+            console.error(`[UPGRADE] Upgrade flow error:`, e);
+            setOcrStatusLabel(null);
+          }
         })();
       }
     },
