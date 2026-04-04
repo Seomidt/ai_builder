@@ -26,6 +26,10 @@ export interface OcrStatusResponse {
   charCount?: number;
   errorReason?: string;
   stage?: string | null;
+  /** Number of document chunks processed so far (server-reported). */
+  chunksProcessed?: number;
+  /** Total number of chunks expected (server-reported, may be absent). */
+  totalChunks?: number;
 }
 
 export interface UpgradePollOptions {
@@ -43,6 +47,12 @@ export interface UpgradePollOptions {
   emptyTextRetryMs?: number;
   /** Optional logger — receives structured log entries. */
   logger?: (entry: UpgradeLogEntry) => void;
+  /**
+   * Optional progress callback — called on every "running/pending" poll.
+   * Receives the current status response and elapsed time (ms) so the caller
+   * can update a progress label without coupling UI code into this module.
+   */
+  onProgress?: (statusData: OcrStatusResponse, elapsedMs: number) => void;
 }
 
 export interface UpgradeLogEntry {
@@ -74,6 +84,7 @@ export async function pollForCompletedOcr(
     emptyTextRetries = 5,
     emptyTextRetryMs = 2_000,
     logger,
+    onProgress,
   } = opts;
 
   const label = `[upgrade:${taskId.slice(-8)}]`;
@@ -125,8 +136,10 @@ export async function pollForCompletedOcr(
       return "";
     }
 
-    // Still running / pending — backoff and poll again
-    log("info", `status=${s} stage=${statusData.stage ?? "-"} — polling in ${pollMs}ms`);
+    // Still running / pending — notify caller and backoff
+    const elapsedMs = Date.now() - (deadline - deadlineMs);
+    log("info", `status=${s} stage=${statusData.stage ?? "-"} chunks=${statusData.chunksProcessed ?? "-"} — polling in ${pollMs}ms`);
+    onProgress?.(statusData, elapsedMs);
     await sleep(pollMs);
     pollMs = Math.min(Math.floor(pollMs * backoffFactor), maxPollMs);
   }

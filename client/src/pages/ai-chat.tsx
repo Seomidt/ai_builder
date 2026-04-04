@@ -1380,6 +1380,7 @@ export default function AiChatPage() {
               }
             };
 
+            const upgradeStart = Date.now();
             const fullText = await pollForCompletedOcr(taskId, fetchStatus, {
               deadlineMs:       10 * 60 * 1_000,
               initialPollMs:    3_000,
@@ -1392,6 +1393,17 @@ export default function AiChatPage() {
                 if (level === "error")      console.error(msg, data ?? "");
                 else if (level === "warn")  console.warn(msg, data ?? "");
                 else                        console.log(msg, data ?? "");
+              },
+              onProgress: (statusData) => {
+                // Show live progress in the status bar while OCR is still running.
+                // Gives user visible proof the system is actively working on the rest of the document.
+                const elapsedSec  = Math.round((Date.now() - upgradeStart) / 1000);
+                const chunks      = statusData.chunksProcessed;
+                const total       = statusData.totalChunks;
+                const chunkInfo   = chunks != null && chunks > 0
+                  ? (total != null && total > 0 ? ` (del ${chunks}/${total})` : ` (${chunks} dele indlæst)`)
+                  : "";
+                setOcrStatusLabel(`Analyserer resten af dokumentet${chunkInfo}... ${elapsedSec}s`);
               },
             });
 

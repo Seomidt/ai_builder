@@ -302,3 +302,68 @@ describe("Test 9 — polling contract: non-empty text is always returned if comp
       "error must reference the empty ocrText problem");
   });
 });
+
+// ─── Test 10: onProgress callback ─────────────────────────────────────────────
+
+describe("Test 10 — onProgress callback provides live progress updates", () => {
+  it("calls onProgress on each running/pending poll with statusData and elapsedMs", async () => {
+    const fetcher = buildFetcher([
+      { status: "running",   stage: "ocr", chunksProcessed: 1, totalChunks: 4 },
+      { status: "running",   stage: "ocr", chunksProcessed: 2, totalChunks: 4 },
+      { status: "running",   stage: "ocr", chunksProcessed: 3, totalChunks: 4 },
+      { status: "completed", ocrText: "Fuldt dokument klar.", charCount: 400 },
+    ]);
+    const progressCalls: Array<{ chunksProcessed?: number; elapsedMs: number }> = [];
+    const result = await pollForCompletedOcr("task-018", fetcher, {
+      ...FAST_OPTS,
+      onProgress: (data, elapsedMs) => {
+        progressCalls.push({ chunksProcessed: data.chunksProcessed, elapsedMs });
+      },
+    });
+    assert.equal(result, "Fuldt dokument klar.");
+    assert.equal(progressCalls.length, 3, "onProgress must be called once per running poll");
+    assert.equal(progressCalls[0].chunksProcessed, 1);
+    assert.equal(progressCalls[1].chunksProcessed, 2);
+    assert.equal(progressCalls[2].chunksProcessed, 3);
+    assert.ok(progressCalls.every(c => typeof c.elapsedMs === "number"), "elapsedMs must be a number");
+  });
+
+  it("does NOT call onProgress when status is completed (only running/pending triggers it)", async () => {
+    const fetcher = buildFetcher([
+      { status: "completed", ocrText: "Tekst klar.", charCount: 100 },
+    ]);
+    const progressCalls: number[] = [];
+    const result = await pollForCompletedOcr("task-019", fetcher, {
+      ...FAST_OPTS,
+      onProgress: () => progressCalls.push(1),
+    });
+    assert.equal(result, "Tekst klar.");
+    assert.equal(progressCalls.length, 0, "onProgress must not fire for completed status");
+  });
+
+  it("works correctly when onProgress is not provided (optional callback)", async () => {
+    const fetcher = buildFetcher([
+      { status: "running",   stage: "ocr", chunksProcessed: 1 },
+      { status: "completed", ocrText: "Tekst.", charCount: 50 },
+    ]);
+    // No onProgress provided — must not throw
+    const result = await pollForCompletedOcr("task-020", fetcher, { ...FAST_OPTS });
+    assert.equal(result, "Tekst.");
+  });
+
+  it("chunksProcessed and totalChunks are passed through intact", async () => {
+    const fetcher = buildFetcher([
+      { status: "running", stage: "ocr", chunksProcessed: 2, totalChunks: 5 },
+      { status: "completed", ocrText: "Komplet.", charCount: 200 },
+    ]);
+    let capturedData: { chunks?: number; total?: number } = {};
+    await pollForCompletedOcr("task-021", fetcher, {
+      ...FAST_OPTS,
+      onProgress: (data) => {
+        capturedData = { chunks: data.chunksProcessed, total: data.totalChunks };
+      },
+    });
+    assert.equal(capturedData.chunks, 2);
+    assert.equal(capturedData.total, 5);
+  });
+});
