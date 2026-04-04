@@ -1,10 +1,24 @@
 import { describe, it, expect } from "vitest";
 import { shouldStartPartialAnswer } from "../../shared/partial-answer-gate";
 
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Pads `base` by repeating it until the total length is >= MIN_TEXT_CHARS (4 000).
+ * Required because the gate now requires substantial OCR text to avoid triggering
+ * provisional answers from short cover pages.
+ */
+function pad(base: string): string {
+  const target = 4_100;
+  let result = base;
+  while (result.length < target) result += "\n" + base;
+  return result;
+}
+
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 /** Realistic intro/front-page OCR text — company cover, TOC, welcome language. */
-const INTRO_TEXT = `
+const INTRO_TEXT_SHORT = `
 Velkomst og præsentation af vores virksomhed
 Hvem er vi: Vi er en erfaren entreprisevirksomhed med fokus på kvalitet.
 Vores vision og mission er at levere de bedste løsninger til markedet.
@@ -18,8 +32,11 @@ Kernekompetencer og organisation: Vi har over 200 ansatte fordelt på tværs af 
 Kontaktoplysninger: info@byggefirma.dk, tlf. 88 88 88 88
 `.trim();
 
+/** Padded to >= 4 000 chars — still contains intro signals so intro_content fires. */
+const INTRO_TEXT = pad(INTRO_TEXT_SHORT);
+
 /** Realistic contract section OCR text — with price, builder, risk, etc. */
-const CONTRACT_PRICE_TEXT = `
+const CONTRACT_PRICE_TEXT_SHORT = `
 Entrepriseaftale — Totalentreprise
 Entreprisesum: kr. 14.750.000 ekskl. moms
 Betalingsbetingelser: 30 dage netto fra faktura
@@ -30,7 +47,10 @@ Bygherre: Andersen Holding A/S, CVR 12345678
 Totalentreprenør: Bygma Entreprise ApS, CVR 87654321
 `.trim();
 
-const CONTRACT_BUILDER_TEXT = `
+/** Padded to >= 4 000 chars — still has price + builder signals. */
+const CONTRACT_PRICE_TEXT = pad(CONTRACT_PRICE_TEXT_SHORT);
+
+const CONTRACT_BUILDER_TEXT_SHORT = `
 Aftalens parter — entreprisekontrakt nr. 2024-087
 Bygherre: Niels Jensen Ejendomme A/S, CVR 11223344, Industrivej 4, 8000 Aarhus C
 Totalentreprenør: Hansen & Sønner Entreprise ApS, CVR 55667788, Byggervej 12, 9000 Aalborg
@@ -41,7 +61,10 @@ Parterne er enige om at opfylde samtlige forpligtelser i henhold til kontrakten.
 Eventuelle tvister afgøres ved voldgift i henhold til reglerne i Voldgiftsnævnet for Bygge og Anlæg.
 `.trim();
 
-const CONTRACT_RISK_TEXT = `
+/** Padded to >= 4 000 chars — has builder signals, NO price/risk signals. */
+const CONTRACT_BUILDER_TEXT = pad(CONTRACT_BUILDER_TEXT_SHORT);
+
+const CONTRACT_RISK_TEXT_SHORT = `
 Aftalens betingelser og ansvar
 § 8 Forsinkelse og dagbod
 Såfremt aflevering sker efter aftalt frist, betaler Totalentreprenøren dagbod
@@ -51,18 +74,21 @@ Garanti og mangelansvar gælder i 5 år fra aflevering.
 Selvrisiko ved forsikringsskader: 50.000 kr.
 `.trim();
 
-/** Short text — below minimum length threshold. */
+/** Padded to >= 4 000 chars — has risk/dagbod signals. */
+const CONTRACT_RISK_TEXT = pad(CONTRACT_RISK_TEXT_SHORT);
+
+/** Short text — below minimum length threshold (< 4 000 chars). */
 const SHORT_TEXT = "Her er lidt tekst.";
 
-/** Non-intro, non-contract text with no specific signals. */
-const GENERIC_LONG_TEXT = `
+/** Non-intro, non-contract text with no specific signals — padded to >= 4 000. */
+const GENERIC_LONG_TEXT = pad(`
 Dette er en lang tekst om et byggeprojekt i Aarhus. Projektet omfatter etablering
 af nye kontorbygninger med moderne faciliteter. Byggeriet forventes at starte i
 foråret og afsluttes inden udgangen af næste år. Der vil blive anvendt bæredygtige
 materialer og energibesparende løsninger. Alle faser er planlagt i samarbejde med
 de relevante myndigheder. Projektet er godkendt af kommunen og vil skabe ca. 50
 nye arbejdspladser i regionen. Detaljerede tegninger er udarbejdet af arkitektfirmaet.
-`.trim();
+`.trim());
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 

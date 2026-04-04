@@ -1335,7 +1335,6 @@ export default function AiChatPage() {
       // Besked er allerede tilføjet til messages via streaming-callback.
       // Her sætter vi kun conversationId og rydder OCR-status.
       if (data?.conversation_id) setConversationId(data.conversation_id);
-      setOcrStatusLabel(null);
 
       // Reset upgrade flag — mutation succeeded (whether initial or upgrade)
       // NOTE: intentionally reset BEFORE checking pendingOcrUpgradeRef so the upgrade
@@ -1350,6 +1349,10 @@ export default function AiChatPage() {
       if (upgrade) {
         pendingOcrUpgradeRef.current = null;
         const { taskId, filename, mime } = upgrade;
+
+        // Show status IMMEDIATELY — before the first poll (3 s away) — so the user
+        // never sees a blank gap between provisional answer and progress indicator.
+        setOcrStatusLabel("Analyserer resten af dokumentet...");
 
         console.log(`[upgrade:${taskId.slice(-8)}] onSuccess: upgrade ref consumed — starting IIFE for "${filename}"`);
 
@@ -1474,6 +1477,9 @@ export default function AiChatPage() {
             console.error(`${label} [I] terminal — upgrade IIFE threw unexpectedly, taskId=${taskId}:`, err);
           }
         })();
+      } else {
+        // No upgrade pending — clear any leftover OCR status from the initial request.
+        setOcrStatusLabel(null);
       }
     },
     onError: (err: any) => {
@@ -1608,12 +1614,17 @@ export default function AiChatPage() {
               {messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)}
               {chatMutation.isPending && !ocrStatusLabel && !hasStreamingMessage && <TypingIndicator />}
               {ocrStatusLabel && (
-                <div className="flex items-center gap-2 px-4 py-2 text-sm text-muted-foreground animate-pulse" data-testid="status-ocr-pending">
-                  <svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
-                  {ocrStatusLabel}
+                <div className="flex gap-3 px-4 py-3" data-testid="status-ocr-pending">
+                  <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0 mt-0.5">
+                    <svg className="w-4 h-4 animate-spin text-primary" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                  </div>
+                  <div className="flex flex-col gap-1 justify-center">
+                    <p className="text-sm font-medium text-foreground">{ocrStatusLabel}</p>
+                    <p className="text-xs text-muted-foreground">Svaret opdateres automatisk når dokumentet er fuldt indlæst</p>
+                  </div>
                 </div>
               )}
               {/* Phase 5Z.3 — Readiness banner shown during/after processing */}

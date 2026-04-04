@@ -30,8 +30,14 @@ export interface PartialAnswerGateResult {
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/** Minimum number of characters the partial OCR text must contain. */
-const MIN_TEXT_CHARS = 300;
+/**
+ * Minimum number of characters the partial OCR text must contain.
+ * 4 000 chars ≈ 600-800 words — ensures the first chunk is substantial enough
+ * to produce a useful provisional answer. Texts smaller than this (cover pages,
+ * short introductions, first-page only) are blocked and the system waits for
+ * the completed OCR instead.
+ */
+const MIN_TEXT_CHARS = 4_000;
 
 /**
  * Intro/cover-page signals.
