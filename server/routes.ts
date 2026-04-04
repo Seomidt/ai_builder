@@ -703,11 +703,11 @@ Action requested: ${ACTION_PROMPTS[body.action]}
 Return ONLY the refined text — no quotes, no explanation, no JSON. Just the improved text directly.`;
 
       const result = await runAiCall(
-        { feature: "expert-refine", useCase: "configuration_assist", tenantId: getOrgId(req), userId: getUserId(req) },
+        { feature: "expert-refine", useCase: "analysis", tenantId: getOrgId(req), userId: getUserId(req) },
         { systemPrompt, userInput: body.currentValue },
       );
 
-      res.json({ refined: result.content.trim() });
+      res.json({ refined: result.text.trim() });
     } catch (err) { handleError(res, err); }
   });
 
@@ -1057,7 +1057,7 @@ Generate names and content in ${langNote}.`;
 
       let parsed: unknown;
       try {
-        parsed = JSON.parse(result.content.replace(/```json\n?|\n?```/g, "").trim());
+        parsed = JSON.parse(result.text.replace(/```json\n?|\n?```/g, "").trim());
       } catch {
         return res.status(422).json({ error: "AI output could not be parsed. Please try again." });
       }
