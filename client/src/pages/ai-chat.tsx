@@ -10,7 +10,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { apiRequest, getDirectApiBase } from "@/lib/queryClient";
+import { apiRequest } from "@/lib/queryClient";
 import { getSessionToken } from "@/lib/supabase";
 import { pollForCompletedOcr } from "@shared/upgrade-chain";
 import { shouldStartPartialAnswer } from "@shared/partial-answer-gate";
@@ -991,10 +991,7 @@ export default function AiChatPage() {
                 const sseHeaders: Record<string, string> = { Accept: "text/event-stream" };
                 if (token) sseHeaders["Authorization"] = `Bearer ${token}`;
 
-                const _ocrDirectBase = getDirectApiBase();
-                const _ocrStreamUrl = `${_ocrDirectBase}/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`;
-                console.log(`[TRACE-2ocr-sse][${traceId}] SSE direct=${!!_ocrDirectBase} url=${_ocrStreamUrl.slice(0, 80)}`);
-                const sseRes = await fetch(_ocrStreamUrl, {
+                const sseRes = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, {
                   headers: sseHeaders,
                   credentials: "include",
                   signal: AbortSignal.timeout(OCR_TIMEOUT),
@@ -1090,8 +1087,7 @@ export default function AiChatPage() {
                               console.log(`[OCR:completed] taskId=${taskId} fallback retry ${ri}/${FETCH_RETRIES} — waiting 2s`);
                               await new Promise(r => setTimeout(r, 2_000));
                             }
-                            const _retryBase = getDirectApiBase();
-                            const sr = await apiRequest("GET", `${_retryBase}/api/ocr-status?id=${taskId}`).catch(() => null);
+                            const sr = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch(() => null);
                             const fetched: any = sr ? await sr.json().catch(() => null) : null;
                             const fetchedLen = fetched?.ocrText?.length ?? 0;
                             console.log(`[OCR:completed] taskId=${taskId} fallback fetch retry=${ri} fetched_chars=${fetchedLen} status=${fetched?.status ?? "null"}`);
@@ -1159,8 +1155,7 @@ export default function AiChatPage() {
                   await new Promise<void>((r) => setTimeout(r, pollMs));
 
                   const elapsedSec = Math.round((Date.now() - ocrStart) / 1000);
-                  const _pollFallbackBase = getDirectApiBase();
-                  const pollRes = await apiRequest("GET", `${_pollFallbackBase}/api/ocr-status?id=${taskId}`).catch((e: any) => {
+                  const pollRes = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch((e: any) => {
                     console.warn(`[TRACE-2ocr][${traceId}] poll error: ${e?.message}`);
                     return null;
                   });
@@ -1304,32 +1299,16 @@ export default function AiChatPage() {
       let doneData: (ChatResponse & { _trace?: any }) | null = null;
 
       try {
-        const _directBase = getDirectApiBase();
-        const _streamUrl = `${_directBase}/api/chat/stream`;
-        const _streamToken = await getSessionToken().catch(() => null);
-        const _streamHeaders: Record<string, string> = { "Content-Type": "application/json" };
-        if (_streamToken) _streamHeaders["Authorization"] = `Bearer ${_streamToken}`;
-        console.log(`[TRACE-3b][${traceId}] SSE direct=${!!_directBase} url=${_streamUrl.slice(0, 60)}`);
-        const res = await fetch(_streamUrl, {
-          method: "POST",
-          headers: _streamHeaders,
-          credentials: "include",
-          body: JSON.stringify({
-            message: fullMessage,
-            conversation_id: conversationId ?? null,
-            document_context: documentContext,
-            context: {
-              document_ids: payload.documentIds ?? [],
-              preferred_expert_id: null,
-            },
-            ...(payload.triggerKey ? { idempotency_key: `${payload.triggerKey}:${fullMessage.slice(0, 64)}` } : {}),
-          }),
+        const res = await apiRequest("POST", "/api/chat/stream", {
+          message: fullMessage,
+          conversation_id: conversationId ?? null,
+          document_context: documentContext,
+          context: {
+            document_ids: payload.documentIds ?? [],
+            preferred_expert_id: null,
+          },
+          ...(payload.triggerKey ? { idempotency_key: `${payload.triggerKey}:${fullMessage.slice(0, 64)}` } : {}),
         });
-        if (!res.ok) {
-          let errCode = "UNKNOWN_ERROR", errMsg = res.statusText;
-          try { const b = await res.json() as any; errCode = b.error_code ?? errCode; errMsg = b.message ?? errMsg; } catch {}
-          throw Object.assign(new Error(errMsg), { errorCode: errCode });
-        }
 
         const reader  = res.body!.getReader();
         const decoder = new TextDecoder();
@@ -1476,8 +1455,7 @@ export default function AiChatPage() {
               try {
                 const h: Record<string, string> = {};
                 if (token) h["Authorization"] = `Bearer ${token}`;
-                const _pollBase = getDirectApiBase();
-                const sr = await fetch(`${_pollBase}/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: h, credentials: "include" });
+                const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: h, credentials: "include" });
                 if (!sr.ok) {
                   console.warn(`[UPGRADE-${upgradeId}] poll HTTP ${sr.status}`);
                   if (sr.status === 401 || sr.status === 403) return { done: true, text: "", error: true };

@@ -44,10 +44,6 @@ async function bearerHeaders(
 }
 
 export function getDirectApiBase(): string {
-  if (typeof window === "undefined") return "";
-  const env = (import.meta.env.VITE_API_DIRECT_URL as string | undefined) ?? "";
-  if (env) return env.replace(/\/$/, "");
-  if (window.location.hostname.endsWith("blissops.com")) return "https://blissops-production.up.railway.app";
   return "";
 }
 
