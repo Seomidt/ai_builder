@@ -1,9 +1,11 @@
 /**
  * api/_src/chat-stream.ts — Vercel Serverless SSE Streaming Handler
  *
- * Direct OpenAI streaming — NO Railway dependency.
- * Mirrors the logic from api/_src/chat.ts but uses stream:true for
- * real-time token delivery via SSE (Server-Sent Events).
+ * Direct OpenAI-compatible streaming — NO Railway dependency.
+ * Supports progressive "delsvar" (partial answers) for large documents:
+ *   - Delsvar 1: quick answer from first ~5000 chars (2-3s TTFT)
+ *   - Delsvar 2: complete answer from full document
+ * Uses gemini-2.5-flash for document analysis (much faster TTFT than GPT-4.1-mini).
  *
  * Route: POST /api/chat-stream
  * Client receives: delta, status, gated, done, error events
@@ -30,6 +32,11 @@ function resolveVercelModel(key: keyof typeof AI_MODEL_ROUTES = "default") {
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 const SUPABASE_URL   = process.env.SUPABASE_URL   ?? "";
 const SUPABASE_SVC   = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+
+// ── Large document threshold ──────────────────────────────────────────────────
+const LARGE_DOC_CHARS     = 5_000;   // above this → use delsvar strategy
+const DELSVAR1_SLICE      = 5_000;   // chars for quick first answer
+const MAX_DOC_CHARS       = 80_000;  // hard cap for full document
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface Expert {
@@ -151,12 +158,87 @@ async function persistTurn(params: {
   return convId as string;
 }
 
+// ── OpenAI-compatible streaming helper ────────────────────────────────────────
+async function streamOpenAI(
+  model: string,
+  systemPrompt: string,
+  userContent: string,
+  sendEvent: (data: object) => void,
+  signal?: AbortSignal,
+): Promise<{ text: string; promptTokens: number; completionTokens: number; latencyMs: number }> {
+  const t0 = Date.now();
+  const streamRes = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.2,
+      max_tokens: 2000,
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userContent },
+      ],
+    }),
+    signal,
+  });
+
+  if (!streamRes.ok) {
+    const txt = await streamRes.text().catch(() => streamRes.statusText);
+    throw new Error(`OpenAI ${streamRes.status}: ${txt}`);
+  }
+
+  let fullText = "";
+  let promptTokens = 0;
+  let completionTokens = 0;
+
+  const reader = (streamRes.body as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const text = decoder.decode(value, { stream: true });
+      sseBuffer += text;
+      const lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop()!;
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const raw = line.slice(6).trim();
+        if (raw === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(raw);
+          const delta = parsed.choices?.[0]?.delta?.content ?? "";
+          if (delta) {
+            fullText += delta;
+            sendEvent({ type: "delta", text: delta });
+          }
+          if (parsed.usage) {
+            promptTokens     = parsed.usage.prompt_tokens     ?? 0;
+            completionTokens = parsed.usage.completion_tokens ?? 0;
+          }
+        } catch { /* skip malformed chunks */ }
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+
+  return { text: fullText, promptTokens, completionTokens, latencyMs: Date.now() - t0 };
+}
+
 // ── SSE Streaming Handler ─────────────────────────────────────────────────────
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
-  // CORS preflight
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
-  // SSE headers — must be set BEFORE any data is sent
+  // SSE headers
   res.writeHead(200, {
     "Content-Type":      "text/event-stream",
     "Cache-Control":     "no-cache, no-transform",
@@ -279,8 +361,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       sendEvent({ type: "gated", routeType: "no_context", message: "Du skal uploade et dokument for at kunne validere." });
       return res.end();
     }
-
-    // Grounded use case without document → block
     if (isGroundedUseCase(useCase) && docCtx.length === 0) {
       sendEvent({ type: "gated", routeType: "no_context", message: "Jeg kan ikke finde det i jeres interne data." });
       return res.end();
@@ -293,148 +373,146 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       : docCtx.length > 0                   ? "attachment_first"
       :                                        "expert_auto";
 
-    // ── Step 4: System prompt ─────────────────────────────────────────────────
-    let systemPrompt: string;
-    if (docCtx.length > 0) {
-      systemPrompt = [
-        `Du er en AI-ekspert ved navn ${expert.name}.`,
-        `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
-        ``,
-        `=== ABSOLUT BINDENDE REGLER FOR DOKUMENTANALYSE ===`,
-        `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
-        `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
-        `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
-        `REGEL 4: Hvis svaret IKKE fremgår af dokumentet, siger du præcist: "Jeg kan ikke finde det i det uploadede dokument."`,
-        `REGEL 5: Hvis svaret fremgår af dokumentet, citerer du den relevante sætning direkte.`,
-        `REGEL 6: Du MÅ ALDRIG give generiske forklaringer eller bred kontekst, medmindre det fremgår af dokumentet.`,
-        `REGEL 7: Dit svar skal starte med den direkte konklusion, ikke med en forklaring.`,
-        `REGEL 8: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
-        `=== SLUT REGLER ===`,
-        ``,
-        `Svar altid på dansk.`,
-      ].join("\n");
-    } else {
-      systemPrompt = [
-        `Du er en AI-ekspert ved navn ${expert.name}.`,
-        expert.category    ? `Dit kompetenceområde er: ${expert.category}.`   : "",
-        expert.description ? `Om dig: ${expert.description}`                   : "",
-        "Svar altid på dansk med klare, præcise og hjælpsomme svar.",
-        "Basér dine svar på virksomhedens data, politikker og regler.",
-        "Angiv tydeligt hvis du er i tvivl om noget.",
-      ].filter(Boolean).join("\n");
-    }
+    // ── Step 4: System prompts ────────────────────────────────────────────────
+    const docSystemPrompt = [
+      `Du er en AI-ekspert ved navn ${expert.name}.`,
+      `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
+      ``,
+      `=== ABSOLUT BINDENDE REGLER FOR DOKUMENTANALYSE ===`,
+      `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
+      `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
+      `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
+      `REGEL 4: Hvis svaret IKKE fremgår af dokumentet, siger du præcist: "Jeg kan ikke finde det i det uploadede dokument."`,
+      `REGEL 5: Hvis svaret fremgår af dokumentet, citerer du den relevante sætning direkte.`,
+      `REGEL 6: Du MÅ ALDRIG give generiske forklaringer eller bred kontekst, medmindre det fremgår af dokumentet.`,
+      `REGEL 7: Dit svar skal starte med den direkte konklusion, ikke med en forklaring.`,
+      `REGEL 8: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
+      `=== SLUT REGLER ===`,
+      ``,
+      `Svar altid på dansk.`,
+    ].join("\n");
 
-    sendEvent({ type: "status", text: "Genererer svar...", routeType });
+    const normalSystemPrompt = [
+      `Du er en AI-ekspert ved navn ${expert.name}.`,
+      expert.category    ? `Dit kompetenceområde er: ${expert.category}.`   : "",
+      expert.description ? `Om dig: ${expert.description}`                   : "",
+      "Svar altid på dansk med klare, præcise og hjælpsomme svar.",
+      "Basér dine svar på virksomhedens data, politikker og regler.",
+      "Angiv tydeligt hvis du er i tvivl om noget.",
+    ].filter(Boolean).join("\n");
 
-    // ── Step 5: Build user content ────────────────────────────────────────────
-    let userContent: string;
-    if (docCtx.length > 0) {
-      const docTextFull = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
-      const docText = docTextFull.length > 40_000
-        ? docTextFull.slice(0, 40_000) + "\n\n[... dokument afkortet ...]"
+    // ── Step 5: Determine strategy ────────────────────────────────────────────
+    const docTextFull = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
+    const totalDocChars = docTextFull.length;
+    const isLargeDoc = docCtx.length > 0 && totalDocChars > LARGE_DOC_CHARS;
+
+    // Choose model: gemini-2.5-flash for documents (fast TTFT), gpt-4.1-mini for normal chat
+    const route = docCtx.length > 0
+      ? resolveVercelModel("expert.chat.doc" as keyof typeof AI_MODEL_ROUTES)
+      : resolveVercelModel("expert.chat" as keyof typeof AI_MODEL_ROUTES);
+
+    console.log(`[chat-stream] model=${route.model} isLargeDoc=${isLargeDoc} totalDocChars=${totalDocChars} routeType=${routeType}`);
+
+    // ── Accumulate total tokens across delsvar calls ──────────────────────────
+    let totalPromptTokens = 0;
+    let totalCompletionTokens = 0;
+    let totalLatencyMs = 0;
+    let fullAnswer = "";
+
+    if (isLargeDoc) {
+      // ══════════════════════════════════════════════════════════════════════════
+      // DELSVAR STRATEGY: Progressive answers for large documents
+      // ══════════════════════════════════════════════════════════════════════════
+
+      // ── Delsvar 1: Quick answer from first chunk ────────────────────────────
+      const chunk1 = docTextFull.slice(0, DELSVAR1_SLICE);
+      const delsvar1Prompt = docSystemPrompt + `\n\nBEMÆRK: Du har kun modtaget de første ${DELSVAR1_SLICE} tegn af dokumentet. Giv et hurtigt foreløbigt svar baseret på det du kan se. Start dit svar med "**Foreløbigt svar (baseret på første del af dokumentet):**\n\n".`;
+      const delsvar1Content = `DOKUMENT (del 1 af ${Math.ceil(totalDocChars / DELSVAR1_SLICE)}):\n\n${chunk1}\n\n---\n\nSPØRGSMÅL: ${message}`;
+
+      sendEvent({ type: "status", text: "Læser første del af dokumentet...", routeType });
+
+      const result1 = await streamOpenAI(route.model, delsvar1Prompt, delsvar1Content, sendEvent);
+      totalPromptTokens     += result1.promptTokens;
+      totalCompletionTokens += result1.completionTokens;
+      totalLatencyMs        += result1.latencyMs;
+      fullAnswer            += result1.text;
+
+      console.log(`[chat-stream] delsvar1 done: ${result1.text.length} chars, ${result1.latencyMs}ms`);
+
+      // ── Delsvar 2: Complete answer from full document ───────────────────────
+      const fullDocText = totalDocChars > MAX_DOC_CHARS
+        ? docTextFull.slice(0, MAX_DOC_CHARS) + "\n\n[... dokument afkortet ...]"
         : docTextFull;
-      userContent = `DOKUMENT:\n\n${docText}\n\n---\n\n${message}`;
+
+      // Send separator + status before delsvar 2
+      sendEvent({ type: "delta", text: "\n\n---\n\n" });
+      sendEvent({ type: "status", text: "Analyserer hele dokumentet...", routeType });
+
+      const delsvar2Prompt = docSystemPrompt + `\n\nBEMÆRK: Du har nu det FULDE dokument. Giv et komplet og endeligt svar. Start dit svar med "**Komplet svar (baseret på hele dokumentet):**\n\n". Hvis dit svar er det samme som det foreløbige, sig blot "Svaret er uændret — se ovenfor."`;
+      const delsvar2Content = `DOKUMENT (komplet):\n\n${fullDocText}\n\n---\n\nSPØRGSMÅL: ${message}`;
+
+      const result2 = await streamOpenAI(route.model, delsvar2Prompt, delsvar2Content, sendEvent);
+      totalPromptTokens     += result2.promptTokens;
+      totalCompletionTokens += result2.completionTokens;
+      totalLatencyMs        += result2.latencyMs;
+      fullAnswer            += "\n\n---\n\n" + result2.text;
+
+      console.log(`[chat-stream] delsvar2 done: ${result2.text.length} chars, ${result2.latencyMs}ms`);
+
+    } else if (docCtx.length > 0) {
+      // ══════════════════════════════════════════════════════════════════════════
+      // SMALL DOCUMENT: Single call with full document (fast enough)
+      // ══════════════════════════════════════════════════════════════════════════
+      const docText = totalDocChars > MAX_DOC_CHARS
+        ? docTextFull.slice(0, MAX_DOC_CHARS) + "\n\n[... dokument afkortet ...]"
+        : docTextFull;
+      const userContent = `DOKUMENT:\n\n${docText}\n\n---\n\n${message}`;
+
+      sendEvent({ type: "status", text: "Genererer svar...", routeType });
+
+      const result = await streamOpenAI(route.model, docSystemPrompt, userContent, sendEvent);
+      totalPromptTokens     = result.promptTokens;
+      totalCompletionTokens = result.completionTokens;
+      totalLatencyMs        = result.latencyMs;
+      fullAnswer            = result.text;
+
     } else {
-      userContent = message;
+      // ══════════════════════════════════════════════════════════════════════════
+      // NO DOCUMENT: Normal expert chat
+      // ══════════════════════════════════════════════════════════════════════════
+      sendEvent({ type: "status", text: "Genererer svar...", routeType });
+
+      const result = await streamOpenAI(route.model, normalSystemPrompt, message, sendEvent);
+      totalPromptTokens     = result.promptTokens;
+      totalCompletionTokens = result.completionTokens;
+      totalLatencyMs        = result.latencyMs;
+      fullAnswer            = result.text;
     }
 
-    // ── Step 6: Stream OpenAI response ────────────────────────────────────────
-    const route = resolveVercelModel("expert.chat" as keyof typeof AI_MODEL_ROUTES);
-    console.log(`[chat-stream] model=${route.model} provider=${route.provider} routeType=${routeType}`);
+    console.log(`[chat-stream] completed len=${fullAnswer.length} latency=${totalLatencyMs}ms tokens=${totalPromptTokens}+${totalCompletionTokens} model=${route.model}`);
 
-    const t0 = Date.now();
-    const streamRes = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model:       route.model,
-        temperature: 0.2,
-        max_tokens:  2000,
-        stream:      true,
-        stream_options: { include_usage: true },
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user",   content: userContent },
-        ],
-      }),
-    });
-
-    if (!streamRes.ok) {
-      const txt = await streamRes.text().catch(() => streamRes.statusText);
-      console.error(`[chat-stream] OpenAI error ${streamRes.status}: ${txt}`);
-      sendEvent({ type: "error", errorCode: "AI_EXECUTION_FAILED", message: "AI-eksperten kunne ikke svare." });
-      return res.end();
-    }
-
-    // ── Parse SSE stream from OpenAI ──────────────────────────────────────────
-    let fullText = "";
-    let promptTokens = 0;
-    let completionTokens = 0;
-
-    const reader = (streamRes.body as ReadableStream<Uint8Array>).getReader();
-    const decoder = new TextDecoder();
-    let sseBuffer = "";
-
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const text = decoder.decode(value, { stream: true });
-        sseBuffer += text;
-        const lines = sseBuffer.split("\n");
-        sseBuffer = lines.pop()!;
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const raw = line.slice(6).trim();
-          if (raw === "[DONE]") continue;
-          try {
-            const parsed = JSON.parse(raw);
-            const delta = parsed.choices?.[0]?.delta?.content ?? "";
-            if (delta) {
-              fullText += delta;
-              sendEvent({ type: "delta", text: delta });
-            }
-            // Capture usage from final chunk
-            if (parsed.usage) {
-              promptTokens     = parsed.usage.prompt_tokens     ?? 0;
-              completionTokens = parsed.usage.completion_tokens ?? 0;
-            }
-          } catch { /* skip malformed chunks */ }
-        }
-      }
-    } finally {
-      reader.cancel().catch(() => {});
-    }
-
-    const aiLatencyMs = Date.now() - t0;
-    console.log(`[chat-stream] completed len=${fullText.length} latency=${aiLatencyMs}ms tokens=${promptTokens}+${completionTokens}`);
-
-    // ── Step 7: Assess answer ─────────────────────────────────────────────────
+    // ── Assess answer ─────────────────────────────────────────────────────────
     const warnings: string[] = [];
-    if (fullText.length < 5) warnings.push("Svaret er meget kort.");
+    if (fullAnswer.length < 5) warnings.push("Svaret er meget kort.");
     const combinedDocText = docCtx.map(d => d.extracted_text).join(" ");
-    const confidence = deriveConfidence(fullText, warnings, docCtx.length > 0 ? combinedDocText : undefined);
+    const confidence = deriveConfidence(fullAnswer, warnings, docCtx.length > 0 ? combinedDocText : undefined);
     const needsManual = confidence === "low";
 
-    // ── Step 8: Persist conversation (non-fatal) ──────────────────────────────
+    // ── Persist conversation (non-fatal) ──────────────────────────────────────
     let conversationId: string = body.conversation_id ?? crypto.randomUUID();
     try {
       conversationId = await persistTurn({
         organizationId: orgId, userId, expertId: expert.id,
-        userMessage: message, answer: fullText,
+        userMessage: message, answer: fullAnswer,
         existingConvId: body.conversation_id ?? null,
-        latencyMs: aiLatencyMs, confidence,
-        promptTokens, completionTokens,
+        latencyMs: totalLatencyMs, confidence,
+        promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
       });
     } catch (e) {
       console.error("[chat-stream] persist failed (non-fatal):", (e as Error).message);
     }
 
-    // ── Step 9: Usage logging (fire-and-forget) ───────────────────────────────
+    // ── Usage logging (fire-and-forget) ───────────────────────────────────────
     void (async () => {
       try {
         const { logAiUsage } = await import("../../server/lib/ai/usage");
@@ -442,16 +520,18 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         const { estimateAiCost } = await import("../../server/lib/ai/costs");
         const { pricing, source: pricingSource, version: pricingVersion } = await loadPricing(route.provider, route.model);
         const actualCostUsd = estimateAiCost({
-          usage: { input_tokens: promptTokens, output_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
+          usage: { input_tokens: totalPromptTokens, output_tokens: totalCompletionTokens, total_tokens: totalPromptTokens + totalCompletionTokens },
           pricing,
         }) ?? 0;
         await logAiUsage({
           tenantId: orgId, userId,
           requestId: body.idempotency_key ?? crypto.randomUUID(),
-          feature: "expert.chat.stream", routeKey: route.key,
+          feature: isLargeDoc ? "expert.chat.doc.delsvar" : "expert.chat.stream",
+          routeKey: route.key,
           provider: route.provider, model: route.model,
-          promptTokens, completionTokens, totalTokens: promptTokens + completionTokens,
-          status: "success", latencyMs: aiLatencyMs,
+          promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
+          totalTokens: totalPromptTokens + totalCompletionTokens,
+          status: "success", latencyMs: totalLatencyMs,
           estimatedCostUsd: actualCostUsd, actualCostUsd,
           pricingSource, pricingVersion,
           inputPreview: message.slice(0, 200),
@@ -468,25 +548,27 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       }
     })();
 
-    // ── Step 10: Send done event ──────────────────────────────────────────────
+    // ── Send done event ──────────────────────────────────────────────────────
     const _isUpgradeCall = (body.document_context ?? []).some((d: any) => d.source === "r2_ocr_async");
     const _sComplt = _isUpgradeCall ? "complete" : (docCtx.length > 0 ? "partial" : "complete");
 
     sendEvent({
       type:                    "done",
-      answer:                  fullText,
+      answer:                  fullAnswer,
       conversation_id:         conversationId,
       route_type:              routeType,
       expert:                  { id: expert.id, name: expert.name, category: expert.category ?? null },
       used_sources:            [],
       used_rules:              [],
       warnings,
-      latency_ms:              aiLatencyMs,
+      latency_ms:              totalLatencyMs,
       confidence_band:         confidence,
       needs_manual_review:     needsManual,
       routing_explanation:     routingExplanation,
       answer_completeness:     _sComplt,
       refinement_generation:   _isUpgradeCall ? 3 : 1,
+      model_used:              route.model,
+      delsvar_count:           isLargeDoc ? 2 : 1,
     });
 
     res.end();

@@ -64,6 +64,7 @@ export const AI_MODEL_ROUTES = {
   "summarize.fast":   { provider: "openai"    as AiProviderKey, model: "gpt-4.1-mini" },
   "ops.analysis":     { provider: "openai"    as AiProviderKey, model: "gpt-4.1" },
   "extraction.struct":{ provider: "openai"    as AiProviderKey, model: "gpt-4.1-mini" },
+  "expert.chat.doc":  { provider: "openai"    as AiProviderKey, model: "gemini-2.5-flash" },
 } satisfies Record<string, AiModelRoute>;
 
 export type AiModelKey = keyof typeof AI_MODEL_ROUTES;
