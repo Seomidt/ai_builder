@@ -846,7 +846,7 @@ function TabDatakilder({ expertId }: { expertId: string }) {
               <FormField control={form.control} name="sourceName" render={({ field }) => (
                 <FormItem>
                   <FormLabel>Navn *</FormLabel>
-                  <FormControl><Input placeholder="f.eks. Forsikringspolice 2024" data-testid="input-source-name" {...field} /></FormControl>
+                  <FormControl><Input placeholder="f.eks. Interne retningslinjer 2024" data-testid="input-source-name" {...field} /></FormControl>
                   <FormMessage />
                 </FormItem>
               )} />

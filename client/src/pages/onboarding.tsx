@@ -45,7 +45,7 @@ const STEPS = [
     label: "AI Ekspert",
     icon: Brain,
     title: "Opret jeres første AI ekspert",
-    description: "Opret en AI specialist — f.eks. en Forsikringsspecialist eller Supportekspert.",
+    description: "Opret en AI specialist — f.eks. en Supportekspert, Kontraktassistent eller Complianceassistent.",
     color: "text-primary",
     bg: "rgba(34,211,238,0.10)",
     border: "rgba(34,211,238,0.18)",
@@ -108,7 +108,7 @@ function OrgStep({
       <div className="space-y-1.5">
         <Label>Workspace navn</Label>
         <Input
-          placeholder="f.eks. Acme Insurance"
+          placeholder="f.eks. Acme ApS"
           value={orgName}
           onChange={(e) => {
             setOrgName(e.target.value);
@@ -149,14 +149,14 @@ function ExpertStep({
   onChange: (name: string) => void;
 }) {
   const [name, setName] = useState("");
-  const EXAMPLES = ["Forsikringsspecialist", "Supportekspert", "Compliance Ekspert", "Salgsassistent"];
+  const EXAMPLES = ["Supportekspert", "Kontraktassistent", "Compliance Ekspert", "Salgsassistent"];
 
   return (
     <div className="space-y-5">
       <div className="space-y-1.5">
         <Label>Navn på AI ekspert</Label>
         <Input
-          placeholder="f.eks. Forsikringsspecialist"
+          placeholder="f.eks. Supportekspert"
           value={name}
           onChange={(e) => { setName(e.target.value); onChange(e.target.value); }}
           data-testid="input-onboarding-expert-name"
@@ -189,7 +189,7 @@ function DataStep({ onChange }: { onChange: (name: string) => void }) {
       <div className="space-y-1.5">
         <Label>Navn på datakilde</Label>
         <Input
-          placeholder="f.eks. Forsikringsvilkår 2024"
+          placeholder="f.eks. Interne retningslinjer 2024"
           value={name}
           onChange={(e) => { setName(e.target.value); onChange(e.target.value); }}
           data-testid="input-onboarding-data-name"

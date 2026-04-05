@@ -446,7 +446,7 @@ export default function VidenData() {
                 <FormItem>
                   <FormLabel>Navn</FormLabel>
                   <FormControl>
-                    <Input placeholder="f.eks. Forsikringsvilkår 2024" data-testid="input-datasource-name" {...field} />
+                    <Input placeholder="f.eks. Interne retningslinjer 2024" data-testid="input-datasource-name" {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
@@ -455,7 +455,7 @@ export default function VidenData() {
                 <FormItem>
                   <FormLabel>Slug</FormLabel>
                   <FormControl>
-                    <Input placeholder="forsikringsvilkaar-2024" className="font-mono text-sm" data-testid="input-datasource-slug" {...field} />
+                    <Input placeholder="interne-retningslinjer-2024" className="font-mono text-sm" data-testid="input-datasource-slug" {...field} />
                   </FormControl>
                   <FormMessage />
                 </FormItem>

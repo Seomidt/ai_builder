@@ -1,5 +1,5 @@
 /**
- * LiveAIDemo — Insurance claims workflow simulation
+ * LiveAIDemo — Enterprise AI workflow simulation
  * Mobile-first, GPU-friendly, no animation libraries, no blur filters.
  * Pure CSS transitions + React state machine.
  */
@@ -36,8 +36,8 @@ const STEPS: Step[] = [
     accentColor: "cyan",
     duration: 2200,
     lines: [
-      { text: "insurance_policy.pdf", accent: "cyan" },
-      { text: "claim_documents.zip", accent: "cyan" },
+      { text: "company_handbook.pdf", accent: "cyan" },
+      { text: "policy_documents.zip", accent: "cyan" },
     ],
   },
   {
@@ -202,7 +202,7 @@ export function LiveAIDemo() {
           </div>
           <div className="flex items-center gap-1.5">
             <Clock className="w-3 h-3 text-slate-600" />
-            <span className="text-[10px] text-slate-600 font-mono">Insurance · Claims</span>
+            <span className="text-[10px] text-slate-600 font-mono">Enterprise · AI Ops</span>
           </div>
         </div>
 
