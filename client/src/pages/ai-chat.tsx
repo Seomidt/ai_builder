@@ -1286,9 +1286,9 @@ export default function AiChatPage() {
       const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";
 
       // ── TRACE STAGE 3: CHAT REQUEST (streaming) ───────────────────────────
-      console.log(`[TRACE-3][${traceId}] streaming /api/chat/stream message_len=${fullMessage.length} document_context_len=${documentContext.length}`);
+      console.log(`[TRACE-3][${traceId}] streaming /api/chat-stream message_len=${fullMessage.length} document_context_len=${documentContext.length}`);
 
-      // ── Step C: SSE-streaming til /api/chat/stream ─────────────────────────
+      // ── Step C: SSE-streaming til /api/chat-stream ──────────────────────────
       // Tilføj streaming-placeholder INDEN vi sender, så brugeren ser noget med det samme
       const streamMsgId = crypto.randomUUID();
       setMessages(prev => [...prev, {
@@ -1299,7 +1299,7 @@ export default function AiChatPage() {
       let doneData: (ChatResponse & { _trace?: any }) | null = null;
 
       try {
-        const res = await apiRequest("POST", "/api/chat/stream", {
+        const res = await apiRequest("POST", "/api/chat-stream", {
           message: fullMessage,
           conversation_id: conversationId ?? null,
           document_context: documentContext,
