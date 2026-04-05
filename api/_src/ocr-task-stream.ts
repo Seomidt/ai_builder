@@ -42,6 +42,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   const authHeader = req.headers.authorization ?? "";
 
+  const ac = new AbortController();
+  req.on("close", () => ac.abort());
+
   try {
     const upstream = await fetch(
       `${RAILWAY_URL}/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`,
@@ -51,6 +54,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
           "Authorization": authHeader,
           "Accept": "text/event-stream",
         },
+        signal: ac.signal,
       },
     );
 
@@ -86,9 +90,10 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     } catch {
     } finally {
       reader.cancel().catch(() => {});
-      res.end();
+      if (!res.writableEnded) res.end();
     }
   } catch (err: any) {
+    if (ac.signal.aborted) return;
     if (!res.headersSent) {
       res.writeHead(502, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error_code: "PROXY_ERROR", message: err?.message ?? "Kan ikke nå backend" }));
