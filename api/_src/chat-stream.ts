@@ -1,11 +1,13 @@
 /**
  * api/_src/chat-stream.ts — Vercel Serverless SSE Streaming Handler
  *
- * Direct OpenAI-compatible streaming — NO Railway dependency.
+ * Direct streaming — NO Railway dependency.
+ * - Documents: Gemini 2.5 Flash via Google Generative AI SDK (GEMINI_API_KEY)
+ * - Normal chat: GPT-4.1-mini via OpenAI API (OPENAI_API_KEY)
+ *
  * Supports progressive "delsvar" (partial answers) for large documents:
  *   - Delsvar 1: quick answer from first ~5000 chars (2-3s TTFT)
  *   - Delsvar 2: complete answer from full document
- * Uses gemini-2.5-flash for document analysis (much faster TTFT than GPT-4.1-mini).
  *
  * Route: POST /api/chat-stream
  * Client receives: delta, status, gated, done, error events
@@ -17,6 +19,7 @@ import { readBody } from "./_lib/response.ts";
 import { dbList } from "./_lib/db.ts";
 import { AI_MODEL_ROUTES } from "../../server/lib/ai/config.ts";
 import { isGroundedUseCase, type AiUseCase } from "../../server/lib/ai/types.ts";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 export const config = {
   supportsResponseStreaming: true,
@@ -30,8 +33,11 @@ function resolveVercelModel(key: keyof typeof AI_MODEL_ROUTES = "default") {
 }
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? "";
 const SUPABASE_URL   = process.env.SUPABASE_URL   ?? "";
 const SUPABASE_SVC   = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
+
+const GEMINI_MODEL = "gemini-2.5-flash";
 
 // ── Large document threshold ──────────────────────────────────────────────────
 const LARGE_DOC_CHARS     = 5_000;   // above this → use delsvar strategy
@@ -158,13 +164,12 @@ async function persistTurn(params: {
   return convId as string;
 }
 
-// ── OpenAI-compatible streaming helper ────────────────────────────────────────
+// ── OpenAI streaming helper (for normal chat without documents) ───────────────
 async function streamOpenAI(
   model: string,
   systemPrompt: string,
   userContent: string,
   sendEvent: (data: object) => void,
-  signal?: AbortSignal,
 ): Promise<{ text: string; promptTokens: number; completionTokens: number; latencyMs: number }> {
   const t0 = Date.now();
   const streamRes = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -184,7 +189,6 @@ async function streamOpenAI(
         { role: "user",   content: userContent },
       ],
     }),
-    signal,
   });
 
   if (!streamRes.ok) {
@@ -229,6 +233,52 @@ async function streamOpenAI(
     }
   } finally {
     reader.cancel().catch(() => {});
+  }
+
+  return { text: fullText, promptTokens, completionTokens, latencyMs: Date.now() - t0 };
+}
+
+// ── Gemini streaming helper (for document analysis) ───────────────────────────
+async function streamGemini(
+  systemPrompt: string,
+  userContent: string,
+  sendEvent: (data: object) => void,
+): Promise<{ text: string; promptTokens: number; completionTokens: number; latencyMs: number }> {
+  const t0 = Date.now();
+
+  if (!GEMINI_API_KEY) {
+    throw new Error("GEMINI_API_KEY is not configured — cannot use Gemini for document analysis");
+  }
+
+  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  const model = genAI.getGenerativeModel({
+    model: GEMINI_MODEL,
+    systemInstruction: systemPrompt,
+    generationConfig: {
+      temperature: 0.2,
+      maxOutputTokens: 2000,
+    },
+  });
+
+  const streamResult = await model.generateContentStream([
+    { text: userContent },
+  ]);
+
+  let fullText = "";
+  let promptTokens = 0;
+  let completionTokens = 0;
+
+  for await (const chunk of streamResult.stream) {
+    const delta = chunk.text() ?? "";
+    if (delta) {
+      fullText += delta;
+      sendEvent({ type: "delta", text: delta });
+    }
+    // Capture usage metadata if available
+    if (chunk.usageMetadata) {
+      promptTokens     = chunk.usageMetadata.promptTokenCount     ?? promptTokens;
+      completionTokens = chunk.usageMetadata.candidatesTokenCount ?? completionTokens;
+    }
   }
 
   return { text: fullText, promptTokens, completionTokens, latencyMs: Date.now() - t0 };
@@ -405,13 +455,13 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const docTextFull = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
     const totalDocChars = docTextFull.length;
     const isLargeDoc = docCtx.length > 0 && totalDocChars > LARGE_DOC_CHARS;
+    const hasDoc = docCtx.length > 0;
 
-    // Choose model: gemini-2.5-flash for documents (fast TTFT), gpt-4.1-mini for normal chat
-    const route = docCtx.length > 0
-      ? resolveVercelModel("expert.chat.doc" as keyof typeof AI_MODEL_ROUTES)
-      : resolveVercelModel("expert.chat" as keyof typeof AI_MODEL_ROUTES);
+    // Model: Gemini for documents, OpenAI for normal chat
+    const modelUsed = hasDoc ? GEMINI_MODEL : "gpt-4.1-mini";
+    const providerUsed = hasDoc ? "google" : "openai";
 
-    console.log(`[chat-stream] model=${route.model} isLargeDoc=${isLargeDoc} totalDocChars=${totalDocChars} routeType=${routeType}`);
+    console.log(`[chat-stream] model=${modelUsed} provider=${providerUsed} isLargeDoc=${isLargeDoc} totalDocChars=${totalDocChars} routeType=${routeType}`);
 
     // ── Accumulate total tokens across delsvar calls ──────────────────────────
     let totalPromptTokens = 0;
@@ -421,7 +471,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     if (isLargeDoc) {
       // ══════════════════════════════════════════════════════════════════════════
-      // DELSVAR STRATEGY: Progressive answers for large documents
+      // DELSVAR STRATEGY: Progressive answers for large documents (Gemini)
       // ══════════════════════════════════════════════════════════════════════════
 
       // ── Delsvar 1: Quick answer from first chunk ────────────────────────────
@@ -431,7 +481,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
       sendEvent({ type: "status", text: "Læser første del af dokumentet...", routeType });
 
-      const result1 = await streamOpenAI(route.model, delsvar1Prompt, delsvar1Content, sendEvent);
+      const result1 = await streamGemini(delsvar1Prompt, delsvar1Content, sendEvent);
       totalPromptTokens     += result1.promptTokens;
       totalCompletionTokens += result1.completionTokens;
       totalLatencyMs        += result1.latencyMs;
@@ -451,7 +501,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       const delsvar2Prompt = docSystemPrompt + `\n\nBEMÆRK: Du har nu det FULDE dokument. Giv et komplet og endeligt svar. Start dit svar med "**Komplet svar (baseret på hele dokumentet):**\n\n". Hvis dit svar er det samme som det foreløbige, sig blot "Svaret er uændret — se ovenfor."`;
       const delsvar2Content = `DOKUMENT (komplet):\n\n${fullDocText}\n\n---\n\nSPØRGSMÅL: ${message}`;
 
-      const result2 = await streamOpenAI(route.model, delsvar2Prompt, delsvar2Content, sendEvent);
+      const result2 = await streamGemini(delsvar2Prompt, delsvar2Content, sendEvent);
       totalPromptTokens     += result2.promptTokens;
       totalCompletionTokens += result2.completionTokens;
       totalLatencyMs        += result2.latencyMs;
@@ -459,9 +509,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
       console.log(`[chat-stream] delsvar2 done: ${result2.text.length} chars, ${result2.latencyMs}ms`);
 
-    } else if (docCtx.length > 0) {
+    } else if (hasDoc) {
       // ══════════════════════════════════════════════════════════════════════════
-      // SMALL DOCUMENT: Single call with full document (fast enough)
+      // SMALL DOCUMENT: Single Gemini call (fast enough)
       // ══════════════════════════════════════════════════════════════════════════
       const docText = totalDocChars > MAX_DOC_CHARS
         ? docTextFull.slice(0, MAX_DOC_CHARS) + "\n\n[... dokument afkortet ...]"
@@ -470,7 +520,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
       sendEvent({ type: "status", text: "Genererer svar...", routeType });
 
-      const result = await streamOpenAI(route.model, docSystemPrompt, userContent, sendEvent);
+      const result = await streamGemini(docSystemPrompt, userContent, sendEvent);
       totalPromptTokens     = result.promptTokens;
       totalCompletionTokens = result.completionTokens;
       totalLatencyMs        = result.latencyMs;
@@ -478,24 +528,24 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     } else {
       // ══════════════════════════════════════════════════════════════════════════
-      // NO DOCUMENT: Normal expert chat
+      // NO DOCUMENT: Normal expert chat (OpenAI)
       // ══════════════════════════════════════════════════════════════════════════
       sendEvent({ type: "status", text: "Genererer svar...", routeType });
 
-      const result = await streamOpenAI(route.model, normalSystemPrompt, message, sendEvent);
+      const result = await streamOpenAI("gpt-4.1-mini", normalSystemPrompt, message, sendEvent);
       totalPromptTokens     = result.promptTokens;
       totalCompletionTokens = result.completionTokens;
       totalLatencyMs        = result.latencyMs;
       fullAnswer            = result.text;
     }
 
-    console.log(`[chat-stream] completed len=${fullAnswer.length} latency=${totalLatencyMs}ms tokens=${totalPromptTokens}+${totalCompletionTokens} model=${route.model}`);
+    console.log(`[chat-stream] completed len=${fullAnswer.length} latency=${totalLatencyMs}ms tokens=${totalPromptTokens}+${totalCompletionTokens} model=${modelUsed}`);
 
     // ── Assess answer ─────────────────────────────────────────────────────────
     const warnings: string[] = [];
     if (fullAnswer.length < 5) warnings.push("Svaret er meget kort.");
     const combinedDocText = docCtx.map(d => d.extracted_text).join(" ");
-    const confidence = deriveConfidence(fullAnswer, warnings, docCtx.length > 0 ? combinedDocText : undefined);
+    const confidence = deriveConfidence(fullAnswer, warnings, hasDoc ? combinedDocText : undefined);
     const needsManual = confidence === "low";
 
     // ── Persist conversation (non-fatal) ──────────────────────────────────────
@@ -518,7 +568,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         const { logAiUsage } = await import("../../server/lib/ai/usage");
         const { loadPricing } = await import("../../server/lib/ai/pricing");
         const { estimateAiCost } = await import("../../server/lib/ai/costs");
-        const { pricing, source: pricingSource, version: pricingVersion } = await loadPricing(route.provider, route.model);
+        const { pricing, source: pricingSource, version: pricingVersion } = await loadPricing(providerUsed, modelUsed);
         const actualCostUsd = estimateAiCost({
           usage: { input_tokens: totalPromptTokens, output_tokens: totalCompletionTokens, total_tokens: totalPromptTokens + totalCompletionTokens },
           pricing,
@@ -526,9 +576,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         await logAiUsage({
           tenantId: orgId, userId,
           requestId: body.idempotency_key ?? crypto.randomUUID(),
-          feature: isLargeDoc ? "expert.chat.doc.delsvar" : "expert.chat.stream",
-          routeKey: route.key,
-          provider: route.provider, model: route.model,
+          feature: isLargeDoc ? "expert.chat.doc.delsvar" : (hasDoc ? "expert.chat.doc" : "expert.chat.stream"),
+          routeKey: hasDoc ? "expert.chat.doc" : "expert.chat",
+          provider: providerUsed, model: modelUsed,
           promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
           totalTokens: totalPromptTokens + totalCompletionTokens,
           status: "success", latencyMs: totalLatencyMs,
@@ -550,7 +600,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     // ── Send done event ──────────────────────────────────────────────────────
     const _isUpgradeCall = (body.document_context ?? []).some((d: any) => d.source === "r2_ocr_async");
-    const _sComplt = _isUpgradeCall ? "complete" : (docCtx.length > 0 ? "partial" : "complete");
+    const _sComplt = _isUpgradeCall ? "complete" : (hasDoc ? "partial" : "complete");
 
     sendEvent({
       type:                    "done",
@@ -567,7 +617,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       routing_explanation:     routingExplanation,
       answer_completeness:     _sComplt,
       refinement_generation:   _isUpgradeCall ? 3 : 1,
-      model_used:              route.model,
+      model_used:              modelUsed,
       delsvar_count:           isLargeDoc ? 2 : 1,
     });
 
