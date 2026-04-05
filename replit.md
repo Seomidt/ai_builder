@@ -121,7 +121,7 @@ tenant_member_permissions / tenant_member_departments → RBAC
 - **Multimedia:** `ffprobe` + `ffmpeg` (v6.1.2)
 - **Edge:** Cloudflare (WAF, rate limiting, SSL, DNS)
 - **Deploy:** Vercel (`seomidt-ai_builder`, prj_EBwBBKHXZoCqe2l7eznsojGaSmtV) → blissops.com
-- **SSE Streaming:** Frontend kalder `api.blissops.com` direkte for SSE-endpoints (`/api/chat/stream`, `/api/ocr-task-stream`, `/api/ocr-status`) — bypasser Vercel rewrite-proxy som bufferer SSE-responses. `getDirectApiBase()` i `client/src/lib/queryClient.ts` returnerer direkte Railway URL i produktion.
+- **SSE Streaming:** Dedikerede Vercel serverless functions (`api/chat/stream.js`, `api/ocr-task-stream.js`) proxyer SSE direkte til Railway med `supportsResponseStreaming: true` — bypasser Vercel rewrite + Cloudflare buffering. Alle andre API-kald bruger stadig Vercel rewrite → `api.blissops.com`. Build-scriptet bruger `cjsCompatFooterWithConfig` for SSE-handlers så `config` export bevares.
 
 ## AI Expert Edit Flow + Versioning (Phase 2)
 
