@@ -1405,6 +1405,11 @@ export default function AiChatPage() {
       // Her sætter vi kun conversationId og rydder OCR-status.
       if (data?.conversation_id) setConversationId(data.conversation_id);
 
+      if (isUpgradeAttemptRef.current) {
+        isUpgradeAttemptRef.current = false;
+        console.log(`[upgrade] onSuccess — upgrade mutation completed successfully`);
+      }
+
       // ── UPGRADE: polling-based OCR completion detection (SSE through Vercel proxy is unreliable) ──
       const upgrade = pendingOcrUpgradeRef.current;
       if (upgrade) {
@@ -1415,16 +1420,15 @@ export default function AiChatPage() {
         // Processing card in message bubble handles the visual — no need for bottom status label
         (async () => {
           const label = `[upgrade:${taskId.slice(-8)}]`;
+          const clearProcessingPlaceholder = () => {
+            setMessages(prev => prev.map(m =>
+              m.isProcessingPlaceholder ? { ...m, isProcessingPlaceholder: false } : m
+            ));
+          };
           try {
             const token = await getSessionToken().catch(() => null);
 
             // ── Helper: fire the upgrade chat mutation ──
-            const clearProcessingPlaceholder = () => {
-              setMessages(prev => prev.map(m =>
-                m.isProcessingPlaceholder ? { ...m, isProcessingPlaceholder: false } : m
-              ));
-            };
-
             const triggerUpgrade = (fullText: string) => {
               console.log(`[UPGRADE-${upgradeId}] triggerUpgrade chars=${fullText.length} hasMutate=${!!chatMutateRef.current}`);
               setOcrStatusLabel(null);
@@ -1542,7 +1546,10 @@ export default function AiChatPage() {
       // after all attempts are exhausted, avoiding duplicate error messages.
       if (isUpgradeAttemptRef.current) {
         isUpgradeAttemptRef.current = false;
-        console.error(`[upgrade] mutation attempt failed — retry loop will decide next action. code=${code} msg=${serverMsg.slice(0, 120)}`);
+        console.error(`[upgrade] mutation attempt failed — clearing placeholder. code=${code} msg=${serverMsg.slice(0, 120)}`);
+        setMessages(prev => prev.map(m =>
+          m.isProcessingPlaceholder ? { ...m, isProcessingPlaceholder: false } : m
+        ));
         return;
       }
 
