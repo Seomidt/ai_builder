@@ -2,15 +2,18 @@
  * Gemini 2.5 Flash multimodal extraction for media files.
  *
  * Supports: application/pdf, image/*, audio/*, video/*
- * Runs synchronously — no async queue needed for typical documents.
  *
- * Quality: Gemini reads PDF bytes directly (including embedded text AND
- * renders scanned pages via Vision), so native and scanned PDFs both work.
+ * WHY NO SDK:
+ *   @google/generative-ai SDK's generateContent() and generateContentStream()
+ *   both buffer the FULL HTTP response body before returning — causing 40-50s
+ *   delays for large PDFs. PERF logs confirmed T7→T8 gap of ~38,000ms.
+ *
+ *   Solution: Direct REST fetch to Gemini API with SSE line-by-line parsing.
+ *   fetch() returns as soon as HTTP headers arrive (~200ms), and we stream
+ *   response body in real-time without any SDK buffering.
  *
  * Env resolution: GEMINI_API_KEY → GOOGLE_GENERATIVE_AI_API_KEY
  */
-
-import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // ── Key resolution ─────────────────────────────────────────────────────────────
 
@@ -21,6 +24,11 @@ function getGeminiKey(): string {
 export function isGeminiAvailable(): boolean {
   return getGeminiKey().length > 0;
 }
+
+// ── Constants ──────────────────────────────────────────────────────────────────
+
+const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_REST_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
 // ── Result types ───────────────────────────────────────────────────────────────
 
@@ -33,8 +41,7 @@ export interface GeminiExtractionResult {
 }
 
 /**
- * PHASE 5Z.5 — Structured stream chunk emitted by extractWithGeminiStream().
- * Carries enough metadata to tie each delta back to its document, page, and model.
+ * Structured stream chunk emitted by extractWithGeminiStream().
  */
 export interface OcrStreamChunk {
   /** Incremental text token from Gemini (may be a few chars or a sentence). */
@@ -104,12 +111,58 @@ function estimateQuality(text: string): number {
   return 0.95;
 }
 
-// ── Main export ────────────────────────────────────────────────────────────────
+// ── REST helpers ──────────────────────────────────────────────────────────────
 
-const GEMINI_MODEL = "gemini-2.5-flash";
+/**
+ * Build the Gemini REST request body for multimodal content.
+ */
+function buildRequestBody(base64data: string, mimeType: string, prompt: string): object {
+  return {
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { inlineData: { data: base64data, mimeType } },
+          { text: prompt },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature:     0.1,
+      maxOutputTokens: 8192,
+      thinkingConfig: {
+        thinkingBudget: 0,  // DISABLE thinking → fast TTFT
+      },
+    },
+  };
+}
+
+/**
+ * Parse a single Gemini SSE data line and extract the text delta.
+ * Returns null if the line has no text content.
+ */
+function parseGeminiSseLine(raw: string): string | null {
+  if (!raw || raw === "[DONE]") return null;
+  try {
+    const parsed = JSON.parse(raw) as {
+      candidates?: Array<{
+        content?: { parts?: Array<{ text?: string }> };
+        finishReason?: string;
+      }>;
+    };
+    const parts = parsed.candidates?.[0]?.content?.parts;
+    if (!parts) return null;
+    return parts.map(p => p.text ?? "").join("") || null;
+  } catch {
+    return null;
+  }
+}
+
+// ── Main export: non-streaming (collects full text) ───────────────────────────
 
 /**
  * Extract text/content from a file buffer using Gemini multimodal.
+ * Uses streaming REST API internally for fast response, collects full text.
  *
  * @param buffer   Raw file bytes.
  * @param filename Original filename (used for MIME inference fallback).
@@ -126,25 +179,54 @@ export async function extractWithGemini(
     throw new Error("GEMINI_API_KEY is not configured — cannot run Gemini OCR");
   }
 
-  const genAI = new GoogleGenerativeAI(key);
-  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
-
   const base64data = buffer.toString("base64");
   const prompt     = buildPrompt(mimeType, filename);
+  const url        = `${GEMINI_REST_BASE}/${GEMINI_MODEL}:streamGenerateContent?alt=sse`;
 
-  const result = await model.generateContent([
-    {
-      inlineData: {
-        data:     base64data,
-        mimeType: mimeType,
-      },
+  const res = await fetch(url, {
+    method:  "POST",
+    headers: {
+      "Content-Type":   "application/json",
+      "x-goog-api-key": key,
     },
-    { text: prompt },
-  ]);
+    body: JSON.stringify(buildRequestBody(base64data, mimeType, prompt)),
+  });
 
-  const raw = result.response.text()?.trim() ?? "";
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`Gemini REST ${res.status}: ${errText}`);
+  }
+
+  // Collect full text from SSE stream
+  const reader  = (res.body as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = "";
+  let fullText  = "";
 
   const EMPTY_SIGNALS = ["[NO_TEXT_FOUND]", "[NO_SPEECH_FOUND]", "[NO_CONTENT_FOUND]"];
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      sseBuffer += decoder.decode(value, { stream: true });
+      const lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop()!;
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const raw = trimmed.slice(5).trim();
+        const delta = parseGeminiSseLine(raw);
+        if (delta) fullText += delta;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const raw = fullText.trim();
   if (!raw || EMPTY_SIGNALS.includes(raw)) {
     return { text: "", charCount: 0, model: GEMINI_MODEL, quality: 0 };
   }
@@ -159,14 +241,13 @@ export async function extractWithGemini(
 }
 
 /**
- * PHASE 5Z.5 — True streaming variant — yields structured OcrStreamChunk values
- * as Gemini produces them. Downstream consumers must NOT await full accumulation;
- * they must process each yielded chunk incrementally.
+ * True streaming variant — yields structured OcrStreamChunk values
+ * as Gemini produces them. Uses direct REST + SSE parsing (no SDK).
  *
  * @param buffer    Raw file bytes (single page recommended for lowest first-token latency).
  * @param filename  Original filename.
- * @param mimeType   MIME type string.
- * @param pageIndex  0-based page index within the document (-1 for non-paginated).
+ * @param mimeType  MIME type string.
+ * @param pageIndex 0-based page index within the document (-1 for non-paginated).
  * @yields OcrStreamChunk — incremental text delta + metadata. Never yields empty deltas.
  */
 export async function* extractWithGeminiStream(
@@ -180,28 +261,57 @@ export async function* extractWithGeminiStream(
     throw new Error("GEMINI_API_KEY is not configured — cannot run Gemini streaming OCR");
   }
 
-  const genAI      = new GoogleGenerativeAI(key);
-  const mdl        = genAI.getGenerativeModel({ model: GEMINI_MODEL });
   const base64data = buffer.toString("base64");
   const prompt     = buildPrompt(mimeType, filename);
+  const url        = `${GEMINI_REST_BASE}/${GEMINI_MODEL}:streamGenerateContent?alt=sse`;
+
+  // Direct fetch — returns immediately when HTTP headers arrive (no SDK buffering)
+  const res = await fetch(url, {
+    method:  "POST",
+    headers: {
+      "Content-Type":   "application/json",
+      "x-goog-api-key": key,
+    },
+    body: JSON.stringify(buildRequestBody(base64data, mimeType, prompt)),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`Gemini REST ${res.status}: ${errText}`);
+  }
+
+  const reader  = (res.body as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = "";
+  let streamSeq = 0;
 
   const EMPTY_SIGNALS = ["[NO_TEXT_FOUND]", "[NO_SPEECH_FOUND]", "[NO_CONTENT_FOUND]"];
 
-  const streamResult = await mdl.generateContentStream([
-    { inlineData: { data: base64data, mimeType } },
-    { text: prompt },
-  ]);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-  let streamSeq = 0;
-  for await (const chunk of streamResult.stream) {
-    const delta = chunk.text() ?? "";
-    if (!delta || EMPTY_SIGNALS.includes(delta.trim())) continue;
-    yield {
-      textDelta: delta,
-      pageIndex,
-      streamSeq: streamSeq++,
-      provider:  "gemini",
-      model:     GEMINI_MODEL,
-    };
+      sseBuffer += decoder.decode(value, { stream: true });
+      const lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop()!;
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const raw = trimmed.slice(5).trim();
+        const delta = parseGeminiSseLine(raw);
+        if (!delta || EMPTY_SIGNALS.includes(delta.trim())) continue;
+        yield {
+          textDelta: delta,
+          pageIndex,
+          streamSeq: streamSeq++,
+          provider:  "gemini",
+          model:     GEMINI_MODEL,
+        };
+      }
+    }
+  } finally {
+    reader.releaseLock();
   }
 }
