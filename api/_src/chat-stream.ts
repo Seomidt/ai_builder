@@ -19,7 +19,7 @@ import { readBody } from "./_lib/response.ts";
 import { dbList } from "./_lib/db.ts";
 import { AI_MODEL_ROUTES } from "../../server/lib/ai/config.ts";
 import { isGroundedUseCase, type AiUseCase } from "../../server/lib/ai/types.ts";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+// Gemini REST API — direct fetch with thinkingConfig.thinkingBudget=0
 
 export const config = {
   supportsResponseStreaming: true,
@@ -238,7 +238,7 @@ async function streamOpenAI(
   return { text: fullText, promptTokens, completionTokens, latencyMs: Date.now() - t0 };
 }
 
-// ── Gemini streaming helper (for document analysis) ───────────────────────────
+// ── Gemini streaming helper (direct REST API with thinking DISABLED) ──────────
 async function streamGemini(
   systemPrompt: string,
   userContent: string,
@@ -250,35 +250,82 @@ async function streamGemini(
     throw new Error("GEMINI_API_KEY is not configured — cannot use Gemini for document analysis");
   }
 
-  const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({
-    model: GEMINI_MODEL,
-    systemInstruction: systemPrompt,
-    generationConfig: {
-      temperature: 0.2,
-      maxOutputTokens: 2000,
-    },
+  // Use Gemini REST API directly so we can set thinkingConfig.thinkingBudget=0
+  // The @google/generative-ai SDK v0.24.1 does NOT support thinkingConfig
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
+
+  const geminiRes = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      system_instruction: {
+        parts: [{ text: systemPrompt }],
+      },
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: userContent }],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.2,
+        maxOutputTokens: 2000,
+        thinkingConfig: {
+          thinkingBudget: 0,   // DISABLE thinking → eliminates 30-60s delay
+        },
+      },
+    }),
   });
 
-  const streamResult = await model.generateContentStream([
-    { text: userContent },
-  ]);
+  if (!geminiRes.ok) {
+    const txt = await geminiRes.text().catch(() => geminiRes.statusText);
+    throw new Error(`Gemini ${geminiRes.status}: ${txt}`);
+  }
 
   let fullText = "";
   let promptTokens = 0;
   let completionTokens = 0;
 
-  for await (const chunk of streamResult.stream) {
-    const delta = chunk.text() ?? "";
-    if (delta) {
-      fullText += delta;
-      sendEvent({ type: "delta", text: delta });
+  // Parse SSE stream from Gemini
+  const reader = (geminiRes.body as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseBuffer += decoder.decode(value, { stream: true });
+      const lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop()!;
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const raw = line.slice(6).trim();
+        if (!raw || raw === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(raw);
+          // Extract text from candidates[0].content.parts[]
+          const parts = parsed.candidates?.[0]?.content?.parts ?? [];
+          for (const part of parts) {
+            // Skip thought parts (just in case)
+            if (part.thought) continue;
+            const delta = part.text ?? "";
+            if (delta) {
+              fullText += delta;
+              sendEvent({ type: "delta", text: delta });
+            }
+          }
+          // Capture usage metadata
+          if (parsed.usageMetadata) {
+            promptTokens     = parsed.usageMetadata.promptTokenCount     ?? promptTokens;
+            completionTokens = parsed.usageMetadata.candidatesTokenCount ?? completionTokens;
+          }
+        } catch { /* skip malformed chunks */ }
+      }
     }
-    // Capture usage metadata if available
-    if (chunk.usageMetadata) {
-      promptTokens     = chunk.usageMetadata.promptTokenCount     ?? promptTokens;
-      completionTokens = chunk.usageMetadata.candidatesTokenCount ?? completionTokens;
-    }
+  } finally {
+    reader.cancel().catch(() => {});
   }
 
   return { text: fullText, promptTokens, completionTokens, latencyMs: Date.now() - t0 };
