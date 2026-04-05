@@ -49,6 +49,7 @@ export function getApp(): Promise<express.Express> {
         "https://api.blissops.com",
         "https://admin.blissops.com",
         ...(process.env.VERCEL_URL ? [`https://${process.env.VERCEL_URL}`] : []),
+        ...(process.env.RAILWAY_PUBLIC_DOMAIN ? [`https://${process.env.RAILWAY_PUBLIC_DOMAIN}`] : []),
       ];
       app.use((req, res, next) => {
         const origin = req.headers.origin as string | undefined;

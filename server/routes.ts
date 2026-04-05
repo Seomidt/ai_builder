@@ -1979,7 +1979,10 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     res.flushHeaders();
 
     const sendEvent = (data: object) => {
-      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch { /* client disconnected */ }
+      try {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+        if (typeof (res as any).flush === "function") (res as any).flush();
+      } catch { /* client disconnected */ }
     };
 
     try {
