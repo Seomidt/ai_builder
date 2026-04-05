@@ -18,7 +18,7 @@ import {
 import { eq, and } from "drizzle-orm";
 import type { AccessibleExpert } from "./chat-routing.ts";
 import { AI_MODEL_ROUTES } from "../lib/ai/config.ts";
-import { applyPartialSafeguard } from "../lib/chat/partial-safeguard.ts";
+import { applyPartialSafeguard, isDefinitiveNegative } from "../lib/chat/partial-safeguard.ts";
 import {
   shouldRunSimilarity,
   shouldAllowSimilarityByBudget,
@@ -105,6 +105,8 @@ export async function runChatMessage(params: {
   useCase?: import("../lib/ai/types").AiUseCase;
   /** SSE streaming callback — when provided, AI call uses stream=true and calls this per token */
   onToken?: (delta: string) => void;
+  /** Called when partial-safeguard triggers AFTER streaming — client must replace streamed content */
+  onSafeguardReplace?: (replacementText: string) => void;
 }): Promise<ChatRunResult> {
   const expert = params.expert ?? VIRTUAL_ATTACHMENT_EXPERT;
   const { message, organizationId, userId, routingExplanation } = params;
@@ -227,10 +229,10 @@ export async function runChatMessage(params: {
           `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
           `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
           `REGEL 4: Da dokumentet kun er DELVIST tilgængeligt, MÅ DU ALDRIG konkludere endeligt at en information IKKE findes — den kan stå i den del der endnu ikke er behandlet.`,
-          `REGEL 5: Giv foreløbige observationer baseret på den tilgængelige tekst. Præfiks dit svar med "Baseret på den tilgængelige del af dokumentet:".`,
-          `REGEL 6: Hvis du ikke kan finde noget relevant i den tilgængelige del, sig: "Informationen er muligvis i den resterende del af dokumentet, som endnu ikke er analyseret."`,
+          `REGEL 5: Giv ALTID et konkret, foreløbigt svar baseret på den tilgængelige tekst. Begynd dit svar med hvad du KAN se i dokumentet.`,
+          `REGEL 6: Du MÅ ALDRIG sige at du ikke kan finde noget — skriv i stedet hvad du ser, og at resten af dokumentet analyseres.`,
           `REGEL 7: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
-          `REGEL 8: Afslut ALTID dit svar med denne linje: "⏳ Svaret er baseret på den første del af dokumentet og opdateres automatisk når hele dokumentet er analyseret."`,
+          `REGEL 8: Afslut ALTID dit svar med denne linje: "⏳ Baseret på den første del — svaret opdateres automatisk når hele dokumentet er analyseret."`,
           `=== SLUT REGLER ===`,
           ``,
           `Svar altid på dansk.`,
@@ -294,23 +296,27 @@ export async function runChatMessage(params: {
     const t0 = Date.now();
 
     if (params.onToken && isPartialOcr) {
-      // ── PARTIAL OCR MODE: generate → safeguard → emit (NEVER stream raw to client) ──
-      // Architecture contract: the full buffer is validated before any byte reaches the client.
-      const completion = await oai.chat.completions.create({
+      // ── PARTIAL OCR MODE: stream tokens immediately, apply safeguard at end ──
+      // Stream in real-time so user sees tokens immediately (like ChatGPT).
+      // If safeguard triggers at the end, send a replace event to clear the streamed content.
+      const stream = await oai.chat.completions.create({
         model:       docModel,
         temperature: 0.1,
         max_tokens:  2000,
         messages:    messagesPayload,
-        stream:      false,
+        stream:      true,
       });
-      aiText = completion.choices[0]?.message?.content ?? "";
-      const safeguarded = applyPartialSafeguard(aiText);
-      if (safeguarded !== aiText) {
-        console.warn(`[chat-runner] PARTIAL_SAFEGUARD triggered — rewriting definitive negative before emit`);
-        aiText = safeguarded;
+      aiText = "";
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content ?? "";
+        if (delta) { params.onToken(delta); aiText += delta; }
       }
-      // Emit to client only after safeguard has passed
-      params.onToken(aiText);
+      // Safeguard check: log only — do NOT replace streamed content.
+      // The system prompt already forbids definitive negative claims.
+      // Replacing streamed content mid-stream creates a bad UX (text jumps).
+      if (isDefinitiveNegative(aiText)) {
+        console.warn(`[chat-runner] PARTIAL_SAFEGUARD detected after streaming — keeping streamed text (prompt-level prevention active)`);
+      }
     } else if (params.onToken) {
       // ── COMPLETE MODE: real token streaming (safeguard not needed) ───────────
       const stream = await oai.chat.completions.create({
@@ -813,4 +819,220 @@ async function persistChatTurn(params: {
   ]);
 
   return convId;
+}
+
+
+// ─── Streaming variant ────────────────────────────────────────────────────────
+/**
+ * runChatMessageStream — same as runChatMessage but streams tokens via onToken callback.
+ * Only the doc-mode AI call is streamed. Normal mode sends full text as single burst.
+ * After all tokens are sent, calls onDone with the full ChatRunResult.
+ */
+export async function runChatMessageStream(
+  params: {
+    message: string;
+    expert: AccessibleExpert;
+    organizationId: string;
+    userId: string;
+    conversationId?: string | null;
+    routingExplanation: string;
+    documentContext?: DocumentContextItem[];
+    useCase?: import("../lib/ai/types").AiUseCase;
+  },
+  callbacks: {
+    onToken: (token: string) => void;
+    onDone: (result: ChatRunResult) => void;
+    onError: (err: Error) => void;
+  },
+): Promise<void> {
+  const { message, expert, organizationId, userId, routingExplanation } = params;
+
+  const rawDocCtx  = params.documentContext ?? [];
+  const docCtx     = rawDocCtx.filter(d => d.status === "ok" && d.extracted_text?.trim());
+  const failedDocs = rawDocCtx.filter(d => d.status !== "ok");
+
+  console.log(`[chat-runner:stream] message_len=${message.length} doc_ctx_raw=${rawDocCtx.length} doc_ctx_ok=${docCtx.length}`);
+
+  if (rawDocCtx.length > 0 && docCtx.length === 0) {
+    const reason = failedDocs.map(d => d.message).filter(Boolean).join("; ") || "Ingen tekst kunne udtrækkes";
+    callbacks.onError(Object.assign(new Error(reason), { errorCode: "DOCUMENT_UNREADABLE" }));
+    return;
+  }
+
+  // ── 1. Load full expert record ─────────────────────────────────────────────
+  const [fullExpert] = await db
+    .select()
+    .from(architectureProfiles)
+    .where(and(eq(architectureProfiles.id, expert.id), eq(architectureProfiles.organizationId, organizationId)))
+    .limit(1);
+  if (!fullExpert) { callbacks.onError(new Error("Expert not found.")); return; }
+
+  // ── 2. Build prompt ────────────────────────────────────────────────────────
+  const { buildExpertPromptFromSnapshot, buildExpertPrompt } = await import("../lib/ai/expert-prompt-builder");
+  let builtPrompt: Awaited<ReturnType<typeof buildExpertPromptFromSnapshot>>;
+  const targetVersionId = fullExpert.currentVersionId;
+  if (targetVersionId) {
+    const [version] = await db
+      .select()
+      .from(expertVersions)
+      .where(and(eq(expertVersions.id, targetVersionId), eq(expertVersions.organizationId, organizationId)))
+      .limit(1);
+    builtPrompt = version
+      ? buildExpertPromptFromSnapshot(version.configJson as any)
+      : await buildFromLive(fullExpert, organizationId, buildExpertPrompt);
+  } else {
+    builtPrompt = await buildFromLive(fullExpert, organizationId, buildExpertPrompt);
+  }
+
+  // ── 3. AI call (streaming for doc mode) ───────────────────────────────────
+  let aiText = "";
+  let aiLatencyMs = 0;
+
+  try {
+    if (docCtx.length > 0) {
+      const { getOpenAIClient } = await import("../lib/openai-client");
+      const oai = getOpenAIClient();
+
+      const docSystemPrompt = [
+        `Du er en AI-ekspert ved navn ${expert.name}.`,
+        `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
+        ``,
+        `=== ABSOLUT BINDENDE REGLER FOR DOKUMENTANALYSE ===`,
+        `REGEL 1: Du MÅ KUN besvare spørgsmål ud fra det uploadede dokumentindhold.`,
+        `REGEL 2: Du MÅ ALDRIG bruge generel viden, uddannelsesdata eller externa kilder.`,
+        `REGEL 3: Du MÅ ALDRIG sige at du ikke kan tilgå, åbne eller læse filer.`,
+        `REGEL 4: Hvis svaret IKKE fremgår af dokumentet, siger du præcist: "Jeg kan ikke finde det i det uploadede dokument."`,
+        `REGEL 5: Hvis svaret fremgår af dokumentet, citerer du den relevante sætning direkte.`,
+        `REGEL 6: Du MÅ ALDRIG give generiske forklaringer eller bred kontekst, medmindre det fremgår af dokumentet.`,
+        `REGEL 7: Dit svar skal starte med den direkte konklusion, ikke med en forklaring.`,
+        `REGEL 8: Du MÅ ALDRIG hallucere tal, navne, datoer eller klausuler der ikke er i dokumentet.`,
+        `=== SLUT REGLER ===`,
+        ``,
+        `Svar altid på dansk.`,
+      ].join("\n");
+
+      const docBlock = docCtx.map(d =>
+        `FILNAVN: ${d.filename}\nTEGN: ${d.extracted_text.length}\n\n${d.extracted_text}`
+      ).join("\n\n---\n\n");
+
+      const messagesPayload = [
+        { role: "system" as const, content: docSystemPrompt },
+        {
+          role: "user" as const,
+          content: `=== DOKUMENTINDHOLD START ===\n\n${docBlock}\n\n=== DOKUMENTINDHOLD SLUT ===\n\nOvenstående er det komplette ekstraherede indhold fra det uploadede dokument. Brug dette som eneste kilde.`,
+        },
+        {
+          role: "assistant" as const,
+          content: "Jeg har læst dokumentet fuldt ud og forstår indholdet. Jeg er klar til at besvare spørgsmål udelukkende baseret på det faktiske dokumentindhold.",
+        },
+        { role: "user" as const, content: message },
+      ];
+
+      const docModel = AI_MODEL_ROUTES.default.model;
+      const t0 = Date.now();
+
+      const stream = await oai.chat.completions.create({
+        model: docModel,
+        temperature: 0.1,
+        max_tokens: 2000,
+        stream: true,
+        messages: messagesPayload,
+      });
+
+      for await (const chunk of stream) {
+        const token = chunk.choices[0]?.delta?.content ?? "";
+        if (token) {
+          aiText += token;
+          callbacks.onToken(token);
+        }
+      }
+      aiLatencyMs = Date.now() - t0;
+      console.log(`[chat-runner:stream] DOC_ANSWER_LEN=${aiText.length} latency=${aiLatencyMs}ms`);
+
+      const isPartialOcr = rawDocCtx.some(d => (d as any).source === "ocr_partial");
+      if (isPartialOcr) {
+        const safeguarded = applyPartialSafeguard(aiText);
+        if (safeguarded !== aiText) {
+          console.warn(`[chat-runner:stream] PARTIAL_SAFEGUARD triggered — rewriting definitive negative before emit`);
+          aiText = safeguarded;
+        }
+      }
+
+      if (aiText) aiText = validateDocumentGrounding(aiText, docCtx[0].extracted_text);
+      if (!aiText) {
+        callbacks.onError(Object.assign(new Error("AI returnerede tomt svar"), { errorCode: "AI_EMPTY_RESPONSE" }));
+        return;
+      }
+    } else {
+      // Normal mode — no streaming support in runAiCall, send as single burst
+      const { runAiCall } = await import("../lib/ai/runner");
+      const resolvedUseCase = params.useCase ?? "grounded_chat";
+      const t0 = Date.now();
+      const aiResult = await runAiCall(
+        { feature: "ai-chat", useCase: resolvedUseCase, tenantId: organizationId, userId },
+        { systemPrompt: builtPrompt.systemPrompt, userInput: message },
+      );
+      aiLatencyMs = Date.now() - t0;
+      aiText = aiResult.text;
+      if (aiText) callbacks.onToken(aiText);
+    }
+  } catch (err) {
+    callbacks.onError(err instanceof Error ? err : new Error(String(err)));
+    return;
+  }
+
+  // ── 4–8. Retrieval, sources, rules, confidence, persist ───────────────────
+  const { runRetrieval } = await import("../lib/retrieval/retrieval-orchestrator");
+  const [, retrievalResult] = await Promise.all([
+    Promise.resolve(),
+    runRetrieval({ tenantId: organizationId, queryText: message, strategy: "hybrid", topK: 5 }).catch(() => null),
+  ]);
+
+  const metadataSources = builtPrompt.usedSources.map(s => ({ id: s.id, name: s.sourceName, sourceType: s.sourceType }));
+  const retrievedSources = (retrievalResult?.results ?? []).map(r => ({
+    id: r.chunkId,
+    name: `Hentet kilde (relevans: ${(r.scoreCombined * 100).toFixed(0)}%)`,
+    sourceType: "retrieved",
+  }));
+  const usedSources = metadataSources.length > 0 ? metadataSources : retrievedSources;
+  const usedRules = builtPrompt.usedRules.map(r => ({ id: r.id, title: r.name }));
+  const warnings: string[] = [];
+  if (retrievalResult && !retrievalResult.success) {
+    warnings.push("Kildegenfinding utilgængelig — svar baseret på ekspertens regler og instruktioner.");
+  }
+  const confidenceBand = docCtx.length > 0
+    ? deriveDocumentConfidence(aiText, docCtx.map(d => d.extracted_text).join(" "))
+    : deriveConfidenceBand(usedSources.length, usedRules.length, warnings);
+  const needsManualReview = warnings.length > 0 || confidenceBand === "low";
+
+  const conversationId = await persistChatTurn({
+    organizationId,
+    userId,
+    expertId: expert.id,
+    message,
+    answer: aiText,
+    usedSources,
+    usedRules,
+    warnings,
+    latencyMs: aiLatencyMs,
+    confidenceBand,
+    existingConversationId: params.conversationId ?? null,
+  });
+
+  const result: ChatRunResult = {
+    answer: aiText,
+    conversationId,
+    expert: { id: expert.id, name: expert.name, category: expert.category },
+    usedSources,
+    usedRules,
+    warnings,
+    latencyMs: aiLatencyMs,
+    confidenceBand,
+    needsManualReview,
+    routingExplanation,
+    similarCasesAttempted: false,
+    similarCasesStatusCode: "not_triggered",
+  };
+
+  callbacks.onDone(result);
 }

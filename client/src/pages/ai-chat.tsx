@@ -77,6 +77,8 @@ interface ChatMessage {
   isStreaming?: boolean;
   /** Phase 5Z.5 — true when a newer refined/final answer has superseded this one. */
   isSuperseded?: boolean;
+  /** OCR partial mode — show animated processing card instead of provisional text */
+  isProcessingPlaceholder?: boolean;
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -151,13 +153,17 @@ function RefinementBadge({
     );
   }
 
-  return (
-    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-blue-400 border-blue-400/30 bg-blue-400/10">
-      <TrendingUp className="w-3 h-3" />Forbedret
-      {coverage != null && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
-      {cacheHit && <span className="opacity-50 ml-0.5">·cache</span>}
-    </span>
-  );
+  if (generation === 2) {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border font-medium text-blue-400 border-blue-400/30 bg-blue-400/10">
+        <TrendingUp className="w-3 h-3" />Forbedret
+        {coverage != null && <span className="opacity-70 ml-0.5">({coverage}%)</span>}
+      </span>
+    );
+  }
+
+  // Delsvar badge removed — customers don't need to see partial-answer state
+  return null;
 }
 
 // ─── Validation parser ────────────────────────────────────────────────────────
@@ -517,9 +523,50 @@ function AttachmentChip({ file, onRemove }: { file: AttachedFile; onRemove?: () 
     </div>
   );
 }
-
-// ─── Message Bubble ───────────────────────────────────────────────────────────
-
+// ─── OCR Processing Card ───────────────────────────────────────────────────────────────────────────────
+/**
+ * Shown while OCR is still processing the full document.
+ * Replaces the old "Jeg har kun analyseret..." provisional text.
+ */
+function OcrProcessingCard() {
+  const [phase, setPhase] = useState(0);
+  const steps = [
+    "Læser dokumentets sider...",
+    "Analyserer tekst og struktur...",
+    "Identificerer nøgleoplysninger...",
+    "Forbereder fuldt svar...",
+  ];
+  useEffect(() => {
+    const t = setInterval(() => setPhase(p => (p + 1) % steps.length), 2800);
+    return () => clearInterval(t);
+  }, []);
+  return (
+    <div className="space-y-3 py-0.5">
+      <div className="flex items-center gap-2">
+        <svg className="w-4 h-4 animate-spin shrink-0 text-primary/70" fill="none" viewBox="0 0 24 24">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+        <span className="text-sm font-medium text-foreground">Analyserer dokument</span>
+      </div>
+      <p className="text-sm text-muted-foreground transition-all duration-500">
+        {steps[phase]}
+      </p>
+      <div className="flex gap-1 pt-0.5">
+        {steps.map((_, i) => (
+          <div
+            key={i}
+            className={cn(
+              "h-1 rounded-full transition-all duration-500",
+              i <= phase ? "bg-primary/60 flex-1" : "bg-muted flex-[0.4]",
+            )}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+// ─── Message Bubble ───────────────────────────────────────────────────────────────────────────────
 function MessageBubble({ msg }: { msg: ChatMessage }) {
   if (msg.role === "user") {
     return (
@@ -577,6 +624,17 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
                 {msg.text || <span className="text-muted-foreground text-xs">Skriver...</span>}
                 <span className="inline-block w-0.5 h-4 bg-primary/70 ml-0.5 align-middle animate-pulse" />
               </p>
+            ) : msg.isProcessingPlaceholder && !msg.isSuperseded ? (
+              <>
+                <AnswerCard response={msg.response!} text={msg.text} />
+                <div className="flex items-center gap-1.5 mt-2 text-xs text-amber-400/80">
+                  <svg className="w-3 h-3 animate-spin shrink-0" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Analyserer resten af dokumentet… svaret opdateres automatisk
+                </div>
+              </>
             ) : msg.response ? (
               <AnswerCard response={msg.response} text={msg.text} />
             ) : (
@@ -1107,7 +1165,7 @@ export default function AiChatPage() {
 
                   if (pollData.status === "running" || pollData.status === "pending") {
                     const sLabel   = stageLabel(pollData.stage);
-                    const progress = pollData.chunksProcessed > 0 ? ` · ${pollData.chunksProcessed} blokke` : "";
+                    const progress = ""; // chunksProcessed progress removed — always 0 for image-based PDFs
                     setOcrStatusLabel(`${sLabel}: ${file.name} (${elapsedSec}s${progress})`);
                   }
                   if (pollData.status === "running" && pollData.stage === "partial_ready" && pollData.ocrText?.trim()) {
@@ -1276,6 +1334,12 @@ export default function AiChatPage() {
               setMessages(prev => prev.map(m =>
                 m.id === streamMsgId ? { ...m, text: streamText } : m
               ));
+            } else if (event.type === "replace" && event.text) {
+              // Partial safeguard triggered server-side — replace streamed content with provisional text
+              streamText = event.text;
+              setMessages(prev => prev.map(m =>
+                m.id === streamMsgId ? { ...m, text: streamText } : m
+              ));
             } else if (event.type === "status" && event.text) {
               setOcrStatusLabel(event.text);
             } else if (event.type === "gated") {
@@ -1299,13 +1363,18 @@ export default function AiChatPage() {
             } else if (event.type === "done") {
               doneData = event as ChatResponse & { _trace?: any };
               const isRefined = (event.refinement_generation ?? 1) >= 2;
-              // Also supersede provisional when this is the upgrade mutation completing.
-              // isUpgradeAttemptRef.current is true throughout the upgrade mutation's streaming.
-              const isUpgradeCompletion = isUpgradeAttemptRef.current;
+              const isPartialOcrAnswer = event.answer_completeness === "partial";
               setMessages(prev => prev.map(m => {
                 if (m.id === streamMsgId) {
                   // Current message: finalise it
-                  return { ...m, text: streamText, isStreaming: false, response: doneData ?? undefined };
+                  // If partial OCR answer, mark as processing placeholder (shows animated card)
+                  return {
+                    ...m,
+                    text: streamText,
+                    isStreaming: false,
+                    response: doneData ?? undefined,
+                    isProcessingPlaceholder: isPartialOcrAnswer,
+                  };
                 }
                 // Supersede earlier assistant answers when a refined or upgrade answer arrives
                 if ((isRefined || isUpgradeCompletion) && m.role === "assistant" && !m.isError && !m.isStreaming && m.id !== streamMsgId) {
@@ -1336,145 +1405,95 @@ export default function AiChatPage() {
       // Her sætter vi kun conversationId og rydder OCR-status.
       if (data?.conversation_id) setConversationId(data.conversation_id);
 
-      // Reset upgrade flag — mutation succeeded (whether initial or upgrade)
-      // NOTE: intentionally reset BEFORE checking pendingOcrUpgradeRef so the upgrade
-      // IIFE's isUpgradeAttemptRef.current = true (set just before mutateAsync) is not
-      // overwritten by a stale onSuccess from a PREVIOUS mutation.
-      isUpgradeAttemptRef.current = false;
-
-      // ── Upgrade: partial_ready broke the initial SSE → now poll until completed ──
-      // Uses pollForCompletedOcr (shared/upgrade-chain.ts) which retries up to 8 min.
-      // Replaces the old SSE-based approach which timed out after 90s for large PDFs.
+      // ── UPGRADE: polling-based OCR completion detection (SSE through Vercel proxy is unreliable) ──
       const upgrade = pendingOcrUpgradeRef.current;
       if (upgrade) {
         pendingOcrUpgradeRef.current = null;
         const { taskId, filename, mime } = upgrade;
-
-        // Show status IMMEDIATELY — before the first poll (3 s away) — so the user
-        // never sees a blank gap between provisional answer and progress indicator.
-        setOcrStatusLabel("Analyserer resten af dokumentet...");
-
-        console.log(`[upgrade:${taskId.slice(-8)}] onSuccess: upgrade ref consumed — starting IIFE for "${filename}"`);
-
-        // Use mutateAsync so the retry loop can await each attempt.
-        // Captures directly from chatMutation — no ref indirection.
-        const triggerUpgradeMutation = chatMutation.mutateAsync;
-
+        const upgradeId = crypto.randomUUID().slice(0, 8);
+        console.log(`[UPGRADE-${upgradeId}] Starting upgrade flow taskId=${taskId}`);
+        // Processing card in message bubble handles the visual — no need for bottom status label
         (async () => {
           const label = `[upgrade:${taskId.slice(-8)}]`;
           try {
-            console.log(`${label} [A] polling /api/ocr-status for taskId=${taskId}`);
+            const token = await getSessionToken().catch(() => null);
 
-            // Build a fetchStatus function that calls /api/ocr-status with auth headers.
-            const fetchStatus = async (id: string) => {
-              const tok = await getSessionToken().catch(() => null);
-              const headers: Record<string, string> = tok ? { Authorization: `Bearer ${tok}` } : {};
-              const controller = new AbortController();
-              const timer = setTimeout(() => controller.abort(), 12_000);
-              try {
-                const sr = await fetch(
-                  `/api/ocr-status?id=${encodeURIComponent(id)}`,
-                  { headers, credentials: "include", signal: controller.signal },
-                );
-                if (!sr.ok) throw new Error(`ocr-status HTTP ${sr.status}`);
-                return sr.json();
-              } finally {
-                clearTimeout(timer);
+            // ── Helper: fire the upgrade chat mutation ──
+            const triggerUpgrade = (fullText: string) => {
+              console.log(`[UPGRADE-${upgradeId}] triggerUpgrade chars=${fullText.length} hasMutate=${!!chatMutateRef.current}`);
+              setOcrStatusLabel(null);
+              if (!chatMutateRef.current) {
+                console.error(`[UPGRADE-${upgradeId}] chatMutateRef.current is null — cannot fire upgrade`);
+                return;
               }
+              chatMutateRef.current({
+                text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
+                attachments: [],
+                _documentContextOverride: [{
+                  filename, mime_type: mime,
+                  char_count: fullText.length,
+                  extracted_text: fullText.slice(0, 80_000),
+                  status: "ok",
+                  source: "r2_ocr_async",
+                }],
+              });
             };
 
-            const upgradeStart = Date.now();
-            const fullText = await pollForCompletedOcr(taskId, fetchStatus, {
-              deadlineMs:       10 * 60 * 1_000,
-              initialPollMs:    3_000,
-              maxPollMs:        10_000,
-              backoffFactor:    1.4,
-              emptyTextRetries: 5,
-              emptyTextRetryMs: 2_000,
-              logger: ({ level, message, data }) => {
-                const msg = `${label} ${message}`;
-                if (level === "error")      console.error(msg, data ?? "");
-                else if (level === "warn")  console.warn(msg, data ?? "");
-                else                        console.log(msg, data ?? "");
-              },
-              onProgress: (statusData) => {
-                // Show live progress in the status bar while OCR is still running.
-                // Gives user visible proof the system is actively working on the rest of the document.
-                const elapsedSec  = Math.round((Date.now() - upgradeStart) / 1000);
-                const chunks      = statusData.chunksProcessed;
-                const total       = statusData.totalChunks;
-                const chunkInfo   = chunks != null && chunks > 0
-                  ? (total != null && total > 0 ? ` (del ${chunks}/${total})` : ` (${chunks} dele indlæst)`)
-                  : "";
-                setOcrStatusLabel(`Analyserer resten af dokumentet${chunkInfo}... ${elapsedSec}s`);
-              },
-            });
-
-            // [B/C] OCR completed result from pollForCompletedOcr
-            if (!fullText.trim()) {
-              // [I] terminal: OCR completed but text never arrived
-              console.error(`${label} [I] terminal — ocrText empty after all retries, taskId=${taskId}`);
-              setMessages(prev => [...prev, {
-                id: crypto.randomUUID(), role: "assistant" as const,
-                text: "Det komplette svar kunne ikke hentes automatisk. Prøv igen om lidt.",
-                timestamp: new Date(),
-              }]);
-              return;
-            }
-
-            console.log(`${label} [B] OCR completed — ocrText=YES chars=${fullText.length} taskId=${taskId}`);
-            console.log(`${label} [C] ocrText chars=${fullText.length} — proceeding to upgrade mutation`);
-
-            // ── [F/G/H] Retry loop — up to 3 attempts, 2s between each ─────────
-            const upgradePayload = {
-              text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
-              attachments: [] as any[],
-              _documentContextOverride: [{
-                filename, mime_type: mime,
-                char_count: fullText.length,
-                extracted_text: fullText,
-                status: "ok",
-                source: "r2_ocr_async",
-              }],
+            // ── Helper: poll /api/ocr-status ──
+            // Returns: ocrText string (may be empty) if completed, "ERROR" if failed, null if still running
+            const pollOnce = async (): Promise<{ done: boolean; text: string; error: boolean }> => {
+              try {
+                const h: Record<string, string> = {};
+                if (token) h["Authorization"] = `Bearer ${token}`;
+                const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: h, credentials: "include" });
+                if (!sr.ok) {
+                  console.warn(`[UPGRADE-${upgradeId}] poll HTTP ${sr.status}`);
+                  return { done: false, text: "", error: false };
+                }
+                const sd = await sr.json() as any;
+                console.log(`[UPGRADE-${upgradeId}] poll status=${sd.status} stage=${sd.stage ?? "-"} chars=${(sd.ocrText ?? "").length}`);
+                if (sd.status === "completed") {
+                  return { done: true, text: sd.ocrText ?? sd.ocr_text ?? "", error: false };
+                }
+                if (sd.status === "failed" || sd.status === "dead_letter") {
+                  return { done: true, text: "", error: true };
+                }
+              } catch (e) {
+                console.warn(`[UPGRADE-${upgradeId}] poll error:`, e);
+              }
+              return { done: false, text: "", error: false };
             };
 
-            const MAX_ATTEMPTS = 3;
-            let lastError: unknown = null;
-
-            for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-              if (attempt > 1) {
-                console.log(`${label} [F] retry attempt ${attempt}/${MAX_ATTEMPTS} — waiting 2s`);
-                await new Promise(r => setTimeout(r, 2_000));
-              } else {
-                console.log(`${label} [F] upgrade mutation attempt ${attempt}/${MAX_ATTEMPTS} taskId=${taskId}`);
-              }
-              try {
-                isUpgradeAttemptRef.current = true;
-                console.log(`${label} [F] calling mutateAsync for upgrade (attempt ${attempt})`);
-                await triggerUpgradeMutation(upgradePayload as any);
-                // [G] success — onSuccess fires before mutateAsync resolves, this is belt-and-suspenders
-                console.log(`${label} [G] upgrade mutation succeeded on attempt ${attempt}`);
-                lastError = null;
+            // ── Direct polling for OCR completion ──
+            // SSE through Vercel proxy is unreliable (30s timeout). Poll directly instead.
+            console.log(`[UPGRADE-${upgradeId}] Starting direct polling`);
+            const tStart = Date.now();
+            const MAX_MS = 5 * 60 * 1000; // 5 minutes
+            let n = 0;
+            let upgraded = false;
+            while (Date.now() - tStart < MAX_MS) {
+              await new Promise(r => setTimeout(r, 2_000));
+              n++;
+              console.log(`[UPGRADE-${upgradeId}] Poll #${n} t=${Math.round((Date.now()-tStart)/1000)}s`);
+              const { done, text, error } = await pollOnce();
+              if (error) {
+                console.warn(`[UPGRADE-${upgradeId}] OCR failed — aborting upgrade`);
+                setOcrStatusLabel(null);
                 break;
-              } catch (attemptErr) {
-                // [H] per-attempt failure
-                lastError = attemptErr;
-                console.error(`${label} [H] upgrade mutation attempt ${attempt} failed:`, attemptErr);
+              }
+              if (done) {
+                upgraded = true;
+                triggerUpgrade(text);
+                break;
               }
             }
-
-            if (lastError) {
-              // [I] terminal: all mutation attempts failed
-              console.error(`${label} [I] terminal — all ${MAX_ATTEMPTS} upgrade mutation attempts failed, taskId=${taskId}`);
-              setMessages(prev => [...prev, {
-                id: crypto.randomUUID(), role: "assistant" as const,
-                text: "Det komplette svar kunne ikke hentes automatisk. Det delvise svar ovenfor er fortsat gyldigt — prøv at sende dit spørgsmål igen.",
-                timestamp: new Date(),
-              }]);
+            if (!upgraded && Date.now() - tStart >= MAX_MS) {
+              console.warn(`[UPGRADE-${upgradeId}] Polling timed out after 5 minutes`);
+              setOcrStatusLabel(null);
             }
-          } catch (err) {
-            // [I] terminal: unexpected IIFE exception — no silent swallow
-            console.error(`${label} [I] terminal — upgrade IIFE threw unexpectedly, taskId=${taskId}:`, err);
+          } catch (e) {
+            console.error(`[UPGRADE] Upgrade flow error:`, e);
+            setOcrStatusLabel(null);
           }
         })();
       } else {
