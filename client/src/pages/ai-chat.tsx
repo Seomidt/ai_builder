@@ -1090,8 +1090,9 @@ export default function AiChatPage() {
                               console.log(`[OCR:completed] taskId=${taskId} fallback retry ${ri}/${FETCH_RETRIES} — waiting 2s`);
                               await new Promise(r => setTimeout(r, 2_000));
                             }
-                            const sr = await apiRequest("GET", `/api/ocr-status?id=${taskId}`).catch(() => null);
-                            const fetched: any = sr?.ok ? await sr.json().catch(() => null) : null;
+                            const _retryBase = getDirectApiBase();
+                            const sr = await apiRequest("GET", `${_retryBase}/api/ocr-status?id=${taskId}`).catch(() => null);
+                            const fetched: any = sr ? await sr.json().catch(() => null) : null;
                             const fetchedLen = fetched?.ocrText?.length ?? 0;
                             console.log(`[OCR:completed] taskId=${taskId} fallback fetch retry=${ri} fetched_chars=${fetchedLen} status=${fetched?.status ?? "null"}`);
                             if (fetched?.ocrText?.trim()) {
@@ -1481,6 +1482,7 @@ export default function AiChatPage() {
                 const sr = await fetch(`${_pollBase}/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: h, credentials: "include" });
                 if (!sr.ok) {
                   console.warn(`[UPGRADE-${upgradeId}] poll HTTP ${sr.status}`);
+                  if (sr.status === 401 || sr.status === 403) return { done: true, text: "", error: true };
                   return { done: false, text: "", error: false };
                 }
                 const sd = await sr.json() as any;
