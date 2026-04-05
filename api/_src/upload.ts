@@ -174,15 +174,50 @@ async function handleFinalize(
     return err(res, 403, "FORBIDDEN", "Ugyldig object key");
   }
 
-  // ── Manus-Only Strategy: Force all PDFs to async OCR ───────────────────────
-  // This prevents Vercel timeouts (121s+) and allows Manus to handle the 
-  // processing, model selection, and cost optimization in the background.
+  // ── PDF fast-path: try native text extraction first ─────────────────────────
+  // pdf-parse is fast (<1s) and works for text-based PDFs.
+  // Only fall back to the slow async OCR pipeline for scanned/image PDFs.
   const isPdf = contentType === "application/pdf" || filename.toLowerCase().endsWith(".pdf");
   if (isPdf) {
-    log("upload.finalize.manus_async_force", { tenantId, objectKey, filename, size });
+    const MIN_NATIVE_TEXT_CHARS = 120;
+    try {
+      const { r2Client: r2, R2_BUCKET: bucket } = await import("../../server/lib/r2/r2-client");
+      const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+      const r2Resp = await r2.send(new GetObjectCommand({ Bucket: bucket, Key: objectKey }));
+      const chunks: Buffer[] = [];
+      for await (const chunk of r2Resp.Body as AsyncIterable<Uint8Array>) {
+        chunks.push(Buffer.from(chunk));
+      }
+      const buffer = Buffer.concat(chunks);
+      const pdfParse = require("pdf-parse") as (buf: Buffer) => Promise<{ text: string }>;
+      const parsed = await pdfParse(buffer);
+      const nativeText = (parsed.text ?? "").trim();
+      const nonWsChars = nativeText.replace(/\s+/g, "").length;
+
+      if (nonWsChars >= MIN_NATIVE_TEXT_CHARS) {
+        log("upload.finalize.pdf_fast_path", { tenantId, objectKey, filename, chars: nativeText.length, nonWs: nonWsChars });
+        return json(res, {
+          mode: "A",
+          routing: "PDF native text (fast path)",
+          results: [{
+            filename,
+            mime_type: contentType,
+            char_count: nativeText.length,
+            extracted_text: nativeText,
+            status: "ok",
+            source: "r2_direct",
+          }],
+        });
+      }
+      log("upload.finalize.pdf_native_too_short", { tenantId, objectKey, filename, nonWs: nonWsChars });
+    } catch (fastPathErr) {
+      log("upload.finalize.pdf_fast_path_error", { tenantId, objectKey, filename, error: String(fastPathErr) });
+    }
+
+    log("upload.finalize.pdf_ocr_fallback", { tenantId, objectKey, filename, size });
     return handleOcrPending(res, { 
       tenantId, userId, objectKey, filename, contentType, sizeBytes: size, 
-      routing: { reason: "Manus-Only Async Pipeline (Enterprise Security)" } 
+      routing: { reason: "Scanned PDF — async OCR pipeline" } 
     });
   }
 
