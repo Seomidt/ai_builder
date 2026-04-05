@@ -2,12 +2,11 @@
  * api/_src/chat-stream.ts — Vercel Serverless SSE Streaming Handler
  *
  * Direct streaming — NO Railway dependency.
- * - Documents: Gemini 2.5 Flash via Google Generative AI SDK (GEMINI_API_KEY)
+ * - Documents: Gemini 2.5 Flash via @google/genai SDK (GEMINI_API_KEY)
  * - Normal chat: GPT-4.1-mini via OpenAI API (OPENAI_API_KEY)
  *
- * Supports progressive "delsvar" (partial answers) for large documents:
- *   - Delsvar 1: quick answer from first ~5000 chars (2-3s TTFT)
- *   - Delsvar 2: complete answer from full document
+ * Uses the NEW @google/genai SDK with native generateContentStream()
+ * and thinkingBudget: 0 to disable thinking for fast TTFT.
  *
  * Route: POST /api/chat-stream
  * Client receives: delta, status, gated, done, error events
@@ -17,21 +16,15 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { authenticate } from "./_lib/auth.ts";
 import { readBody } from "./_lib/response.ts";
 import { dbList } from "./_lib/db.ts";
-import { AI_MODEL_ROUTES } from "../../server/lib/ai/config.ts";
 import { isGroundedUseCase, type AiUseCase } from "../../server/lib/ai/types.ts";
-// Gemini REST API — direct fetch with thinkingConfig.thinkingBudget=0
+import { GoogleGenAI } from "@google/genai";
 
 export const config = {
   supportsResponseStreaming: true,
   maxDuration: 120,
 };
 
-// ── Model resolution ──────────────────────────────────────────────────────────
-function resolveVercelModel(key: keyof typeof AI_MODEL_ROUTES = "default") {
-  const route = AI_MODEL_ROUTES[key] ?? AI_MODEL_ROUTES.default;
-  return { model: route.model, provider: route.provider, key };
-}
-
+// ── Environment ──────────────────────────────────────────────────────────────
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? "";
 const SUPABASE_URL   = process.env.SUPABASE_URL   ?? "";
@@ -39,81 +32,79 @@ const SUPABASE_SVC   = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
 
 const GEMINI_MODEL = "gemini-2.5-flash";
 
-// ── Large document threshold ──────────────────────────────────────────────────
-const LARGE_DOC_CHARS     = 5_000;   // above this → use delsvar strategy
-const DELSVAR1_SLICE      = 5_000;   // chars for quick first answer
-const MAX_DOC_CHARS       = 80_000;  // hard cap for full document
+// ── Thresholds ───────────────────────────────────────────────────────────────
+const LARGE_DOC_CHARS = 5_000;
+const DELSVAR1_SLICE  = 5_000;
+const MAX_DOC_CHARS   = 80_000;
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Gemini client (singleton) ────────────────────────────────────────────────
+let _geminiClient: GoogleGenAI | null = null;
+function getGemini(): GoogleGenAI {
+  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
+  if (!_geminiClient) _geminiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
+  return _geminiClient;
+}
+
+// ── Types ────────────────────────────────────────────────────────────────────
 interface Expert {
-  id:             string;
-  name:           string;
-  category:       string | null;
-  description:    string | null;
-  routingHints:   unknown;
-  enabledForChat: boolean;
-  status:         string;
+  id: string; name: string; category: string | null;
+  description: string | null; routingHints: unknown;
+  enabledForChat: boolean; status: string;
 }
 interface DocumentContext {
-  filename:       string;
-  mime_type:      string;
-  char_count:     number;
-  extracted_text: string;
-  status:         "ok" | "unsupported" | "error";
-  message?:       string;
-  source?:        string;
+  filename: string; mime_type: string; char_count: number;
+  extracted_text: string; status: "ok" | "unsupported" | "error";
+  message?: string; source?: string;
 }
 interface ChatStreamRequest {
-  message:           string;
-  conversation_id?:  string | null;
+  message: string; conversation_id?: string | null;
   document_context?: DocumentContext[];
   context?: {
     preferred_expert_id?: string | null;
-    document_ids?:        string[];
-    attachment_count?:    number;
-    use_case?:            AiUseCase;
+    document_ids?: string[]; attachment_count?: number;
+    use_case?: AiUseCase;
   };
   idempotency_key?: string;
 }
 
-// ── Expert scoring (same as chat.ts) ──────────────────────────────────────────
+// ── Expert scoring ───────────────────────────────────────────────────────────
 function getHints(expert: Expert): string[] {
   const h = expert.routingHints;
   if (!h) return [];
   if (Array.isArray(h)) return h as string[];
-  try { const parsed = JSON.parse(String(h)); return Array.isArray(parsed) ? parsed : []; }
+  try { const p = JSON.parse(String(h)); return Array.isArray(p) ? p : []; }
   catch { return []; }
 }
 function scoreExpert(expert: Expert, message: string): number {
   const lower = message.toLowerCase();
-  let score   = 0;
+  let score = 0;
   for (const hint of getHints(expert)) {
     if (lower.includes(hint.toLowerCase())) score += 10;
   }
   if (expert.category && lower.includes(expert.category.toLowerCase())) score += 6;
-  if (lower.includes(expert.name.toLowerCase()))                         score += 4;
+  if (lower.includes(expert.name.toLowerCase())) score += 4;
   return score;
 }
 
-// ── Confidence ────────────────────────────────────────────────────────────────
+// ── Confidence ───────────────────────────────────────────────────────────────
 function deriveConfidence(answer: string, warnings: string[], extractedText?: string): "high" | "medium" | "low" {
   if (warnings.length > 0) return "low";
-  const notFoundPhrases = ["kan ikke finde", "fremgår ikke", "ikke i det uploadede"];
-  if (notFoundPhrases.some(p => answer.toLowerCase().includes(p))) return "low";
+  const notFound = ["kan ikke finde", "fremgår ikke", "ikke i det uploadede"];
+  if (notFound.some(p => answer.toLowerCase().includes(p))) return "low";
   if (extractedText) {
-    const answerWords = answer.toLowerCase().replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4);
-    const docWords    = new Set(extractedText.toLowerCase().replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4));
-    const matchingWords = answerWords.filter(w => docWords.has(w));
-    const overlapRatio  = answerWords.length > 0 ? matchingWords.length / answerWords.length : 0;
-    if (overlapRatio >= 0.4) return "high";
-    if (overlapRatio >= 0.2) return "medium";
+    const aw = answer.toLowerCase().replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4);
+    const dw = new Set(extractedText.toLowerCase().replace(/[^a-zæøå0-9\s]/gi, " ").split(/\s+/).filter(w => w.length >= 4));
+    const m = aw.filter(w => dw.has(w));
+    const r = aw.length > 0 ? m.length / aw.length : 0;
+    if (r >= 0.4) return "high";
+    if (r >= 0.2) return "medium";
     return "low";
   }
   const hedges = ["ikke sikker", "ved ikke", "begrænset", "muligvis", "kan ikke garantere"];
   return hedges.some(h => answer.toLowerCase().includes(h)) ? "medium" : "high";
 }
 
-// ── Persist turn (non-fatal) ──────────────────────────────────────────────────
+// ── Persist turn ─────────────────────────────────────────────────────────────
 async function persistTurn(params: {
   organizationId: string; userId: string; expertId: string;
   userMessage: string; answer: string; existingConvId: string | null;
@@ -164,7 +155,52 @@ async function persistTurn(params: {
   return convId as string;
 }
 
-// ── OpenAI streaming helper (for normal chat without documents) ───────────────
+// ── Gemini streaming via @google/genai SDK ───────────────────────────────────
+// Uses generateContentStream with for-await chunks — true token-by-token streaming.
+// thinkingBudget: 0 disables the thinking phase for fast TTFT.
+async function streamGemini(
+  systemPrompt: string,
+  userContent: string,
+  sendEvent: (data: object) => void,
+): Promise<{ text: string; promptTokens: number; completionTokens: number; latencyMs: number }> {
+  const t0 = Date.now();
+  const ai = getGemini();
+
+  const response = await ai.models.generateContentStream({
+    model: GEMINI_MODEL,
+    contents: userContent,
+    config: {
+      systemInstruction: systemPrompt,
+      temperature: 0.2,
+      maxOutputTokens: 2000,
+      thinkingConfig: {
+        thinkingBudget: 0,  // DISABLE thinking → fast TTFT
+      },
+    },
+  });
+
+  let fullText = "";
+  let promptTokens = 0;
+  let completionTokens = 0;
+
+  for await (const chunk of response) {
+    // Extract text delta from this chunk
+    const delta = chunk.text ?? "";
+    if (delta) {
+      fullText += delta;
+      sendEvent({ type: "delta", text: delta });
+    }
+    // Capture usage metadata (usually in the last chunk)
+    if (chunk.usageMetadata) {
+      promptTokens     = chunk.usageMetadata.promptTokenCount     ?? promptTokens;
+      completionTokens = chunk.usageMetadata.candidatesTokenCount ?? completionTokens;
+    }
+  }
+
+  return { text: fullText, promptTokens, completionTokens, latencyMs: Date.now() - t0 };
+}
+
+// ── OpenAI streaming (for normal chat without documents) ─────────────────────
 async function streamOpenAI(
   model: string,
   systemPrompt: string,
@@ -174,16 +210,10 @@ async function streamOpenAI(
   const t0 = Date.now();
   const streamRes = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
     body: JSON.stringify({
-      model,
-      temperature: 0.2,
-      max_tokens: 2000,
-      stream: true,
-      stream_options: { include_usage: true },
+      model, temperature: 0.2, max_tokens: 2000,
+      stream: true, stream_options: { include_usage: true },
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user",   content: userContent },
@@ -208,8 +238,7 @@ async function streamOpenAI(
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      const text = decoder.decode(value, { stream: true });
-      sseBuffer += text;
+      sseBuffer += decoder.decode(value, { stream: true });
       const lines = sseBuffer.split("\n");
       sseBuffer = lines.pop()!;
 
@@ -228,7 +257,7 @@ async function streamOpenAI(
             promptTokens     = parsed.usage.prompt_tokens     ?? 0;
             completionTokens = parsed.usage.completion_tokens ?? 0;
           }
-        } catch { /* skip malformed chunks */ }
+        } catch { /* skip malformed */ }
       }
     }
   } finally {
@@ -238,104 +267,11 @@ async function streamOpenAI(
   return { text: fullText, promptTokens, completionTokens, latencyMs: Date.now() - t0 };
 }
 
-// ── Gemini streaming helper (direct REST API with thinking DISABLED) ──────────
-async function streamGemini(
-  systemPrompt: string,
-  userContent: string,
-  sendEvent: (data: object) => void,
-): Promise<{ text: string; promptTokens: number; completionTokens: number; latencyMs: number }> {
-  const t0 = Date.now();
-
-  if (!GEMINI_API_KEY) {
-    throw new Error("GEMINI_API_KEY is not configured — cannot use Gemini for document analysis");
-  }
-
-  // Use Gemini REST API directly so we can set thinkingConfig.thinkingBudget=0
-  // The @google/generative-ai SDK v0.24.1 does NOT support thinkingConfig
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse&key=${GEMINI_API_KEY}`;
-
-  const geminiRes = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      system_instruction: {
-        parts: [{ text: systemPrompt }],
-      },
-      contents: [
-        {
-          role: "user",
-          parts: [{ text: userContent }],
-        },
-      ],
-      generationConfig: {
-        temperature: 0.2,
-        maxOutputTokens: 2000,
-        thinkingConfig: {
-          thinkingBudget: 0,   // DISABLE thinking → eliminates 30-60s delay
-        },
-      },
-    }),
-  });
-
-  if (!geminiRes.ok) {
-    const txt = await geminiRes.text().catch(() => geminiRes.statusText);
-    throw new Error(`Gemini ${geminiRes.status}: ${txt}`);
-  }
-
-  let fullText = "";
-  let promptTokens = 0;
-  let completionTokens = 0;
-
-  // Parse SSE stream from Gemini
-  const reader = (geminiRes.body as ReadableStream<Uint8Array>).getReader();
-  const decoder = new TextDecoder();
-  let sseBuffer = "";
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      sseBuffer += decoder.decode(value, { stream: true });
-      const lines = sseBuffer.split("\n");
-      sseBuffer = lines.pop()!;
-
-      for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
-        const raw = line.slice(6).trim();
-        if (!raw || raw === "[DONE]") continue;
-        try {
-          const parsed = JSON.parse(raw);
-          // Extract text from candidates[0].content.parts[]
-          const parts = parsed.candidates?.[0]?.content?.parts ?? [];
-          for (const part of parts) {
-            // Skip thought parts (just in case)
-            if (part.thought) continue;
-            const delta = part.text ?? "";
-            if (delta) {
-              fullText += delta;
-              sendEvent({ type: "delta", text: delta });
-            }
-          }
-          // Capture usage metadata
-          if (parsed.usageMetadata) {
-            promptTokens     = parsed.usageMetadata.promptTokenCount     ?? promptTokens;
-            completionTokens = parsed.usageMetadata.candidatesTokenCount ?? completionTokens;
-          }
-        } catch { /* skip malformed chunks */ }
-      }
-    }
-  } finally {
-    reader.cancel().catch(() => {});
-  }
-
-  return { text: fullText, promptTokens, completionTokens, latencyMs: Date.now() - t0 };
-}
-
-// ── SSE Streaming Handler ─────────────────────────────────────────────────────
+// ── SSE Streaming Handler ────────────────────────────────────────────────────
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
-  // SSE headers
+  // SSE headers — must be set before any data is written
   res.writeHead(200, {
     "Content-Type":      "text/event-stream",
     "Cache-Control":     "no-cache, no-transform",
@@ -394,7 +330,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     const token = (req.headers.authorization ?? "").slice(7);
 
-    // ── Step 1: Fetch experts via RLS ─────────────────────────────────────────
+    // ── Fetch experts ────────────────────────────────────────────────────────
     sendEvent({ type: "status", text: "Analyserer forespørgsel..." });
 
     let experts: Expert[];
@@ -416,7 +352,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       return res.end();
     }
 
-    // ── Step 2: Select expert ─────────────────────────────────────────────────
+    // ── Select expert ────────────────────────────────────────────────────────
     const EXPERT_MATCH_THRESHOLD = 6;
     let expert: Expert;
     let expertScore = 0;
@@ -435,7 +371,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     const routingExplanation = `Valgt baseret på match med ekspertens kompetenceområde (${expert.category ?? expert.name}).`;
 
-    // ── Step 3: Document context ──────────────────────────────────────────────
+    // ── Document context ─────────────────────────────────────────────────────
     const rawDocCtx  = body.document_context ?? [];
     const docCtx     = rawDocCtx.filter(d => d.status === "ok" && d.extracted_text?.trim());
     const failedDocs = rawDocCtx.filter(d => d.status !== "ok");
@@ -463,14 +399,14 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       return res.end();
     }
 
-    // ── Route type ────────────────────────────────────────────────────────────
+    // ── Route type ───────────────────────────────────────────────────────────
     const hasRelevantExpert = expertScore >= EXPERT_MATCH_THRESHOLD;
     const routeType: string =
       docCtx.length > 0 && hasRelevantExpert ? "hybrid"
       : docCtx.length > 0                   ? "attachment_first"
       :                                        "expert_auto";
 
-    // ── Step 4: System prompts ────────────────────────────────────────────────
+    // ── System prompts ───────────────────────────────────────────────────────
     const docSystemPrompt = [
       `Du er en AI-ekspert ved navn ${expert.name}.`,
       `Du har modtaget et uploadet dokument, som brugeren ønsker analyseret.`,
@@ -498,30 +434,29 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       "Angiv tydeligt hvis du er i tvivl om noget.",
     ].filter(Boolean).join("\n");
 
-    // ── Step 5: Determine strategy ────────────────────────────────────────────
+    // ── Determine strategy ───────────────────────────────────────────────────
     const docTextFull = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
     const totalDocChars = docTextFull.length;
     const isLargeDoc = docCtx.length > 0 && totalDocChars > LARGE_DOC_CHARS;
     const hasDoc = docCtx.length > 0;
 
-    // Model: Gemini for documents, OpenAI for normal chat
     const modelUsed = hasDoc ? GEMINI_MODEL : "gpt-4.1-mini";
     const providerUsed = hasDoc ? "google" : "openai";
 
     console.log(`[chat-stream] model=${modelUsed} provider=${providerUsed} isLargeDoc=${isLargeDoc} totalDocChars=${totalDocChars} routeType=${routeType}`);
 
-    // ── Accumulate total tokens across delsvar calls ──────────────────────────
+    // ── Accumulate tokens ────────────────────────────────────────────────────
     let totalPromptTokens = 0;
     let totalCompletionTokens = 0;
     let totalLatencyMs = 0;
     let fullAnswer = "";
 
     if (isLargeDoc) {
-      // ══════════════════════════════════════════════════════════════════════════
-      // DELSVAR STRATEGY: Progressive answers for large documents (Gemini)
-      // ══════════════════════════════════════════════════════════════════════════
+      // ════════════════════════════════════════════════════════════════════════
+      // DELSVAR STRATEGY: Progressive answers for large documents
+      // ════════════════════════════════════════════════════════════════════════
 
-      // ── Delsvar 1: Quick answer from first chunk ────────────────────────────
+      // ── Delsvar 1: Quick answer from first chunk ──────────────────────────
       const chunk1 = docTextFull.slice(0, DELSVAR1_SLICE);
       const delsvar1Prompt = docSystemPrompt + `\n\nBEMÆRK: Du har kun modtaget de første ${DELSVAR1_SLICE} tegn af dokumentet. Giv et hurtigt foreløbigt svar baseret på det du kan se. Start dit svar med "**Foreløbigt svar (baseret på første del af dokumentet):**\n\n".`;
       const delsvar1Content = `DOKUMENT (del 1 af ${Math.ceil(totalDocChars / DELSVAR1_SLICE)}):\n\n${chunk1}\n\n---\n\nSPØRGSMÅL: ${message}`;
@@ -536,12 +471,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
       console.log(`[chat-stream] delsvar1 done: ${result1.text.length} chars, ${result1.latencyMs}ms`);
 
-      // ── Delsvar 2: Complete answer from full document ───────────────────────
+      // ── Delsvar 2: Complete answer from full document ─────────────────────
       const fullDocText = totalDocChars > MAX_DOC_CHARS
         ? docTextFull.slice(0, MAX_DOC_CHARS) + "\n\n[... dokument afkortet ...]"
         : docTextFull;
 
-      // Send separator + status before delsvar 2
       sendEvent({ type: "delta", text: "\n\n---\n\n" });
       sendEvent({ type: "status", text: "Analyserer hele dokumentet...", routeType });
 
@@ -557,9 +491,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       console.log(`[chat-stream] delsvar2 done: ${result2.text.length} chars, ${result2.latencyMs}ms`);
 
     } else if (hasDoc) {
-      // ══════════════════════════════════════════════════════════════════════════
-      // SMALL DOCUMENT: Single Gemini call (fast enough)
-      // ══════════════════════════════════════════════════════════════════════════
+      // ════════════════════════════════════════════════════════════════════════
+      // SMALL DOCUMENT: Single Gemini call
+      // ════════════════════════════════════════════════════════════════════════
       const docText = totalDocChars > MAX_DOC_CHARS
         ? docTextFull.slice(0, MAX_DOC_CHARS) + "\n\n[... dokument afkortet ...]"
         : docTextFull;
@@ -574,9 +508,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       fullAnswer            = result.text;
 
     } else {
-      // ══════════════════════════════════════════════════════════════════════════
+      // ════════════════════════════════════════════════════════════════════════
       // NO DOCUMENT: Normal expert chat (OpenAI)
-      // ══════════════════════════════════════════════════════════════════════════
+      // ════════════════════════════════════════════════════════════════════════
       sendEvent({ type: "status", text: "Genererer svar...", routeType });
 
       const result = await streamOpenAI("gpt-4.1-mini", normalSystemPrompt, message, sendEvent);
@@ -588,14 +522,14 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     console.log(`[chat-stream] completed len=${fullAnswer.length} latency=${totalLatencyMs}ms tokens=${totalPromptTokens}+${totalCompletionTokens} model=${modelUsed}`);
 
-    // ── Assess answer ─────────────────────────────────────────────────────────
+    // ── Assess answer ────────────────────────────────────────────────────────
     const warnings: string[] = [];
     if (fullAnswer.length < 5) warnings.push("Svaret er meget kort.");
     const combinedDocText = docCtx.map(d => d.extracted_text).join(" ");
     const confidence = deriveConfidence(fullAnswer, warnings, hasDoc ? combinedDocText : undefined);
     const needsManual = confidence === "low";
 
-    // ── Persist conversation (non-fatal) ──────────────────────────────────────
+    // ── Persist conversation (non-fatal) ─────────────────────────────────────
     let conversationId: string = body.conversation_id ?? crypto.randomUUID();
     try {
       conversationId = await persistTurn({
@@ -609,7 +543,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       console.error("[chat-stream] persist failed (non-fatal):", (e as Error).message);
     }
 
-    // ── Usage logging (fire-and-forget) ───────────────────────────────────────
+    // ── Usage logging (fire-and-forget) ──────────────────────────────────────
     void (async () => {
       try {
         const { logAiUsage } = await import("../../server/lib/ai/usage");

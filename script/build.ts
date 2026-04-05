@@ -33,6 +33,7 @@ const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
 
 const allowlist = [
   "@google/generative-ai",
+  "@google/genai",
   "@supabase/supabase-js",
   "axios",
   "connect-pg-simple",
