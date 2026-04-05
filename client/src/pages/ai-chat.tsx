@@ -1377,7 +1377,7 @@ export default function AiChatPage() {
                   };
                 }
                 // Supersede earlier assistant answers when a refined or upgrade answer arrives
-                if ((isRefined || isUpgradeCompletion) && m.role === "assistant" && !m.isError && !m.isStreaming && m.id !== streamMsgId) {
+                if (isRefined && m.role === "assistant" && !m.isError && !m.isStreaming && m.id !== streamMsgId) {
                   return { ...m, isSuperseded: true };
                 }
                 return m;
@@ -1419,13 +1419,21 @@ export default function AiChatPage() {
             const token = await getSessionToken().catch(() => null);
 
             // ── Helper: fire the upgrade chat mutation ──
+            const clearProcessingPlaceholder = () => {
+              setMessages(prev => prev.map(m =>
+                m.isProcessingPlaceholder ? { ...m, isProcessingPlaceholder: false } : m
+              ));
+            };
+
             const triggerUpgrade = (fullText: string) => {
               console.log(`[UPGRADE-${upgradeId}] triggerUpgrade chars=${fullText.length} hasMutate=${!!chatMutateRef.current}`);
               setOcrStatusLabel(null);
               if (!chatMutateRef.current) {
                 console.error(`[UPGRADE-${upgradeId}] chatMutateRef.current is null — cannot fire upgrade`);
+                clearProcessingPlaceholder();
                 return;
               }
+              isUpgradeAttemptRef.current = true;
               chatMutateRef.current({
                 text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
                 attachments: [],
@@ -1479,6 +1487,7 @@ export default function AiChatPage() {
               if (error) {
                 console.warn(`[UPGRADE-${upgradeId}] OCR failed — aborting upgrade`);
                 setOcrStatusLabel(null);
+                clearProcessingPlaceholder();
                 break;
               }
               if (done) {
@@ -1490,10 +1499,17 @@ export default function AiChatPage() {
             if (!upgraded && Date.now() - tStart >= MAX_MS) {
               console.warn(`[UPGRADE-${upgradeId}] Polling timed out after 5 minutes`);
               setOcrStatusLabel(null);
+              clearProcessingPlaceholder();
+              setMessages(prev => [...prev, {
+                id: crypto.randomUUID(), role: "assistant" as const,
+                text: "Dokumentanalysen tog for lang tid. Det delvise svar ovenfor er fortsat gyldigt — prøv at sende dit spørgsmål igen for et komplet svar.",
+                timestamp: new Date(),
+              }]);
             }
           } catch (e) {
             console.error(`[UPGRADE] Upgrade flow error:`, e);
             setOcrStatusLabel(null);
+            clearProcessingPlaceholder();
           }
         })();
       } else {
