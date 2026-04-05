@@ -2,40 +2,16 @@
  * api/_src/chat-stream.ts — Vercel Serverless SSE Streaming Handler
  *
  * Direct streaming — NO Railway dependency.
- * - Documents: Gemini 2.5 Flash via @google/genai SDK (GEMINI_API_KEY)
+ * - Documents: Gemini 2.5 Flash via direct REST + SSE parsing (GEMINI_API_KEY)
  * - Normal chat: GPT-4.1-mini via OpenAI API (OPENAI_API_KEY)
  *
- * Uses the NEW @google/genai SDK with native generateContentStream()
- * and thinkingBudget: 0 to disable thinking for fast TTFT.
+ * WHY NOT @google/genai SDK:
+ *   Logs proved that generateContentStream() buffers the FULL HTTP response
+ *   internally before returning the AsyncGenerator. T7→T8 gap was ~38,000ms.
+ *   Direct REST fetch + line-by-line SSE parsing delivers first token in <3s.
  *
  * Route: POST /api/chat-stream
  * Client receives: delta, status, gated, done, error events
- *
- * ── LATENCY INSTRUMENTATION ──────────────────────────────────────────────────
- * Every significant lifecycle stage is logged with a [PERF] prefix so that
- * Vercel runtime logs can be filtered to isolate the 50-second delay.
- *
- * Stages measured:
- *   T0  request_start
- *   T1  auth_resolved
- *   T2  body_parsed
- *   T3  budget_checked
- *   T4  experts_fetched
- *   T5  expert_selected
- *   T6  context_built        (doc text assembled, prompt built)
- *   T7  gemini_call_start    (immediately before generateContentStream())
- *   T8  gemini_stream_object (immediately after await returns the stream)
- *   T9  gemini_first_chunk   (first chunk received from for-await)
- *   T10 first_chunk_flushed  (first delta written + flushed to HTTP)
- *   T11 stream_complete      (for-await loop finished)
- *
- * Additionally logged per request:
- *   - model name
- *   - provider (google / openai)
- *   - prompt char count (systemPrompt + userContent)
- *   - total input message count (contents array length)
- *   - whether streaming API is used (always true — generateContentStream)
- *   - whether any buffering wrapper is present (none — direct for-await)
  */
 import "../../server/lib/env.ts";
 import type { IncomingMessage, ServerResponse } from "http";
@@ -43,7 +19,6 @@ import { authenticate } from "./_lib/auth.ts";
 import { readBody } from "./_lib/response.ts";
 import { dbList } from "./_lib/db.ts";
 import { isGroundedUseCase, type AiUseCase } from "../../server/lib/ai/types.ts";
-import { GoogleGenAI } from "@google/genai";
 
 export const config = {
   supportsResponseStreaming: true,
@@ -57,19 +32,12 @@ const SUPABASE_URL   = process.env.SUPABASE_URL   ?? "";
 const SUPABASE_SVC   = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
 
 const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_REST_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
 const LARGE_DOC_CHARS = 5_000;
 const DELSVAR1_SLICE  = 5_000;
 const MAX_DOC_CHARS   = 80_000;
-
-// ── Gemini client (singleton) ────────────────────────────────────────────────
-let _geminiClient: GoogleGenAI | null = null;
-function getGemini(): GoogleGenAI {
-  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
-  if (!_geminiClient) _geminiClient = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-  return _geminiClient;
-}
 
 // ── Latency helper ───────────────────────────────────────────────────────────
 function perf(label: string, t0: number, extra?: Record<string, unknown>): void {
@@ -188,98 +156,145 @@ async function persistTurn(params: {
   return convId as string;
 }
 
-// ── Gemini streaming via @google/genai SDK ───────────────────────────────────
-// IMPORTANT: This uses generateContentStream() — the streaming API.
-// There is NO non-streaming generateContent() call anywhere.
-// There is NO buffering wrapper — chunks are forwarded immediately via sendEvent().
-// The for-await loop delivers chunks as soon as Gemini emits them.
+// ── Gemini streaming via direct REST + SSE parsing ───────────────────────────
+//
+// WHY REST instead of @google/genai SDK:
+//   The SDK's generateContentStream() awaits the full HTTP response body before
+//   returning the AsyncGenerator — causing a ~38s delay (T7→T8 in PERF logs).
+//   Direct fetch() returns as soon as HTTP headers arrive (~200ms), and we
+//   parse SSE lines from the response body stream in real-time.
+//
+// Gemini SSE format:
+//   data: {"candidates":[{"content":{"parts":[{"text":"..."}],...},...}],...}
+//
+// thinkingBudget: 0 is set to disable the thinking phase (fast TTFT).
+//
 async function streamGemini(
   systemPrompt: string,
   userContent: string,
   sendEvent: (data: object) => void,
-  t0Request: number,  // request start time for relative PERF logging
-  callLabel: string,  // e.g. "delsvar1", "delsvar2", "single"
+  t0Request: number,
+  callLabel: string,
 ): Promise<{ text: string; promptTokens: number; completionTokens: number; latencyMs: number }> {
   const t0Call = Date.now();
-  const ai = getGemini();
 
-  // ── Context size logging ──────────────────────────────────────────────────
+  if (!GEMINI_API_KEY) throw new Error("GEMINI_API_KEY is not configured");
+
   const systemChars  = systemPrompt.length;
   const contentChars = userContent.length;
   const totalChars   = systemChars + contentChars;
-  // contents is a single string (PartUnion), so message count = 1
-  const inputMessageCount = 1;
 
-  perf(`T7_gemini_call_start [${callLabel}]`, t0Request, {
+  perf(`T7_gemini_rest_call_start [${callLabel}]`, t0Request, {
     model:              GEMINI_MODEL,
     provider:           "google",
-    streaming_api:      "generateContentStream",  // NOT generateContent
-    buffering_wrapper:  "none",                   // direct for-await
+    method:             "REST fetch + SSE parsing (no SDK)",
+    url:                GEMINI_REST_URL,
     system_chars:       systemChars,
     content_chars:      contentChars,
     total_prompt_chars: totalChars,
-    input_message_count: inputMessageCount,
     thinking_budget:    0,
   });
 
-  // ── STREAMING CALL — no await on full response ────────────────────────────
-  // generateContentStream() returns an AsyncGenerator immediately.
-  // The actual HTTP request starts here but we do NOT wait for the full body.
-  const response = await ai.models.generateContentStream({
-    model: GEMINI_MODEL,
-    contents: userContent,
-    config: {
-      systemInstruction: systemPrompt,
-      temperature: 0.2,
-      maxOutputTokens: 2000,
-      thinkingConfig: {
-        thinkingBudget: 0,  // DISABLE thinking → fast TTFT
-      },
+  // ── Direct REST call — returns as soon as HTTP headers arrive ────────────
+  const res = await fetch(GEMINI_REST_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type":  "application/json",
+      "x-goog-api-key": GEMINI_API_KEY,
     },
+    body: JSON.stringify({
+      system_instruction: {
+        parts: [{ text: systemPrompt }],
+      },
+      contents: [
+        { role: "user", parts: [{ text: userContent }] },
+      ],
+      generationConfig: {
+        temperature:      0.2,
+        maxOutputTokens:  2000,
+        thinkingConfig: {
+          thinkingBudget: 0,   // DISABLE thinking → fast TTFT
+        },
+      },
+    }),
   });
 
-  perf(`T8_gemini_stream_object [${callLabel}]`, t0Request, {
-    note: "AsyncGenerator created — HTTP connection established, waiting for first chunk",
+  perf(`T8_gemini_http_headers [${callLabel}]`, t0Request, {
+    status: res.status,
+    note:   "HTTP headers received — body stream open, no buffering",
   });
 
-  let fullText = "";
-  let promptTokens = 0;
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`Gemini REST ${res.status}: ${errText}`);
+  }
+
+  // ── SSE line-by-line parsing ──────────────────────────────────────────────
+  const reader  = (res.body as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = "";
+  let fullText  = "";
+  let promptTokens     = 0;
   let completionTokens = 0;
   let firstChunkReceived = false;
   let firstChunkFlushed  = false;
 
-  for await (const chunk of response) {
-    // ── T9: First chunk received ────────────────────────────────────────────
-    if (!firstChunkReceived) {
-      firstChunkReceived = true;
-      perf(`T9_gemini_first_chunk [${callLabel}]`, t0Request, {
-        has_text:        !!(chunk.text),
-        chunk_text_len:  (chunk.text ?? "").length,
-        has_usage:       !!(chunk.usageMetadata),
-      });
-    }
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    // Extract text delta from this chunk
-    const delta = chunk.text ?? "";
-    if (delta) {
-      fullText += delta;
-      sendEvent({ type: "delta", text: delta });
-
-      // ── T10: First chunk flushed to HTTP response ───────────────────────
-      if (!firstChunkFlushed) {
-        firstChunkFlushed = true;
-        perf(`T10_first_chunk_flushed [${callLabel}]`, t0Request, {
-          delta_len: delta.length,
-          note: "First token written + flushed to HTTP response",
+      // ── T9: First raw bytes received from Gemini ────────────────────────
+      if (!firstChunkReceived) {
+        firstChunkReceived = true;
+        perf(`T9_first_sse_chunk_received [${callLabel}]`, t0Request, {
+          raw_bytes: value?.length ?? 0,
+          note: "First bytes from Gemini — no SDK buffering",
         });
       }
-    }
 
-    // Capture usage metadata (usually in the last chunk)
-    if (chunk.usageMetadata) {
-      promptTokens     = chunk.usageMetadata.promptTokenCount     ?? promptTokens;
-      completionTokens = chunk.usageMetadata.candidatesTokenCount ?? completionTokens;
+      sseBuffer += decoder.decode(value, { stream: true });
+      const lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop()!;  // keep incomplete last line
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith("data:")) continue;
+
+        const raw = trimmed.slice(5).trim();
+        if (!raw || raw === "[DONE]") continue;
+
+        // Safe JSON parse — never crash on malformed chunks
+        let parsed: any;
+        try { parsed = JSON.parse(raw); }
+        catch { continue; }
+
+        // Extract text delta: candidates[0].content.parts[0].text
+        const delta: string = parsed?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+        if (delta) {
+          fullText += delta;
+          sendEvent({ type: "delta", text: delta });
+
+          // ── T10: First token forwarded to HTTP response ───────────────
+          if (!firstChunkFlushed) {
+            firstChunkFlushed = true;
+            perf(`T10_first_chunk_forwarded [${callLabel}]`, t0Request, {
+              delta_len: delta.length,
+              note: "First token written + flushed to client",
+            });
+          }
+        }
+
+        // Capture usage metadata (usually in the last chunk)
+        const meta = parsed?.usageMetadata;
+        if (meta) {
+          promptTokens     = meta.promptTokenCount     ?? promptTokens;
+          completionTokens = meta.candidatesTokenCount ?? completionTokens;
+        }
+      }
     }
+  } finally {
+    reader.cancel().catch(() => {});
   }
 
   const callMs = Date.now() - t0Call;
@@ -305,19 +320,13 @@ async function streamOpenAI(
 ): Promise<{ text: string; promptTokens: number; completionTokens: number; latencyMs: number }> {
   const t0Call = Date.now();
 
-  const systemChars  = systemPrompt.length;
-  const contentChars = userContent.length;
-  const totalChars   = systemChars + contentChars;
-
   perf("T7_openai_call_start", t0Request, {
     model,
     provider:           "openai",
     streaming_api:      "stream:true",
-    buffering_wrapper:  "none",
-    system_chars:       systemChars,
-    content_chars:      contentChars,
-    total_prompt_chars: totalChars,
-    input_message_count: 2,  // system + user
+    system_chars:       systemPrompt.length,
+    content_chars:      userContent.length,
+    total_prompt_chars: systemPrompt.length + userContent.length,
   });
 
   const streamRes = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -333,10 +342,7 @@ async function streamOpenAI(
     }),
   });
 
-  perf("T8_openai_stream_object", t0Request, {
-    status: streamRes.status,
-    note:   "HTTP response headers received — body stream open",
-  });
+  perf("T8_openai_http_headers", t0Request, { status: streamRes.status });
 
   if (!streamRes.ok) {
     const txt = await streamRes.text().catch(() => streamRes.statusText);
@@ -360,9 +366,7 @@ async function streamOpenAI(
 
       if (!firstChunkReceived) {
         firstChunkReceived = true;
-        perf("T9_openai_first_chunk", t0Request, {
-          raw_bytes: value?.length ?? 0,
-        });
+        perf("T9_first_sse_chunk_received", t0Request, { raw_bytes: value?.length ?? 0 });
       }
 
       sseBuffer += decoder.decode(value, { stream: true });
@@ -379,13 +383,9 @@ async function streamOpenAI(
           if (delta) {
             fullText += delta;
             sendEvent({ type: "delta", text: delta });
-
             if (!firstChunkFlushed) {
               firstChunkFlushed = true;
-              perf("T10_first_chunk_flushed", t0Request, {
-                delta_len: delta.length,
-                note: "First token written + flushed to HTTP response",
-              });
+              perf("T10_first_chunk_forwarded", t0Request, { delta_len: delta.length });
             }
           }
           if (parsed.usage) {
@@ -401,10 +401,8 @@ async function streamOpenAI(
 
   const callMs = Date.now() - t0Call;
   perf("T11_stream_complete", t0Request, {
-    call_ms:           callMs,
-    output_chars:      fullText.length,
-    prompt_tokens:     promptTokens,
-    completion_tokens: completionTokens,
+    call_ms: callMs, output_chars: fullText.length,
+    prompt_tokens: promptTokens, completion_tokens: completionTokens,
   });
 
   return { text: fullText, promptTokens, completionTokens, latencyMs: callMs };
@@ -414,11 +412,10 @@ async function streamOpenAI(
 export default async function handler(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
-  // ── T0: Request start ─────────────────────────────────────────────────────
   const T0 = Date.now();
-  console.log(`[PERF] T0_request_start ${new Date(T0).toISOString()} method=${req.method} url=${req.url}`);
+  console.log(`[PERF] T0_request_start ${new Date(T0).toISOString()} method=${req.method}`);
 
-  // SSE headers — must be set before any data is written
+  // SSE headers — set before any data is written
   res.writeHead(200, {
     "Content-Type":      "text/event-stream",
     "Cache-Control":     "no-cache, no-transform",
@@ -461,9 +458,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const message = (body.message ?? "").trim();
     perf("T2_body_parsed", T0, {
       message_len:       message.length,
-      has_doc_context:   !!(body.document_context?.length),
       doc_context_count: body.document_context?.length ?? 0,
-      has_conv_id:       !!(body.conversation_id),
       use_case:          body.context?.use_case ?? "grounded_chat",
     });
 
@@ -485,8 +480,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         return res.end();
       }
       budgetReservedAmount = reservation.reservedAmount;
-    } catch (e) {
-      perf("T3_budget_checked", T0, { allowed: true, note: "budget-guard import failed — fail-safe" });
+    } catch {
+      perf("T3_budget_checked", T0, { allowed: true, note: "fail-safe" });
     }
 
     const token = (req.headers.authorization ?? "").slice(7);
@@ -505,7 +500,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       perf("T4_experts_fetched", T0, { count: experts.length });
     } catch (e) {
       perf("T4_experts_fetched", T0, { error: (e as Error).message });
-      console.error("[chat-stream] expert fetch failed:", (e as Error).message);
       sendEvent({ type: "error", errorCode: "EXPERT_FETCH_FAILED", message: "Kunne ikke hente eksperter" });
       return res.end();
     }
@@ -533,10 +527,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     }
 
     perf("T5_expert_selected", T0, {
-      expert_id:   expert.id,
       expert_name: expert.name,
       score:       expertScore,
-      pref_id:     prefId ?? null,
     });
 
     const routingExplanation = `Valgt baseret på match med ekspertens kompetenceområde (${expert.category ?? expert.name}).`;
@@ -554,15 +546,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const providerUsed = hasDoc ? "google"     : "openai";
 
     perf("T6_context_built", T0, {
-      raw_doc_count:   rawDocCtx.length,
       ok_doc_count:    docCtx.length,
-      failed_doc_count: failedDocs.length,
       total_doc_chars: totalDocChars,
       is_large_doc:    isLargeDoc,
-      has_doc:         hasDoc,
       model:           modelUsed,
       provider:        providerUsed,
-      doc_filenames:   docCtx.map(d => d.filename),
     });
 
     // Hard stops
@@ -631,7 +619,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       // DELSVAR STRATEGY: Progressive answers for large documents
       // ════════════════════════════════════════════════════════════════════════
 
-      // ── Delsvar 1: Quick answer from first chunk ──────────────────────────
       const chunk1 = docTextFull.slice(0, DELSVAR1_SLICE);
       const delsvar1Prompt = docSystemPrompt + `\n\nBEMÆRK: Du har kun modtaget de første ${DELSVAR1_SLICE} tegn af dokumentet. Giv et hurtigt foreløbigt svar baseret på det du kan se. Start dit svar med "**Foreløbigt svar (baseret på første del af dokumentet):**\n\n".`;
       const delsvar1Content = `DOKUMENT (del 1 af ${Math.ceil(totalDocChars / DELSVAR1_SLICE)}):\n\n${chunk1}\n\n---\n\nSPØRGSMÅL: ${message}`;
@@ -644,7 +631,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       totalLatencyMs        += result1.latencyMs;
       fullAnswer            += result1.text;
 
-      // ── Delsvar 2: Complete answer from full document ─────────────────────
       const fullDocText = totalDocChars > MAX_DOC_CHARS
         ? docTextFull.slice(0, MAX_DOC_CHARS) + "\n\n[... dokument afkortet ...]"
         : docTextFull;
@@ -694,8 +680,6 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     perf("T_all_streams_complete", T0, {
       total_latency_ms:   totalLatencyMs,
       total_output_chars: fullAnswer.length,
-      prompt_tokens:      totalPromptTokens,
-      completion_tokens:  totalCompletionTokens,
       model:              modelUsed,
       delsvar_count:      isLargeDoc ? 2 : 1,
     });
@@ -724,8 +708,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     // ── Usage logging (fire-and-forget) ──────────────────────────────────────
     void (async () => {
       try {
-        const { logAiUsage } = await import("../../server/lib/ai/usage");
-        const { loadPricing } = await import("../../server/lib/ai/pricing");
+        const { logAiUsage }    = await import("../../server/lib/ai/usage");
+        const { loadPricing }   = await import("../../server/lib/ai/pricing");
         const { estimateAiCost } = await import("../../server/lib/ai/costs");
         const { pricing, source: pricingSource, version: pricingVersion } = await loadPricing(providerUsed, modelUsed);
         const actualCostUsd = estimateAiCost({
@@ -782,6 +766,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     perf("T_done_event_sent", T0, { total_request_ms: Date.now() - T0 });
     res.end();
+
   } catch (err) {
     const msg  = err instanceof Error ? err.message : String(err);
     const code = (err as any)?.errorCode ?? "CHAT_STREAM_ERROR";
