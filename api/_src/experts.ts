@@ -114,6 +114,19 @@ function handleErr(res: ServerResponse, err: unknown, label = "experts"): void {
   if (!res.headersSent) jsonOut(res, 500, { error_code: "INTERNAL_ERROR", message: msg });
 }
 
+/**
+ * safeParseJson — strips markdown fences then attempts JSON.parse.
+ * Module-level so it is never re-created inside closures.
+ * Returns the parsed value on success, or null on any failure. Never throws.
+ */
+function safeParseJson(raw: string): unknown | null {
+  try {
+    return JSON.parse(raw.replace(/```json\n?|\n?```/g, "").trim());
+  } catch {
+    return null;
+  }
+}
+
 async function readBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let data = "";
@@ -637,38 +650,31 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       warnings:               z.array(z.string()).default([]),
     });
 
-    // Helper: strip markdown fences and parse JSON
-    const tryParse = (raw: string): unknown | null => {
-      try { return JSON.parse(raw.replace(/```json\n?|\n?```/g, "").trim()); }
-      catch { return null; }
-    };
-
-    // FIX: use correct model key ("expert.suggest"); useCase is already "analysis"
-    const result = await runAiCall(
-      { feature: "expert-suggest", useCase: "analysis", model: "expert.suggest", tenantId: orgId, userId },
-      { systemPrompt, userInput },
-    );
-
-    // FIX: AiCallResult returns .text, not .content
-    let parsed = tryParse(result.text ?? "");
-
-    // Retry once with a repair prompt if the first response isn't valid JSON
-    if (parsed === null) {
-      console.warn(`[experts/ai-suggest][${reqId}] first parse failed — retrying with repair prompt`);
-      const repairPrompt = `The previous response was not valid JSON. Return ONLY the raw JSON object (no fences, no text):
-${systemPrompt}`;
-      const retry = await runAiCall(
-        { feature: "expert-suggest-retry", useCase: "analysis", model: "expert.suggest", tenantId: orgId, userId },
-        { systemPrompt: repairPrompt, userInput },
+    // Retry loop — safeParseJson is module-level; retry fires on null parse, not on throws
+    let parsed: unknown | null = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const isRetry = attempt > 0;
+      if (isRetry) console.warn(`[experts/ai-suggest][${reqId}] attempt 0 parse failed — retrying`);
+      const result = await runAiCall(
+        { feature: isRetry ? "expert-suggest-retry" : "expert-suggest",
+          useCase: "analysis", model: "expert.suggest",
+          tenantId: orgId, userId },
+        { systemPrompt: isRetry
+            ? `The previous response was not valid JSON. Return ONLY the raw JSON object (no markdown fences, no explanations):\n${systemPrompt}`
+            : systemPrompt,
+          userInput },
       );
-      parsed = tryParse(retry.text ?? "");
+      // Log raw AI response before parsing — essential for debugging parse failures
+      console.log(`[experts/ai-suggest][${reqId}] raw[${attempt}]: ${result.text.slice(0, 300)}`);
+      parsed = safeParseJson(result.text);
+      if (parsed !== null) break;
     }
 
     if (parsed === null) {
-      console.error(`[experts/ai-suggest][${reqId}] both parse attempts failed`);
+      console.error(`[experts/ai-suggest][${reqId}] both attempts produced unparseable JSON`);
       return jsonOut(res, 422, {
-        error_code: "VALIDATION_ERROR",
-        message: "AI-forslaget kunne ikke behandles korrekt. Prøv at beskrive eksperten med lidt mere detalje.",
+        error_code: "AI_PARSE_ERROR",
+        message: "AI-forslaget kunne ikke behandles. Prøv at beskrive eksperten med lidt mere detalje.",
       });
     }
 
@@ -676,7 +682,7 @@ ${systemPrompt}`;
     if (!validated.success) {
       console.error(`[experts/ai-suggest][${reqId}] schema validation failed`, validated.error.issues);
       return jsonOut(res, 422, {
-        error_code: "VALIDATION_ERROR",
+        error_code: "AI_SCHEMA_ERROR",
         message: "AI-forslaget manglede påkrævede felter. Prøv igen.",
       });
     }

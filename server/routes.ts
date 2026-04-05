@@ -39,6 +39,18 @@ import {
 import type { IStorage } from "./storage.ts";
 import { AppError } from "./lib/errors.ts";
 
+/**
+ * safeParseJson — strips markdown fences then attempts JSON.parse.
+ * Defined at module level so it is never captured inside route closures.
+ * Returns the parsed value on success, or null on any failure. Never throws.
+ */
+function safeParseJson(raw: string): unknown | null {
+  try {
+    return JSON.parse(raw.replace(/```json\n?|\n?```/g, "").trim());
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Central error → HTTP response mapper.
@@ -1079,36 +1091,31 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         warnings:               z.array(z.string()).default([]),
       });
 
-      // Helper: strip markdown fences and parse
-      const tryParse = (raw: string): unknown | null => {
-        try { return JSON.parse(raw.replace(/```json\n?|\n?```/g, "").trim()); }
-        catch { return null; }
-      };
-
-      // FIX: add explicit model key; useCase is already "analysis"
-      const result = await runAiCall(
-        { feature: "expert-suggest", useCase: "analysis", model: "expert.suggest", tenantId: getOrgId(req), userId: getUserId(req) },
-        { systemPrompt, userInput },
-      );
-
-      // FIX: AiCallResult returns .text — not .content
-      let parsed = tryParse(result.text ?? "");
-
-      // Retry once with repair prompt if first response isn't valid JSON
-      if (parsed === null) {
-        console.warn(`[experts/ai-suggest][${reqId}] first parse failed — retrying`);
-        const repairResult = await runAiCall(
-          { feature: "expert-suggest-retry", useCase: "analysis", model: "expert.suggest", tenantId: getOrgId(req), userId: getUserId(req) },
-          { systemPrompt: `Return ONLY the raw JSON object (no fences, no explanation):\n${systemPrompt}`, userInput },
+      // Retry loop — safeParseJson is module-level; retry fires on null parse, not on throws
+      let parsed: unknown | null = null;
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const isRetry = attempt > 0;
+        if (isRetry) console.warn(`[experts/ai-suggest][${reqId}] attempt 0 parse failed — retrying`);
+        const result = await runAiCall(
+          { feature: isRetry ? "expert-suggest-retry" : "expert-suggest",
+            useCase: "analysis", model: "expert.suggest",
+            tenantId: getOrgId(req), userId: getUserId(req) },
+          { systemPrompt: isRetry
+              ? `The previous response was not valid JSON. Return ONLY the raw JSON object (no markdown fences, no explanations):\n${systemPrompt}`
+              : systemPrompt,
+            userInput },
         );
-        parsed = tryParse(repairResult.text ?? "");
+        // Log raw AI response before parsing — essential for debugging parse failures
+        console.log(`[experts/ai-suggest][${reqId}] raw[${attempt}]: ${result.text.slice(0, 300)}`);
+        parsed = safeParseJson(result.text);
+        if (parsed !== null) break;
       }
 
       if (parsed === null) {
-        console.error(`[experts/ai-suggest][${reqId}] both parse attempts failed`);
+        console.error(`[experts/ai-suggest][${reqId}] both attempts produced unparseable JSON`);
         return res.status(422).json({
-          error_code: "VALIDATION_ERROR",
-          message: "AI-forslaget kunne ikke behandles korrekt. Prøv at beskrive eksperten med lidt mere detalje.",
+          error_code: "AI_PARSE_ERROR",
+          message: "AI-forslaget kunne ikke behandles. Prøv at beskrive eksperten med lidt mere detalje.",
         });
       }
 
@@ -1116,7 +1123,7 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       if (!validated.success) {
         console.error(`[experts/ai-suggest][${reqId}] schema validation failed`, validated.error.issues.slice(0, 3));
         return res.status(422).json({
-          error_code: "VALIDATION_ERROR",
+          error_code: "AI_SCHEMA_ERROR",
           message: "AI-forslaget manglede påkrævede felter. Prøv igen.",
         });
       }
