@@ -32,6 +32,71 @@ import {
 
 export type ConfidenceBand = "high" | "medium" | "low" | "unknown";
 
+type ChatComplexity = "nano" | "default" | "heavy";
+
+function classifyChatComplexity(
+  message: string,
+  docChars: number,
+  isPartialOcr: boolean,
+): { tier: ChatComplexity; reason: string } {
+  const msg = message.trim();
+  const msgLen = msg.length;
+
+  const GREETING_PATTERNS = [
+    /^(hej|hey|hi|hello|godmorgen|goddag|tak|thanks)\s*[!.?]?\s*$/i,
+    /^hvad kan du\b/i,
+    /^hvem er du\b/i,
+    /^test\s*$/i,
+  ];
+  if (msgLen < 60 && docChars === 0 && GREETING_PATTERNS.some(p => p.test(msg))) {
+    return { tier: "nano", reason: "greeting_or_trivial" };
+  }
+
+  if (docChars === 0 && msgLen < 120) {
+    const SIMPLE_SIGNALS = [
+      /^(forklar|hvad (er|betyder)|definer)\b/i,
+      /^(oversæt|skriv)\b/i,
+    ];
+    if (SIMPLE_SIGNALS.some(p => p.test(msg))) {
+      return { tier: "nano", reason: "short_simple_no_doc" };
+    }
+  }
+
+  if (docChars > 20_000) {
+    return { tier: "heavy", reason: `large_doc_${docChars}_chars` };
+  }
+
+  const COMPLEX_SIGNALS = [
+    /\bsammenl?ign\b/i,
+    /\brisikovurdering\b/i,
+    /\banalyse[rn]?\b/i,
+    /\bopsummer\b.*\bog\b.*\bvurder\b/i,
+    /\bstyrker\b.*\bsvagheder\b/i,
+    /\bfordele\b.*\bulemper\b/i,
+    /\bgennemgå\b.*\bhelt?\b/i,
+    /\bkontraktgennemgang\b/i,
+    /\bdue diligence\b/i,
+    /\bjuridisk\b/i,
+  ];
+  if (docChars > 5_000 && COMPLEX_SIGNALS.some(p => p.test(msg))) {
+    return { tier: "heavy", reason: "complex_analysis_with_doc" };
+  }
+
+  const questionMarks = (msg.match(/\?/g) || []).length;
+  if (docChars > 5_000 && questionMarks >= 3) {
+    return { tier: "heavy", reason: "multi_question_with_doc" };
+  }
+
+  return { tier: "default", reason: "standard" };
+}
+
+function resolveModelForTier(tier: ChatComplexity): { model: string; provider: string; key: string } {
+  const route = tier === "heavy" ? AI_MODEL_ROUTES.heavy
+    : tier === "nano" ? AI_MODEL_ROUTES.nano
+    : AI_MODEL_ROUTES.default;
+  return { model: route.model, provider: route.provider, key: tier };
+}
+
 export interface SimilarCaseInResponse {
   chunkId:          string;
   score:            number;
@@ -291,18 +356,19 @@ export async function runChatMessage(params: {
       );
     }
 
-    const docModel = AI_MODEL_ROUTES.default.model;
-    console.log(`[ai:router] model=${docModel} provider=${AI_MODEL_ROUTES.default.provider} key=default use_case=doc_mode streaming=${!!params.onToken}`);
+    const docChars = docCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0);
+    const complexity = classifyChatComplexity(message, docChars, isPartialOcr);
+    const resolved = resolveModelForTier(complexity.tier);
+    const docModel = resolved.model;
+    const docMaxTokens = complexity.tier === "heavy" ? 4000 : 2000;
+    console.log(`[ai:router] model=${docModel} tier=${complexity.tier} reason=${complexity.reason} provider=${resolved.provider} use_case=doc_mode streaming=${!!params.onToken}`);
     const t0 = Date.now();
 
     if (params.onToken && isPartialOcr) {
-      // ── PARTIAL OCR MODE: stream tokens immediately, apply safeguard at end ──
-      // Stream in real-time so user sees tokens immediately (like ChatGPT).
-      // If safeguard triggers at the end, send a replace event to clear the streamed content.
       const stream = await oai.chat.completions.create({
         model:       docModel,
         temperature: 0.1,
-        max_tokens:  2000,
+        max_tokens:  docMaxTokens,
         messages:    messagesPayload,
         stream:      true,
       });
@@ -311,18 +377,14 @@ export async function runChatMessage(params: {
         const delta = chunk.choices[0]?.delta?.content ?? "";
         if (delta) { params.onToken(delta); aiText += delta; }
       }
-      // Safeguard check: log only — do NOT replace streamed content.
-      // The system prompt already forbids definitive negative claims.
-      // Replacing streamed content mid-stream creates a bad UX (text jumps).
       if (isDefinitiveNegative(aiText)) {
         console.warn(`[chat-runner] PARTIAL_SAFEGUARD detected after streaming — keeping streamed text (prompt-level prevention active)`);
       }
     } else if (params.onToken) {
-      // ── COMPLETE MODE: real token streaming (safeguard not needed) ───────────
       const stream = await oai.chat.completions.create({
         model:       docModel,
         temperature: 0.1,
-        max_tokens:  2000,
+        max_tokens:  docMaxTokens,
         messages:    messagesPayload,
         stream:      true,
       });
@@ -332,11 +394,10 @@ export async function runChatMessage(params: {
         if (delta) { params.onToken(delta); aiText += delta; }
       }
     } else {
-      // ── NON-STREAMING PATH ────────────────────────────────────────────────────
       const completion = await oai.chat.completions.create({
         model:       docModel,
         temperature: 0.1,
-        max_tokens:  2000,
+        max_tokens:  docMaxTokens,
         messages:    messagesPayload,
       });
       aiText = completion.choices[0]?.message?.content ?? "";
@@ -364,20 +425,20 @@ export async function runChatMessage(params: {
       );
     }
   } else {
-    // ── NORMAL MODE: runAiCall via Responses API ──────────────────────────────
     const resolvedUseCase = params.useCase ?? "grounded_chat";
-    console.log(`[chat-runner] NORMAL_MODE useCase=${resolvedUseCase} streaming=${!!params.onToken}`);
+    const normalComplexity = classifyChatComplexity(message, 0, false);
+    const normalResolved = resolveModelForTier(normalComplexity.tier);
+    const normalMaxTokens = normalComplexity.tier === "heavy" ? 4000 : normalComplexity.tier === "nano" ? 1000 : 2000;
+    console.log(`[chat-runner] NORMAL_MODE useCase=${resolvedUseCase} model=${normalResolved.model} tier=${normalComplexity.tier} reason=${normalComplexity.reason} streaming=${!!params.onToken}`);
     const t0 = Date.now();
 
     if (params.onToken) {
-      // ── STREAMING PATH: direct OpenAI streaming (bypasses runAiCall) ─────────
       const { getOpenAIClient } = await import("../lib/openai-client");
       const oai = getOpenAIClient();
-      const normalModel = AI_MODEL_ROUTES.default.model;
       const stream = await oai.chat.completions.create({
-        model:       normalModel,
+        model:       normalResolved.model,
         temperature: 0.3,
-        max_tokens:  2000,
+        max_tokens:  normalMaxTokens,
         messages: [
           { role: "system", content: builtPrompt.systemPrompt },
           { role: "user",   content: message },
@@ -390,10 +451,9 @@ export async function runChatMessage(params: {
         if (delta) { params.onToken(delta); aiText += delta; }
       }
     } else {
-      // ── NON-STREAMING PATH (original) ────────────────────────────────────────
       const { runAiCall } = await import("../lib/ai/runner");
       const aiResult = await runAiCall(
-        { feature: "ai-chat", useCase: resolvedUseCase, tenantId: organizationId, userId },
+        { feature: "ai-chat", useCase: resolvedUseCase, tenantId: organizationId, userId, model: normalComplexity.tier as any },
         { systemPrompt: builtPrompt.systemPrompt, userInput: message },
       );
       aiText = aiResult.text;
@@ -928,13 +988,17 @@ export async function runChatMessageStream(
         { role: "user" as const, content: message },
       ];
 
-      const docModel = AI_MODEL_ROUTES.default.model;
+      const streamDocChars = docCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0);
+      const streamComplexity = classifyChatComplexity(message, streamDocChars, false);
+      const streamResolved = resolveModelForTier(streamComplexity.tier);
+      const streamMaxTokens = streamComplexity.tier === "heavy" ? 4000 : 2000;
+      console.log(`[chat-runner:stream] model=${streamResolved.model} tier=${streamComplexity.tier} reason=${streamComplexity.reason}`);
       const t0 = Date.now();
 
       const stream = await oai.chat.completions.create({
-        model: docModel,
+        model: streamResolved.model,
         temperature: 0.1,
-        max_tokens: 2000,
+        max_tokens: streamMaxTokens,
         stream: true,
         messages: messagesPayload,
       });
