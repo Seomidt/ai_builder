@@ -1384,11 +1384,9 @@ export default function AiChatPage() {
             } else if (event.type === "done") {
               doneData = event as ChatResponse & { _trace?: any };
               const isRefined = (event.refinement_generation ?? 1) >= 2;
-              const isPartialOcrAnswer = event.answer_completeness === "partial";
+              const isPartialOcrAnswer = event.answer_completeness === "partial" && !!pendingOcrUpgradeRef.current;
               setMessages(prev => prev.map(m => {
                 if (m.id === streamMsgId) {
-                  // Current message: finalise it
-                  // If partial OCR answer, mark as processing placeholder (shows animated card)
                   return {
                     ...m,
                     text: streamText,

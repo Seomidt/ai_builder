@@ -2045,8 +2045,14 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       const _sDocIds   = [...(body.context?.document_ids ?? [])].sort().join(",");
       // Detect upgrade call: document_context has source=r2_ocr_async (full OCR complete)
       const _isUpgradeCall = (body.document_context ?? []).some((d: any) => d.source === "r2_ocr_async");
-      const _sComplt   = _isUpgradeCall ? "complete" : ((streamReadiness as any)?.answerCompleteness ?? "partial");
-      const _sRefGen   = _isUpgradeCall ? 3 : _derivedRefinementGen(streamReadiness);
+      // Detect partial OCR: only source=ocr_partial means we expect a later upgrade
+      const _hasPartialOcr = (body.document_context ?? []).some((d: any) => d.source === "ocr_partial");
+      // If no documents at all, or documents are fully extracted (r2_direct, etc.), answer IS complete
+      const _docContextComplete = !_hasPartialOcr;
+      const _sComplt   = _isUpgradeCall ? "complete"
+        : _docContextComplete ? ((streamReadiness as any)?.answerCompleteness === "partial" && _sDocIds.length > 0 ? "complete" : ((streamReadiness as any)?.answerCompleteness ?? "complete"))
+        : ((streamReadiness as any)?.answerCompleteness ?? "partial");
+      const _sRefGen   = _isUpgradeCall ? 3 : _docContextComplete && !_hasPartialOcr ? Math.max(_derivedRefinementGen(streamReadiness), 2) : _derivedRefinementGen(streamReadiness);
       const _sCovPct   = (streamReadiness as any)?.coveragePercent ?? 0;
       const _sGenKey   = _refinementGenKey(streamReadiness, _sDocIds);
       const _sQueryHash = _hashQuery(body.message);
