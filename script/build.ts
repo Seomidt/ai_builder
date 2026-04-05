@@ -26,6 +26,7 @@ const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
   { name: "usage",       entry: "api/_src/usage.ts",       out: "api/usage.js"       },
   { name: "ocr-worker",  entry: "api/_src/ocr-worker.ts",  out: "api/ocr-worker.js"  },
   { name: "ocr-status",  entry: "api/_src/ocr-status.ts",  out: "api/ocr-status.js"  },
+  { name: "chat/stream", entry: "api/_src/chat-stream.ts", out: "api/chat/stream.js" },
 ];
 
 
@@ -135,8 +136,19 @@ async function buildAll() {
     "}",
   ].join("\n");
 
+  const cjsCompatFooterWithConfig = [
+    "",
+    "// Vercel CJS compatibility: expose handler + config on module.exports",
+    "if (module.exports && module.exports.__esModule && typeof module.exports.default === 'function') {",
+    "  const _cfg = module.exports.config;",
+    "  module.exports = module.exports.default;",
+    "  if (_cfg) module.exports.config = _cfg;",
+    "}",
+  ].join("\n");
+
   for (const h of HANDLERS) {
     console.log(`building Vercel function: ${h.name} → ${h.out}`);
+    const needsConfig = h.name === "chat/stream";
     await esbuild({
       entryPoints: [h.entry],
       platform:    "node",
@@ -151,7 +163,7 @@ async function buildAll() {
       plugins:     [stubPgNative],
       logLevel:    "info",
       banner:      { js: `// @vercel-bundled [${h.name}] — esbuild pre-compiled, do not edit\n` },
-      footer:      { js: cjsCompatFooter },
+      footer:      { js: needsConfig ? cjsCompatFooterWithConfig : cjsCompatFooter },
     });
   }
 
