@@ -26,7 +26,8 @@ const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
   { name: "usage",       entry: "api/_src/usage.ts",       out: "api/usage.js"       },
   { name: "ocr-worker",  entry: "api/_src/ocr-worker.ts",  out: "api/ocr-worker.js"  },
   { name: "ocr-status",  entry: "api/_src/ocr-status.ts",  out: "api/ocr-status.js"  },
-  { name: "chat/stream", entry: "api/_src/chat-stream.ts", out: "api/chat/stream.js" },
+  { name: "chat/stream",     entry: "api/_src/chat-stream.ts",     out: "api/chat/stream.js"     },
+  { name: "ocr-task-stream", entry: "api/_src/ocr-task-stream.ts", out: "api/ocr-task-stream.js" },
 ];
 
 
@@ -148,7 +149,7 @@ async function buildAll() {
 
   for (const h of HANDLERS) {
     console.log(`building Vercel function: ${h.name} → ${h.out}`);
-    const needsConfig = h.name === "chat/stream";
+    const needsConfig = h.name === "chat/stream" || h.name === "ocr-task-stream";
     await esbuild({
       entryPoints: [h.entry],
       platform:    "node",
