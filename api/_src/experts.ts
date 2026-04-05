@@ -526,6 +526,7 @@ async function analyzeAuthenticity(expertId: string, sourceId: string, orgId: st
 // ── AI helpers ────────────────────────────────────────────────────────────────
 
 async function aiRefine(orgId: string, userId: string, body: unknown, res: ServerResponse) {
+  const reqId = `ref-${Date.now().toString(36)}`;
   try {
     const data = z.object({
       field:        z.string().min(1),
@@ -533,28 +534,49 @@ async function aiRefine(orgId: string, userId: string, body: unknown, res: Serve
       action:       z.enum(["improve", "shorten", "rewrite", "more_precise"]),
     }).parse(body);
 
+    // Guard: require meaningful input to refine
+    if (data.currentValue.trim().length < 15) {
+      return jsonOut(res, 400, {
+        error_code: "VALIDATION_ERROR",
+        message: "Teksten er for kort til at blive forfinet. Skriv mindst 15 tegn.",
+      });
+    }
+
     const { runAiCall } = await import("../../server/lib/ai/runner");
+    console.log(`[experts/ai-refine][${reqId}] action=${data.action} field="${data.field}" orgId=${orgId}`);
+
     const ACTION_PROMPTS: Record<string, string> = {
       improve:      "Improve this text while keeping its meaning and purpose. Make it more professional and clear.",
       shorten:      "Shorten this text significantly while keeping all key meaning. Keep it Danish if it is Danish.",
       rewrite:      "Rewrite this text with different wording but the same intent. Keep it Danish if it is Danish.",
       more_precise: "Make this text more precise and specific. Remove vague language. Keep it Danish if it is Danish.",
     };
-    const systemPrompt = `You are an expert configuration assistant for a B2B AI platform. 
+    const systemPrompt = `You are an expert configuration assistant for a B2B AI platform.
 The user wants to refine a specific field of their AI expert configuration.
 Field being refined: "${data.field}"
 Action requested: ${ACTION_PROMPTS[data.action]}
 Return ONLY the refined text — no quotes, no explanation, no JSON. Just the improved text directly.`;
 
+    // FIX: use correct useCase ("analysis") and explicit model key ("expert.refine")
     const result = await runAiCall(
-      { feature: "expert-refine", useCase: "configuration_assist", tenantId: orgId, userId },
+      { feature: "expert-refine", useCase: "analysis", model: "expert.refine", tenantId: orgId, userId },
       { systemPrompt, userInput: data.currentValue },
     );
-    ok(res, { refined: result.content.trim() });
-  } catch (err) { handleErr(res, err, "experts/ai-refine"); }
+
+    // FIX: AiCallResult returns .text, not .content
+    const refined = result.text?.trim();
+    if (!refined) {
+      console.error(`[experts/ai-refine][${reqId}] empty result.text — provider returned blank`);
+      return jsonOut(res, 500, { error_code: "INTERNAL_ERROR", message: "AI returnerede et tomt svar. Prøv igen." });
+    }
+
+    console.log(`[experts/ai-refine][${reqId}] ok — ${refined.length} chars`);
+    ok(res, { refined });
+  } catch (err) { handleErr(res, err, `experts/ai-refine[${reqId}]`); }
 }
 
 async function aiSuggest(orgId: string, userId: string, body: unknown, res: ServerResponse) {
+  const reqId = `sug-${Date.now().toString(36)}`;
   try {
     const data = z.object({
       rawDescription: z.string().min(1),
@@ -563,11 +585,21 @@ async function aiSuggest(orgId: string, userId: string, body: unknown, res: Serv
       language:       z.string().optional().default("da"),
     }).parse(body);
 
+    // Guard: require meaningful description
+    if (data.rawDescription.trim().length < 20) {
+      return jsonOut(res, 400, {
+        error_code: "VALIDATION_ERROR",
+        message: "Beskriv eksperten med mindst 20 tegn for at AI kan generere et forslag.",
+      });
+    }
+
     const { runAiCall } = await import("../../server/lib/ai/runner");
+    console.log(`[experts/ai-suggest][${reqId}] len=${data.rawDescription.length} orgId=${orgId}`);
     const langNote = data.language === "en" ? "English" : "danish";
 
-    const systemPrompt = `You are an AI configuration assistant for a multi-tenant B2B AI specialist platform.
-The user describes an AI expert they want to build. Return ONLY valid JSON with this exact schema:
+    const systemPrompt = `You are an AI configuration assistant for a multi-tenant B2B enterprise platform.
+The user describes an AI expert they want to build. The expert can be for ANY domain — support, legal, finance, compliance, operations, sales, HR, or general enterprise knowledge work. Do NOT assume insurance unless explicitly stated.
+Return ONLY valid JSON with this exact schema (no markdown fences, no explanation):
 {
   "suggested_name": "string",
   "improved_description": "string",
@@ -579,18 +611,13 @@ The user describes an AI expert they want to build. Return ONLY valid JSON with 
   "suggested_source_types": ["document | policy | legal | rulebook | image | other"],
   "warnings": []
 }
-Respond only in JSON. No markdown fences. No explanation. Generate names and content in ${langNote}.`;
+Generate names and content in ${langNote}. Adapt to the specific domain the user describes.`;
 
     const userInput = [
       data.rawDescription,
-      data.industry   ? `Industry: ${data.industry}`   : "",
-      data.department ? `Department: ${data.department}` : "",
+      data.industry   ? `Branche/domæne: ${data.industry}`   : "",
+      data.department ? `Afdeling: ${data.department}` : "",
     ].filter(Boolean).join("\n");
-
-    const result = await runAiCall(
-      { feature: "expert-suggest", useCase: "analysis", tenantId: orgId, userId },
-      { systemPrompt, userInput },
-    );
 
     const AiSuggestionSchema = z.object({
       suggested_name:         z.string().min(1),
@@ -610,14 +637,53 @@ Respond only in JSON. No markdown fences. No explanation. Generate names and con
       warnings:               z.array(z.string()).default([]),
     });
 
-    let parsed: unknown;
-    try { parsed = JSON.parse(result.content.replace(/```json\n?|\n?```/g, "").trim()); }
-    catch { return jsonOut(res, 422, { error: "AI output could not be parsed. Please try again." }); }
+    // Helper: strip markdown fences and parse JSON
+    const tryParse = (raw: string): unknown | null => {
+      try { return JSON.parse(raw.replace(/```json\n?|\n?```/g, "").trim()); }
+      catch { return null; }
+    };
+
+    // FIX: use correct model key ("expert.suggest"); useCase is already "analysis"
+    const result = await runAiCall(
+      { feature: "expert-suggest", useCase: "analysis", model: "expert.suggest", tenantId: orgId, userId },
+      { systemPrompt, userInput },
+    );
+
+    // FIX: AiCallResult returns .text, not .content
+    let parsed = tryParse(result.text ?? "");
+
+    // Retry once with a repair prompt if the first response isn't valid JSON
+    if (parsed === null) {
+      console.warn(`[experts/ai-suggest][${reqId}] first parse failed — retrying with repair prompt`);
+      const repairPrompt = `The previous response was not valid JSON. Return ONLY the raw JSON object (no fences, no text):
+${systemPrompt}`;
+      const retry = await runAiCall(
+        { feature: "expert-suggest-retry", useCase: "analysis", model: "expert.suggest", tenantId: orgId, userId },
+        { systemPrompt: repairPrompt, userInput },
+      );
+      parsed = tryParse(retry.text ?? "");
+    }
+
+    if (parsed === null) {
+      console.error(`[experts/ai-suggest][${reqId}] both parse attempts failed`);
+      return jsonOut(res, 422, {
+        error_code: "VALIDATION_ERROR",
+        message: "AI-forslaget kunne ikke behandles korrekt. Prøv at beskrive eksperten med lidt mere detalje.",
+      });
+    }
 
     const validated = AiSuggestionSchema.safeParse(parsed);
-    if (!validated.success) return jsonOut(res, 422, { error: "AI output did not match expected schema. Please try again." });
+    if (!validated.success) {
+      console.error(`[experts/ai-suggest][${reqId}] schema validation failed`, validated.error.issues);
+      return jsonOut(res, 422, {
+        error_code: "VALIDATION_ERROR",
+        message: "AI-forslaget manglede påkrævede felter. Prøv igen.",
+      });
+    }
+
+    console.log(`[experts/ai-suggest][${reqId}] ok — name="${validated.data.suggested_name}"`);
     ok(res, validated.data);
-  } catch (err) { handleErr(res, err, "experts/ai-suggest"); }
+  } catch (err) { handleErr(res, err, `experts/ai-suggest[${reqId}]`); }
 }
 
 async function testExpert(expertId: string, orgId: string, userId: string, body: unknown, res: ServerResponse) {

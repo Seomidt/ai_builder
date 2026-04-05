@@ -617,7 +617,7 @@ export default function AiEkspertEditor() {
                     <FormLabel className={LABEL_CLS}>Navn *</FormLabel>
                     <FormControl>
                       <Input
-                        placeholder="f.eks. Forsikringsspecialist"
+                        placeholder="f.eks. Kontraktassistent, Supportekspert, Complianceassistent"
                         data-testid="input-expert-name"
                         className={FIELD_CLS}
                         {...field}
@@ -640,7 +640,7 @@ export default function AiEkspertEditor() {
                     </div>
                     <FormControl>
                       <Input
-                        placeholder="Vurderer forsikringssager og forklarer dækning ud fra virksomhedens egne data."
+                        placeholder="f.eks. Besvarer spørgsmål baseret på interne dokumenter og virksomhedens egne processer."
                         data-testid="input-expert-goal"
                         className={FIELD_CLS}
                         {...field}
@@ -863,11 +863,32 @@ export default function AiEkspertEditor() {
               <SectionHeader
                 letter="D"
                 title="AI Hjælp"
-                subtitle="Beskriv eksperten med dine egne ord — AI udfylder alle felter automatisk."
+                subtitle="Beskriv eksperten med dine egne ord — AI foreslår navn, formål, opgaver, begrænsninger og svarstil."
               />
               <div className="space-y-3">
+                {/* Quick templates */}
+                <div className="flex flex-wrap gap-1.5" data-testid="ai-quick-templates">
+                  {[
+                    { label: "Support ekspert",     text: "En supportekspert der besvarer medarbejdernes eller kundernes spørgsmål hurtigt og præcist baseret på interne vejledninger og FAQ-dokumenter." },
+                    { label: "Salg ekspert",        text: "En salgsassistent der hjælper salgsteamet med at finde relevante produktinformationer, priser og argumenter baseret på interne salgsmaterialer." },
+                    { label: "Compliance ekspert",  text: "En complianceassistent der rådgiver om interne politikker, regulatoriske krav og dokumentationspligter baseret på virksomhedens egne compliance-dokumenter." },
+                    { label: "Dokumentekspert",     text: "En dokumentekspert der analyserer og forklarer indholdet i uploadede dokumenter, kontrakter og rapporter — giver strukturerede svar." },
+                    { label: "Kontrakt ekspert",    text: "En kontraktassistent der gennemgår kontrakter, identificerer vigtige klausuler, frister og risici, og besvarer spørgsmål baseret på kontraktindholdet." },
+                    { label: "Custom ekspert",      text: "" },
+                  ].map(({ label, text }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      data-testid={`template-${label.toLowerCase().replace(/\s+/g, "-")}`}
+                      onClick={() => setAiPrompt(text)}
+                      className="text-[11px] px-2.5 py-1 rounded-full border border-white/10 bg-white/[0.03] text-muted-foreground hover:bg-primary/10 hover:border-primary/30 hover:text-primary/80 transition-colors"
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
                 <Textarea
-                  placeholder="f.eks. En ekspert der vurderer forsikringssager ud fra policer, skadeshistorik og interne dokumenter — giver strukturerede vurderinger og anbefaler videre behandling."
+                  placeholder="Beskriv eksperten med dine egne ord — f.eks. 'En assistent der hjælper HR-teamet med spørgsmål om ansættelseskontrakter, orlov og interne politikker.'"
                   rows={4}
                   value={aiPrompt}
                   onChange={(e) => setAiPrompt(e.target.value)}

@@ -680,6 +680,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
   // POST /api/experts/ai-refine — per-field AI refinement, routed through tenant runtime
   app.post("/api/experts/ai-refine", async (req, res) => {
+    const reqId = `ref-${Date.now().toString(36)}`;
     try {
       const body = z.object({
         field:        z.string().min(1),
@@ -687,7 +688,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         action:       z.enum(["improve", "shorten", "rewrite", "more_precise"]),
       }).parse(req.body);
 
+      // Guard: require meaningful input
+      if (body.currentValue.trim().length < 15) {
+        return res.status(400).json({
+          error_code: "VALIDATION_ERROR",
+          message: "Teksten er for kort til at blive forfinet. Skriv mindst 15 tegn.",
+        });
+      }
+
       const { runAiCall } = await import("./lib/ai/runner");
+      console.log(`[experts/ai-refine][${reqId}] action=${body.action} field="${body.field}" org=${getOrgId(req)}`);
 
       const ACTION_PROMPTS: Record<string, string> = {
         improve:      "Improve this text while keeping its meaning and purpose. Make it more professional and clear.",
@@ -696,18 +706,27 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         more_precise: "Make this text more precise and specific. Remove vague language. Keep it Danish if it is Danish.",
       };
 
-      const systemPrompt = `You are an expert configuration assistant for a B2B AI platform. 
+      const systemPrompt = `You are an expert configuration assistant for a B2B AI platform.
 The user wants to refine a specific field of their AI expert configuration.
 Field being refined: "${body.field}"
 Action requested: ${ACTION_PROMPTS[body.action]}
 Return ONLY the refined text — no quotes, no explanation, no JSON. Just the improved text directly.`;
 
+      // FIX: useCase must be a valid AiUseCase ("analysis"); add explicit model key
       const result = await runAiCall(
-        { feature: "expert-refine", useCase: "configuration_assist", tenantId: getOrgId(req), userId: getUserId(req) },
+        { feature: "expert-refine", useCase: "analysis", model: "expert.refine", tenantId: getOrgId(req), userId: getUserId(req) },
         { systemPrompt, userInput: body.currentValue },
       );
 
-      res.json({ refined: result.content.trim() });
+      // FIX: AiCallResult returns .text — not .content
+      const refined = result.text?.trim();
+      if (!refined) {
+        console.error(`[experts/ai-refine][${reqId}] empty result.text`);
+        return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "AI returnerede et tomt svar. Prøv igen." });
+      }
+
+      console.log(`[experts/ai-refine][${reqId}] ok — ${refined.length} chars`);
+      res.json({ refined });
     } catch (err) { handleError(res, err); }
   });
 
@@ -991,6 +1010,7 @@ Return ONLY the refined text — no quotes, no explanation, no JSON. Just the im
   // ─── AI Assist — structured validated output ──────────────────────────────────
 
   app.post("/api/experts/ai-suggest", async (req, res) => {
+    const reqId = `sug-${Date.now().toString(36)}`;
     try {
       const body = z.object({
         rawDescription: z.string().min(1),
@@ -999,11 +1019,21 @@ Return ONLY the refined text — no quotes, no explanation, no JSON. Just the im
         language:       z.string().optional().default("da"),
       }).parse(req.body);
 
+      // Guard: require meaningful description
+      if (body.rawDescription.trim().length < 20) {
+        return res.status(400).json({
+          error_code: "VALIDATION_ERROR",
+          message: "Beskriv eksperten med mindst 20 tegn for at AI kan generere et forslag.",
+        });
+      }
+
       const { runAiCall } = await import("./lib/ai/runner");
+      console.log(`[experts/ai-suggest][${reqId}] len=${body.rawDescription.length} org=${getOrgId(req)}`);
       const langNote = body.language === "en" ? "English" : "danish";
 
-      const systemPrompt = `You are an AI configuration assistant for a multi-tenant B2B AI specialist platform.
-The user describes an AI expert they want to build. Return ONLY valid JSON with this exact schema:
+      const systemPrompt = `You are an AI configuration assistant for a multi-tenant B2B enterprise platform.
+The user describes an AI expert they want to build. The expert can be for ANY domain — support, legal, finance, compliance, operations, sales, HR, or general enterprise knowledge work. Do NOT assume insurance unless explicitly stated.
+Return ONLY valid JSON with this exact schema (no markdown fences, no explanation):
 {
   "suggested_name": "string — precise professional name",
   "improved_description": "string — clear purpose-driven description, max 2 sentences",
@@ -1023,19 +1053,13 @@ The user describes an AI expert they want to build. Return ONLY valid JSON with 
   "suggested_source_types": ["document | policy | legal | rulebook | image | other"],
   "warnings": []
 }
-Respond only in JSON. No markdown fences. No explanation.
-Generate names and content in ${langNote}.`;
+Generate names and content in ${langNote}. Adapt to the specific domain the user describes.`;
 
       const userInput = [
         body.rawDescription,
-        body.industry   ? `Industry: ${body.industry}`   : "",
-        body.department ? `Department: ${body.department}` : "",
+        body.industry   ? `Branche/domæne: ${body.industry}`   : "",
+        body.department ? `Afdeling: ${body.department}` : "",
       ].filter(Boolean).join("\n");
-
-      const result = await runAiCall(
-        { feature: "expert-suggest", useCase: "analysis", tenantId: getOrgId(req), userId: getUserId(req) },
-        { systemPrompt, userInput },
-      );
 
       const AiSuggestionSchema = z.object({
         suggested_name:         z.string().min(1),
@@ -1055,18 +1079,49 @@ Generate names and content in ${langNote}.`;
         warnings:               z.array(z.string()).default([]),
       });
 
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(result.content.replace(/```json\n?|\n?```/g, "").trim());
-      } catch {
-        return res.status(422).json({ error: "AI output could not be parsed. Please try again." });
+      // Helper: strip markdown fences and parse
+      const tryParse = (raw: string): unknown | null => {
+        try { return JSON.parse(raw.replace(/```json\n?|\n?```/g, "").trim()); }
+        catch { return null; }
+      };
+
+      // FIX: add explicit model key; useCase is already "analysis"
+      const result = await runAiCall(
+        { feature: "expert-suggest", useCase: "analysis", model: "expert.suggest", tenantId: getOrgId(req), userId: getUserId(req) },
+        { systemPrompt, userInput },
+      );
+
+      // FIX: AiCallResult returns .text — not .content
+      let parsed = tryParse(result.text ?? "");
+
+      // Retry once with repair prompt if first response isn't valid JSON
+      if (parsed === null) {
+        console.warn(`[experts/ai-suggest][${reqId}] first parse failed — retrying`);
+        const repairResult = await runAiCall(
+          { feature: "expert-suggest-retry", useCase: "analysis", model: "expert.suggest", tenantId: getOrgId(req), userId: getUserId(req) },
+          { systemPrompt: `Return ONLY the raw JSON object (no fences, no explanation):\n${systemPrompt}`, userInput },
+        );
+        parsed = tryParse(repairResult.text ?? "");
+      }
+
+      if (parsed === null) {
+        console.error(`[experts/ai-suggest][${reqId}] both parse attempts failed`);
+        return res.status(422).json({
+          error_code: "VALIDATION_ERROR",
+          message: "AI-forslaget kunne ikke behandles korrekt. Prøv at beskrive eksperten med lidt mere detalje.",
+        });
       }
 
       const validated = AiSuggestionSchema.safeParse(parsed);
       if (!validated.success) {
-        return res.status(422).json({ error: "AI output did not match expected schema. Please try again." });
+        console.error(`[experts/ai-suggest][${reqId}] schema validation failed`, validated.error.issues.slice(0, 3));
+        return res.status(422).json({
+          error_code: "VALIDATION_ERROR",
+          message: "AI-forslaget manglede påkrævede felter. Prøv igen.",
+        });
       }
 
+      console.log(`[experts/ai-suggest][${reqId}] ok — name="${validated.data.suggested_name}"`);
       res.json(validated.data);
     } catch (err) { handleError(res, err); }
   });

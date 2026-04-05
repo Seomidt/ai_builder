@@ -246,7 +246,11 @@ export default function AiEksperter() {
             <p className="text-sm font-semibold text-foreground mb-1">Ingen AI eksperter endnu</p>
             <p className="text-sm text-muted-foreground">
               Opret din første ekspert — f.eks. en{" "}
-              <span className="text-primary/80">Forsikringsspecialist</span>
+              <span className="text-primary/80">Kontraktassistent</span>
+              {", "}
+              <span className="text-primary/80">Supportekspert</span>
+              {" eller "}
+              <span className="text-primary/80">Complianceassistent</span>
             </p>
           </div>
           {isAdmin && (
