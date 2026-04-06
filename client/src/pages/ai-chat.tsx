@@ -13,7 +13,6 @@ import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
 import { getSessionToken } from "@/lib/supabase";
 import { pollForCompletedOcr } from "@shared/upgrade-chain";
-import { shouldStartPartialAnswer } from "@shared/partial-answer-gate";
 import { useToast } from "@/hooks/use-toast";
 import { useReadinessStream, type ReadinessSnapshot, type ReadinessUxState } from "@/hooks/use-readiness-stream";
 
@@ -1033,21 +1032,9 @@ export default function AiChatPage() {
                         }
                         const partialText = (data.ocrText as string).slice(0, 80_000);
 
-                        // Gate: only generate a provisional answer if the partial OCR text
-                        // is relevant enough for the user's question.
-                        // If blocked, continue reading the SSE stream and wait for completed.
-                        const gate = shouldStartPartialAnswer({
-                          questionText:   payload.text ?? "",
-                          partialOcrText: partialText,
-                          filename:       file.name,
-                          mimeType:       file.type,
-                        });
-
-                        if (!gate.allowed) {
-                          console.log(`[OCR:partial_ready] taskId=${taskId} gate=BLOCKED reason=${gate.reason} — skipping provisional, waiting for completed`);
-                          // Do NOT break — continue SSE loop to wait for completed event
-                          continue;
-                        }
+                        // Client-side gate removed: server already applied deterministic
+                        // partial-readiness policy before emitting partial_ready.
+                        // Always forward partial text immediately for provisional answer.
 
                         // Build document_context directly — do NOT rely on ocrResult fallthrough chain.
                         // ocrHandled = true skips the post-SSE ocrResult→finalizeResults block.
@@ -1063,7 +1050,7 @@ export default function AiChatPage() {
                         ocrResult = { status: "running", stage: "partial_ready" }; // sentinel: passes !ocrResult check
                         pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
                         setOcrStatusLabel(null);
-                        console.log(`[OCR:partial_ready] taskId=${taskId} gate=OK chars=${data.charCount} — provisional queued, upgrade ref set`);
+                        console.log(`[OCR:partial_ready] taskId=${taskId} chars=${data.charCount} — provisional queued, upgrade ref set`);
                         sseResolved = true;
                         reader.cancel().catch(() => {});
                         break outer;
@@ -1169,22 +1156,11 @@ export default function AiChatPage() {
                     setOcrStatusLabel(`${sLabel}: ${file.name} (${elapsedSec}s${progress})`);
                   }
                   if (pollData.status === "running" && pollData.stage === "partial_ready" && pollData.ocrText?.trim()) {
-                    // Gate: same question-relevance check as the SSE path
-                    const pollGate = shouldStartPartialAnswer({
-                      questionText:   payload.text ?? "",
-                      partialOcrText: (pollData.ocrText as string).slice(0, 80_000),
-                      filename:       file.name,
-                      mimeType:       file.type,
-                    });
-                    if (!pollGate.allowed) {
-                      console.log(`[TRACE-2ocr][${traceId}] poll partial_ready gate=BLOCKED reason=${pollGate.reason} — waiting for completed`);
-                      continue; // continue polling loop
-                    }
                     ocrResult = pollData;
                     // Set upgrade ref so onSuccess starts completed-upgrade SSE (same as SSE path)
                     pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
                     setOcrStatusLabel(null);
-                    console.log(`[TRACE-2ocr][${traceId}] poll partial_ready gate=OK chars=${pollData.charCount} — early trigger, upgrade ref set`);
+                    console.log(`[TRACE-2ocr][${traceId}] poll partial_ready chars=${pollData.charCount} — early trigger, upgrade ref set`);
                     break;
                   }
                   if (pollData.status === "completed") { ocrResult = pollData; break; }
