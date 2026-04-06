@@ -15,14 +15,28 @@ En AI Ekspert er det centrale business-objekt i platformen. Den:
 
 Alt i tenant-produktet kredser om AI Eksperter.
 
-**Tenant produkt-sektioner:**
-- Oversigt
-- AI Eksperter (primær)
-- Viden & Data
-- Regler
-- Kørseler
+**Tenant produkt-sektioner (sidebar):**
+- AI Chat (primær)
+- AI Eksperter
+- Storage (Viden & Data)
 - Team
-- Workspace
+- Insights
+- Workspace (oversigt/data/AI ops/forbrug/billing/integrationer/indstillinger/audit)
+
+**Navigation:**
+- Sidebar (TenantSidebar): Core items + admin items
+- TenantNav: Top-navigation brugt INDEN i workspace-sider (stier = `/workspace/*`)
+- Routes: `/ai-chat`, `/ai-eksperter`, `/storage`, `/workspace/*`, `/insights`
+
+**Smart model-routing (AI chat):**
+- GPT-4.1-nano (trivielt, hilsner) — max 1000 tokens
+- GPT-4.1-mini (standard) — max 2000 tokens
+- GPT-4.1 (store docs >20k chars, juridisk analyse, multi-spørgsmål) — max 4000 tokens
+
+**Chat streaming:**
+- Express registrerer BEGGE paths: `/api/chat/stream` + `/api/chat-stream`
+- Frontend kalder `/api/chat-stream` (Vercel-safe flat path)
+- Vercel-funktion `api/chat-stream.js` proxyer til Railway's `/api/chat/stream`
 
 ## User Preferences
 
