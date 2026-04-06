@@ -32,12 +32,12 @@ export interface PartialAnswerGateResult {
 
 /**
  * Minimum number of characters the partial OCR text must contain.
- * 4 000 chars ≈ 600-800 words — ensures the first chunk is substantial enough
- * to produce a useful provisional answer. Texts smaller than this (cover pages,
+ * 1 200 chars ≈ 180-240 words — allows earlier provisional answers for large
+ * OCR jobs while still filtering very short/noisy fragments. Texts smaller than this (cover pages,
  * short introductions, first-page only) are blocked and the system waits for
  * the completed OCR instead.
  */
-const MIN_TEXT_CHARS = 4_000;
+const MIN_TEXT_CHARS = 1_200;
 
 /**
  * Intro/cover-page signals.
@@ -240,6 +240,12 @@ export function shouldStartPartialAnswer(input: PartialAnswerGateInput): Partial
   if (topics.length > 0) {
     const relevantTopic = topics.find(topic => hasTopicSignals(topic, partialOcrText));
     if (!relevantTopic) {
+      // Fail-open for long partial OCR snippets: even when topic signals are not
+      // matched exactly, a substantial partial often still contains enough context
+      // for a useful provisional answer.
+      if (partialOcrText.trim().length >= 2_500) {
+        return { allowed: true, reason: "long_partial_fallback" };
+      }
       return {
         allowed: false,
         reason: `no_ocr_signals_for_topics:${topics.join(",")}`,
