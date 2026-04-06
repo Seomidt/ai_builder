@@ -6,15 +6,15 @@ import {
 import { cn } from "@/lib/utils";
 
 export const tenantNavItems = [
-  { href: "/tenant",              label: "Overview",     icon: LayoutDashboard },
-  { href: "/tenant/data",         label: "Data",         icon: Database        },
-  { href: "/tenant/ai",           label: "AI Ops",       icon: BrainCircuit    },
-  { href: "/tenant/usage",        label: "Usage",        icon: BarChart2       },
-  { href: "/tenant/billing",      label: "Billing",      icon: CreditCard      },
-  { href: "/tenant/integrations", label: "Integrations", icon: Plug            },
-  { href: "/tenant/team",         label: "Team",         icon: Users           },
-  { href: "/tenant/settings",     label: "Settings",     icon: Settings        },
-  { href: "/tenant/audit",        label: "Audit",        icon: ScrollText      },
+  { href: "/workspace",              label: "Oversigt",        icon: LayoutDashboard },
+  { href: "/workspace/data",         label: "Data",            icon: Database        },
+  { href: "/workspace/ai",           label: "AI Ops",          icon: BrainCircuit    },
+  { href: "/workspace/usage",        label: "Forbrug",         icon: BarChart2       },
+  { href: "/workspace/billing",      label: "Billing",         icon: CreditCard      },
+  { href: "/workspace/integrations", label: "Integrationer",   icon: Plug            },
+  { href: "/team",                   label: "Team",            icon: Users           },
+  { href: "/workspace/settings",     label: "Indstillinger",   icon: Settings        },
+  { href: "/workspace/audit",        label: "Audit",           icon: ScrollText      },
 ];
 
 export function TenantNav() {
@@ -25,8 +25,8 @@ export function TenantNav() {
       <div className="px-6">
         <nav className="flex items-center gap-0.5 overflow-x-auto scrollbar-none" data-testid="tenant-nav">
           {tenantNavItems.map(({ href, label, icon: Icon }) => {
-            const isActive = href === "/tenant"
-              ? location === "/tenant"
+            const isActive = href === "/workspace"
+              ? location === "/workspace"
               : location.startsWith(href);
             return (
               <Link

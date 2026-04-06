@@ -29,11 +29,11 @@ const CORE_ITEMS = [
 ] as const;
 
 const ADMIN_ITEMS = [
-  { href: "/team",          label: "Team",                  icon: Users2            },
-  { href: "/insights",      label: "Insights",              icon: Lightbulb         },
-  { href: "/workspace/ai",  label: "Ekspertindstillinger",  icon: SlidersHorizontal },
-  { href: "/brug",          label: "Usage",                 icon: BarChart2         },
-  { href: "/indstillinger", label: "Indstillinger",         icon: Settings          },
+  { href: "/team",               label: "Team",           icon: Users2            },
+  { href: "/insights",           label: "Insights",       icon: Lightbulb         },
+  { href: "/workspace",          label: "Workspace",      icon: SlidersHorizontal },
+  { href: "/workspace/usage",    label: "Forbrug",        icon: BarChart2         },
+  { href: "/workspace/settings", label: "Indstillinger",  icon: Settings          },
 ] as const;
 
 type AllHref =
@@ -54,6 +54,7 @@ function isPlatformAdmin(role?: string): boolean {
 
 function isActive(href: AllHref, location: string): boolean {
   if (href === "/ai-chat") return location === "/ai-chat" || location === "/";
+  if (href === "/workspace") return location === "/workspace";
   return location === href || location.startsWith(href + "/");
 }
 

@@ -1,10 +1,9 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { Settings, Globe, Clock, DollarSign, BrainCircuit, Save } from "lucide-react";
+import { Settings, Globe, Clock, DollarSign, Save, Info } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { TenantNav } from "@/components/tenant/TenantNav";
 import { apiRequest, queryClient } from "@/lib/queryClient";
@@ -23,10 +22,35 @@ interface TenantSettings {
   updatedAt: string;
 }
 
-const LANGUAGES  = ["en", "da", "de", "fr", "es", "pt", "nl", "sv", "no"];
-const TIMEZONES  = ["UTC", "America/New_York", "America/Los_Angeles", "Europe/London", "Europe/Copenhagen", "Asia/Tokyo"];
-const CURRENCIES = ["USD", "EUR", "GBP", "DKK", "SEK", "NOK"];
-const AI_MODELS  = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"];
+const LANGUAGES = [
+  { code: "da", label: "Dansk" },
+  { code: "en", label: "English" },
+  { code: "de", label: "Deutsch" },
+  { code: "sv", label: "Svenska" },
+  { code: "no", label: "Norsk" },
+  { code: "nl", label: "Nederlands" },
+  { code: "fr", label: "Français" },
+  { code: "es", label: "Español" },
+  { code: "pt", label: "Português" },
+];
+
+const TIMEZONES = [
+  { code: "Europe/Copenhagen", label: "København (CET)" },
+  { code: "Europe/London",     label: "London (GMT)" },
+  { code: "UTC",               label: "UTC" },
+  { code: "America/New_York",  label: "New York (EST)" },
+  { code: "America/Los_Angeles", label: "Los Angeles (PST)" },
+  { code: "Asia/Tokyo",        label: "Tokyo (JST)" },
+];
+
+const CURRENCIES = [
+  { code: "DKK", label: "DKK – Danske kroner" },
+  { code: "EUR", label: "EUR – Euro" },
+  { code: "USD", label: "USD – US Dollar" },
+  { code: "GBP", label: "GBP – Britiske pund" },
+  { code: "SEK", label: "SEK – Svenske kroner" },
+  { code: "NOK", label: "NOK – Norske kroner" },
+];
 
 function SettingRow({ label, icon: Icon, children }: { label: string; icon: React.ElementType; children: React.ReactNode }) {
   return (
@@ -35,7 +59,7 @@ function SettingRow({ label, icon: Icon, children }: { label: string; icon: Reac
         <Icon className="w-4 h-4 text-muted-foreground" />
         <span className="text-sm text-foreground">{label}</span>
       </div>
-      <div className="w-44">{children}</div>
+      <div className="w-52">{children}</div>
     </div>
   );
 }
@@ -45,25 +69,33 @@ export default function TenantSettings() {
   const { data, isLoading } = useQuery<TenantSettings>({ queryKey: ["/api/tenant/settings"] });
 
   const [form, setForm] = useState({
-    defaultLanguage: "en", defaultLocale: "en-US",
-    currency: "USD", timezone: "UTC",
-    aiModel: "gpt-4o", maxTokensPerRun: 100_000,
+    language: "da",
+    locale: "da-DK",
+    currency: "DKK",
+    timezone: "Europe/Copenhagen",
   });
 
   useEffect(() => {
-    if (data?.tenant) setForm(data.tenant);
+    if (data?.tenant) {
+      setForm({
+        language: data.tenant.defaultLanguage ?? "da",
+        locale:   data.tenant.defaultLocale   ?? "da-DK",
+        currency: data.tenant.currency        ?? "DKK",
+        timezone: data.tenant.timezone        ?? "Europe/Copenhagen",
+      });
+    }
   }, [data]);
 
   const saveMutation = useMutation({
     mutationFn: () => apiRequest("PATCH", "/api/tenant/settings", form),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/tenant/settings"] });
-      toast({ title: "Settings saved", description: "Configuration updated successfully" });
+      toast({ title: "Gemt", description: "Indstillinger opdateret" });
     },
-    onError: (err: Error) => toast({ title: "Error", description: friendlyError(err), variant: "destructive" }),
+    onError: (err: Error) => toast({ title: "Fejl", description: friendlyError(err), variant: "destructive" }),
   });
 
-  const set = (field: keyof typeof form, value: string | number) =>
+  const set = (field: keyof typeof form, value: string) =>
     setForm((f) => ({ ...f, [field]: value }));
 
   return (
@@ -81,7 +113,7 @@ export default function TenantSettings() {
               </div>
               <h1 className="text-xl font-bold text-foreground tracking-tight">Indstillinger</h1>
             </div>
-            <p className="text-sm text-muted-foreground ml-10">Organisations- og AI-konfiguration</p>
+            <p className="text-sm text-muted-foreground ml-10">Organisations- og regionskonfiguration</p>
           </div>
           <Button
             size="sm" className="gap-1.5"
@@ -97,11 +129,10 @@ export default function TenantSettings() {
         {isLoading ? (
           <div className="space-y-4">
             <Skeleton className="h-48" />
-            <Skeleton className="h-36" />
+            <Skeleton className="h-24" />
           </div>
         ) : (
           <>
-            {/* Locale Settings */}
             <Card className="bg-card border-card-border">
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium flex items-center gap-2">
@@ -109,11 +140,11 @@ export default function TenantSettings() {
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <SettingRow label="Standardsprog" icon={Globe}>
-                  <Select value={form.defaultLanguage} onValueChange={(v) => set("defaultLanguage", v)}>
+                <SettingRow label="Sprog" icon={Globe}>
+                  <Select value={form.language} onValueChange={(v) => set("language", v)}>
                     <SelectTrigger data-testid="select-language"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {LANGUAGES.map((l) => <SelectItem key={l} value={l}>{l.toUpperCase()}</SelectItem>)}
+                      {LANGUAGES.map((l) => <SelectItem key={l.code} value={l.code}>{l.label}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 </SettingRow>
@@ -121,7 +152,7 @@ export default function TenantSettings() {
                   <Select value={form.currency} onValueChange={(v) => set("currency", v)}>
                     <SelectTrigger data-testid="select-currency"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {CURRENCIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                      {CURRENCIES.map((c) => <SelectItem key={c.code} value={c.code}>{c.label}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 </SettingRow>
@@ -129,38 +160,32 @@ export default function TenantSettings() {
                   <Select value={form.timezone} onValueChange={(v) => set("timezone", v)}>
                     <SelectTrigger data-testid="select-timezone"><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      {TIMEZONES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                      {TIMEZONES.map((t) => <SelectItem key={t.code} value={t.code}>{t.label}</SelectItem>)}
                     </SelectContent>
                   </Select>
                 </SettingRow>
               </CardContent>
             </Card>
 
-            {/* AI-konfiguration */}
             <Card className="bg-card border-card-border">
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm font-medium flex items-center gap-2">
-                  <BrainCircuit className="w-4 h-4 text-primary" /> AI-konfiguration
+                  <Info className="w-4 h-4 text-primary" /> AI-konfiguration
                 </CardTitle>
               </CardHeader>
               <CardContent>
-                <SettingRow label="Standardmodel" icon={BrainCircuit}>
-                  <Select value={form.aiModel} onValueChange={(v) => set("aiModel", v)}>
-                    <SelectTrigger data-testid="select-ai-model"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {AI_MODELS.map((m) => <SelectItem key={m} value={m}>{m}</SelectItem>)}
-                    </SelectContent>
-                  </Select>
-                </SettingRow>
-                <SettingRow label="Maks. tokens pr. kørsel" icon={BrainCircuit}>
-                  <Input
-                    type="number"
-                    value={form.maxTokensPerRun}
-                    onChange={(e) => set("maxTokensPerRun", Number(e.target.value))}
-                    className="text-sm"
-                    data-testid="input-max-tokens"
-                  />
-                </SettingRow>
+                <div className="py-3 space-y-2">
+                  <p className="text-sm text-foreground">Smart model-routing er aktivt</p>
+                  <p className="text-xs text-muted-foreground">
+                    AI-modellen vælges automatisk baseret på opgavens kompleksitet.
+                    Simple spørgsmål bruger hurtige modeller, mens komplekse analyser automatisk eskaleres til mere avancerede modeller.
+                  </p>
+                  <div className="flex flex-wrap gap-2 mt-2">
+                    <span className="text-xs px-2 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20">Simpel → GPT-4.1-nano</span>
+                    <span className="text-xs px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">Standard → GPT-4.1-mini</span>
+                    <span className="text-xs px-2 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20">Kompleks → GPT-4.1</span>
+                  </div>
+                </div>
               </CardContent>
             </Card>
           </>

@@ -1969,9 +1969,10 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     } catch (err) { handleError(res, err); }
   });
 
-  // POST /api/chat/stream — SSE streaming variant (automatic routing)
+  // POST /api/chat/stream + /api/chat-stream — SSE streaming variant (automatic routing)
   // Events: {"type":"status","text":"..."} | {"type":"delta","text":"..."} | {"type":"done",...} | {"type":"error",...}
-  app.post("/api/chat/stream", async (req: Request, res: Response) => {
+  // Both paths registered: /api/chat/stream (legacy) + /api/chat-stream (Vercel-safe flat path)
+  const chatStreamHandler = async (req: Request, res: Response) => {
     res.setHeader("Content-Type",      "text/event-stream");
     res.setHeader("Cache-Control",     "no-cache");
     res.setHeader("Connection",        "keep-alive");
@@ -2118,7 +2119,9 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       sendEvent({ type: "error", errorCode: code, message: msg });
       res.end();
     }
-  });
+  };
+  app.post("/api/chat/stream", chatStreamHandler);
+  app.post("/api/chat-stream", chatStreamHandler);
 
   // GET /api/chat/conversations — list conversations for current user
   app.get("/api/chat/conversations", async (req: Request, res: Response) => {

@@ -103,8 +103,6 @@ export function TenantApp() {
 
             {/* ── Direct top-level shortcuts for nav items ─────────────── */}
             <Route path="/insights"      component={InsightsPage} />
-            <Route path="/brug"         component={WorkspaceUsage} />
-            <Route path="/indstillinger" component={WorkspaceSettings} />
 
             {/* ── Workspace surface (/workspace/*) ─────────────────────── */}
             <Route path="/workspace"              component={WorkspaceDashboard} />
@@ -158,6 +156,12 @@ export function TenantApp() {
             </Route>
             <Route path="/tenant/audit">
               <Redirect to="/workspace/audit" />
+            </Route>
+            <Route path="/brug">
+              <Redirect to="/workspace/usage" />
+            </Route>
+            <Route path="/indstillinger">
+              <Redirect to="/workspace/settings" />
             </Route>
 
             {/* Admin/ops routes on tenant domain → not registered → 404 */}
