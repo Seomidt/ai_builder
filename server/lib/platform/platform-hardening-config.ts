@@ -11,11 +11,9 @@
  *   - Analytics dedupe
  *
  * CURRENT LIVE PRODUCTION MODE: single
- *   blissops.com = entire authenticated application
+ *   blissops.com = authenticated application
+ *   app.blissops.com = allowed alias for app traffic
  *   www.blissops.com = 301 redirect to blissops.com
- *
- * NOT ACTIVE (future only):
- *   app.blissops.com, admin.blissops.com — documented in DOMAIN_CONFIG.plannedSubdomains
  */
 
 import { DOMAIN_CONFIG } from "./domain-config.ts";
@@ -41,25 +39,22 @@ export const ROOT_DOMAIN = "blissops.com";
 
 // ─── Canonical production hosts ───────────────────────────────────────────────
 //
-// CURRENT LIVE DOMAIN MODEL (single-domain mode):
+// CURRENT LIVE DOMAIN MODEL (single-domain mode with app alias):
 //
 //  blissops.com        Authenticated application (tenants, admin — path-based). NOINDEX.
-//  www.blissops.com    301 redirect to blissops.com. No app content served here.
-//
-// NOT ACTIVE — future planned model (DOMAIN_CONFIG.mode = "multi"):
-//  app.blissops.com    Future: authenticated SPA moves here.
-//  admin.blissops.com  Future: isolated ops console.
+//  app.blissops.com    Allowed host alias for authenticated application.
+//  www.blissops.com    301 redirect to blissops.com.
 //
 // Auth callbacks: https://blissops.com/auth/*
-// Cookie scope: blissops.com (single-domain — no cross-subdomain handoff needed)
+// Cookie scope: blissops.com (host-scoped)
 
 export const PRODUCTION_ALLOWED_HOSTS: ReadonlySet<string> = new Set(
   DOMAIN_CONFIG.allowHosts,
 );
 
 export const PUBLIC_CANONICAL_HOST  = ROOT_DOMAIN;
-export const APP_CANONICAL_HOST     = ROOT_DOMAIN;        // single-domain: same as root
-export const ADMIN_CANONICAL_HOST   = ROOT_DOMAIN;        // single-domain: path-based, not hostname-based
+export const APP_CANONICAL_HOST     = DOMAIN_CONFIG.mode === "multi" ? "app.blissops.com" : ROOT_DOMAIN;
+export const ADMIN_CANONICAL_HOST   = DOMAIN_CONFIG.mode === "multi" ? "admin.blissops.com" : ROOT_DOMAIN;
 export const WWW_HOST               = `www.${ROOT_DOMAIN}`;
 
 /** Hosts allowed in development mode */
@@ -94,53 +89,53 @@ export const ALWAYS_BLOCKED_HOSTS: ReadonlySet<string> = new Set([]);
 // All three layers are in server/app.ts middleware stack.
 
 export const ADMIN_CONFIG = {
-  canonicalHost:      ROOT_DOMAIN,                  // single-domain: admin lives here
+  canonicalHost:      ADMIN_CANONICAL_HOST,
   adminPathPrefixes:  ["/ops", "/api/admin"],
   noindex:            true,
   robotsHeaderValue:  "noindex, nofollow",
   requiresRoleGuard:  true,
   sharedDeployment:   true,
-  hostBasedAccess:    false,                        // DISABLED — path+role only
+  hostBasedAccess:    DOMAIN_CONFIG.mode === "multi",
 } as const;
 
 // ─── Auth strategy config ─────────────────────────────────────────────────────
 //
-// Single-domain mode: all auth lives on blissops.com.
+// Single-domain mode: auth lives on blissops.com.
 //
 // Auth URLs:
 //   Login:    https://blissops.com/auth/login
 //   Callback: https://blissops.com/auth/callback
 //   Logout:   https://blissops.com/auth/logout
 //
-// Cookie scope: blissops.com (exact host — no subdomain sharing needed)
+// Cookie scope: blissops.com (host-scoped)
 // SameSite: Lax  Secure: true (production)
 //
 // Future (multi-domain): move callbacks to app.blissops.com/auth/*,
 // update Supabase OAuth allow-list, update cookie domain to .blissops.com.
 
 export const AUTH_CONFIG = {
-  canonicalCallbackHost:  ROOT_DOMAIN,
+  canonicalCallbackHost:  APP_CANONICAL_HOST,
   callbackBasePath:       "/auth",
-  cookieScope:            ROOT_DOMAIN,
+  cookieScope:            APP_CANONICAL_HOST,
   rootDomainCookieScope:  ROOT_DOMAIN,
-  logoutRedirect:         `https://${ROOT_DOMAIN}/auth/login`,
-  loginUrl:               `https://${ROOT_DOMAIN}/auth/login`,
-  callbackUrl:            `https://${ROOT_DOMAIN}/auth/callback`,
-  supabaseAllowListNote:  "Supabase allow-list must target https://blissops.com/auth/callback",
+  logoutRedirect:         `https://${APP_CANONICAL_HOST}/auth/login`,
+  loginUrl:               `https://${APP_CANONICAL_HOST}/auth/login`,
+  callbackUrl:            `https://${APP_CANONICAL_HOST}/auth/callback`,
+  supabaseAllowListNote:  "Supabase allow-list should include https://blissops.com/auth/callback and optionally https://app.blissops.com/auth/callback",
 } as const;
 
 // ─── Cookie / session policy ──────────────────────────────────────────────────
 //
-// Single-domain: cookies scoped to blissops.com exactly.
+// Single-domain: cookies scoped to blissops.com.
 // Secure=true, SameSite=Lax in production.
 // No subdomain cookie sharing needed until multi-domain migration.
 
 export const COOKIE_POLICY = {
-  privilegedScope:      ROOT_DOMAIN,
+  privilegedScope:      APP_CANONICAL_HOST,
   localeScope:          ROOT_DOMAIN,
   sameSite:             "Lax" as const,
   secure:               true,
-  migrateToRootNote:    "If multi-domain mode activated, re-scope to .blissops.com for subdomain SSO.",
+  migrateToRootNote:    "If full multi-domain mode is activated later, re-scope to .blissops.com for cross-subdomain SSO.",
 } as const;
 
 // ─── Analytics dedupe config ──────────────────────────────────────────────────
