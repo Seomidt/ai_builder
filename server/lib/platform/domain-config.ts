@@ -2,14 +2,9 @@
  * domain-config.ts — Single Source of Truth for Current Domain Mode
  *
  * CURRENT LIVE PRODUCTION:
- *   blissops.com = entire authenticated application (tenant + admin, path-based)
- *   www.blissops.com = 301 redirect to blissops.com
- *
- * NOT ACTIVE:
- *   app.blissops.com — planned, not live
- *   admin.blissops.com — planned, not live
- *
- * Change DOMAIN_CONFIG.mode to "multi" only when subdomains are fully provisioned.
+ *   blissops.com       = authenticated application
+ *   www.blissops.com   = 301 redirect to blissops.com
+ *   app.blissops.com   = allowed alias for app traffic
  */
 
 export type DomainMode = "single" | "multi";
@@ -24,6 +19,7 @@ export const DOMAIN_CONFIG = {
   allowHosts: [
     "blissops.com",
     "www.blissops.com",
+    "app.blissops.com",
     // Railway: allow its own public domain so Express host-allowlist passes
     ...(RAILWAY_HOST ? [RAILWAY_HOST] : []),
   ],

@@ -77,7 +77,7 @@ interface ChatMessage {
   isStreaming?: boolean;
   /** Phase 5Z.5 — true when a newer refined/final answer has superseded this one. */
   isSuperseded?: boolean;
-  /** OCR partial mode — show animated processing card instead of provisional text */
+  /** OCR partial mode marker (used for upgrade flow metadata). */
   isProcessingPlaceholder?: boolean;
 }
 
@@ -1363,7 +1363,6 @@ export default function AiChatPage() {
             } else if (event.type === "done") {
               doneData = event as ChatResponse & { _trace?: any };
               const isRefined = (event.refinement_generation ?? 1) >= 2;
-              const isPartialOcrAnswer = event.answer_completeness === "partial" && !!pendingOcrUpgradeRef.current;
               setMessages(prev => prev.map(m => {
                 if (m.id === streamMsgId) {
                   return {
@@ -1371,7 +1370,9 @@ export default function AiChatPage() {
                     text: streamText,
                     isStreaming: false,
                     response: doneData ?? undefined,
-                    isProcessingPlaceholder: isPartialOcrAnswer,
+                    // Show provisional text immediately instead of a processing placeholder.
+                    // Keep marker false so UI renders the actual partial answer.
+                    isProcessingPlaceholder: false,
                   };
                 }
                 // Supersede earlier assistant answers when a refined or upgrade answer arrives
