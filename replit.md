@@ -125,6 +125,11 @@ tenant_member_permissions / tenant_member_departments → RBAC
 - Usage quotas og kreditbaseret model
 - White-label tenant branding
 
+### OPS & ADMIN
+- Admin AI Cost Tracking (`/ops/ai-costs`): Platform cost × customer markup, DKK/USD, per-tenant breakdown
+- Express routes paritet med Vercel: `/api/insights/*`, `/api/admin/ops-summary`, `/api/admin/tenants`, `/api/admin/governance/*`, `/api/admin/ai-costs`
+- Admin response shape normalisering: Frontend udpakker `{ data: rows }`, `{ plans: [] }`, `{ invoices: [] }` korrekt
+
 ## External Dependencies
 
 - **Database:** Supabase Postgres (PostgreSQL 17.6)

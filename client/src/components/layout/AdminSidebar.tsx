@@ -46,6 +46,7 @@ const opsItems = [
   { href: "/ops/assistant", label: "Assistant",      icon: Bot            },
   { href: "/ops/jobs",      label: "Jobs",           icon: Clock          },
   { href: "/ops/webhooks",  label: "Webhooks",       icon: Webhook        },
+  { href: "/ops/ai-costs", label: "AI Costs",       icon: DollarSign     },
 ];
 
 const adminItems = [

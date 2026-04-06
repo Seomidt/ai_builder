@@ -70,8 +70,8 @@ export default function OpsAi() {
     ...QUERY_POLICY.opsSnapshot,
   });
 
-  const alertList: Alert[] = Array.isArray(alerts) ? alerts : (alerts?.alerts ?? []);
-  const budgetList: BudgetResult[] = Array.isArray(budgets) ? budgets : (budgets?.results ?? []);
+  const alertList: Alert[] = Array.isArray(alerts) ? alerts : ((alerts as any)?.data ?? (alerts as any)?.alerts ?? []);
+  const budgetList: BudgetResult[] = Array.isArray(budgets) ? budgets : ((budgets as any)?.data ?? (budgets as any)?.results ?? []);
 
   const runBudgetCheck = useMutation({
     mutationFn: () => apiRequest("POST", "/api/admin/governance/alerts/generate/budget", {}),

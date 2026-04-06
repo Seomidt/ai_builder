@@ -34,6 +34,7 @@ const OpsAssistant    = lazy(() => import("@/pages/ops/assistant"));
 const OpsRelease      = lazy(() => import("@/pages/ops/release"));
 const OpsAuthSecurity = lazy(() => import("@/pages/ops/auth"));
 const OpsStorage      = lazy(() => import("@/pages/ops/storage"));
+const OpsAiCosts      = lazy(() => import("@/pages/ops/ai-costs"));
 
 // ── Admin platform ─────────────────────────────────────────────────────────────
 const Integrations     = lazy(() => import("@/pages/integrations"));
@@ -94,6 +95,7 @@ export function AdminApp() {
             <Route path="/ops/release"   component={wrap(OpsRelease)} />
             <Route path="/ops/auth"      component={wrap(OpsAuthSecurity)} />
             <Route path="/ops/storage"   component={wrap(OpsStorage)} />
+            <Route path="/ops/ai-costs" component={wrap(OpsAiCosts)} />
 
             {/* Admin platform */}
             <Route path="/integrations"      component={wrap(Integrations)} />

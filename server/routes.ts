@@ -4691,6 +4691,76 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     } catch (err) { return handleError(res, err); }
   });
 
+  // ── Admin AI Cost Tracking (platform cost + customer markup) ──────────────
+
+  app.get("/api/admin/ai-costs", async (req: Request, res: Response) => {
+    try {
+      if (!checkAdminRole(req, res)) return;
+      const validPeriods = ["7d", "30d", "90d"];
+      const period = validPeriods.includes(req.query.period as string) ? (req.query.period as string) : "30d";
+      const days = period === "7d" ? 7 : period === "90d" ? 90 : 30;
+      const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+      const rawMarkup = parseFloat(req.query.markup as string);
+      const markupMultiplier = (!isFinite(rawMarkup) || rawMarkup < 1 || rawMarkup > 10) ? 2.5 : Math.round(rawMarkup * 10) / 10;
+
+      const { db: database } = await import("./db");
+      const { pool } = await import("./db");
+
+      const costQuery = await pool.query(`
+        SELECT
+          organization_id,
+          COUNT(*)::int AS request_count,
+          COALESCE(SUM(prompt_tokens), 0)::bigint AS total_prompt_tokens,
+          COALESCE(SUM(completion_tokens), 0)::bigint AS total_completion_tokens,
+          COALESCE(SUM(prompt_tokens + completion_tokens), 0)::bigint AS total_tokens
+        FROM ai_runs
+        WHERE created_at >= $1
+        GROUP BY organization_id
+        ORDER BY total_tokens DESC
+      `, [since.toISOString()]);
+
+      const COST_PER_1K_INPUT = 0.00015;
+      const COST_PER_1K_OUTPUT = 0.0006;
+
+      const tenantCosts = costQuery.rows.map((row: any) => {
+        const promptTokens = Number(row.total_prompt_tokens);
+        const completionTokens = Number(row.total_completion_tokens);
+        const platformCostUsd = (promptTokens / 1000) * COST_PER_1K_INPUT + (completionTokens / 1000) * COST_PER_1K_OUTPUT;
+        const customerCostUsd = platformCostUsd * markupMultiplier;
+        return {
+          organizationId: row.organization_id,
+          requestCount: row.request_count,
+          promptTokens,
+          completionTokens,
+          totalTokens: Number(row.total_tokens),
+          platformCostUsd: Math.round(platformCostUsd * 10000) / 10000,
+          customerCostUsd: Math.round(customerCostUsd * 10000) / 10000,
+          profitUsd: Math.round((customerCostUsd - platformCostUsd) * 10000) / 10000,
+        };
+      });
+
+      const totalPlatformCost = tenantCosts.reduce((s: number, t: any) => s + t.platformCostUsd, 0);
+      const totalCustomerCost = tenantCosts.reduce((s: number, t: any) => s + t.customerCostUsd, 0);
+      const totalProfit = tenantCosts.reduce((s: number, t: any) => s + t.profitUsd, 0);
+      const totalRequests = tenantCosts.reduce((s: number, t: any) => s + t.requestCount, 0);
+
+      return res.json({
+        period,
+        markupMultiplier,
+        summary: {
+          totalPlatformCostUsd: Math.round(totalPlatformCost * 10000) / 10000,
+          totalCustomerCostUsd: Math.round(totalCustomerCost * 10000) / 10000,
+          totalProfitUsd: Math.round(totalProfit * 10000) / 10000,
+          totalRequests,
+          costPer1kInputTokens: COST_PER_1K_INPUT,
+          costPer1kOutputTokens: COST_PER_1K_OUTPUT,
+        },
+        tenants: tenantCosts,
+        retrievedAt: new Date().toISOString(),
+      });
+    } catch (err) { handleError(res, err); }
+  });
+
   return httpServer;
 }
 

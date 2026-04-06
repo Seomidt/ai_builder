@@ -38,8 +38,8 @@ export default function OpsBilling() {
     ...QUERY_POLICY.opsSnapshot,
   });
 
-  const planList: Plan[] = Array.isArray(plans) ? plans : [];
-  const invoiceList: Invoice[] = Array.isArray(invoices) ? invoices : [];
+  const planList: Plan[] = Array.isArray(plans) ? plans : ((plans as any)?.plans ?? []);
+  const invoiceList: Invoice[] = Array.isArray(invoices) ? invoices : ((invoices as any)?.invoices ?? []);
 
   return (
     <div className="flex-1 overflow-y-auto p-6 space-y-6 max-w-6xl" data-testid="ops-billing-page">
