@@ -35,8 +35,9 @@ const GEMINI_MODEL = "gemini-2.5-flash";
 const GEMINI_REST_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:streamGenerateContent?alt=sse`;
 
 // ── Thresholds ───────────────────────────────────────────────────────────────
-const LARGE_DOC_CHARS = 5_000;
-const DELSVAR1_SLICE  = 5_000;
+const LARGE_DOC_CHARS = 2_000;   // Aktiverer delsvar for flere dokumenter (var 5000)
+const DELSVAR1_SLICE  = 1_500;   // Foreløbigt svar — hurtig første respons ~2-3 sek (var 5000)
+const DELSVAR2_SLICE  = 10_000;  // Uddybet svar — første 10.000 tegn
 const MAX_DOC_CHARS   = 80_000;
 
 // ── Latency helper ───────────────────────────────────────────────────────────
@@ -616,12 +617,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     if (isLargeDoc) {
       // ════════════════════════════════════════════════════════════════════════
-      // DELSVAR STRATEGY: Progressive answers for large documents
+      // DELSVAR STRATEGY: 3-faset progressivt svar for store dokumenter
+      //   Fase 1: Foreløbigt svar   — første 1.500 tegn  (~2-3 sek TTFT)
+      //   Fase 2: Uddybet svar      — første 10.000 tegn (kun hvis doc > 10k)
+      //   Fase 3: Komplet svar      — hele dokumentet
       // ════════════════════════════════════════════════════════════════════════
 
+      // ── Fase 1: Foreløbigt svar (første 1.500 tegn) ──────────────────────
       const chunk1 = docTextFull.slice(0, DELSVAR1_SLICE);
-      const delsvar1Prompt = docSystemPrompt + `\n\nBEMÆRK: Du har kun modtaget de første ${DELSVAR1_SLICE} tegn af dokumentet. Giv et hurtigt foreløbigt svar baseret på det du kan se. Start dit svar med "**Foreløbigt svar (baseret på første del af dokumentet):**\n\n".`;
-      const delsvar1Content = `DOKUMENT (del 1 af ${Math.ceil(totalDocChars / DELSVAR1_SLICE)}):\n\n${chunk1}\n\n---\n\nSPØRGSMÅL: ${message}`;
+      const delsvar1Prompt = docSystemPrompt + `\n\nBEMÆRK: Du har kun de første ${DELSVAR1_SLICE} tegn af dokumentet. Giv et hurtigt foreløbigt svar. Start med "**Foreløbigt svar (baseret på første del af dokumentet):**\n\n".`;
+      const delsvar1Content = `DOKUMENT (første ${DELSVAR1_SLICE} tegn):\n\n${chunk1}\n\n---\n\nSPØRGSMÅL: ${message}`;
 
       sendEvent({ type: "status", text: "Læser første del af dokumentet...", routeType });
 
@@ -631,6 +636,24 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       totalLatencyMs        += result1.latencyMs;
       fullAnswer            += result1.text;
 
+      // ── Fase 2: Uddybet svar (første 10.000 tegn) — kun ved store docs ────
+      const needsPhase2 = totalDocChars > DELSVAR2_SLICE;
+      if (needsPhase2) {
+        const chunk2 = docTextFull.slice(0, DELSVAR2_SLICE);
+        const delsvar2Prompt = docSystemPrompt + `\n\nBEMÆRK: Du har nu de første ${DELSVAR2_SLICE} tegn af dokumentet. Giv et uddybet svar med flere detaljer end det foreløbige. Start med "**Uddybet svar (baseret på første ${DELSVAR2_SLICE} tegn):**\n\n".`;
+        const delsvar2Content = `DOKUMENT (første ${DELSVAR2_SLICE} tegn):\n\n${chunk2}\n\n---\n\nSPØRGSMÅL: ${message}`;
+
+        sendEvent({ type: "delta", text: "\n\n---\n\n" });
+        sendEvent({ type: "status", text: "Uddyber analyse...", routeType });
+
+        const result2 = await streamGemini(delsvar2Prompt, delsvar2Content, sendEvent, T0, "delsvar2");
+        totalPromptTokens     += result2.promptTokens;
+        totalCompletionTokens += result2.completionTokens;
+        totalLatencyMs        += result2.latencyMs;
+        fullAnswer            += "\n\n---\n\n" + result2.text;
+      }
+
+      // ── Fase 3: Komplet svar (hele dokumentet) ────────────────────────────
       const fullDocText = totalDocChars > MAX_DOC_CHARS
         ? docTextFull.slice(0, MAX_DOC_CHARS) + "\n\n[... dokument afkortet ...]"
         : docTextFull;
@@ -638,14 +661,15 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       sendEvent({ type: "delta", text: "\n\n---\n\n" });
       sendEvent({ type: "status", text: "Analyserer hele dokumentet...", routeType });
 
-      const delsvar2Prompt = docSystemPrompt + `\n\nBEMÆRK: Du har nu det FULDE dokument. Giv et komplet og endeligt svar. Start dit svar med "**Komplet svar (baseret på hele dokumentet):**\n\n". Hvis dit svar er det samme som det foreløbige, sig blot "Svaret er uændret — se ovenfor."`;
-      const delsvar2Content = `DOKUMENT (komplet):\n\n${fullDocText}\n\n---\n\nSPØRGSMÅL: ${message}`;
+      const phaseNum = needsPhase2 ? 3 : 2;
+      const delsvar3Prompt = docSystemPrompt + `\n\nBEMÆRK: Du har nu det FULDE dokument. Giv et komplet og endeligt svar. Start med "**Komplet svar (baseret på hele dokumentet):**\n\n". Hvis svaret er uændret fra det forrige, skriv blot "Svaret er uændret — se ovenfor."`;
+      const delsvar3Content = `DOKUMENT (komplet):\n\n${fullDocText}\n\n---\n\nSPØRGSMÅL: ${message}`;
 
-      const result2 = await streamGemini(delsvar2Prompt, delsvar2Content, sendEvent, T0, "delsvar2");
-      totalPromptTokens     += result2.promptTokens;
-      totalCompletionTokens += result2.completionTokens;
-      totalLatencyMs        += result2.latencyMs;
-      fullAnswer            += "\n\n---\n\n" + result2.text;
+      const result3 = await streamGemini(delsvar3Prompt, delsvar3Content, sendEvent, T0, `delsvar${phaseNum}`);
+      totalPromptTokens     += result3.promptTokens;
+      totalCompletionTokens += result3.completionTokens;
+      totalLatencyMs        += result3.latencyMs;
+      fullAnswer            += "\n\n---\n\n" + result3.text;
 
     } else if (hasDoc) {
       // ════════════════════════════════════════════════════════════════════════
@@ -677,11 +701,12 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       fullAnswer            = result.text;
     }
 
+    const delsvarCount = isLargeDoc ? (totalDocChars > DELSVAR2_SLICE ? 3 : 2) : 1;
     perf("T_all_streams_complete", T0, {
       total_latency_ms:   totalLatencyMs,
       total_output_chars: fullAnswer.length,
       model:              modelUsed,
-      delsvar_count:      isLargeDoc ? 2 : 1,
+      delsvar_count:      delsvarCount,
     });
 
     // ── Assess answer ────────────────────────────────────────────────────────
@@ -761,7 +786,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       answer_completeness:     _sComplt,
       refinement_generation:   _isUpgradeCall ? 3 : 1,
       model_used:              modelUsed,
-      delsvar_count:           isLargeDoc ? 2 : 1,
+      delsvar_count:           delsvarCount,
     });
 
     perf("T_done_event_sent", T0, { total_request_ms: Date.now() - T0 });
