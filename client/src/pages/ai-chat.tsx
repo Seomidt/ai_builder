@@ -793,6 +793,9 @@ export default function AiChatPage() {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [attachments, setAttachments]     = useState<AttachedFile[]>([]);
   const [ocrStatusLabel, setOcrStatusLabel] = useState<string | null>(null);
+  // isFastPath: true while a confirmed ALL_FAST request is in flight.
+  // Gates the OCR status card so it NEVER shows for text-PDF fast-path flows.
+  const [isFastPath, setIsFastPath] = useState(false);
   const bottomRef   = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -885,15 +888,23 @@ export default function AiChatPage() {
       const T0 = Date.now();
       const tClick = payload.submitAt ?? T0;
 
-      // ── STREAMING BUBBLE: create immediately so user sees response within ~100ms ──
+      // streamMsgId declared here so catch/finally can always reference it.
+      // The actual bubble is created lazily via createStreamBubble():
+      //   ALL_FAST → created right after decision (~1-2s) — user sees text almost immediately
+      //   ALL_SLOW → created just before AI fetch (after OCR) — no empty "Skriver..." during OCR
       const streamMsgId = crypto.randomUUID();
-      setMessages(prev => [...prev, {
-        id: streamMsgId, role: "assistant" as const,
-        text: "", isStreaming: true, timestamp: new Date(),
-      }]);
-      console.log(
-        `[TIMING] MESSAGE_STATE_CREATED t=${T0} +${T0 - tClick}ms_since_CLICK traceId=${traceId}`,
-      );
+      let streamBubbleCreated = false;
+      const createStreamBubble = (decision: string) => {
+        if (streamBubbleCreated) return;
+        streamBubbleCreated = true;
+        setMessages(prev => [...prev, {
+          id: streamMsgId, role: "assistant" as const,
+          text: "", isStreaming: true, timestamp: new Date(),
+        }]);
+        const tBubble = Date.now();
+        console.log(`[TIMING] MESSAGE_STATE_CREATED t=${tBubble} +${tBubble - tClick}ms_since_CLICK decision=${decision}`);
+        console.log(`[UI] UI_STREAM_MSG_CREATED t=${tBubble} +${tBubble - tClick}ms_since_CLICK decision=${decision} traceId=${traceId}`);
+      };
 
       // ── TRACE STAGE 1: FRONTEND SEND ─────────────────────────────────────
       const docFiles = payload.attachments.filter(a => a.type === "document");
@@ -1005,6 +1016,13 @@ export default function AiChatPage() {
               ` → T4_AI_START fires next — NO OCR/R2 wait`,
             );
             console.log(`[FAST-PATH][${traceId}] DECISION=ALL_FAST → skipping server path, AI starts now at t=${tDecision}`);
+            console.log(`[UI] UI_PROCESSING_CARD_SKIPPED reason=ALL_FAST t=${tDecision} traceId=${traceId}`);
+
+            // Set isFastPath so the OCR status card is gated off for this entire request
+            setIsFastPath(true);
+
+            // Create streaming bubble NOW — text will start flowing in ~1-2s
+            createStreamBubble("ALL_FAST");
 
             // Fire-and-forget durable R2 upload for persistence — does NOT block AI answer
             (async () => {
@@ -1117,6 +1135,7 @@ export default function AiChatPage() {
 
                 const tOcrStart = Date.now();
                 console.log(`[TIMING] OCR_STATUS_POLL_START t=${tOcrStart} +${tOcrStart - tClick}ms_since_CLICK taskId=${taskId} file="${file.name}"`);
+                console.log(`[UI] UI_PROCESSING_CARD_CREATED t=${tOcrStart} +${tOcrStart - tClick}ms_since_CLICK file="${file.name}" traceId=${traceId}`);
                 setOcrStatusLabel(`Behandler scannet PDF: ${file.name}`);
 
                 let sseResolved = false;
@@ -1415,7 +1434,10 @@ export default function AiChatPage() {
       console.log(`[FAST-PATH][${traceId}] AI_START: context_entries=${documentContext.length} sources=[${documentContext.map((r:any)=>r.source).join(",")}] t=${T4} — sending to /api/chat-stream now`);
 
       // ── Step C: SSE-streaming til /api/chat-stream ──────────────────────────
-      // (streamMsgId + isStreaming bubble already created at top of mutationFn)
+      // For ALL_SLOW: bubble created here (after OCR) — no empty "Skriver..." during OCR.
+      // For ALL_FAST: createStreamBubble is idempotent — already created at decision point.
+      // For no-doc requests: also created here (~100ms from click).
+      createStreamBubble(docFiles.length === 0 ? "NO_DOC" : "ALL_SLOW_or_MIXED");
 
       let doneData: (ChatResponse & { _trace?: any }) | null = null;
 
@@ -1617,6 +1639,7 @@ export default function AiChatPage() {
                   return m;
                 }));
                 console.log(`[TIMING] FINAL_STATE_COMMITTED t=${Date.now()} +${Date.now() - tClick}ms_since_CLICK`);
+                console.log(`[UI] UI_FINAL_COMMIT source=stream t=${Date.now()} +${Date.now() - tClick}ms_since_CLICK traceId=${traceId}`);
                 console.log(`[LIVE][${traceId}] FINAL_STATE_COMMITTED +${Date.now() - T0}ms_since_T0`);
               } else if (event.type === "error") {
                 throw Object.assign(new Error(event.message ?? "Ukendt fejl"), { errorCode: event.errorCode });
@@ -1732,6 +1755,7 @@ export default function AiChatPage() {
             // ── Helper: fire the upgrade chat mutation ──
             const triggerUpgrade = (fullText: string) => {
               console.log(`[UPGRADE-${upgradeId}] triggerUpgrade chars=${fullText.length} hasMutate=${!!chatMutateRef.current}`);
+              console.log(`[UI] UI_FINAL_COMMIT source=legacy_replacement t=${Date.now()} upgradeId=${upgradeId}`);
               setOcrStatusLabel(null);
               if (!chatMutateRef.current) {
                 console.error(`[UPGRADE-${upgradeId}] chatMutateRef.current is null — cannot fire upgrade`);
@@ -1883,6 +1907,7 @@ export default function AiChatPage() {
     if ((!text && attachments.length === 0) || chatMutation.isPending) return;
     const displayText = text || (attachments.length === 1 ? `[${attachments[0].file.name}]` : `[${attachments.length} filer vedhæftet]`);
     const useCase = "grounded_chat";
+    setIsFastPath(false); // reset before each request
     console.log(
       `[TIMING] USER_SUBMIT_CLICK t=${tClick}` +
       ` attachments=${attachments.length}` +
@@ -1961,7 +1986,7 @@ export default function AiChatPage() {
             <div className="pt-6">
               {messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)}
               {chatMutation.isPending && !ocrStatusLabel && !hasStreamingMessage && <TypingIndicator />}
-              {ocrStatusLabel && (
+              {ocrStatusLabel && !isFastPath && (
                 <div className="flex gap-3 px-4 py-3" data-testid="status-ocr-pending">
                   <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center shrink-0 mt-0.5">
                     <svg className="w-4 h-4 animate-spin text-primary" fill="none" viewBox="0 0 24 24">
