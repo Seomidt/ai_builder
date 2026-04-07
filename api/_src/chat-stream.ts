@@ -575,7 +575,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     // ── T6: Context built ─────────────────────────────────────────────────────
     const rawDocCtx  = body.document_context ?? [];
     const docCtx     = rawDocCtx.filter(d => d.status === "ok" && d.extracted_text?.trim());
-    const visionDocs = rawDocCtx.filter(d => d.status === "ok" && d.vision_images && d.vision_images.length > 0);
+
+    const MAX_VISION_IMAGES = 5;
+    const MAX_VISION_IMAGE_BYTES = 2_000_000;
+    const visionDocs = rawDocCtx.filter(d => {
+      if (d.status !== "ok" || !d.vision_images || d.vision_images.length === 0) return false;
+      d.vision_images = d.vision_images.slice(0, MAX_VISION_IMAGES).filter(
+        img => typeof img === "string" && img.length <= MAX_VISION_IMAGE_BYTES,
+      );
+      return d.vision_images.length > 0;
+    });
     const hasVision  = visionDocs.length > 0;
     const failedDocs = rawDocCtx.filter(d => d.status !== "ok");
     const hasDocIntent = rawDocCtx.length > 0;

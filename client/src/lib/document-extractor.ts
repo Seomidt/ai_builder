@@ -269,35 +269,39 @@ export async function renderPdfPagesToImages(
       useSystemFonts: true,
     }).promise;
 
-    const pageCount = pdf.numPages;
-    const pagesToRender = Math.min(pageCount, maxPages);
-    const images: string[] = [];
+    try {
+      const pageCount = pdf.numPages;
+      const pagesToRender = Math.min(pageCount, maxPages);
+      const images: string[] = [];
 
-    for (let i = 1; i <= pagesToRender; i++) {
-      const page = await pdf.getPage(i);
-      const viewport = page.getViewport({ scale: 1.0 });
-      const scale = Math.min(maxWidth / viewport.width, 2.0);
-      const scaledViewport = page.getViewport({ scale });
+      for (let i = 1; i <= pagesToRender; i++) {
+        const page = await pdf.getPage(i);
+        const viewport = page.getViewport({ scale: 1.0 });
+        const scale = Math.min(maxWidth / viewport.width, 2.0);
+        const scaledViewport = page.getViewport({ scale });
 
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.floor(scaledViewport.width);
-      canvas.height = Math.floor(scaledViewport.height);
-      const ctx = canvas.getContext("2d")!;
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.floor(scaledViewport.width);
+        canvas.height = Math.floor(scaledViewport.height);
+        const ctx = canvas.getContext("2d")!;
 
-      await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise;
+        await page.render({ canvasContext: ctx, viewport: scaledViewport }).promise;
 
-      const dataUrl = canvas.toDataURL("image/jpeg", quality);
-      const base64 = dataUrl.split(",")[1];
-      if (base64) images.push(base64);
+        const dataUrl = canvas.toDataURL("image/jpeg", quality);
+        const base64 = dataUrl.split(",")[1];
+        if (base64) images.push(base64);
 
-      page.cleanup();
-      canvas.width = 0;
-      canvas.height = 0;
+        page.cleanup();
+        canvas.width = 0;
+        canvas.height = 0;
+      }
+
+      const durMs = Math.round(performance.now() - t0);
+      console.log(`[renderPdfPages] OK file="${file.name}" pages=${pagesToRender}/${pageCount} images=${images.length} durMs=${durMs}`);
+      return { images, pageCount };
+    } finally {
+      await pdf.destroy();
     }
-
-    const durMs = Math.round(performance.now() - t0);
-    console.log(`[renderPdfPages] OK file="${file.name}" pages=${pagesToRender}/${pageCount} images=${images.length} durMs=${durMs}`);
-    return { images, pageCount };
   } catch (e: any) {
     console.error(`[renderPdfPages] FAILED file="${file.name}": ${e?.message}`);
     return null;
