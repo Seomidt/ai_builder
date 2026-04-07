@@ -1391,6 +1391,12 @@ export default function AiChatPage() {
       let doneData: (ChatResponse & { _trace?: any }) | null = null;
 
       try {
+        const tFetchStart = Date.now();
+        console.log(
+          `[LIVE][${traceId}] FETCH_START t=${tFetchStart} +${tFetchStart - T0}ms` +
+          ` — POST /api/chat-stream`,
+        );
+
         const res = await apiRequest("POST", "/api/chat-stream", {
           message: fullMessage,
           conversation_id: conversationId ?? null,
@@ -1405,14 +1411,35 @@ export default function AiChatPage() {
             : traceId,
         });
 
+        const tFetchHeaders = Date.now();
+        console.log(
+          `[LIVE][${traceId}] FETCH_HEADERS_RECEIVED t=${tFetchHeaders}` +
+          ` +${tFetchHeaders - tFetchStart}ms_since_FETCH_START` +
+          ` status=${res.status}`,
+        );
+
         const reader  = res.body!.getReader();
         const decoder = new TextDecoder();
         let buffer    = "";
         let streamText = "";
+        let firstChunkLogged = false;
+        let firstRenderLogged = false;
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
+
+          if (!firstChunkLogged) {
+            firstChunkLogged = true;
+            const tFirstChunk = Date.now();
+            console.log(
+              `[LIVE][${traceId}] FIRST_CHUNK t=${tFirstChunk}` +
+              ` +${tFirstChunk - tFetchStart}ms_since_FETCH_START` +
+              ` +${tFirstChunk - T0}ms_since_T0` +
+              ` bytes=${value?.length ?? 0}`,
+            );
+          }
+
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop()!;
@@ -1429,6 +1456,16 @@ export default function AiChatPage() {
               setMessages(prev => prev.map(m =>
                 m.id === streamMsgId ? { ...m, text: streamText } : m
               ));
+
+              if (!firstRenderLogged && streamText.length > 0) {
+                firstRenderLogged = true;
+                const tFirstRender = Date.now();
+                console.log(
+                  `[LIVE][${traceId}] FIRST_RENDER t=${tFirstRender}` +
+                  ` +${tFirstRender - T0}ms_since_T0` +
+                  ` textLen=${streamText.length}`,
+                );
+              }
             } else if (event.type === "replace" && event.text) {
               // Partial safeguard triggered server-side — replace streamed content with provisional text
               streamText = event.text;
@@ -1457,6 +1494,13 @@ export default function AiChatPage() {
               } as any;
             } else if (event.type === "done") {
               doneData = event as ChatResponse & { _trace?: any };
+              const tFinalRender = Date.now();
+              console.log(
+                `[LIVE][${traceId}] FINAL_RENDER t=${tFinalRender}` +
+                ` +${tFinalRender - T0}ms_since_T0` +
+                ` textLen=${streamText.length}` +
+                ` latency_ms=${(event as any).latency_ms ?? "?"}`,
+              );
               const isRefined = (event.refinement_generation ?? 1) >= 2;
               setMessages(prev => prev.map(m => {
                 if (m.id === streamMsgId) {

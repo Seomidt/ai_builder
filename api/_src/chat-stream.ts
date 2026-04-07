@@ -662,57 +662,25 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const confidence = deriveConfidence(fullAnswer, warnings, hasDoc ? combinedDocText : undefined);
     const needsManual = confidence === "low";
 
-    // ── Persist conversation (non-fatal) ─────────────────────────────────────
-    let conversationId: string = body.conversation_id ?? crypto.randomUUID();
-    try {
-      conversationId = await persistTurn({
-        organizationId: orgId, userId, expertId: expert.id,
-        userMessage: message, answer: fullAnswer,
-        existingConvId: body.conversation_id ?? null,
-        latencyMs: totalLatencyMs, confidence,
-        promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
-      });
-    } catch (e) {
-      console.error("[chat-stream] persist failed (non-fatal):", (e as Error).message);
-    }
+    // ── Send done event BEFORE persist ───────────────────────────────────────
+    // CRITICAL: res.end() must be called before any DB/network operations.
+    // Vercel buffers res.write() chunks and only flushes to the browser on
+    // res.end(). If persistTurn() (which can take 30-40s on cold start) runs
+    // before res.end(), ALL streamed delta events are held in Vercel's buffer
+    // and the browser sees nothing until t=40s — despite tokens being generated
+    // at t=2-4s. Fix: close the response first, then persist in the background.
 
-    // ── Usage logging (fire-and-forget) ──────────────────────────────────────
-    void (async () => {
-      try {
-        const { logAiUsage }    = await import("../../server/lib/ai/usage");
-        const { loadPricing }   = await import("../../server/lib/ai/pricing");
-        const { estimateAiCost } = await import("../../server/lib/ai/costs");
-        const { pricing, source: pricingSource, version: pricingVersion } = await loadPricing(providerUsed, modelUsed);
-        const actualCostUsd = estimateAiCost({
-          usage: { input_tokens: totalPromptTokens, output_tokens: totalCompletionTokens, total_tokens: totalPromptTokens + totalCompletionTokens },
-          pricing,
-        }) ?? 0;
-        await logAiUsage({
-          tenantId: orgId, userId,
-          requestId: body.idempotency_key ?? crypto.randomUUID(),
-          feature: hasDoc ? "expert.chat.doc" : "expert.chat.stream",
-          routeKey: hasDoc ? "expert.chat.doc" : "expert.chat",
-          provider: providerUsed, model: modelUsed,
-          promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
-          totalTokens: totalPromptTokens + totalCompletionTokens,
-          status: "success", latencyMs: totalLatencyMs,
-          estimatedCostUsd: actualCostUsd, actualCostUsd,
-          pricingSource, pricingVersion,
-          inputPreview: message.slice(0, 200),
-        });
-      } catch (err) {
-        console.warn("[chat-stream] usage logging failed:", (err as Error).message);
-      }
-    })();
-
-    // ── Send done event ──────────────────────────────────────────────────────
     const _isUpgradeCall = (body.document_context ?? []).some((d: any) => d.source === "r2_ocr_async");
     const _sComplt = _isUpgradeCall ? "complete" : (hasDoc ? "partial" : "complete");
+
+    // Optimistic conversationId — will be overwritten by persistTurn result but
+    // we need to send it in the done event now, before the DB round-trip.
+    const optimisticConvId: string = body.conversation_id ?? crypto.randomUUID();
 
     sendEvent({
       type:                    "done",
       answer:                  fullAnswer,
-      conversation_id:         conversationId,
+      conversation_id:         optimisticConvId,
       route_type:              routeType,
       expert:                  { id: expert.id, name: expert.name, category: expert.category ?? null },
       used_sources:            [],
@@ -728,8 +696,55 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       delsvar_count:           1,
     });
 
-    perf("T_done_event_sent", T0, { total_request_ms: Date.now() - T0 });
+    const tDone = Date.now() - T0;
+    perf("T_done_event_sent", T0, { total_request_ms: tDone });
+    console.log(`[LIVE][${liveId}] DONE_SENT_MS=${tDone} → res.end() now, persist runs after`);
+
+    // Close the response — Vercel flushes ALL buffered SSE chunks to the browser NOW.
     res.end();
+
+    // ── Persist conversation (non-fatal, AFTER res.end) ───────────────────────
+    // The handler continues executing after res.end() until the function returns.
+    // Vercel keeps the function alive for the remaining maxDuration budget.
+    try {
+      await persistTurn({
+        organizationId: orgId, userId, expertId: expert.id,
+        userMessage: message, answer: fullAnswer,
+        existingConvId: body.conversation_id ?? null,
+        latencyMs: totalLatencyMs, confidence,
+        promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
+      });
+      perf("T_persist_done", T0, { after_res_end: true });
+    } catch (e) {
+      console.error("[chat-stream] persist failed (non-fatal):", (e as Error).message);
+    }
+
+    // ── Usage logging (fire-and-forget, AFTER res.end) ────────────────────────
+    try {
+      const { logAiUsage }     = await import("../../server/lib/ai/usage");
+      const { loadPricing }    = await import("../../server/lib/ai/pricing");
+      const { estimateAiCost } = await import("../../server/lib/ai/costs");
+      const { pricing, source: pricingSource, version: pricingVersion } = await loadPricing(providerUsed, modelUsed);
+      const actualCostUsd = estimateAiCost({
+        usage: { input_tokens: totalPromptTokens, output_tokens: totalCompletionTokens, total_tokens: totalPromptTokens + totalCompletionTokens },
+        pricing,
+      }) ?? 0;
+      await logAiUsage({
+        tenantId: orgId, userId,
+        requestId: body.idempotency_key ?? crypto.randomUUID(),
+        feature: hasDoc ? "expert.chat.doc" : "expert.chat.stream",
+        routeKey: hasDoc ? "expert.chat.doc" : "expert.chat",
+        provider: providerUsed, model: modelUsed,
+        promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
+        totalTokens: totalPromptTokens + totalCompletionTokens,
+        status: "success", latencyMs: totalLatencyMs,
+        estimatedCostUsd: actualCostUsd, actualCostUsd,
+        pricingSource, pricingVersion,
+        inputPreview: message.slice(0, 200),
+      });
+    } catch (err) {
+      console.warn("[chat-stream] usage logging failed:", (err as Error).message);
+    }
 
   } catch (err) {
     const msg  = err instanceof Error ? err.message : String(err);
