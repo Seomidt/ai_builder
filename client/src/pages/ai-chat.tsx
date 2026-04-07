@@ -1397,13 +1397,18 @@ export default function AiChatPage() {
       // AbortController: guarantees loading cannot last forever (90s hard limit)
       const streamAbort = new AbortController();
       const streamTimeout = setTimeout(() => {
-        console.warn(`[LIVE][${traceId}] STREAM_TIMEOUT — aborting after 90s`);
+        console.warn(`[LIVE][${traceId}] STREAM_TIMEOUT_90S — aborting`);
         streamAbort.abort();
       }, 90_000);
 
-      // Get session token before entering streaming try-block
-      const { getSessionToken } = await import("@/lib/supabase");
-      const sessionToken = await getSessionToken().catch(() => null);
+      // 5-second "no first chunk" safety — fail fast if server accepts but never sends data
+      let firstChunkReceived = false;
+      const firstChunkTimeout = setTimeout(() => {
+        if (!firstChunkReceived) {
+          console.warn(`[LIVE][${traceId}] STREAM_NO_FIRST_CHUNK_5S — aborting`);
+          streamAbort.abort();
+        }
+      }, 5_000);
 
       try {
         const tFetchStart = Date.now();
@@ -1411,6 +1416,11 @@ export default function AiChatPage() {
           `[LIVE][${traceId}] FETCH_START t=${tFetchStart} +${tFetchStart - T0}ms` +
           ` — POST /api/chat-stream`,
         );
+
+        // Use statically-imported getSessionToken (already imported at top of file)
+        // DO NOT use dynamic import() here — if it fails, the finally block is bypassed
+        // and the streaming placeholder stays stuck as isStreaming: true forever.
+        const sessionToken = await getSessionToken().catch(() => null);
 
         const res = await fetch("/api/chat-stream", {
           method:  "POST",
@@ -1474,6 +1484,7 @@ export default function AiChatPage() {
             }
 
             chunkCount++;
+            firstChunkReceived = true; // disarms the 5s no-first-chunk timeout
             if (!firstChunkLogged) {
               firstChunkLogged = true;
               const tFirstChunk = Date.now();
@@ -1634,6 +1645,7 @@ export default function AiChatPage() {
         }
       } finally {
         clearTimeout(streamTimeout);
+        clearTimeout(firstChunkTimeout);
         // Ultimate safety net: ensure isStreaming is NEVER left as true
         setMessages(prev => prev.map(m =>
           m.id === streamMsgId && m.isStreaming ? { ...m, isStreaming: false } : m,
