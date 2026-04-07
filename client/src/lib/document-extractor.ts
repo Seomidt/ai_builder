@@ -1,12 +1,33 @@
+// ─── Types ────────────────────────────────────────────────────────────────────
+
 export type FastExtractMode = "fast_text" | "fast_pdf" | "unsupported";
+
+export type AnswerSource =
+  | "client_fast_text"
+  | "client_fast_pdf"
+  | "r2_ocr_async"
+  | "ocr_partial"
+  | "r2_ocr_fallback";
 
 export interface FastExtractResult {
   text: string;
   charCount: number;
-  source: "client_fast_text" | "client_fast_pdf";
+  wordCount: number;
+  alphaRatio: number;
+  source: AnswerSource;
   mode: FastExtractMode;
   durationMs: number;
 }
+
+export interface UsabilityGateResult {
+  passed: boolean;
+  reason: string | null;
+  nonWsChars: number;
+  wordCount: number;
+  alphaRatio: number;
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
 
 const TEXT_EXTENSIONS = new Set([
   ".txt", ".csv", ".md", ".markdown", ".html", ".htm",
@@ -18,13 +39,19 @@ const TEXT_MIMES = new Set([
   "text/xml", "application/json", "application/xml", "application/rtf",
 ]);
 
-const MAX_TEXT_SIZE = 10 * 1024 * 1024;
-const MAX_PDF_SIZE = 10 * 1024 * 1024;
-const MIN_USEFUL_CHARS = 80;
+const MAX_TEXT_SIZE   = 10 * 1024 * 1024; // 10 MB
+const MAX_PDF_SIZE    = 10 * 1024 * 1024; // 10 MB
+const MIN_NON_WS_CHARS = 80;
+const MIN_WORD_COUNT  = 10;
+const MIN_ALPHA_RATIO = 0.25; // at least 25% alphabetical chars (rejects pure OCR noise)
+const MAX_EXTRACTED_CHARS = 200_000;
+
+// ─── Classification ───────────────────────────────────────────────────────────
 
 export function classifyForFastExtract(file: File): FastExtractMode {
-  const ext = "." + file.name.split(".").pop()?.toLowerCase();
-  const mime = file.type?.toLowerCase() ?? "";
+  const nameLower = file.name.toLowerCase();
+  const ext = "." + (nameLower.split(".").pop() ?? "");
+  const mime = (file.type ?? "").toLowerCase();
 
   if (TEXT_MIMES.has(mime) || TEXT_EXTENSIONS.has(ext)) {
     return file.size <= MAX_TEXT_SIZE ? "fast_text" : "unsupported";
@@ -37,31 +64,120 @@ export function classifyForFastExtract(file: File): FastExtractMode {
   return "unsupported";
 }
 
+// ─── Usability gate ───────────────────────────────────────────────────────────
+
+export function checkTextUsability(text: string): UsabilityGateResult {
+  const nonWsChars = text.replace(/\s+/g, "").length;
+  const words      = text.trim().split(/\s+/).filter(w => w.length >= 2);
+  const wordCount  = words.length;
+  const alphaChars = (text.match(/[a-zA-ZÀ-ÖØ-öø-ÿ]/g) ?? []).length;
+  const alphaRatio = nonWsChars > 0 ? alphaChars / nonWsChars : 0;
+
+  if (nonWsChars < MIN_NON_WS_CHARS) {
+    return {
+      passed: false,
+      reason: `too_short: only ${nonWsChars} non-whitespace chars (min ${MIN_NON_WS_CHARS})`,
+      nonWsChars,
+      wordCount,
+      alphaRatio,
+    };
+  }
+
+  if (wordCount < MIN_WORD_COUNT) {
+    return {
+      passed: false,
+      reason: `too_few_words: only ${wordCount} words (min ${MIN_WORD_COUNT})`,
+      nonWsChars,
+      wordCount,
+      alphaRatio,
+    };
+  }
+
+  if (alphaRatio < MIN_ALPHA_RATIO) {
+    return {
+      passed: false,
+      reason: `low_alpha_ratio: ${alphaRatio.toFixed(2)} (min ${MIN_ALPHA_RATIO}) — likely OCR noise or binary data`,
+      nonWsChars,
+      wordCount,
+      alphaRatio,
+    };
+  }
+
+  return { passed: true, reason: null, nonWsChars, wordCount, alphaRatio };
+}
+
+// ─── Extractors ───────────────────────────────────────────────────────────────
+
 async function extractTextFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = () => reject(new Error("Failed to read text file"));
+    reader.onload  = () => resolve(reader.result as string);
+    reader.onerror = () => reject(new Error("FileReader failed to read file"));
     reader.readAsText(file, "utf-8");
   });
 }
 
-async function extractPdfText(file: File): Promise<string> {
+let pdfjsWorkerSrcCached: string | null = null;
+
+async function resolvePdfjsWorkerSrc(): Promise<string> {
+  if (pdfjsWorkerSrcCached) return pdfjsWorkerSrcCached;
+
+  // Strategy 1: public/ directory — worker is copied here at build time
+  // File: client/public/pdf.worker.min.mjs → served at /pdf.worker.min.mjs
+  const publicUrl = `${window.location.origin}/pdf.worker.min.mjs`;
+  try {
+    const probe = await fetch(publicUrl, { method: "HEAD" });
+    if (probe.ok) {
+      pdfjsWorkerSrcCached = publicUrl;
+      console.log(`[pdfjs-worker] resolved via public path: ${pdfjsWorkerSrcCached}`);
+      return pdfjsWorkerSrcCached;
+    }
+    console.warn(`[pdfjs-worker] public path probe failed: HTTP ${probe.status}`);
+  } catch (e: any) {
+    console.warn(`[pdfjs-worker] public path probe error: ${e?.message}`);
+  }
+
+  // Strategy 2: Vite ?url import (works if Vite processed the import)
+  try {
+    const workerMod = await import(/* @vite-ignore */ "pdfjs-dist/build/pdf.worker.min.mjs?url");
+    if (workerMod?.default && typeof workerMod.default === "string") {
+      pdfjsWorkerSrcCached = workerMod.default;
+      console.log(`[pdfjs-worker] resolved via ?url import: ${pdfjsWorkerSrcCached}`);
+      return pdfjsWorkerSrcCached;
+    }
+  } catch {
+    // Strategy 2 failed
+  }
+
+  // Strategy 3: CDN fallback — last resort
+  const { version } = await import("pdfjs-dist");
+  pdfjsWorkerSrcCached = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${version}/pdf.worker.min.mjs`;
+  console.warn(`[pdfjs-worker] ALL local strategies failed — falling back to CDN: ${pdfjsWorkerSrcCached}`);
+  return pdfjsWorkerSrcCached;
+}
+
+async function extractPdfText(file: File, traceLabel: string): Promise<string> {
   const pdfjsLib = await import("pdfjs-dist");
 
-  pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
-    "pdfjs-dist/build/pdf.worker.min.mjs",
-    import.meta.url,
-  ).toString();
+  const workerSrc = await resolvePdfjsWorkerSrc();
+  pdfjsLib.GlobalWorkerOptions.workerSrc = workerSrc;
 
   const arrayBuffer = await file.arrayBuffer();
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+  const pdf = await pdfjsLib.getDocument({
+    data:             arrayBuffer,
+    useSystemFonts:   true,
+    disableAutoFetch: true,
+    disableStream:    true,
+  }).promise;
+
+  console.log(`[pdfjs] ${traceLabel} numPages=${pdf.numPages} workerSrc=${workerSrc.slice(0, 60)}`);
 
   const textParts: string[] = [];
   const maxPages = Math.min(pdf.numPages, 200);
 
   for (let i = 1; i <= maxPages; i++) {
-    const page = await pdf.getPage(i);
+    const page    = await pdf.getPage(i);
     const content = await page.getTextContent();
     const pageText = content.items
       .map((item: any) => ("str" in item ? item.str : ""))
@@ -69,45 +185,60 @@ async function extractPdfText(file: File): Promise<string> {
     if (pageText.trim()) {
       textParts.push(pageText.trim());
     }
+    page.cleanup();
   }
 
   return textParts.join("\n\n");
 }
 
-export async function fastExtractText(file: File): Promise<FastExtractResult | null> {
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+export async function fastExtractText(
+  file: File,
+  traceLabel = file.name,
+): Promise<FastExtractResult | null> {
   const mode = classifyForFastExtract(file);
-  if (mode === "unsupported") return null;
+  if (mode === "unsupported") {
+    console.log(`[fast-extract] ${traceLabel}: SKIP — classifyForFastExtract=unsupported mime=${file.type} size=${file.size}`);
+    return null;
+  }
 
   const t0 = performance.now();
+  console.log(`[fast-extract] ${traceLabel}: START mode=${mode} size=${file.size} mime=${file.type}`);
 
   try {
-    let text: string;
+    let rawText: string;
 
     if (mode === "fast_text") {
-      text = await extractTextFile(file);
+      rawText = await extractTextFile(file);
     } else {
-      text = await extractPdfText(file);
+      rawText = await extractPdfText(file, traceLabel);
     }
 
-    const trimmed = text.trim();
-    const nonWsChars = trimmed.replace(/\s+/g, "").length;
+    const gate = checkTextUsability(rawText);
 
-    if (nonWsChars < MIN_USEFUL_CHARS) {
-      console.log(`[fast-extract] ${file.name}: only ${nonWsChars} non-ws chars — below threshold`);
+    if (!gate.passed) {
+      console.log(`[fast-extract] ${traceLabel}: GATE_REJECTED — ${gate.reason} nonWs=${gate.nonWsChars} words=${gate.wordCount} alpha=${gate.alphaRatio.toFixed(2)}`);
       return null;
     }
 
-    const capped = trimmed.slice(0, 200_000);
+    const capped = rawText.trim().slice(0, MAX_EXTRACTED_CHARS);
+    const durationMs = Math.round(performance.now() - t0);
+
+    console.log(`[fast-extract] ${traceLabel}: OK nonWs=${gate.nonWsChars} words=${gate.wordCount} alpha=${gate.alphaRatio.toFixed(2)} chars=${capped.length} duration=${durationMs}ms source=${mode === "fast_text" ? "client_fast_text" : "client_fast_pdf"}`);
 
     return {
-      text: capped,
-      charCount: capped.length,
-      source: mode === "fast_text" ? "client_fast_text" : "client_fast_pdf",
+      text:        capped,
+      charCount:   capped.length,
+      wordCount:   gate.wordCount,
+      alphaRatio:  gate.alphaRatio,
+      source:      mode === "fast_text" ? "client_fast_text" : "client_fast_pdf",
       mode,
-      durationMs: Math.round(performance.now() - t0),
+      durationMs,
     };
-  } catch (err) {
-    console.warn(`[fast-extract] ${file.name} failed:`, err);
+  } catch (err: any) {
+    const durationMs = Math.round(performance.now() - t0);
+    console.warn(`[fast-extract] ${traceLabel}: ERROR after ${durationMs}ms —`, err?.message ?? err);
     return null;
   }
 }

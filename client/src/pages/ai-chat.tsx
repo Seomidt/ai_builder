@@ -896,9 +896,10 @@ export default function AiChatPage() {
 
       if (docFiles.length > 0) {
         try {
-          // ── DUAL-PATH: Fast client-side extraction → immediate AI response ──
-          // Background: R2 upload continues for durable storage (fire-and-forget)
-          console.log(`[TRACE-2a][${traceId}] DUAL-PATH: attempting fast client-side extraction for ${docFiles.length} file(s)`);
+          // ─── DUAL-PATH: Client-side fast extraction → immediate AI answer ──────
+          // Avoids 40s R2→finalize→OCR wait for text-based PDFs and text files.
+          const t2a = performance.now();
+          console.log(`[FAST-PATH][${traceId}] START: ${docFiles.length} file(s) names=[${docFiles.map(a=>a.file.name).join(",")}] t=${Date.now()}`);
 
           const fastResults: any[] = [];
           const slowFiles: { af: typeof docFiles[0]; reason: string }[] = [];
@@ -906,88 +907,75 @@ export default function AiChatPage() {
           for (const af of docFiles) {
             const file = af.file;
             const mode = classifyForFastExtract(file);
-            console.log(`[TRACE-2b][${traceId}] classify ${file.name} (${file.size}b, ${file.type}) → ${mode}`);
+            console.log(`[FAST-PATH][${traceId}] CLASSIFY ${file.name}: mode=${mode} size=${file.size} mime="${file.type}"`);
 
             if (mode === "unsupported") {
-              slowFiles.push({ af, reason: `unsupported_for_fast:${file.type}` });
+              const reason = `unsupported_mime_or_size:${file.type || "empty"}:${file.size}b`;
+              console.log(`[FAST-PATH][${traceId}] SKIP ${file.name}: ${reason}`);
+              slowFiles.push({ af, reason });
               continue;
             }
 
-            try {
-              const result = await fastExtractText(file);
-              if (result && result.charCount > 0) {
-                console.log(`[TRACE-2c][${traceId}] FAST OK ${file.name}: ${result.charCount} chars in ${result.durationMs}ms via ${result.source}`);
-                fastResults.push({
-                  filename:       file.name,
-                  mime_type:      file.type || "application/octet-stream",
-                  char_count:     result.charCount,
-                  extracted_text: result.text,
-                  status:         "ok",
-                  source:         result.source,
-                });
-              } else {
-                console.log(`[TRACE-2c][${traceId}] FAST EMPTY ${file.name} — falling back to server path`);
-                slowFiles.push({ af, reason: "fast_extract_empty" });
-              }
-            } catch (fastErr: any) {
-              console.warn(`[TRACE-2c][${traceId}] FAST ERROR ${file.name}: ${fastErr?.message} — falling back to server path`);
-              slowFiles.push({ af, reason: `fast_extract_error:${fastErr?.message?.slice(0,80)}` });
+            const extractResult = await fastExtractText(file, `[${traceId}]${file.name}`);
+
+            if (extractResult && extractResult.charCount > 0) {
+              console.log(`[FAST-PATH][${traceId}] OK ${file.name}: chars=${extractResult.charCount} words=${extractResult.wordCount} alpha=${extractResult.alphaRatio.toFixed(2)} dur=${extractResult.durationMs}ms src=${extractResult.source}`);
+              fastResults.push({
+                filename:       file.name,
+                mime_type:      file.type || "application/octet-stream",
+                char_count:     extractResult.charCount,
+                extracted_text: extractResult.text,
+                status:         "ok",
+                source:         extractResult.source,
+              });
+            } else {
+              const reason = extractResult === null ? "gate_rejected_or_error" : "zero_chars";
+              console.log(`[FAST-PATH][${traceId}] REJECTED ${file.name}: ${reason} — slow fallback`);
+              slowFiles.push({ af, reason });
             }
           }
 
-          // ── If all files extracted fast, skip server path entirely ──
+          const fastMs = Math.round(performance.now() - t2a);
+          console.log(`[FAST-PATH][${traceId}] SUMMARY: fast=${fastResults.length} slow=${slowFiles.length} totalMs=${fastMs} t=${Date.now()}`);
+
+          // ── ALL FAST: every file extracted client-side ──────────────────────
           if (slowFiles.length === 0 && fastResults.length > 0) {
             documentContext = fastResults;
-            console.log(`[TRACE-2d][${traceId}] ALL FAST: ${fastResults.length} file(s) extracted client-side — skipping server path`);
+            console.log(`[FAST-PATH][${traceId}] DECISION=ALL_FAST → skipping server path, AI starts now at t=${Date.now()}`);
 
-            // Fire-and-forget durable R2 upload ONLY when fast path handled everything
-            const durableUpload = async () => {
+            // Fire-and-forget durable R2 upload for persistence — does NOT block AI answer
+            (async () => {
               for (const af of docFiles) {
+                const file = af.file;
                 try {
-                  const file = af.file;
                   const urlRes = await apiRequest("POST", "/api/upload/url", {
-                    filename: file.name,
+                    filename:    file.name,
                     contentType: file.type || "application/octet-stream",
-                    size: file.size,
-                    context: "chat",
+                    size:        file.size,
+                    context:     "chat",
                   });
-                  if (!urlRes.ok) {
-                    console.warn(`[DURABLE][${traceId}] presign failed for ${file.name}: HTTP ${urlRes.status}`);
-                    continue;
-                  }
+                  if (!urlRes.ok) { console.warn(`[DURABLE][${traceId}] presign failed for ${file.name}: HTTP ${urlRes.status}`); continue; }
                   const { uploadUrl, objectKey } = await urlRes.json() as any;
-                  const r2Res = await fetch(uploadUrl, {
-                    method: "PUT",
-                    body: file,
-                    headers: { "Content-Type": file.type || "application/octet-stream" },
-                  });
-                  if (!r2Res.ok) {
-                    console.warn(`[DURABLE][${traceId}] R2 PUT failed for ${file.name}: HTTP ${r2Res.status}`);
-                    continue;
-                  }
+                  const r2Res = await fetch(uploadUrl, { method: "PUT", body: file, headers: { "Content-Type": file.type || "application/octet-stream" } });
+                  if (!r2Res.ok) { console.warn(`[DURABLE][${traceId}] R2 PUT failed for ${file.name}: HTTP ${r2Res.status}`); continue; }
                   const finRes = await apiRequest("POST", "/api/upload/finalize", {
                     objectKey,
-                    filename: file.name,
+                    filename:    file.name,
                     contentType: file.type || "application/octet-stream",
-                    size: file.size,
-                    context: "chat",
-                    fileCount: docFiles.length,
+                    size:        file.size,
+                    context:     "chat",
+                    fileCount:   docFiles.length,
                   });
-                  if (finRes.ok) {
-                    console.log(`[DURABLE][${traceId}] R2 upload+finalize OK: ${file.name}`);
-                  } else {
-                    console.warn(`[DURABLE][${traceId}] finalize failed for ${file.name}: HTTP ${finRes.status}`);
-                  }
+                  console.log(`[DURABLE][${traceId}] R2+finalize ${finRes.ok ? "OK" : `FAIL HTTP ${finRes.status}`} for ${file.name}`);
                 } catch (e: any) {
-                  console.warn(`[DURABLE][${traceId}] R2 upload failed for ${af.file.name}: ${e?.message}`);
+                  console.warn(`[DURABLE][${traceId}] error for ${file.name}: ${e?.message}`);
                 }
               }
-            };
-            durableUpload().catch(() => {});
+            })().catch(() => {});
 
           } else {
-            // ALL files need server path — fall back to legacy R2→finalize→OCR flow
-            console.log(`[TRACE-2d][${traceId}] ALL SLOW: ${slowFiles.length} file(s) need server extraction`);
+            // SLOW (or mixed): run server path for slow files; merge fast results in
+            console.log(`[FAST-PATH][${traceId}] DECISION=${fastResults.length > 0 ? "MIXED" : "ALL_SLOW"}: slow=${slowFiles.length} fast_preloaded=${fastResults.length} — server path starts at t=${Date.now()}`);
 
             const finalizeResults: any[] = [];
             for (const { af } of slowFiles) {
@@ -1297,10 +1285,11 @@ export default function AiChatPage() {
             }
           }
 
-          documentContext = finalizeResults;
-          console.log(`[TRACE-2g][${traceId}] total context entries=${documentContext.length} statuses=[${documentContext.map((r:any)=>r.status).join(",")}] chars=[${documentContext.map((r:any)=>r.extracted_text?.length??0).join(",")}]`);
+          // Merge: fast-extracted files (pre-loaded) + server-processed slow files
+          documentContext = [...fastResults, ...finalizeResults];
+          console.log(`[FAST-PATH][${traceId}] SLOW_DONE: fast=${fastResults.length} server=${finalizeResults.length} total=${documentContext.length} statuses=[${documentContext.map((r:any)=>r.status).join(",")}] chars=[${documentContext.map((r:any)=>r.extracted_text?.length??0).join(",")}] t=${Date.now()}`);
           if (documentContext.length > 0) {
-            console.log(`[TRACE-2h][${traceId}] first200="${(documentContext[0] as any).extracted_text?.slice(0,200)?.replace(/\n/g," ")}"`);
+            console.log(`[FAST-PATH][${traceId}] first200="${(documentContext[0] as any).extracted_text?.slice(0,200)?.replace(/\n/g," ")}"`);
           }
 
           // HARD STOP: ingen gyldige dokumenter
@@ -1330,7 +1319,8 @@ export default function AiChatPage() {
       const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";
 
       // ── TRACE STAGE 3: CHAT REQUEST (streaming) ───────────────────────────
-      console.log(`[TRACE-3][${traceId}] streaming /api/chat-stream message_len=${fullMessage.length} document_context_len=${documentContext.length}`);
+      const t3 = Date.now();
+      console.log(`[FAST-PATH][${traceId}] AI_START: context_entries=${documentContext.length} sources=[${documentContext.map((r:any)=>r.source).join(",")}] t=${t3} — sending to /api/chat-stream now`);
 
       // ── Step C: SSE-streaming til /api/chat-stream ──────────────────────────
       // Tilføj streaming-placeholder INDEN vi sender, så brugeren ser noget med det samme
