@@ -1390,6 +1390,21 @@ export default function AiChatPage() {
 
       let doneData: (ChatResponse & { _trace?: any }) | null = null;
 
+      // Declared outside try so catch/finally can access them
+      let streamText = "";
+      let chunkCount = 0;
+
+      // AbortController: guarantees loading cannot last forever (90s hard limit)
+      const streamAbort = new AbortController();
+      const streamTimeout = setTimeout(() => {
+        console.warn(`[LIVE][${traceId}] STREAM_TIMEOUT — aborting after 90s`);
+        streamAbort.abort();
+      }, 90_000);
+
+      // Get session token before entering streaming try-block
+      const { getSessionToken } = await import("@/lib/supabase");
+      const sessionToken = await getSessionToken().catch(() => null);
+
       try {
         const tFetchStart = Date.now();
         console.log(
@@ -1397,19 +1412,38 @@ export default function AiChatPage() {
           ` — POST /api/chat-stream`,
         );
 
-        const res = await apiRequest("POST", "/api/chat-stream", {
-          message: fullMessage,
-          conversation_id: conversationId ?? null,
-          document_context: documentContext,
-          context: {
-            document_ids: payload.documentIds ?? [],
-            preferred_expert_id: null,
+        const res = await fetch("/api/chat-stream", {
+          method:  "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
           },
-          // Always include trace_id so server-side [LIVE] logs use the same correlation ID
-          idempotency_key: payload.triggerKey
-            ? `${payload.triggerKey}:${fullMessage.slice(0, 64)}`
-            : traceId,
+          credentials: "include",
+          signal: streamAbort.signal,
+          body: JSON.stringify({
+            message: fullMessage,
+            conversation_id: conversationId ?? null,
+            document_context: documentContext,
+            context: {
+              document_ids: payload.documentIds ?? [],
+              preferred_expert_id: null,
+            },
+            idempotency_key: payload.triggerKey
+              ? `${payload.triggerKey}:${fullMessage.slice(0, 64)}`
+              : traceId,
+          }),
         });
+
+        if (!res.ok) {
+          let errorCode = "UNKNOWN_ERROR";
+          let message   = res.statusText;
+          try {
+            const body = await res.json() as { error_code?: string; message?: string };
+            if (body.error_code) errorCode = body.error_code;
+            if (body.message)    message   = body.message;
+          } catch { /* non-JSON */ }
+          throw Object.assign(new Error(message), { errorCode });
+        }
 
         const tFetchHeaders = Date.now();
         console.log(
@@ -1420,115 +1454,190 @@ export default function AiChatPage() {
 
         const reader  = res.body!.getReader();
         const decoder = new TextDecoder();
-        let buffer    = "";
-        let streamText = "";
-        let firstChunkLogged = false;
+        let buffer     = "";
+        let firstChunkLogged  = false;
         let firstRenderLogged = false;
+        let streamClosed      = false;
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
 
-          if (!firstChunkLogged) {
-            firstChunkLogged = true;
-            const tFirstChunk = Date.now();
-            console.log(
-              `[LIVE][${traceId}] FIRST_CHUNK t=${tFirstChunk}` +
-              ` +${tFirstChunk - tFetchStart}ms_since_FETCH_START` +
-              ` +${tFirstChunk - T0}ms_since_T0` +
-              ` bytes=${value?.length ?? 0}`,
-            );
-          }
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop()!;
-
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const raw = line.slice(6).trim();
-            if (!raw) continue;
-            let event: any;
-            try { event = JSON.parse(raw); } catch { continue; }
-
-            if (event.type === "delta") {
-              streamText += event.text;
-              setMessages(prev => prev.map(m =>
-                m.id === streamMsgId ? { ...m, text: streamText } : m
-              ));
-
-              if (!firstRenderLogged && streamText.length > 0) {
-                firstRenderLogged = true;
-                const tFirstRender = Date.now();
-                console.log(
-                  `[LIVE][${traceId}] FIRST_RENDER t=${tFirstRender}` +
-                  ` +${tFirstRender - T0}ms_since_T0` +
-                  ` textLen=${streamText.length}`,
-                );
-              }
-            } else if (event.type === "replace" && event.text) {
-              // Partial safeguard triggered server-side — replace streamed content with provisional text
-              streamText = event.text;
-              setMessages(prev => prev.map(m =>
-                m.id === streamMsgId ? { ...m, text: streamText } : m
-              ));
-            } else if (event.type === "status" && event.text) {
-              setOcrStatusLabel(event.text);
-            } else if (event.type === "gated") {
-              // Routing gate: processing/no_context — show as assistant info message
-              const gatedMsg = event.message ?? "Forespørgslen kan ikke behandles i øjeblikket.";
-              setMessages(prev => [
-                ...prev.filter(m => m.id !== streamMsgId),
-                { id: streamMsgId, role: "assistant" as const, text: gatedMsg, timestamp: new Date() },
-              ]);
-              // Synthesise a fake done response so onSuccess/cleanup runs
-              doneData = {
-                answer: gatedMsg,
-                conversation_id: "",
-                route_type: event.routeType,
-                expert: { id: "", name: "", category: null },
-                used_sources: [], used_rules: [], warnings: [],
-                latency_ms: 0, confidence_band: "unknown",
-                needs_manual_review: false,
-                routing_explanation: event.routeType ?? "gated",
-              } as any;
-            } else if (event.type === "done") {
-              doneData = event as ChatResponse & { _trace?: any };
-              const tFinalRender = Date.now();
+            if (done) {
+              streamClosed = true;
               console.log(
-                `[LIVE][${traceId}] FINAL_RENDER t=${tFinalRender}` +
-                ` +${tFinalRender - T0}ms_since_T0` +
-                ` textLen=${streamText.length}` +
-                ` latency_ms=${(event as any).latency_ms ?? "?"}`,
+                `[LIVE][${traceId}] STREAM_CLOSED chunkCount=${chunkCount}` +
+                ` textLen=${streamText.length} doneReceived=${!!doneData}` +
+                ` +${Date.now() - T0}ms_since_T0`,
               );
-              const isRefined = (event.refinement_generation ?? 1) >= 2;
-              setMessages(prev => prev.map(m => {
-                if (m.id === streamMsgId) {
-                  return {
-                    ...m,
-                    text: streamText,
-                    isStreaming: false,
-                    response: doneData ?? undefined,
-                    // Show provisional text immediately instead of a processing placeholder.
-                    // Keep marker false so UI renders the actual partial answer.
-                    isProcessingPlaceholder: false,
-                  };
+              break;
+            }
+
+            chunkCount++;
+            if (!firstChunkLogged) {
+              firstChunkLogged = true;
+              const tFirstChunk = Date.now();
+              console.log(
+                `[LIVE][${traceId}] FIRST_CHUNK t=${tFirstChunk}` +
+                ` +${tFirstChunk - tFetchStart}ms_since_FETCH_START` +
+                ` +${tFirstChunk - T0}ms_since_T0` +
+                ` bytes=${value?.length ?? 0}`,
+              );
+            }
+
+            buffer += decoder.decode(value, { stream: true });
+            console.log(
+              `[LIVE][${traceId}] CHUNK_APPEND chunk=${chunkCount}` +
+              ` length=${value?.length ?? 0} bufferLen=${buffer.length}`,
+            );
+
+            const lines = buffer.split("\n");
+            buffer = lines.pop()!;
+
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              const raw = line.slice(6).trim();
+              if (!raw) continue;
+              let event: any;
+              try { event = JSON.parse(raw); } catch { continue; }
+
+              if (event.type === "delta") {
+                streamText += event.text;
+                setMessages(prev => prev.map(m =>
+                  m.id === streamMsgId ? { ...m, text: streamText } : m
+                ));
+
+                if (!firstRenderLogged && streamText.length > 0) {
+                  firstRenderLogged = true;
+                  const tFirstRender = Date.now();
+                  console.log(
+                    `[LIVE][${traceId}] FIRST_RENDER t=${tFirstRender}` +
+                    ` +${tFirstRender - T0}ms_since_T0` +
+                    ` textLen=${streamText.length}`,
+                  );
                 }
-                // Supersede earlier assistant answers when a refined or upgrade answer arrives
-                if (isRefined && m.role === "assistant" && !m.isError && !m.isStreaming && m.id !== streamMsgId) {
-                  return { ...m, isSuperseded: true };
-                }
-                return m;
-              }));
-            } else if (event.type === "error") {
-              throw Object.assign(new Error(event.message ?? "Ukendt fejl"), { errorCode: event.errorCode });
+              } else if (event.type === "replace" && event.text) {
+                streamText = event.text;
+                setMessages(prev => prev.map(m =>
+                  m.id === streamMsgId ? { ...m, text: streamText } : m
+                ));
+              } else if (event.type === "status" && event.text) {
+                setOcrStatusLabel(event.text);
+              } else if (event.type === "gated") {
+                const gatedMsg = event.message ?? "Forespørgslen kan ikke behandles i øjeblikket.";
+                setMessages(prev => [
+                  ...prev.filter(m => m.id !== streamMsgId),
+                  { id: streamMsgId, role: "assistant" as const, text: gatedMsg, timestamp: new Date() },
+                ]);
+                doneData = {
+                  answer: gatedMsg,
+                  conversation_id: "",
+                  route_type: event.routeType,
+                  expert: { id: "", name: "", category: null },
+                  used_sources: [], used_rules: [], warnings: [],
+                  latency_ms: 0, confidence_band: "unknown",
+                  needs_manual_review: false,
+                  routing_explanation: event.routeType ?? "gated",
+                } as any;
+              } else if (event.type === "done") {
+                doneData = event as ChatResponse & { _trace?: any };
+                const tDoneReceived = Date.now();
+                console.log(
+                  `[LIVE][${traceId}] DONE_EVENT_RECEIVED t=${tDoneReceived}` +
+                  ` +${tDoneReceived - T0}ms_since_T0` +
+                  ` textLen=${streamText.length}` +
+                  ` latency_ms=${(event as any).latency_ms ?? "?"}`,
+                );
+                const isRefined = (event.refinement_generation ?? 1) >= 2;
+                setMessages(prev => prev.map(m => {
+                  if (m.id === streamMsgId) {
+                    return {
+                      ...m,
+                      text: streamText,
+                      isStreaming: false,
+                      response: doneData ?? undefined,
+                      isProcessingPlaceholder: false,
+                    };
+                  }
+                  if (isRefined && m.role === "assistant" && !m.isError && !m.isStreaming && m.id !== streamMsgId) {
+                    return { ...m, isSuperseded: true };
+                  }
+                  return m;
+                }));
+                console.log(`[LIVE][${traceId}] FINAL_STATE_COMMITTED +${Date.now() - T0}ms_since_T0`);
+              } else if (event.type === "error") {
+                throw Object.assign(new Error(event.message ?? "Ukendt fejl"), { errorCode: event.errorCode });
+              }
             }
           }
+        } finally {
+          reader.cancel().catch(() => {});
         }
+
+        // ── Fallback finalizer ────────────────────────────────────────────────
+        // If stream closed without a `done` event (network abort, Vercel timeout,
+        // function restart mid-stream) but we received content, commit it anyway.
+        // This ensures isStreaming is always cleared so the spinner never hangs.
+        if (!doneData && streamText.length > 0) {
+          console.warn(
+            `[LIVE][${traceId}] FALLBACK_FINALIZER — stream closed without done event` +
+            ` textLen=${streamText.length} chunkCount=${chunkCount}`,
+          );
+          doneData = {
+            answer: streamText,
+            conversation_id: conversationId ?? "",
+            route_type: "expert.chat" as any,
+            expert: { id: "", name: "", category: null },
+            used_sources: [], used_rules: [], warnings: [],
+            latency_ms: Date.now() - T0,
+            confidence_band: "unknown",
+            needs_manual_review: false,
+            routing_explanation: "fallback_close",
+          } as any;
+          setMessages(prev => prev.map(m =>
+            m.id === streamMsgId
+              ? { ...m, text: streamText, isStreaming: false, isProcessingPlaceholder: false, response: doneData ?? undefined }
+              : m,
+          ));
+          console.log(`[LIVE][${traceId}] FINAL_STATE_COMMITTED via FALLBACK +${Date.now() - T0}ms_since_T0`);
+        } else if (!doneData && streamText.length === 0) {
+          // Stream closed with no content and no done — hard error
+          console.error(`[LIVE][${traceId}] STREAM_EMPTY — no content received, no done event`);
+          setMessages(prev => prev.filter(m => m.id !== streamMsgId));
+          throw Object.assign(new Error("Ingen svar modtaget fra serveren."), { errorCode: "EMPTY_STREAM" });
+        }
+
       } catch (streamErr) {
-        // Fjern streaming-placeholder ved fejl — onError tilføjer fejlbesked
-        setMessages(prev => prev.filter(m => m.id !== streamMsgId));
-        throw streamErr;
+        // If the stream errors without a done event, commit whatever was received
+        // (if any) so the spinner never hangs — then rethrow for onError handling.
+        if (!doneData) {
+          if (streamText.length > 0) {
+            console.warn(`[LIVE][${traceId}] STREAM_ERROR_PARTIAL — committing partial text textLen=${streamText.length}`);
+            setMessages(prev => prev.map(m =>
+              m.id === streamMsgId
+                ? { ...m, text: streamText, isStreaming: false, isProcessingPlaceholder: false }
+                : m,
+            ));
+            // Don't rethrow — partial answer is better than error for network glitches
+            doneData = {
+              answer: streamText, conversation_id: conversationId ?? "",
+              route_type: "expert.chat" as any,
+              expert: { id: "", name: "", category: null },
+              used_sources: [], used_rules: [], warnings: [],
+              latency_ms: Date.now() - T0, confidence_band: "unknown",
+              needs_manual_review: false, routing_explanation: "partial_stream_error",
+            } as any;
+          } else {
+            setMessages(prev => prev.filter(m => m.id !== streamMsgId));
+            throw streamErr;
+          }
+        }
+      } finally {
+        clearTimeout(streamTimeout);
+        // Ultimate safety net: ensure isStreaming is NEVER left as true
+        setMessages(prev => prev.map(m =>
+          m.id === streamMsgId && m.isStreaming ? { ...m, isStreaming: false } : m,
+        ));
       }
 
       // ── TRACE STAGE 5: SERVER RESPONSE ────────────────────────────────────

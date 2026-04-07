@@ -359,10 +359,13 @@ async function streamOpenAI(
   let completionTokens = 0;
   let firstChunkReceived = false;
   let firstChunkFlushed  = false;
+  let tokenIndex = 0;
 
   const reader = (streamRes.body as ReadableStream<Uint8Array>).getReader();
   const decoder = new TextDecoder();
   let sseBuffer = "";
+
+  console.log(`[LIVE][${liveId}] OPENAI_STREAM_START model=${model} +${Date.now() - t0Request}ms`);
 
   try {
     while (true) {
@@ -386,8 +389,13 @@ async function streamOpenAI(
           const parsed = JSON.parse(raw);
           const delta = parsed.choices?.[0]?.delta?.content ?? "";
           if (delta) {
+            tokenIndex++;
             fullText += delta;
             sendEvent({ type: "delta", text: delta });
+            // Log first 3 tokens + every 25th — enough signal without flooding
+            if (tokenIndex <= 3 || tokenIndex % 25 === 0) {
+              console.log(`[LIVE][${liveId}] TOKEN_SENT index=${tokenIndex} delta_len=${delta.length} total_chars=${fullText.length}`);
+            }
             if (!firstChunkFlushed) {
               firstChunkFlushed = true;
               const firstTokenMs = Date.now() - t0Request;
@@ -405,6 +413,7 @@ async function streamOpenAI(
   } finally {
     reader.cancel().catch(() => {});
   }
+  console.log(`[LIVE][${liveId}] OPENAI_STREAM_COMPLETE total_tokens=${tokenIndex} chars=${fullText.length} +${Date.now() - t0Request}ms`);
 
   const callMs = Date.now() - t0Call;
   const responseDoneMs = Date.now() - t0Request;
@@ -425,7 +434,17 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
   const T0 = Date.now();
-  console.log(`[PERF] T0_request_start ${new Date(T0).toISOString()} method=${req.method}`);
+  const liveIdEarly = Math.random().toString(36).slice(2, 8);
+  console.log(`[LIVE][${liveIdEarly}] STREAM_OPEN t=${T0} ${new Date(T0).toISOString()} method=${req.method}`);
+
+  // Guard against double res.end()
+  let responded = false;
+  const safeEnd = () => {
+    if (responded) return;
+    responded = true;
+    console.log(`[LIVE][${liveIdEarly}] RES_END_CALLED +${Date.now() - T0}ms`);
+    res.end();
+  };
 
   // SSE headers — set before any data is written
   res.writeHead(200, {
@@ -437,6 +456,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
   });
 
   const sendEvent = (data: object) => {
+    if (responded) return; // don't write after res.end()
     try {
       res.write(`data: ${JSON.stringify(data)}\n\n`);
       if (typeof (res as any).flush === "function") (res as any).flush();
@@ -450,15 +470,15 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     if (auth.status === "lockdown") {
       sendEvent({ type: "error", errorCode: "LOCKDOWN", message: "Platform er i lockdown" });
-      return res.end();
+      return safeEnd();
     }
     if (auth.status !== "ok" || !auth.user) {
       sendEvent({ type: "error", errorCode: "UNAUTHENTICATED", message: "Login påkrævet" });
-      return res.end();
+      return safeEnd();
     }
     if (req.method !== "POST") {
       sendEvent({ type: "error", errorCode: "METHOD_NOT_ALLOWED", message: "Kun POST tilladt" });
-      return res.end();
+      return safeEnd();
     }
 
     const { user } = auth;
@@ -484,7 +504,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     if (!message) {
       sendEvent({ type: "error", errorCode: "MISSING_MESSAGE", message: "Besked mangler" });
-      return res.end();
+      return safeEnd();
     }
 
     const useCase: AiUseCase = body.context?.use_case ?? "grounded_chat";
@@ -508,12 +528,12 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     } catch (e) {
       perf("T3_experts_fetched", T0, { error: (e as Error).message });
       sendEvent({ type: "error", errorCode: "EXPERT_FETCH_FAILED", message: "Kunne ikke hente eksperter" });
-      return res.end();
+      return safeEnd();
     }
 
     if (!experts.length) {
       sendEvent({ type: "error", errorCode: "NO_EXPERTS_AVAILABLE", message: "Ingen AI-eksperter er tilgængelige." });
-      return res.end();
+      return safeEnd();
     }
 
     // ── T5: Expert selected ───────────────────────────────────────────────────
@@ -562,20 +582,20 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const attachmentCount = body.context?.attachment_count ?? 0;
     if (attachmentCount > 0 && rawDocCtx.length === 0) {
       sendEvent({ type: "error", errorCode: "DOCUMENT_CONTEXT_MISSING", message: "Dokument er vedhæftet men dokumentindhold mangler." });
-      return res.end();
+      return safeEnd();
     }
     if (hasDocIntent && docCtx.length === 0) {
       const reason = failedDocs.map(d => d.message).filter(Boolean).join("; ") || "Ingen tekst kunne udtrækkes fra dokumentet";
       sendEvent({ type: "error", errorCode: "DOCUMENT_UNREADABLE", message: reason });
-      return res.end();
+      return safeEnd();
     }
     if (useCase === "validation" && docCtx.length === 0) {
       sendEvent({ type: "gated", routeType: "no_context", message: "Du skal uploade et dokument for at kunne validere." });
-      return res.end();
+      return safeEnd();
     }
     if (isGroundedUseCase(useCase) && docCtx.length === 0) {
       sendEvent({ type: "gated", routeType: "no_context", message: "Jeg kan ikke finde det i jeres interne data." });
-      return res.end();
+      return safeEnd();
     }
 
     // ── Route type ───────────────────────────────────────────────────────────
@@ -696,61 +716,72 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       delsvar_count:           1,
     });
 
+    // ── DONE_EVENT_SENT ──────────────────────────────────────────────────────
     const tDone = Date.now() - T0;
+    console.log(`[LIVE][${liveId}] DONE_EVENT_SENT +${tDone}ms answer_chars=${fullAnswer.length}`);
     perf("T_done_event_sent", T0, { total_request_ms: tDone });
-    console.log(`[LIVE][${liveId}] DONE_SENT_MS=${tDone} → res.end() now, persist runs after`);
 
-    // Close the response — Vercel flushes ALL buffered SSE chunks to the browser NOW.
-    res.end();
+    // ── RES_END_CALLED — CRITICAL: handler must return immediately after this ─
+    // Vercel delivers response to client when safeEnd() is called (streaming mode).
+    // Any awaited work after this BLOCKS the function from returning and may
+    // prevent Vercel from flushing the response to the client.
+    safeEnd();
 
-    // ── Persist conversation (non-fatal, AFTER res.end) ───────────────────────
-    // The handler continues executing after res.end() until the function returns.
-    // Vercel keeps the function alive for the remaining maxDuration budget.
-    try {
-      await persistTurn({
-        organizationId: orgId, userId, expertId: expert.id,
-        userMessage: message, answer: fullAnswer,
-        existingConvId: body.conversation_id ?? null,
-        latencyMs: totalLatencyMs, confidence,
-        promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
-      });
-      perf("T_persist_done", T0, { after_res_end: true });
-    } catch (e) {
-      console.error("[chat-stream] persist failed (non-fatal):", (e as Error).message);
-    }
+    // ── Fire-and-forget persist (POST-RESPONSE) ───────────────────────────────
+    // NOT awaited. Handler returns immediately after this block.
+    // These promises run in the background on the Node.js event loop.
+    // Vercel keeps the function alive until the event loop drains,
+    // but the HTTP response is already flushed to the client above.
+    void (async () => {
+      console.log(`[LIVE][${liveId}] POST_RESPONSE_PERSIST_START +${Date.now() - T0}ms`);
+      try {
+        await persistTurn({
+          organizationId: orgId, userId, expertId: expert.id,
+          userMessage: message, answer: fullAnswer,
+          existingConvId: body.conversation_id ?? null,
+          latencyMs: totalLatencyMs, confidence,
+          promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
+        });
+        console.log(`[LIVE][${liveId}] POST_RESPONSE_PERSIST_DONE +${Date.now() - T0}ms`);
+        perf("T_persist_done", T0, { after_res_end: true });
+      } catch (e) {
+        console.error(`[LIVE][${liveId}] POST_RESPONSE_PERSIST_ERROR +${Date.now() - T0}ms:`, (e as Error).message);
+      }
+    })();
 
-    // ── Usage logging (fire-and-forget, AFTER res.end) ────────────────────────
-    try {
-      const { logAiUsage }     = await import("../../server/lib/ai/usage");
-      const { loadPricing }    = await import("../../server/lib/ai/pricing");
-      const { estimateAiCost } = await import("../../server/lib/ai/costs");
-      const { pricing, source: pricingSource, version: pricingVersion } = await loadPricing(providerUsed, modelUsed);
-      const actualCostUsd = estimateAiCost({
-        usage: { input_tokens: totalPromptTokens, output_tokens: totalCompletionTokens, total_tokens: totalPromptTokens + totalCompletionTokens },
-        pricing,
-      }) ?? 0;
-      await logAiUsage({
-        tenantId: orgId, userId,
-        requestId: body.idempotency_key ?? crypto.randomUUID(),
-        feature: hasDoc ? "expert.chat.doc" : "expert.chat.stream",
-        routeKey: hasDoc ? "expert.chat.doc" : "expert.chat",
-        provider: providerUsed, model: modelUsed,
-        promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
-        totalTokens: totalPromptTokens + totalCompletionTokens,
-        status: "success", latencyMs: totalLatencyMs,
-        estimatedCostUsd: actualCostUsd, actualCostUsd,
-        pricingSource, pricingVersion,
-        inputPreview: message.slice(0, 200),
-      });
-    } catch (err) {
-      console.warn("[chat-stream] usage logging failed:", (err as Error).message);
-    }
+    void (async () => {
+      try {
+        const { logAiUsage }     = await import("../../server/lib/ai/usage");
+        const { loadPricing }    = await import("../../server/lib/ai/pricing");
+        const { estimateAiCost } = await import("../../server/lib/ai/costs");
+        const { pricing, source: pricingSource, version: pricingVersion } = await loadPricing(providerUsed, modelUsed);
+        const actualCostUsd = estimateAiCost({
+          usage: { input_tokens: totalPromptTokens, output_tokens: totalCompletionTokens, total_tokens: totalPromptTokens + totalCompletionTokens },
+          pricing,
+        }) ?? 0;
+        await logAiUsage({
+          tenantId: orgId, userId,
+          requestId: body.idempotency_key ?? crypto.randomUUID(),
+          feature: hasDoc ? "expert.chat.doc" : "expert.chat.stream",
+          routeKey: hasDoc ? "expert.chat.doc" : "expert.chat",
+          provider: providerUsed, model: modelUsed,
+          promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens,
+          totalTokens: totalPromptTokens + totalCompletionTokens,
+          status: "success", latencyMs: totalLatencyMs,
+          estimatedCostUsd: actualCostUsd, actualCostUsd,
+          pricingSource, pricingVersion,
+          inputPreview: message.slice(0, 200),
+        });
+      } catch (err) {
+        console.warn("[chat-stream] usage logging failed:", (err as Error).message);
+      }
+    })();
 
   } catch (err) {
     const msg  = err instanceof Error ? err.message : String(err);
     const code = (err as any)?.errorCode ?? "CHAT_STREAM_ERROR";
-    console.error(`[chat-stream] error at +${Date.now() - T0}ms: ${msg}`);
+    console.error(`[LIVE][${liveIdEarly}] STREAM_ERROR +${Date.now() - T0}ms code=${code}: ${msg}`);
     sendEvent({ type: "error", errorCode: code, message: msg });
-    res.end();
+    safeEnd();
   }
 }
