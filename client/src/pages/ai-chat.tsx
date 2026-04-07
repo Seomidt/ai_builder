@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
 import { getSessionToken } from "@/lib/supabase";
-import { fastExtractText, classifyForFastExtract } from "@/lib/document-extractor";
+import { fastExtractText, classifyForFastExtract, renderPdfPagesToImages } from "@/lib/document-extractor";
 import { pollForCompletedOcr } from "@shared/upgrade-chain";
 import { useToast } from "@/hooks/use-toast";
 import { useReadinessStream, type ReadinessSnapshot, type ReadinessUxState } from "@/hooks/use-readiness-stream";
@@ -883,17 +883,23 @@ export default function AiChatPage() {
   // ── Send ─────────────────────────────────────────────────────────────────────
 
   const chatMutation = useMutation({
-    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[]; submitAt?: number }) => {
+    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[]; submitAt?: number; _upgradeStreamMsgId?: string }) => {
       const traceId = crypto.randomUUID().slice(0, 8);
       const T0 = Date.now();
       const tClick = payload.submitAt ?? T0;
+      const isUpgradeReuse = !!payload._upgradeStreamMsgId;
 
-      // streamMsgId declared here so catch/finally can always reference it.
-      // The actual bubble is created lazily via createStreamBubble():
-      //   ALL_FAST → created right after decision (~1-2s) — user sees text almost immediately
-      //   ALL_SLOW → created just before AI fetch (after OCR) — no empty "Skriver..." during OCR
-      const streamMsgId = crypto.randomUUID();
+      const streamMsgId = payload._upgradeStreamMsgId ?? crypto.randomUUID();
       let streamBubbleCreated = false;
+
+      if (isUpgradeReuse) {
+        streamBubbleCreated = true;
+        setMessages(prev => prev.map(m =>
+          m.id === streamMsgId ? { ...m, isStreaming: true } : m
+        ));
+        console.log(`[UPGRADE-REUSE] Reusing msgId=${streamMsgId} — marking as streaming`);
+      }
+
       const createStreamBubble = (decision: string) => {
         if (streamBubbleCreated) return;
         streamBubbleCreated = true;
@@ -1001,9 +1007,29 @@ export default function AiChatPage() {
           const fastMs = Math.round(performance.now() - t2a);
           console.log(`[FAST-PATH][${traceId}] SUMMARY: fast=${fastResults.length} slow=${slowFiles.length} totalMs=${fastMs} t=${Date.now()}`);
           console.log(
-            `[TIMING] DOC_PREP_DONE t=${Date.now()} +${Date.now() - tClick}ms_since_CLICK` +
-            ` fast=${fastResults.length} slow=${slowFiles.length} decision=${slowFiles.length === 0 && fastResults.length > 0 ? "ALL_FAST" : fastResults.length > 0 ? "MIXED" : "ALL_SLOW"}`,
+            `[TIMING] DOC_PREP_DONE t=${Date.now()} +=${Date.now() - tClick}ms_since_CLICK` +
+            ` fast=${fastResults.length} slow=${slowFiles.length} decision=${slowFiles.length === 0 && fastResults.length > 0 ? "ALL_FAST" : fastResults.length > 0 ? "MIXED" : "ALL_SLOW_or_SCANNED"}`,
           );
+
+          const isScannedPdfCandidate = fastResults.length === 0 &&
+            slowFiles.length > 0 &&
+            slowFiles.every(s =>
+              (s.af.file.type === "application/pdf" || s.af.file.name.toLowerCase().endsWith(".pdf")) &&
+              (s.reason === "zero_chars" || s.reason === "gate_rejected_or_error")
+            );
+
+          let scannedVisionImages: string[] | null = null;
+          if (isScannedPdfCandidate) {
+            const tVisionStart = Date.now();
+            console.log(`[TIMING] SCANNED_PREVIEW_RENDER_START t=${tVisionStart} +${tVisionStart - tClick}ms_since_CLICK file="${slowFiles[0].af.file.name}"`);
+            const renderResult = await renderPdfPagesToImages(slowFiles[0].af.file, 3);
+            if (renderResult && renderResult.images.length > 0) {
+              scannedVisionImages = renderResult.images;
+              console.log(`[TIMING] SCANNED_PREVIEW_RENDER_DONE t=${Date.now()} +${Date.now() - tClick}ms_since_CLICK images=${renderResult.images.length} pageCount=${renderResult.pageCount}`);
+            } else {
+              console.log(`[TIMING] SCANNED_PREVIEW_RENDER_FAILED t=${Date.now()} — falling back to ALL_SLOW`);
+            }
+          }
 
           // ── ALL FAST: every file extracted client-side ──────────────────────
           if (slowFiles.length === 0 && fastResults.length > 0) {
@@ -1051,6 +1077,113 @@ export default function AiChatPage() {
                 } catch (e: any) {
                   console.warn(`[DURABLE][${traceId}] error for ${file.name}: ${e?.message}`);
                 }
+              }
+            })().catch(() => {});
+
+          } else if (scannedVisionImages) {
+            const scannedFile = slowFiles[0].af.file;
+            const visionImages = scannedVisionImages;
+            const tDecisionVision = Date.now();
+            console.log(
+              `[LIVE][${traceId}] DECISION=SCANNED_PREVIEW t=${tDecisionVision} +${tDecisionVision - T0}ms` +
+              ` file="${scannedFile.name}" visionImages=${visionImages.length}` +
+              ` → Vision preview fires NOW, OCR runs in background`,
+            );
+            console.log(`[UI] UI_PROCESSING_CARD_SKIPPED reason=SCANNED_PREVIEW t=${tDecisionVision} traceId=${traceId}`);
+
+            setIsFastPath(true);
+            createStreamBubble("SCANNED_PREVIEW");
+
+            documentContext = [{
+              filename: scannedFile.name,
+              mime_type: scannedFile.type || "application/pdf",
+              char_count: 0,
+              extracted_text: "",
+              status: "ok",
+              source: "vision_preview",
+              vision_images: visionImages,
+            }];
+
+            const previewMsgId = streamMsgId;
+            (async () => {
+              try {
+                for (const { af } of slowFiles) {
+                  const file = af.file;
+                  const urlRes = await apiRequest("POST", "/api/upload/url", {
+                    filename: file.name,
+                    contentType: file.type || "application/octet-stream",
+                    size: file.size,
+                    context: "chat",
+                  });
+                  if (!urlRes.ok) { console.warn(`[SCANNED_BG][${traceId}] presign failed for ${file.name}`); continue; }
+                  const { uploadUrl, objectKey } = await urlRes.json() as any;
+                  const r2Res = await fetch(uploadUrl, {
+                    method: "PUT", body: file,
+                    headers: { "Content-Type": file.type || "application/octet-stream" },
+                  });
+                  if (!r2Res.ok) { console.warn(`[SCANNED_BG][${traceId}] R2 PUT failed for ${file.name}`); continue; }
+                  const finRes = await apiRequest("POST", "/api/upload/finalize", {
+                    objectKey,
+                    filename: file.name,
+                    contentType: file.type || "application/octet-stream",
+                    size: file.size,
+                    context: "chat",
+                    fileCount: slowFiles.length,
+                  });
+                  if (!finRes.ok) { console.warn(`[SCANNED_BG][${traceId}] finalize failed for ${file.name}`); continue; }
+                  const finData = await finRes.json() as any;
+                  console.log(`[SCANNED_BG][${traceId}] finalize OK for ${file.name} mode=${finData.mode} taskId=${finData.taskId ?? "none"}`);
+
+                  if (finData.mode === "OCR_PENDING" && finData.taskId) {
+                    const taskId = finData.taskId;
+                    console.log(`[SCANNED_BG][${traceId}] OCR started taskId=${taskId} — polling for upgrade to msgId=${previewMsgId}`);
+
+                    const token = await getSessionToken().catch(() => null);
+                    const MAX_POLL_MS = 5 * 60 * 1000;
+                    const tPollStart = Date.now();
+                    let pollN = 0;
+
+                    while (Date.now() - tPollStart < MAX_POLL_MS) {
+                      await new Promise(r => setTimeout(r, 3_000));
+                      pollN++;
+                      try {
+                        const h: Record<string, string> = {};
+                        if (token) h["Authorization"] = `Bearer ${token}`;
+                        const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: h, credentials: "include" });
+                        if (!sr.ok) { console.warn(`[SCANNED_BG][${traceId}] poll HTTP ${sr.status}`); continue; }
+                        const sd = await sr.json() as any;
+                        console.log(`[SCANNED_BG][${traceId}] poll #${pollN} status=${sd.status} chars=${(sd.ocrText ?? "").length}`);
+
+                        if (sd.status === "completed" && sd.ocrText?.trim()) {
+                          console.log(`[SCANNED_BG][${traceId}] OCR completed — triggering upgrade to same msgId=${previewMsgId}`);
+                          isUpgradeAttemptRef.current = true;
+                          chatMutateRef.current?.({
+                            text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
+                            attachments: [],
+                            _documentContextOverride: [{
+                              filename: file.name,
+                              mime_type: file.type || "application/pdf",
+                              char_count: sd.ocrText.length,
+                              extracted_text: sd.ocrText.slice(0, 80_000),
+                              status: "ok",
+                              source: "r2_ocr_async",
+                            }],
+                            _upgradeStreamMsgId: previewMsgId,
+                          });
+                          break;
+                        }
+                        if (sd.status === "failed" || sd.status === "dead_letter") {
+                          console.warn(`[SCANNED_BG][${traceId}] OCR ${sd.status} — keeping preview answer`);
+                          break;
+                        }
+                      } catch (pollErr: any) {
+                        console.warn(`[SCANNED_BG][${traceId}] poll error: ${pollErr?.message}`);
+                      }
+                    }
+                  }
+                }
+              } catch (bgErr: any) {
+                console.warn(`[SCANNED_BG][${traceId}] background OCR error: ${bgErr?.message}`);
               }
             })().catch(() => {});
 
@@ -1409,9 +1542,14 @@ export default function AiChatPage() {
           }
           } // close else (ALL SLOW path)
         } catch (e: any) {
-          // Remove streaming bubble before re-throw — created early at top of mutationFn
-          setMessages(prev => prev.filter(m => m.id !== streamMsgId));
-          if (e?.errorCode) throw e; // re-throw hard-stops
+          if (!isUpgradeReuse) {
+            setMessages(prev => prev.filter(m => m.id !== streamMsgId));
+          } else {
+            setMessages(prev => prev.map(m =>
+              m.id === streamMsgId ? { ...m, isStreaming: false } : m
+            ));
+          }
+          if (e?.errorCode) throw e;
           console.error(`[HARD-STOP][${traceId}] UPLOAD_PIPELINE_FAILED:`, e);
           throw Object.assign(new Error("Upload fejlede. Prøv igen."), { errorCode: "DOCUMENT_UNREADABLE" });
         }
@@ -1677,9 +1815,14 @@ export default function AiChatPage() {
           ));
           console.log(`[LIVE][${traceId}] FINAL_STATE_COMMITTED via FALLBACK +${Date.now() - T0}ms_since_T0`);
         } else if (!doneData && streamText.length === 0) {
-          // Stream closed with no content and no done — hard error
           console.error(`[LIVE][${traceId}] STREAM_EMPTY — no content received, no done event`);
-          setMessages(prev => prev.filter(m => m.id !== streamMsgId));
+          if (!isUpgradeReuse) {
+            setMessages(prev => prev.filter(m => m.id !== streamMsgId));
+          } else {
+            setMessages(prev => prev.map(m =>
+              m.id === streamMsgId ? { ...m, isStreaming: false } : m
+            ));
+          }
           throw Object.assign(new Error("Ingen svar modtaget fra serveren."), { errorCode: "EMPTY_STREAM" });
         }
 
@@ -1704,7 +1847,13 @@ export default function AiChatPage() {
               needs_manual_review: false, routing_explanation: "partial_stream_error",
             } as any;
           } else {
-            setMessages(prev => prev.filter(m => m.id !== streamMsgId));
+            if (!isUpgradeReuse) {
+              setMessages(prev => prev.filter(m => m.id !== streamMsgId));
+            } else {
+              setMessages(prev => prev.map(m =>
+                m.id === streamMsgId ? { ...m, isStreaming: false } : m
+              ));
+            }
             throw streamErr;
           }
         }

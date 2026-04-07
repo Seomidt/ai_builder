@@ -58,6 +58,7 @@ interface DocumentContext {
   filename: string; mime_type: string; char_count: number;
   extracted_text: string; status: "ok" | "unsupported" | "error";
   message?: string; source?: string;
+  vision_images?: string[];
 }
 interface ChatStreamRequest {
   message: string; conversation_id?: string | null;
@@ -176,6 +177,7 @@ async function streamGemini(
   sendEvent: (data: object) => void,
   t0Request: number,
   callLabel: string,
+  visionImages?: string[],
 ): Promise<{ text: string; promptTokens: number; completionTokens: number; latencyMs: number }> {
   const t0Call = Date.now();
 
@@ -184,17 +186,27 @@ async function streamGemini(
   const systemChars  = systemPrompt.length;
   const contentChars = userContent.length;
   const totalChars   = systemChars + contentChars;
+  const isVision     = visionImages && visionImages.length > 0;
 
   perf(`T7_gemini_rest_call_start [${callLabel}]`, t0Request, {
     model:              GEMINI_MODEL,
     provider:           "google",
-    method:             "REST fetch + SSE parsing (no SDK)",
+    method:             isVision ? "REST fetch + SSE parsing (multimodal vision)" : "REST fetch + SSE parsing (no SDK)",
     url:                GEMINI_REST_URL,
     system_chars:       systemChars,
     content_chars:      contentChars,
     total_prompt_chars: totalChars,
+    vision_images:      isVision ? visionImages!.length : 0,
     note:               "gemini-2.0-flash — no thinking phase",
   });
+
+  const userParts: Array<Record<string, unknown>> = [];
+  if (isVision) {
+    for (const img of visionImages!) {
+      userParts.push({ inline_data: { mime_type: "image/jpeg", data: img } });
+    }
+  }
+  userParts.push({ text: userContent });
 
   // ── Direct REST call — returns as soon as HTTP headers arrive ────────────
   const res = await fetch(GEMINI_REST_URL, {
@@ -208,7 +220,7 @@ async function streamGemini(
         parts: [{ text: systemPrompt }],
       },
       contents: [
-        { role: "user", parts: [{ text: userContent }] },
+        { role: "user", parts: userParts },
       ],
       generationConfig: {
         temperature:      0.2,
@@ -563,13 +575,15 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     // ── T6: Context built ─────────────────────────────────────────────────────
     const rawDocCtx  = body.document_context ?? [];
     const docCtx     = rawDocCtx.filter(d => d.status === "ok" && d.extracted_text?.trim());
+    const visionDocs = rawDocCtx.filter(d => d.status === "ok" && d.vision_images && d.vision_images.length > 0);
+    const hasVision  = visionDocs.length > 0;
     const failedDocs = rawDocCtx.filter(d => d.status !== "ok");
     const hasDocIntent = rawDocCtx.length > 0;
     const docTextFull = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
     const totalDocChars = docTextFull.length;
-    const hasDoc = docCtx.length > 0;
-    const modelUsed    = "gpt-4.1-mini";
-    const providerUsed = "openai";
+    const hasDoc = docCtx.length > 0 || hasVision;
+    let modelUsed    = "gpt-4.1-mini";
+    let providerUsed = "openai";
 
     perf("T6_context_built", T0, {
       ok_doc_count:    docCtx.length,
@@ -584,7 +598,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       sendEvent({ type: "error", errorCode: "DOCUMENT_CONTEXT_MISSING", message: "Dokument er vedhæftet men dokumentindhold mangler." });
       return safeEnd();
     }
-    if (hasDocIntent && docCtx.length === 0) {
+    if (hasDocIntent && docCtx.length === 0 && !hasVision) {
       const reason = failedDocs.map(d => d.message).filter(Boolean).join("; ") || "Ingen tekst kunne udtrækkes fra dokumentet";
       sendEvent({ type: "error", errorCode: "DOCUMENT_UNREADABLE", message: reason });
       return safeEnd();
@@ -639,7 +653,32 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     let totalLatencyMs = 0;
     let fullAnswer = "";
 
-    if (hasDoc) {
+    if (hasVision) {
+      // ════════════════════════════════════════════════════════════════════════
+      // VISION DOCUMENT CHAT: Gemini 2.0 Flash multimodal (scanned PDFs)
+      // ════════════════════════════════════════════════════════════════════════
+      const allVisionImages = visionDocs.flatMap(d => d.vision_images ?? []);
+      const visionFilename = visionDocs[0]?.filename ?? "dokument";
+      modelUsed    = GEMINI_MODEL;
+      providerUsed = "google";
+
+      perf("T6b_vision_route", T0, {
+        image_count: allVisionImages.length,
+        filename: visionFilename,
+        model: modelUsed,
+      });
+
+      const visionUserContent = `DOKUMENTSIDER (som billeder) fra filen "${visionFilename}" er vedhæftet.\n\n${message}`;
+
+      sendEvent({ type: "status", text: "Analyserer dokument...", routeType });
+
+      const result = await streamGemini(docSystemPrompt, visionUserContent, sendEvent, T0, liveId, allVisionImages);
+      totalPromptTokens     = result.promptTokens;
+      totalCompletionTokens = result.completionTokens;
+      totalLatencyMs        = result.latencyMs;
+      fullAnswer            = result.text;
+
+    } else if (docCtx.length > 0) {
       // ════════════════════════════════════════════════════════════════════════
       // DOCUMENT CHAT: OpenAI gpt-4.1-mini (128K context, fast TTFT ~2s)
       // ════════════════════════════════════════════════════════════════════════
@@ -691,7 +730,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     // at t=2-4s. Fix: close the response first, then persist in the background.
 
     const _isUpgradeCall = (body.document_context ?? []).some((d: any) => d.source === "r2_ocr_async");
-    const _sComplt = _isUpgradeCall ? "complete" : (hasDoc ? "partial" : "complete");
+    const _isVisionPreview = hasVision && !_isUpgradeCall;
+    const _sComplt = _isUpgradeCall ? "complete" : (_isVisionPreview ? "preview" : (hasDoc ? "partial" : "complete"));
+    const _answerSource = _isUpgradeCall ? "ocr_final_pdf" : (_isVisionPreview ? "vision_preview_pdf" : (hasDoc ? "fast_text_pdf" : "expert_chat"));
 
     // Optimistic conversationId — will be overwritten by persistTurn result but
     // we need to send it in the done event now, before the DB round-trip.
@@ -711,6 +752,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       needs_manual_review:     needsManual,
       routing_explanation:     routingExplanation,
       answer_completeness:     _sComplt,
+      answer_source:           _answerSource,
       refinement_generation:   _isUpgradeCall ? 3 : 1,
       model_used:              modelUsed,
       delsvar_count:           1,
