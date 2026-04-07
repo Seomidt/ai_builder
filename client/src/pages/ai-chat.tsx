@@ -880,13 +880,28 @@ export default function AiChatPage() {
   // ── Send ─────────────────────────────────────────────────────────────────────
 
   const chatMutation = useMutation({
-    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[] }) => {
+    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[]; submitAt?: number }) => {
       const traceId = crypto.randomUUID().slice(0, 8);
       const T0 = Date.now();
+      const tClick = payload.submitAt ?? T0;
+
+      // ── STREAMING BUBBLE: create immediately so user sees response within ~100ms ──
+      const streamMsgId = crypto.randomUUID();
+      setMessages(prev => [...prev, {
+        id: streamMsgId, role: "assistant" as const,
+        text: "", isStreaming: true, timestamp: new Date(),
+      }]);
+      console.log(
+        `[TIMING] MESSAGE_STATE_CREATED t=${T0} +${T0 - tClick}ms_since_CLICK traceId=${traceId}`,
+      );
 
       // ── TRACE STAGE 1: FRONTEND SEND ─────────────────────────────────────
       const docFiles = payload.attachments.filter(a => a.type === "document");
       const imgFiles = payload.attachments.filter(a => a.type === "image");
+      console.log(
+        `[TIMING] FILES_SELECTED t=${T0} docFiles=${docFiles.length} imgFiles=${imgFiles.length}` +
+        ` names=[${docFiles.map(a => a.file.name).join(",")}]`,
+      );
       console.log(
         `[LIVE][${traceId}] T0_UPLOAD_RECEIVED t=${T0}` +
         ` doc_files=${docFiles.length} img_files=${imgFiles.length}` +
@@ -906,6 +921,7 @@ export default function AiChatPage() {
           // ─── DUAL-PATH: Client-side fast extraction → immediate AI answer ──────
           // Avoids 40s R2→finalize→OCR wait for text-based PDFs and text files.
           const t2a = performance.now();
+          console.log(`[TIMING] DOC_PREP_START t=${Date.now()} +${Date.now() - tClick}ms_since_CLICK files=${docFiles.length}`);
           console.log(`[FAST-PATH][${traceId}] START: ${docFiles.length} file(s) names=[${docFiles.map(a=>a.file.name).join(",")}] t=${Date.now()}`);
 
           const fastResults: any[] = [];
@@ -973,6 +989,10 @@ export default function AiChatPage() {
 
           const fastMs = Math.round(performance.now() - t2a);
           console.log(`[FAST-PATH][${traceId}] SUMMARY: fast=${fastResults.length} slow=${slowFiles.length} totalMs=${fastMs} t=${Date.now()}`);
+          console.log(
+            `[TIMING] DOC_PREP_DONE t=${Date.now()} +${Date.now() - tClick}ms_since_CLICK` +
+            ` fast=${fastResults.length} slow=${slowFiles.length} decision=${slowFiles.length === 0 && fastResults.length > 0 ? "ALL_FAST" : fastResults.length > 0 ? "MIXED" : "ALL_SLOW"}`,
+          );
 
           // ── ALL FAST: every file extracted client-side ──────────────────────
           if (slowFiles.length === 0 && fastResults.length > 0) {
@@ -1054,6 +1074,8 @@ export default function AiChatPage() {
                 throw Object.assign(new Error("Fil upload fejlede. Prøv igen."), { errorCode: "R2_UPLOAD_FAILED" });
               }
 
+              const tFinalizeStart = Date.now();
+              console.log(`[TIMING] FINALIZE_START t=${tFinalizeStart} +${tFinalizeStart - tClick}ms_since_CLICK file="${file.name}"`);
               const finalRes = await apiRequest("POST", "/api/upload/finalize", {
                 objectKey,
                 filename:    file.name,
@@ -1068,6 +1090,8 @@ export default function AiChatPage() {
                 throw Object.assign(new Error(errBody?.message ?? "Dokument kunne ikke behandles."), { errorCode: "FINALIZE_FAILED" });
               }
               const finalData = await finalRes.json() as { mode: string; results?: any[]; message?: string; taskId?: string };
+              const tFinalizeDone = Date.now();
+              console.log(`[TIMING] FINALIZE_DONE t=${tFinalizeDone} +${tFinalizeDone - tClick}ms_since_CLICK mode=${finalData.mode} file="${file.name}"`);
 
               if (finalData.mode === "B_FALLBACK") {
                 throw Object.assign(new Error(finalData.message ?? "OCR-systemet er ikke tilgængeligt."), { errorCode: "DOCUMENT_UNREADABLE" });
@@ -1091,6 +1115,8 @@ export default function AiChatPage() {
                   return "Behandler";
                 };
 
+                const tOcrStart = Date.now();
+                console.log(`[TIMING] OCR_STATUS_POLL_START t=${tOcrStart} +${tOcrStart - tClick}ms_since_CLICK taskId=${taskId} file="${file.name}"`);
                 setOcrStatusLabel(`Behandler scannet PDF: ${file.name}`);
 
                 let sseResolved = false;
@@ -1287,6 +1313,12 @@ export default function AiChatPage() {
                 }
               }
 
+              const tOcrDone = Date.now();
+              console.log(
+                `[TIMING] OCR_STATUS_POLL_DONE t=${tOcrDone} +${tOcrDone - tClick}ms_since_CLICK` +
+                ` +${tOcrDone - tOcrStart}ms_since_POLL_START sseResolved=${sseResolved} ocrStatus=${ocrResult?.status ?? "null"}`,
+              );
+
               // Throw SSE error immediately — exact message from server
               if (sseError) throw sseError;
 
@@ -1358,6 +1390,8 @@ export default function AiChatPage() {
           }
           } // close else (ALL SLOW path)
         } catch (e: any) {
+          // Remove streaming bubble before re-throw — created early at top of mutationFn
+          setMessages(prev => prev.filter(m => m.id !== streamMsgId));
           if (e?.errorCode) throw e; // re-throw hard-stops
           console.error(`[HARD-STOP][${traceId}] UPLOAD_PIPELINE_FAILED:`, e);
           throw Object.assign(new Error("Upload fejlede. Prøv igen."), { errorCode: "DOCUMENT_UNREADABLE" });
@@ -1381,12 +1415,7 @@ export default function AiChatPage() {
       console.log(`[FAST-PATH][${traceId}] AI_START: context_entries=${documentContext.length} sources=[${documentContext.map((r:any)=>r.source).join(",")}] t=${T4} — sending to /api/chat-stream now`);
 
       // ── Step C: SSE-streaming til /api/chat-stream ──────────────────────────
-      // Tilføj streaming-placeholder INDEN vi sender, så brugeren ser noget med det samme
-      const streamMsgId = crypto.randomUUID();
-      setMessages(prev => [...prev, {
-        id: streamMsgId, role: "assistant" as const,
-        text: "", isStreaming: true, timestamp: new Date(),
-      }]);
+      // (streamMsgId + isStreaming bubble already created at top of mutationFn)
 
       let doneData: (ChatResponse & { _trace?: any }) | null = null;
 
@@ -1412,6 +1441,10 @@ export default function AiChatPage() {
 
       try {
         const tFetchStart = Date.now();
+        console.log(
+          `[TIMING] CHAT_FETCH_START t=${tFetchStart} +${tFetchStart - tClick}ms_since_CLICK` +
+          ` +${tFetchStart - T0}ms_since_MUTATIONFN_START`,
+        );
         console.log(
           `[LIVE][${traceId}] FETCH_START t=${tFetchStart} +${tFetchStart - T0}ms` +
           ` — POST /api/chat-stream`,
@@ -1457,6 +1490,11 @@ export default function AiChatPage() {
 
         const tFetchHeaders = Date.now();
         console.log(
+          `[TIMING] CHAT_FETCH_HEADERS_RECEIVED t=${tFetchHeaders}` +
+          ` +${tFetchHeaders - tClick}ms_since_CLICK +${tFetchHeaders - tFetchStart}ms_since_FETCH_START` +
+          ` status=${res.status}`,
+        );
+        console.log(
           `[LIVE][${traceId}] FETCH_HEADERS_RECEIVED t=${tFetchHeaders}` +
           ` +${tFetchHeaders - tFetchStart}ms_since_FETCH_START` +
           ` status=${res.status}`,
@@ -1488,6 +1526,7 @@ export default function AiChatPage() {
             if (!firstChunkLogged) {
               firstChunkLogged = true;
               const tFirstChunk = Date.now();
+              console.log(`[TIMING] FIRST_CHUNK t=${tFirstChunk} +${tFirstChunk - tClick}ms_since_CLICK +${tFirstChunk - tFetchStart}ms_since_FETCH_START`);
               console.log(
                 `[LIVE][${traceId}] FIRST_CHUNK t=${tFirstChunk}` +
                 ` +${tFirstChunk - tFetchStart}ms_since_FETCH_START` +
@@ -1521,6 +1560,7 @@ export default function AiChatPage() {
                 if (!firstRenderLogged && streamText.length > 0) {
                   firstRenderLogged = true;
                   const tFirstRender = Date.now();
+                  console.log(`[TIMING] FIRST_RENDER t=${tFirstRender} +${tFirstRender - tClick}ms_since_CLICK textLen=${streamText.length}`);
                   console.log(
                     `[LIVE][${traceId}] FIRST_RENDER t=${tFirstRender}` +
                     ` +${tFirstRender - T0}ms_since_T0` +
@@ -1553,6 +1593,7 @@ export default function AiChatPage() {
               } else if (event.type === "done") {
                 doneData = event as ChatResponse & { _trace?: any };
                 const tDoneReceived = Date.now();
+                console.log(`[TIMING] DONE_EVENT_RECEIVED t=${tDoneReceived} +${tDoneReceived - tClick}ms_since_CLICK textLen=${streamText.length}`);
                 console.log(
                   `[LIVE][${traceId}] DONE_EVENT_RECEIVED t=${tDoneReceived}` +
                   ` +${tDoneReceived - T0}ms_since_T0` +
@@ -1575,6 +1616,7 @@ export default function AiChatPage() {
                   }
                   return m;
                 }));
+                console.log(`[TIMING] FINAL_STATE_COMMITTED t=${Date.now()} +${Date.now() - tClick}ms_since_CLICK`);
                 console.log(`[LIVE][${traceId}] FINAL_STATE_COMMITTED +${Date.now() - T0}ms_since_T0`);
               } else if (event.type === "error") {
                 throw Object.assign(new Error(event.message ?? "Ukendt fejl"), { errorCode: event.errorCode });
@@ -1836,13 +1878,17 @@ export default function AiChatPage() {
   chatMutateRef.current = chatMutation.mutate as typeof chatMutateRef.current;
 
   const handleSend = () => {
+    const tClick = Date.now();
     const text = input.trim();
     if ((!text && attachments.length === 0) || chatMutation.isPending) return;
     const displayText = text || (attachments.length === 1 ? `[${attachments[0].file.name}]` : `[${attachments.length} filer vedhæftet]`);
-    // Dokument-upload → grounded_chat: svarer spørgsmål direkte fra dokumentindholdet.
-    // "validation" bruges kun hvis eksperten eksplicit er en valideringsekspert.
     const useCase = "grounded_chat";
-    console.log(`[TRACE-SEND] use_case="${useCase}" attachments=${attachments.length}`);
+    console.log(
+      `[TIMING] USER_SUBMIT_CLICK t=${tClick}` +
+      ` attachments=${attachments.length}` +
+      ` docFiles=${attachments.filter(a => a.type === "document").length}` +
+      ` text_len=${text.length}`,
+    );
     setMessages(prev => [...prev, {
       id: crypto.randomUUID(),
       role: "user",
@@ -1850,7 +1896,7 @@ export default function AiChatPage() {
       attachments: [...attachments],
       timestamp: new Date(),
     }]);
-    chatMutation.mutate({ text: text || "Analysér venligst det uploadede dokument.", attachments, useCase });
+    chatMutation.mutate({ text: text || "Analysér venligst det uploadede dokument.", attachments, useCase, submitAt: tClick });
     setInput("");
     setAttachments([]);
   };
