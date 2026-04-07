@@ -171,10 +171,11 @@ async function extractPdfText(file: File, traceLabel: string): Promise<string> {
     disableStream:    true,
   }).promise;
 
-  console.log(`[pdfjs] ${traceLabel} numPages=${pdf.numPages} workerSrc=${workerSrc.slice(0, 60)}`);
+  const maxPages = Math.min(pdf.numPages, 200);
+  console.log(`[pdfjs] ${traceLabel} numPages=${pdf.numPages} maxPages=${maxPages} workerSrc=${workerSrc.slice(0, 80)}`);
 
   const textParts: string[] = [];
-  const maxPages = Math.min(pdf.numPages, 200);
+  let emptyPages = 0;
 
   for (let i = 1; i <= maxPages; i++) {
     const page    = await pdf.getPage(i);
@@ -184,11 +185,30 @@ async function extractPdfText(file: File, traceLabel: string): Promise<string> {
       .join(" ");
     if (pageText.trim()) {
       textParts.push(pageText.trim());
+    } else {
+      emptyPages++;
     }
     page.cleanup();
   }
 
-  return textParts.join("\n\n");
+  const joined = textParts.join("\n\n");
+
+  // Log per-page extraction result — critical for diagnosing image-only vs text PDFs
+  if (joined.length === 0) {
+    console.warn(
+      `[pdfjs-raw] ${traceLabel}: ZERO_CHARS — pdf.js extracted 0 chars from ${maxPages} pages ` +
+      `(emptyPages=${emptyPages}/${maxPages}). ` +
+      `Likely causes: (1) scanned/image-only PDF → server OCR needed, ` +
+      `(2) broken worker URL "${workerSrc.slice(0, 80)}" → check build assets.`,
+    );
+  } else {
+    console.log(
+      `[pdfjs-raw] ${traceLabel}: rawChars=${joined.length} ` +
+      `pagesWithText=${textParts.length}/${maxPages} emptyPages=${emptyPages}`,
+    );
+  }
+
+  return joined;
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────

@@ -882,10 +882,16 @@ export default function AiChatPage() {
   const chatMutation = useMutation({
     mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[] }) => {
       const traceId = crypto.randomUUID().slice(0, 8);
+      const T0 = Date.now();
 
       // ── TRACE STAGE 1: FRONTEND SEND ─────────────────────────────────────
       const docFiles = payload.attachments.filter(a => a.type === "document");
       const imgFiles = payload.attachments.filter(a => a.type === "image");
+      console.log(
+        `[TIMING][${traceId}] T0_UPLOAD_RECEIVED t=${T0} ` +
+        `doc_files=${docFiles.length} img_files=${imgFiles.length} ` +
+        `names=[${docFiles.map(a => a.file.name).join(",")}]`,
+      );
       console.log(`[TRACE-1][${traceId}] use_case="${payload.useCase ?? "grounded_chat"}" attachments_total=${payload.attachments.length} doc_files=${docFiles.length} img_files=${imgFiles.length} names=[${docFiles.map(a=>a.file.name).join(",")}]`);
 
       // ── Step A: Ekstraher dokumentindhold via direkte R2-upload ───────────
@@ -907,18 +913,38 @@ export default function AiChatPage() {
           for (const af of docFiles) {
             const file = af.file;
             const mode = classifyForFastExtract(file);
+
+            const T1 = Date.now();
+            console.log(
+              `[TIMING][${traceId}] T1_CLASSIFY_DONE t=${T1} +${T1 - T0}ms ` +
+              `file="${file.name}" classify=${mode} size=${file.size} mime="${file.type}"`,
+            );
             console.log(`[FAST-PATH][${traceId}] CLASSIFY ${file.name}: mode=${mode} size=${file.size} mime="${file.type}"`);
 
             if (mode === "unsupported") {
               const reason = `unsupported_mime_or_size:${file.type || "empty"}:${file.size}b`;
-              console.log(`[FAST-PATH][${traceId}] SKIP ${file.name}: ${reason}`);
+              console.log(`[FAST-PATH][${traceId}] SKIP ${file.name}: ${reason} → slowFiles`);
               slowFiles.push({ af, reason });
               continue;
             }
 
+            const T2 = Date.now();
+            console.log(
+              `[TIMING][${traceId}] T2_EXTRACT_START t=${T2} +${T2 - T0}ms ` +
+              `file="${file.name}" mode=${mode}`,
+            );
+
             const extractResult = await fastExtractText(file, `[${traceId}]${file.name}`);
 
+            const T3 = Date.now();
+            const extractMs = T3 - T2;
+
             if (extractResult && extractResult.charCount > 0) {
+              console.log(
+                `[TIMING][${traceId}] T3_EXTRACT_DONE t=${T3} +${T3 - T0}ms ` +
+                `extractMs=${extractMs}ms file="${file.name}" ` +
+                `chars=${extractResult.charCount} src=${extractResult.source} → FAST_PATH`,
+              );
               console.log(`[FAST-PATH][${traceId}] OK ${file.name}: chars=${extractResult.charCount} words=${extractResult.wordCount} alpha=${extractResult.alphaRatio.toFixed(2)} dur=${extractResult.durationMs}ms src=${extractResult.source}`);
               fastResults.push({
                 filename:       file.name,
@@ -930,6 +956,11 @@ export default function AiChatPage() {
               });
             } else {
               const reason = extractResult === null ? "gate_rejected_or_error" : "zero_chars";
+              console.log(
+                `[TIMING][${traceId}] T3_EXTRACT_DONE t=${T3} +${T3 - T0}ms ` +
+                `extractMs=${extractMs}ms file="${file.name}" ` +
+                `result=REJECTED reason=${reason} → slowFiles (OCR path)`,
+              );
               console.log(`[FAST-PATH][${traceId}] REJECTED ${file.name}: ${reason} — slow fallback`);
               slowFiles.push({ af, reason });
             }
@@ -941,7 +972,12 @@ export default function AiChatPage() {
           // ── ALL FAST: every file extracted client-side ──────────────────────
           if (slowFiles.length === 0 && fastResults.length > 0) {
             documentContext = fastResults;
-            console.log(`[FAST-PATH][${traceId}] DECISION=ALL_FAST → skipping server path, AI starts now at t=${Date.now()}`);
+            const tDecision = Date.now();
+            console.log(
+              `[TIMING][${traceId}] DECISION=ALL_FAST t=${tDecision} +${tDecision - T0}ms_since_T0 ` +
+              `fast=${fastResults.length} slow=0 → T4_AI_START fires next (no OCR/R2 wait)`,
+            );
+            console.log(`[FAST-PATH][${traceId}] DECISION=ALL_FAST → skipping server path, AI starts now at t=${tDecision}`);
 
             // Fire-and-forget durable R2 upload for persistence — does NOT block AI answer
             (async () => {
@@ -975,7 +1011,14 @@ export default function AiChatPage() {
 
           } else {
             // SLOW (or mixed): run server path for slow files; merge fast results in
-            console.log(`[FAST-PATH][${traceId}] DECISION=${fastResults.length > 0 ? "MIXED" : "ALL_SLOW"}: slow=${slowFiles.length} fast_preloaded=${fastResults.length} — server path starts at t=${Date.now()}`);
+            const tDecisionSlow = Date.now();
+            const decisionLabel = fastResults.length > 0 ? "MIXED" : "ALL_SLOW";
+            console.log(
+              `[TIMING][${traceId}] DECISION=${decisionLabel} t=${tDecisionSlow} +${tDecisionSlow - T0}ms_since_T0 ` +
+              `slow=${slowFiles.length} fast=${fastResults.length} ` +
+              `→ T4_AI_START blocked by OCR/R2 upload + finalize`,
+            );
+            console.log(`[FAST-PATH][${traceId}] DECISION=${decisionLabel}: slow=${slowFiles.length} fast_preloaded=${fastResults.length} — server path starts at t=${tDecisionSlow}`);
 
             const finalizeResults: any[] = [];
             for (const { af } of slowFiles) {
@@ -1319,8 +1362,14 @@ export default function AiChatPage() {
       const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";
 
       // ── TRACE STAGE 3: CHAT REQUEST (streaming) ───────────────────────────
-      const t3 = Date.now();
-      console.log(`[FAST-PATH][${traceId}] AI_START: context_entries=${documentContext.length} sources=[${documentContext.map((r:any)=>r.source).join(",")}] t=${t3} — sending to /api/chat-stream now`);
+      const T4 = Date.now();
+      console.log(
+        `[TIMING][${traceId}] T4_AI_START t=${T4} +${T4 - T0}ms_since_T0 ` +
+        `context_entries=${documentContext.length} ` +
+        `sources=[${documentContext.map((r: any) => r.source).join(",")}] ` +
+        `— /api/chat-stream fires NOW`,
+      );
+      console.log(`[FAST-PATH][${traceId}] AI_START: context_entries=${documentContext.length} sources=[${documentContext.map((r:any)=>r.source).join(",")}] t=${T4} — sending to /api/chat-stream now`);
 
       // ── Step C: SSE-streaming til /api/chat-stream ──────────────────────────
       // Tilføj streaming-placeholder INDEN vi sender, så brugeren ser noget med det samme
