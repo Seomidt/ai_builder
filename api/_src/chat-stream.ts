@@ -526,8 +526,8 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     const docTextFull = docCtx.map(d => d.extracted_text).join("\n\n---\n\n");
     const totalDocChars = docTextFull.length;
     const hasDoc = docCtx.length > 0;
-    const modelUsed    = hasDoc ? GEMINI_MODEL : "gpt-4.1-mini";
-    const providerUsed = hasDoc ? "google"     : "openai";
+    let modelUsed    = hasDoc ? GEMINI_MODEL : "gpt-4.1-mini";
+    let providerUsed = hasDoc ? "google"     : "openai";
 
     perf("T6_context_built", T0, {
       ok_doc_count:    docCtx.length,
@@ -599,7 +599,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     if (hasDoc) {
       // ════════════════════════════════════════════════════════════════════════
-      // DOCUMENT CHAT: Single Gemini call — stream directly, no phases
+      // DOCUMENT CHAT: Try Gemini first → fallback to OpenAI on error/quota
       // ════════════════════════════════════════════════════════════════════════
       const docText = totalDocChars > MAX_DOC_CHARS
         ? docTextFull.slice(0, MAX_DOC_CHARS) + "\n\n[... dokument afkortet ...]"
@@ -608,7 +608,25 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
       sendEvent({ type: "status", text: "Analyserer dokument...", routeType });
 
-      const result = await streamGemini(docSystemPrompt, userContent, sendEvent, T0, "single");
+      let result: { text: string; promptTokens: number; completionTokens: number; latencyMs: number };
+
+      if (GEMINI_API_KEY) {
+        try {
+          result = await streamGemini(docSystemPrompt, userContent, sendEvent, T0, "single");
+        } catch (geminiErr) {
+          const errMsg = geminiErr instanceof Error ? geminiErr.message : String(geminiErr);
+          perf("T_gemini_failed_fallback_openai", T0, { error: errMsg });
+          sendEvent({ type: "status", text: "Skifter til alternativ AI...", routeType });
+          modelUsed = "gpt-4.1-mini";
+          providerUsed = "openai";
+          result = await streamOpenAI("gpt-4.1-mini", docSystemPrompt, userContent, sendEvent, T0);
+        }
+      } else {
+        modelUsed = "gpt-4.1-mini";
+        providerUsed = "openai";
+        result = await streamOpenAI("gpt-4.1-mini", docSystemPrompt, userContent, sendEvent, T0);
+      }
+
       totalPromptTokens     = result.promptTokens;
       totalCompletionTokens = result.completionTokens;
       totalLatencyMs        = result.latencyMs;
