@@ -279,6 +279,40 @@ export async function runChatMessage(params: {
     console.log(`[chat-runner] DOC_MODE: doc_ctx_ok=${docCtx.length} total_doc_chars=${totalChars}`);
     console.log(`[chat-runner] first200="${docCtx[0].extracted_text.slice(0, 200).replace(/\n/g, " ")}"`);
 
+    // ── Fast-context trimming ────────────────────────────────────────────────
+    // Fast-path sources (client_fast_pdf, client_fast_text) can produce 50-200k chars.
+    // Sending the full text triggers the "heavy" tier (gpt-4.1, TTFT ~40s).
+    // We trim to <15k chars using keyword-relevance chunking so the call stays on
+    // the default tier (gpt-4.1-mini, TTFT ~2s) with no quality loss for targeted questions.
+    // Durable-path sources (r2_direct, ocr_partial, r2_ocr_async) are not trimmed —
+    // they are already chunked by the server OCR pipeline.
+    const FAST_SOURCES = new Set(["client_fast_pdf", "client_fast_text", "client_fast"]);
+    const allFastSource = docCtx.every(d => {
+      const src = (d as any).source as string | undefined;
+      return !src || FAST_SOURCES.has(src);
+    });
+
+    let effectiveDocCtx = docCtx;
+    if (allFastSource && totalChars > 14_000) {
+      const { selectFastContext } = await import("../lib/chat/fast-context-selector");
+      effectiveDocCtx = docCtx.map(d => {
+        const result = selectFastContext(d.extracted_text, message, { maxChars: 14_000 });
+        console.log(
+          `[chat-runner] FAST_TRIM: file="${d.filename}" ` +
+          `total=${d.extracted_text.length} → selected=${result.selectedChars} ` +
+          `method=${result.method} chunks=${result.chunkCount}/${result.totalChunks} ` +
+          `topScore=${result.topScore.toFixed(3)}`,
+        );
+        return { ...d, extracted_text: result.selectedText };
+      });
+      const trimmedTotal = effectiveDocCtx.reduce((s, d) => s + d.extracted_text.length, 0);
+      console.log(`[chat-runner] FAST_TRIM_TOTAL: ${totalChars} → ${trimmedTotal} chars`);
+    } else if (!allFastSource) {
+      console.log(`[chat-runner] SKIP_TRIM: durable-path source — keeping full text`);
+    } else {
+      console.log(`[chat-runner] SKIP_TRIM: total_chars=${totalChars} ≤ 14k — no trim needed`);
+    }
+
     // TASK 4 — STRICT document-only system prompt (ERSTATTER expert-prompt)
     // Two versions: partial OCR (first page only) vs. complete document.
     const docSystemPrompt = isPartialOcr
@@ -321,7 +355,8 @@ export async function runChatMessage(params: {
         ].join("\n");
 
     // TASK 3 — dokument som separat user-besked (højest prioritet)
-    const docBlock = docCtx.map(d =>
+    // effectiveDocCtx er trimmet til <14k chars for fast-path kilder (undgår heavy tier)
+    const docBlock = effectiveDocCtx.map(d =>
       `FILNAVN: ${d.filename}\nTEGN: ${d.extracted_text.length}\n\n${d.extracted_text}`
     ).join("\n\n---\n\n");
 
@@ -356,7 +391,8 @@ export async function runChatMessage(params: {
       );
     }
 
-    const docChars = docCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0);
+    // Brug effectiveDocCtx (trimmet) til tier-klassificering — det er hvad AI faktisk modtager
+    const docChars = effectiveDocCtx.reduce((s, d) => s + (d.extracted_text?.length ?? 0), 0);
     const complexity = classifyChatComplexity(message, docChars, isPartialOcr);
     const resolved = resolveModelForTier(complexity.tier);
     const docModel = resolved.model;
@@ -413,9 +449,9 @@ export async function runChatMessage(params: {
 
     console.log(`[chat-runner] DOC_ANSWER_LEN=${aiText.length} latency=${aiLatencyMs}ms isPartialOcr=${isPartialOcr}`);
 
-    // TASK 5 — grounding-validering
+    // TASK 5 — grounding-validering (bruger effectiveDocCtx — hvad AI faktisk fik)
     if (aiText) {
-      aiText = validateDocumentGrounding(aiText, docCtx[0].extracted_text);
+      aiText = validateDocumentGrounding(aiText, effectiveDocCtx[0].extracted_text);
     }
 
     if (!aiText) {

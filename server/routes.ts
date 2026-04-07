@@ -1987,6 +1987,7 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     };
 
     try {
+      const t0handler = Date.now();
       const body   = chatBodySchema.parse(req.body);
       const orgId  = getOrgId(req);
       const userId = getUserId(req);
@@ -1995,9 +1996,20 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       const { getRoutingStatusMessage } = await import("./lib/chat/hybrid-context-builder");
       const { runChatMessage }          = await import("./services/chat-runner");
 
+      const docCtxCount = (body.document_context ?? []).length;
+      const docCtxChars = (body.document_context ?? []).reduce(
+        (s: number, d: any) => s + (d?.extracted_text?.length ?? 0), 0,
+      );
+      const docSources = (body.document_context ?? []).map((d: any) => d?.source ?? "?").join(",");
+      console.log(
+        `[chat-stream] T0_START orgId=${orgId} doc_ctx=${docCtxCount} ` +
+        `doc_chars=${docCtxChars} sources="${docSources}" msg_len=${body.message?.length ?? 0}`,
+      );
+
       // ── Automatic routing (RULE A-E) ─────────────────────────────────────
       sendEvent({ type: "status", text: "Analyserer forespørgsel..." });
 
+      const t1 = Date.now();
       const decision = await resolveRouteDecision({
         message:           body.message,
         organizationId:    orgId,
@@ -2006,6 +2018,13 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         documentContext:   body.document_context as any[],
         preferredExpertId: body.context?.preferred_expert_id ?? null,
       });
+
+      const t2 = Date.now();
+      console.log(
+        `[chat-stream] T1_ROUTE_DONE in ${t2 - t1}ms ` +
+        `routeType=${decision.routeType} requiresAi=${decision.requiresAiCall} ` +
+        `experts=${decision.selectedExperts.length} docCtx=${decision.documentContext.length}`,
+      );
 
       // ── Gated responses ──────────────────────────────────────────────────
       if (!decision.requiresAiCall) {
@@ -2023,6 +2042,8 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         routeType: decision.routeType,
       });
 
+      console.log(`[chat-stream] T2_AI_START total_so_far=${t2 - t0handler}ms`);
+
       // ── Execute AI call with streaming ───────────────────────────────────
       const result = await runChatMessage({
         message:         body.message,
@@ -2036,6 +2057,12 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         onToken: (delta) => sendEvent({ type: "delta", text: delta }),
         onSafeguardReplace: (text) => sendEvent({ type: "replace", text }),
       });
+
+      const t3 = Date.now();
+      console.log(
+        `[chat-stream] T3_AI_DONE total=${t3 - t0handler}ms ` +
+        `ai_latency=${result.latencyMs}ms answer_len=${result.answer?.length ?? 0}`,
+      );
 
       const { enrichResponseWithReadiness: enrichStream } = await import("./lib/chat/readiness-enrichment");
       const streamReadiness = await enrichStream({
