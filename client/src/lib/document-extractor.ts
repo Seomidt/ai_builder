@@ -119,40 +119,70 @@ async function extractTextFile(file: File): Promise<string> {
 
 let pdfjsWorkerSrcCached: string | null = null;
 
+// Run once at startup to log whether the local worker asset is accessible.
+// Logs [pdfjs-worker] LOCAL_WORKER_OK or LOCAL_WORKER_MISSING so it is
+// immediately visible in the browser console before any PDF is uploaded.
+let _workerProbePromise: Promise<void> | null = null;
+function probeLocalWorkerOnce(): Promise<void> {
+  if (_workerProbePromise) return _workerProbePromise;
+  _workerProbePromise = (async () => {
+    const path = "/pdf.worker.min.mjs";
+    try {
+      const res = await fetch(path, { method: "HEAD" });
+      if (res.ok) {
+        console.log(`[pdfjs-worker] LOCAL_WORKER_OK status=${res.status} url=${path}`);
+      } else {
+        console.error(
+          `[pdfjs-worker] LOCAL_WORKER_MISSING status=${res.status} url=${path}` +
+          ` — pdf.js browser extraction will use CDN fallback (slow path risk).` +
+          ` Fix: ensure dist/public/pdf.worker.min.mjs is emitted by the build.`,
+        );
+      }
+    } catch (e: any) {
+      console.error(`[pdfjs-worker] LOCAL_WORKER_PROBE_ERROR: ${e?.message}`);
+    }
+  })();
+  return _workerProbePromise;
+}
+
+// Kick off the probe immediately when this module is loaded (no await needed).
+probeLocalWorkerOnce();
+
 async function resolvePdfjsWorkerSrc(): Promise<string> {
   if (pdfjsWorkerSrcCached) return pdfjsWorkerSrcCached;
 
-  // Strategy 1: public/ directory — worker is copied here at build time
-  // File: client/public/pdf.worker.min.mjs → served at /pdf.worker.min.mjs
-  const publicUrl = `${window.location.origin}/pdf.worker.min.mjs`;
+  // Strategy 1: public/ directory — worker is explicitly copied here at build
+  // time via script/build.ts. client/public/pdf.worker.min.mjs → /pdf.worker.min.mjs
+  // vercel.json rewrite excludes this path so Vercel serves it as a static file.
+  const localPath = "/pdf.worker.min.mjs";
   try {
-    const probe = await fetch(publicUrl, { method: "HEAD" });
+    const probe = await fetch(localPath, { method: "HEAD" });
     if (probe.ok) {
-      pdfjsWorkerSrcCached = publicUrl;
-      console.log(`[pdfjs-worker] resolved via public path: ${pdfjsWorkerSrcCached}`);
+      pdfjsWorkerSrcCached = localPath;
+      console.log(`[pdfjs-worker] resolved via public path: ${localPath} (status=${probe.status})`);
       return pdfjsWorkerSrcCached;
     }
-    console.warn(`[pdfjs-worker] public path probe failed: HTTP ${probe.status}`);
+    console.error(
+      `[pdfjs-worker] MISSING_LOCAL_WORKER ${localPath} — HTTP ${probe.status}.` +
+      ` The worker file is missing from the deployed build.` +
+      ` All text PDFs will fall back to slow OCR path (~40 s latency).`,
+    );
   } catch (e: any) {
-    console.warn(`[pdfjs-worker] public path probe error: ${e?.message}`);
+    console.error(`[pdfjs-worker] MISSING_LOCAL_WORKER ${localPath} — fetch error: ${e?.message}`);
   }
 
-  // Strategy 2: Vite ?url import (works if Vite processed the import)
-  try {
-    const workerMod = await import(/* @vite-ignore */ "pdfjs-dist/build/pdf.worker.min.mjs?url");
-    if (workerMod?.default && typeof workerMod.default === "string") {
-      pdfjsWorkerSrcCached = workerMod.default;
-      console.log(`[pdfjs-worker] resolved via ?url import: ${pdfjsWorkerSrcCached}`);
-      return pdfjsWorkerSrcCached;
-    }
-  } catch {
-    // Strategy 2 failed
-  }
-
-  // Strategy 3: CDN fallback — last resort
+  // Strategy 2 (CDN FALLBACK — OBSERVABLE, NOT SILENT):
+  // Only reached if /pdf.worker.min.mjs is missing from the deployment.
+  // This keeps pdf.js functional but means browser extraction may be unreliable
+  // for CORS-restricted origins, and signals a build pipeline problem.
   const { version } = await import("pdfjs-dist");
-  pdfjsWorkerSrcCached = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${version}/pdf.worker.min.mjs`;
-  console.warn(`[pdfjs-worker] ALL local strategies failed — falling back to CDN: ${pdfjsWorkerSrcCached}`);
+  const cdnUrl = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${version}/pdf.worker.min.mjs`;
+  pdfjsWorkerSrcCached = cdnUrl;
+  console.error(
+    `[pdfjs-worker] CDN_FALLBACK_ACTIVE url=${cdnUrl}` +
+    ` — LOCAL WORKER MISSING. This is a build/deploy misconfiguration.` +
+    ` Expected: dist/public/pdf.worker.min.mjs in Vercel output directory.`,
+  );
   return pdfjsWorkerSrcCached;
 }
 

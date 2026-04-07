@@ -1,6 +1,6 @@
 import { build as esbuild } from "esbuild";
 import { build as viteBuild } from "vite";
-import { rm, readFile } from "fs/promises";
+import { rm, readFile, copyFile } from "fs/promises";
 
 // ── Serverless handler entries ────────────────────────────────────────────────
 const HANDLERS: Array<{ name: string; entry: string; out: string }> = [
@@ -68,6 +68,14 @@ async function buildAll() {
 
   console.log("building client...");
   await viteBuild();
+
+  // Explicitly copy pdf.worker.min.mjs to dist/public/ as a guaranteed safety net.
+  // Vite copies client/public/ to dist/public/ automatically, but we copy explicitly
+  // to ensure the file is always present in the Vercel deployment output regardless
+  // of any publicDir resolution issues in the Vercel build environment.
+  console.log("copying pdf.worker.min.mjs → dist/public/...");
+  await copyFile("client/public/pdf.worker.min.mjs", "dist/public/pdf.worker.min.mjs");
+  console.log("pdf.worker.min.mjs OK");
 
   const pkg = JSON.parse(await readFile("package.json", "utf-8"));
   const allDeps = [

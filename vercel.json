@@ -8,7 +8,7 @@
       "destination": "https://api.blissops.com/api/:path*"
     },
     {
-      "source": "/((?!assets/|brand/|favicon\\.png).*)",
+      "source": "/((?!assets/|brand/|favicon\\.png|pdf\\.worker\\.min\\.mjs).*)",
       "destination": "/index.html"
     }
   ],
