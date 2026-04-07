@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
 import { getSessionToken } from "@/lib/supabase";
+import { fastExtractText, classifyForFastExtract } from "@/lib/document-extractor";
 import { pollForCompletedOcr } from "@shared/upgrade-chain";
 import { useToast } from "@/hooks/use-toast";
 import { useReadinessStream, type ReadinessSnapshot, type ReadinessUxState } from "@/hooks/use-readiness-stream";
@@ -895,138 +896,204 @@ export default function AiChatPage() {
 
       if (docFiles.length > 0) {
         try {
-          console.log(`[TRACE-2a][${traceId}] starting direct-to-R2 upload for ${docFiles.length} file(s)`);
+          // ── DUAL-PATH: Fast client-side extraction → immediate AI response ──
+          // Background: R2 upload continues for durable storage (fire-and-forget)
+          console.log(`[TRACE-2a][${traceId}] DUAL-PATH: attempting fast client-side extraction for ${docFiles.length} file(s)`);
 
-          // Upload alle doc-filer direkte til R2 og finaliser
-          const finalizeResults: any[] = [];
+          const fastResults: any[] = [];
+          const slowFiles: { af: typeof docFiles[0]; reason: string }[] = [];
 
           for (const af of docFiles) {
             const file = af.file;
+            const mode = classifyForFastExtract(file);
+            console.log(`[TRACE-2b][${traceId}] classify ${file.name} (${file.size}b, ${file.type}) → ${mode}`);
 
-            // ── 1. Hent presigned URL ─────────────────────────────────────
-            console.log(`[TRACE-2b][${traceId}] requesting presigned URL for ${file.name} (${file.size}b)`);
-            const urlRes = await apiRequest("POST", "/api/upload/url", {
-              filename:    file.name,
-              contentType: file.type || "application/octet-stream",
-              size:        file.size,
-              context:     "chat",
-            });
-            if (!urlRes.ok) {
-              const errBody = await urlRes.json().catch(() => ({})) as any;
-              console.error(`[HARD-STOP][${traceId}] presign failed HTTP ${urlRes.status}`, errBody);
-              throw Object.assign(new Error(errBody?.message ?? "Fil kunne ikke klargøres til upload."), { errorCode: "PRESIGN_FAILED" });
-            }
-            const { uploadUrl, objectKey } = await urlRes.json() as { uploadUrl: string; objectKey: string; expiresIn: number };
-
-            // ── 2. Upload fil direkte fra browser til R2 (bypasser Vercel) ─
-            console.log(`[TRACE-2c][${traceId}] uploading directly to R2 key=${objectKey}`);
-            const r2Res = await fetch(uploadUrl, {
-              method:  "PUT",
-              body:    file,
-              headers: { "Content-Type": file.type || "application/octet-stream" },
-            });
-            if (!r2Res.ok) {
-              console.error(`[HARD-STOP][${traceId}] R2 PUT failed HTTP ${r2Res.status}`);
-              throw Object.assign(new Error("Fil upload til lager fejlede. Prøv igen."), { errorCode: "R2_UPLOAD_FAILED" });
-            }
-            console.log(`[TRACE-2d][${traceId}] R2 upload OK for ${file.name}`);
-
-            // ── 3. Finaliser upload — ekstraher tekst server-side fra R2 ──
-            console.log(`[TRACE-2e][${traceId}] finalizing upload for ${file.name}`);
-            const finalRes = await apiRequest("POST", "/api/upload/finalize", {
-              objectKey,
-              filename:    file.name,
-              contentType: file.type || "application/octet-stream",
-              size:        file.size,
-              context:     "chat",
-              fileCount:   docFiles.length,
-              // PHASE 5Z.7 — question passed at upload time for server-driven orchestration
-              questionText: payload.text?.trim() || undefined,
-            });
-            if (!finalRes.ok) {
-              const errBody = await finalRes.json().catch(() => ({})) as any;
-              console.error(`[HARD-STOP][${traceId}] finalize failed HTTP ${finalRes.status}`, errBody);
-              throw Object.assign(new Error(errBody?.message ?? "Dokument kunne ikke behandles."), { errorCode: "FINALIZE_FAILED" });
-            }
-            const finalData = await finalRes.json() as { mode: string; results?: any[]; message?: string; taskId?: string };
-            console.log(`[TRACE-2f][${traceId}] finalize OK mode=${finalData.mode} results=${finalData.results?.length ?? 0} msg=${finalData.message ?? "-"}`);
-
-            // ── B_FALLBACK: OCR-task creation failed (DB/queue error) ─────
-            if (finalData.mode === "B_FALLBACK") {
-              const reason = finalData.message ?? "OCR-systemet er ikke tilgængeligt. Prøv igen om lidt.";
-              console.error(`[OCR-FAIL][${traceId}] PATH=b_fallback reason="${reason}"`);
-              throw Object.assign(new Error(reason), { errorCode: "DOCUMENT_UNREADABLE" });
+            if (mode === "unsupported") {
+              slowFiles.push({ af, reason: `unsupported_for_fast:${file.type}` });
+              continue;
             }
 
-            // ── OCR_PENDING: scanned PDF → SSE-stream + polling-fallback ─────
-            if (finalData.mode === "OCR_PENDING" && finalData.taskId) {
-              const taskId = finalData.taskId;
-              console.log(`[TRACE-2ocr][${traceId}] OCR_PENDING taskId=${taskId} SSE-subscribe...`);
-
-              const OCR_TIMEOUT = 360_000;
-              const ocrStart    = Date.now();
-              let ocrResult: any = null;
-              let ocrHandled = false; // set true when partial_ready pushes directly to finalizeResults
-
-              // Stage → brugervenlig tekst
-              const stageLabel = (stage: string | null | undefined): string => {
-                if (!stage) return "Analyserer dokument";
-                if (stage === "ocr")       return "Læser tekst via AI";
-                if (stage === "chunking")  return "Opdeler tekst";
-                if (stage === "embedding") return "Indekserer indhold";
-                if (stage === "storing")   return "Gemmer indhold";
-                return "Behandler";
-              };
-
-              setOcrStatusLabel(`Behandler scannet PDF: ${file.name}`);
-
-              // ── PHASE 5Z.7: SSE-baseret subscription ─────────────────────
-              // Forsøger at modtage real-time events fra serveren (nul polling-latency).
-              // Falder tilbage til polling-loop hvis SSE ikke virker.
-              let sseResolved = false;
-              let sseError: Error | null = null;
-              try {
-                const token = await getSessionToken();
-                const sseHeaders: Record<string, string> = { Accept: "text/event-stream" };
-                if (token) sseHeaders["Authorization"] = `Bearer ${token}`;
-
-                const sseRes = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, {
-                  headers: sseHeaders,
-                  credentials: "include",
-                  signal: AbortSignal.timeout(OCR_TIMEOUT),
+            try {
+              const result = await fastExtractText(file);
+              if (result && result.charCount > 0) {
+                console.log(`[TRACE-2c][${traceId}] FAST OK ${file.name}: ${result.charCount} chars in ${result.durationMs}ms via ${result.source}`);
+                fastResults.push({
+                  filename:       file.name,
+                  mime_type:      file.type || "application/octet-stream",
+                  char_count:     result.charCount,
+                  extracted_text: result.text,
+                  status:         "ok",
+                  source:         result.source,
                 });
+              } else {
+                console.log(`[TRACE-2c][${traceId}] FAST EMPTY ${file.name} — falling back to server path`);
+                slowFiles.push({ af, reason: "fast_extract_empty" });
+              }
+            } catch (fastErr: any) {
+              console.warn(`[TRACE-2c][${traceId}] FAST ERROR ${file.name}: ${fastErr?.message} — falling back to server path`);
+              slowFiles.push({ af, reason: `fast_extract_error:${fastErr?.message?.slice(0,80)}` });
+            }
+          }
 
-                if (sseRes.ok && sseRes.body) {
-                  const reader  = sseRes.body.getReader();
-                  const decoder = new TextDecoder();
-                  let   buf     = "";
+          // ── If all files extracted fast, skip server path entirely ──
+          if (slowFiles.length === 0 && fastResults.length > 0) {
+            documentContext = fastResults;
+            console.log(`[TRACE-2d][${traceId}] ALL FAST: ${fastResults.length} file(s) extracted client-side — skipping server path`);
 
-                  outer: while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    buf += decoder.decode(value, { stream: true });
-                    const lines = buf.split("\n");
-                    buf = lines.pop() ?? "";
+            // Fire-and-forget durable R2 upload ONLY when fast path handled everything
+            const durableUpload = async () => {
+              for (const af of docFiles) {
+                try {
+                  const file = af.file;
+                  const urlRes = await apiRequest("POST", "/api/upload/url", {
+                    filename: file.name,
+                    contentType: file.type || "application/octet-stream",
+                    size: file.size,
+                    context: "chat",
+                  });
+                  if (!urlRes.ok) {
+                    console.warn(`[DURABLE][${traceId}] presign failed for ${file.name}: HTTP ${urlRes.status}`);
+                    continue;
+                  }
+                  const { uploadUrl, objectKey } = await urlRes.json() as any;
+                  const r2Res = await fetch(uploadUrl, {
+                    method: "PUT",
+                    body: file,
+                    headers: { "Content-Type": file.type || "application/octet-stream" },
+                  });
+                  if (!r2Res.ok) {
+                    console.warn(`[DURABLE][${traceId}] R2 PUT failed for ${file.name}: HTTP ${r2Res.status}`);
+                    continue;
+                  }
+                  const finRes = await apiRequest("POST", "/api/upload/finalize", {
+                    objectKey,
+                    filename: file.name,
+                    contentType: file.type || "application/octet-stream",
+                    size: file.size,
+                    context: "chat",
+                    fileCount: docFiles.length,
+                  });
+                  if (finRes.ok) {
+                    console.log(`[DURABLE][${traceId}] R2 upload+finalize OK: ${file.name}`);
+                  } else {
+                    console.warn(`[DURABLE][${traceId}] finalize failed for ${file.name}: HTTP ${finRes.status}`);
+                  }
+                } catch (e: any) {
+                  console.warn(`[DURABLE][${traceId}] R2 upload failed for ${af.file.name}: ${e?.message}`);
+                }
+              }
+            };
+            durableUpload().catch(() => {});
 
-                    for (const line of lines) {
-                      if (!line.startsWith("data:")) continue;
-                      let evt: any;
-                      try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+          } else {
+            // ALL files need server path — fall back to legacy R2→finalize→OCR flow
+            console.log(`[TRACE-2d][${traceId}] ALL SLOW: ${slowFiles.length} file(s) need server extraction`);
 
-                      const { type, data } = evt;
-                      if (!type || !data) continue;
+            const finalizeResults: any[] = [];
+            for (const { af } of slowFiles) {
+              const file = af.file;
 
-                      // ── Log EVERY SSE event so we can verify completed is received ──────────
-                      // Unknown event types must NOT be silently swallowed.
-                      if (type !== "keepalive") {
-                        console.log(`[OCR:SSE] taskId=${taskId} type=${type} charCount=${data.charCount ?? "-"} stage=${data.stage ?? "-"}`);
-                      }
+              console.log(`[TRACE-2e][${traceId}] requesting presigned URL for ${file.name} (${file.size}b)`);
+              const urlRes = await apiRequest("POST", "/api/upload/url", {
+                filename:    file.name,
+                contentType: file.type || "application/octet-stream",
+                size:        file.size,
+                context:     "chat",
+              });
+              if (!urlRes.ok) {
+                const errBody = await urlRes.json().catch(() => ({})) as any;
+                throw Object.assign(new Error(errBody?.message ?? "Fil kunne ikke klargøres til upload."), { errorCode: "PRESIGN_FAILED" });
+              }
+              const { uploadUrl, objectKey } = await urlRes.json() as { uploadUrl: string; objectKey: string; expiresIn: number };
 
-                      if (type === "partial_ready") {
-                        // TASK 6 safety: gate runs ONLY inside this branch.
-                        // The completed branch below is completely separate and NEVER gated.
-                        if (!data.ocrText?.trim()) {
-                          console.warn(`[OCR:partial_ready] taskId=${taskId} ocrText=EMPTY — ignoring, waiting for completed`);
+              const r2Res = await fetch(uploadUrl, {
+                method:  "PUT",
+                body:    file,
+                headers: { "Content-Type": file.type || "application/octet-stream" },
+              });
+              if (!r2Res.ok) {
+                throw Object.assign(new Error("Fil upload fejlede. Prøv igen."), { errorCode: "R2_UPLOAD_FAILED" });
+              }
+
+              const finalRes = await apiRequest("POST", "/api/upload/finalize", {
+                objectKey,
+                filename:    file.name,
+                contentType: file.type || "application/octet-stream",
+                size:        file.size,
+                context:     "chat",
+                fileCount:   slowFiles.length,
+                questionText: payload.text?.trim() || undefined,
+              });
+              if (!finalRes.ok) {
+                const errBody = await finalRes.json().catch(() => ({})) as any;
+                throw Object.assign(new Error(errBody?.message ?? "Dokument kunne ikke behandles."), { errorCode: "FINALIZE_FAILED" });
+              }
+              const finalData = await finalRes.json() as { mode: string; results?: any[]; message?: string; taskId?: string };
+
+              if (finalData.mode === "B_FALLBACK") {
+                throw Object.assign(new Error(finalData.message ?? "OCR-systemet er ikke tilgængeligt."), { errorCode: "DOCUMENT_UNREADABLE" });
+              }
+
+              if (finalData.mode === "OCR_PENDING" && finalData.taskId) {
+                const taskId = finalData.taskId;
+                console.log(`[TRACE-2ocr][${traceId}] OCR_PENDING taskId=${taskId} SSE-subscribe...`);
+
+                const OCR_TIMEOUT = 360_000;
+                const ocrStart    = Date.now();
+                let ocrResult: any = null;
+                let ocrHandled = false;
+
+                const stageLabel = (stage: string | null | undefined): string => {
+                  if (!stage) return "Analyserer dokument";
+                  if (stage === "ocr")       return "Læser tekst via AI";
+                  if (stage === "chunking")  return "Opdeler tekst";
+                  if (stage === "embedding") return "Indekserer indhold";
+                  if (stage === "storing")   return "Gemmer indhold";
+                  return "Behandler";
+                };
+
+                setOcrStatusLabel(`Behandler scannet PDF: ${file.name}`);
+
+                let sseResolved = false;
+                let sseError: Error | null = null;
+                try {
+                  const token = await getSessionToken();
+                  const sseHeaders: Record<string, string> = { Accept: "text/event-stream" };
+                  if (token) sseHeaders["Authorization"] = `Bearer ${token}`;
+
+                  const sseRes = await fetch(`/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`, {
+                    headers: sseHeaders,
+                    credentials: "include",
+                    signal: AbortSignal.timeout(OCR_TIMEOUT),
+                  });
+
+                  if (sseRes.ok && sseRes.body) {
+                    const reader  = sseRes.body.getReader();
+                    const decoder = new TextDecoder();
+                    let   buf     = "";
+
+                    outer: while (true) {
+                      const { done, value } = await reader.read();
+                      if (done) break;
+                      buf += decoder.decode(value, { stream: true });
+                      const lines = buf.split("\n");
+                      buf = lines.pop() ?? "";
+
+                      for (const line of lines) {
+                        if (!line.startsWith("data:")) continue;
+                        let evt: any;
+                        try { evt = JSON.parse(line.slice(5).trim()); } catch { continue; }
+
+                        const { type, data } = evt;
+                        if (!type || !data) continue;
+
+                        if (type !== "keepalive") {
+                          console.log(`[OCR:SSE] taskId=${taskId} type=${type} charCount=${data.charCount ?? "-"} stage=${data.stage ?? "-"}`);
+                        }
+
+                        if (type === "partial_ready") {
+                          if (!data.ocrText?.trim()) {
+                            console.warn(`[OCR:partial_ready] taskId=${taskId} ocrText=EMPTY — ignoring, waiting for completed`);
                           // continue SSE loop — do not generate provisional from empty text
                           continue;
                         }
@@ -1249,6 +1316,7 @@ export default function AiChatPage() {
             console.error(`[OCR-FAIL][${traceId}] PATH=empty_extracted_text entries=${documentContext.length} chars=[${documentContext.map((r:any)=>r.extracted_text?.length??0).join(",")}] statuses=[${documentContext.map((r:any)=>r.status).join(",")}] hasOcr=${hasOcrSource} — ${specificMsg}`);
             throw Object.assign(new Error(specificMsg), { errorCode: "DOCUMENT_UNREADABLE" });
           }
+          } // close else (ALL SLOW path)
         } catch (e: any) {
           if (e?.errorCode) throw e; // re-throw hard-stops
           console.error(`[HARD-STOP][${traceId}] UPLOAD_PIPELINE_FAILED:`, e);
