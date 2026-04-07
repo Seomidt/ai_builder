@@ -470,40 +470,62 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     const useCase: AiUseCase = body.context?.use_case ?? "grounded_chat";
 
-    // ── T3: Budget check ──────────────────────────────────────────────────────
-    let budgetReservedAmount = 0;
-    try {
-      const { reserveBudget } = await import("../../server/lib/ai/budget-guard");
-      const reservation = await reserveBudget(orgId, 0.001);
-      perf("T3_budget_checked", T0, { allowed: reservation.allowed });
-      if (!reservation.allowed) {
-        sendEvent({ type: "error", errorCode: "BUDGET_EXCEEDED", message: "AI-budgettet er opbrugt." });
-        return res.end();
-      }
-      budgetReservedAmount = reservation.reservedAmount;
-    } catch {
-      perf("T3_budget_checked", T0, { allowed: true, note: "fail-safe" });
-    }
+    // ── T3+T4: Budget check + Expert fetch (PARALLEL) ─────────────────────────
+    // Budget check uses Drizzle/pg.Pool which has slow cold starts (10-20s SSL).
+    // Timeout after 2s → fail-safe allow. Run in parallel with expert fetch.
+    sendEvent({ type: "status", text: "Analyserer forespørgsel..." });
 
     const token = (req.headers.authorization ?? "").slice(7);
 
-    // ── T4: Fetch experts ─────────────────────────────────────────────────────
-    sendEvent({ type: "status", text: "Analyserer forespørgsel..." });
+    const BUDGET_TIMEOUT_MS = 2_000;
+    const budgetPromise = (async (): Promise<{ allowed: boolean; reservedAmount: number; note?: string }> => {
+      try {
+        const { reserveBudget } = await import("../../server/lib/ai/budget-guard");
+        const reservation = await reserveBudget(orgId, 0.001);
+        return { allowed: reservation.allowed, reservedAmount: reservation.reservedAmount };
+      } catch {
+        return { allowed: true, reservedAmount: 0, note: "error-fail-safe" };
+      }
+    })();
+
+    const budgetWithTimeout = Promise.race([
+      budgetPromise,
+      new Promise<{ allowed: true; reservedAmount: 0; note: string }>((resolve) =>
+        setTimeout(() => resolve({ allowed: true, reservedAmount: 0, note: "timeout-fail-safe" }), BUDGET_TIMEOUT_MS),
+      ),
+    ]);
+
+    const expertPromise = (async (): Promise<{ experts?: Expert[]; error?: string }> => {
+      try {
+        const rows = await dbList("architecture_profiles", token, {
+          status:           "neq.archived",
+          enabled_for_chat: "eq.true",
+          select:           "id,name,category,description,routing_hints,enabled_for_chat,status",
+        });
+        return { experts: rows as unknown as Expert[] };
+      } catch (e) {
+        return { error: (e as Error).message };
+      }
+    })();
+
+    const [budgetResult, expertResult] = await Promise.all([budgetWithTimeout, expertPromise]);
+
+    let budgetReservedAmount = 0;
+    perf("T3_budget_checked", T0, { allowed: budgetResult.allowed, note: (budgetResult as any).note });
+    if (!budgetResult.allowed) {
+      sendEvent({ type: "error", errorCode: "BUDGET_EXCEEDED", message: "AI-budgettet er opbrugt." });
+      return res.end();
+    }
+    budgetReservedAmount = budgetResult.reservedAmount;
 
     let experts: Expert[];
-    try {
-      const rows = await dbList("architecture_profiles", token, {
-        status:           "neq.archived",
-        enabled_for_chat: "eq.true",
-        select:           "id,name,category,description,routing_hints,enabled_for_chat,status",
-      });
-      experts = rows as unknown as Expert[];
-      perf("T4_experts_fetched", T0, { count: experts.length });
-    } catch (e) {
-      perf("T4_experts_fetched", T0, { error: (e as Error).message });
+    if (expertResult.error || !expertResult.experts) {
+      perf("T4_experts_fetched", T0, { error: expertResult.error });
       sendEvent({ type: "error", errorCode: "EXPERT_FETCH_FAILED", message: "Kunne ikke hente eksperter" });
       return res.end();
     }
+    experts = expertResult.experts;
+    perf("T4_experts_fetched", T0, { count: experts.length });
 
     if (!experts.length) {
       sendEvent({ type: "error", errorCode: "NO_EXPERTS_AVAILABLE", message: "Ingen AI-eksperter er tilgængelige." });
