@@ -665,6 +665,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     if (hasVision) {
       // ════════════════════════════════════════════════════════════════════════
       // VISION DOCUMENT CHAT: Gemini 2.0 Flash multimodal (scanned PDFs)
+      // Dedicated prompt — answers ONLY from visible page images
       // ════════════════════════════════════════════════════════════════════════
       const allVisionImages = visionDocs.flatMap(d => d.vision_images ?? []);
       const visionFilename = visionDocs[0]?.filename ?? "dokument";
@@ -677,15 +678,49 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         model: modelUsed,
       });
 
-      const visionUserContent = `DOKUMENTSIDER (som billeder) fra filen "${visionFilename}" er vedhæftet.\n\n${message}`;
+      console.log(`[VISION][${liveId}] SCANNED_PREVIEW_START preview_pages_used=${allVisionImages.length} preview_prompt_type=vision_pdf_preview preview_answer_mode=document_only`);
+
+      const visionSystemPrompt = [
+        `Du er en dokumentanalytiker. Du modtager billeder af sider fra en PDF-fil.`,
+        ``,
+        `=== ABSOLUTTE REGLER FOR VISUEL DOKUMENTANALYSE ===`,
+        `REGEL 1: Du MÅ KUN besvare spørgsmål baseret på det du kan SE i de vedhæftede sidebilleder.`,
+        `REGEL 2: Kig grundigt på ALLE vedhæftede sidebilleder før du svarer.`,
+        `REGEL 3: Hvis svaret er synligt i billederne, citér det direkte og præcist.`,
+        `REGEL 4: Hvis kun DELE af spørgsmålet kan besvares fra de synlige sider, besvar den del du kan se, og sig eksplicit: "Resten fremgår ikke af de viste sider — det fulde svar kommer når hele dokumentet er behandlet."`,
+        `REGEL 5: Hvis INTET i billederne besvarer spørgsmålet, sig: "Jeg kan ikke se svaret i de viste sider. Det fulde svar kommer når hele dokumentet er behandlet."`,
+        `REGEL 6: Du MÅ ALDRIG nævne "interne data", "vidensbase", "knowledge base", "virksomhedens data" eller lignende. Du kigger KUN på sidebilleder.`,
+        `REGEL 7: Du MÅ ALDRIG hallucere tal, navne, datoer, priser eller klausuler der ikke er synlige i billederne.`,
+        `REGEL 8: Start dit svar med den direkte konklusion fra billederne. Ingen indledende forklaringer.`,
+        `REGEL 9: Dette er et PREVIEW-svar baseret på de første sider. Nævn kort at det fulde dokument stadig behandles, hvis du ikke kan besvare alt.`,
+        `=== SLUT REGLER ===`,
+        ``,
+        `Svar altid på dansk.`,
+      ].join("\n");
+
+      const visionUserContent = [
+        `Herunder ser du ${allVisionImages.length} side${allVisionImages.length > 1 ? "r" : ""} fra PDF-filen "${visionFilename}".`,
+        `Kig grundigt på alle sidebilleder og besvar følgende spørgsmål:`,
+        ``,
+        message,
+      ].join("\n");
 
       sendEvent({ type: "status", text: "Analyserer dokument...", routeType });
 
-      const result = await streamGemini(docSystemPrompt, visionUserContent, sendEvent, T0, liveId, allVisionImages);
+      const result = await streamGemini(visionSystemPrompt, visionUserContent, sendEvent, T0, liveId, allVisionImages);
       totalPromptTokens     = result.promptTokens;
       totalCompletionTokens = result.completionTokens;
       totalLatencyMs        = result.latencyMs;
       fullAnswer            = result.text;
+
+      const LEAK_PHRASES = ["interne data", "vidensbase", "knowledge base", "virksomhedens data"];
+      const lowerAnswer = fullAnswer.toLowerCase();
+      const leakedPhrase = LEAK_PHRASES.find(p => lowerAnswer.includes(p));
+      if (leakedPhrase) {
+        console.error(`[VISION][${liveId}] PREVIEW_PROMPT_LEAK detected="${leakedPhrase}" answer_len=${fullAnswer.length}`);
+      }
+      const isPartialAnswer = lowerAnswer.includes("viste sider") || lowerAnswer.includes("hele dokumentet");
+      console.log(`[VISION][${liveId}] SCANNED_PREVIEW_DONE preview_partial_answer=${isPartialAnswer} answer_len=${fullAnswer.length} latencyMs=${totalLatencyMs}`);
 
     } else if (docCtx.length > 0) {
       // ════════════════════════════════════════════════════════════════════════
