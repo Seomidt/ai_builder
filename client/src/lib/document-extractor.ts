@@ -17,6 +17,10 @@ export interface FastExtractResult {
   source: AnswerSource;
   mode: FastExtractMode;
   durationMs: number;
+  rawChars: number;      // raw char count from extraction (before quality gate)
+  pagesWithText: number; // pages that had text content (PDFs only, 1 for text files)
+  workerSrc: string;     // pdf.js worker URL used ("" for text files)
+  gateForced: boolean;   // true if quality gate was bypassed by hard assert
 }
 
 export interface UsabilityGateResult {
@@ -186,7 +190,10 @@ async function resolvePdfjsWorkerSrc(): Promise<string> {
   return pdfjsWorkerSrcCached;
 }
 
-async function extractPdfText(file: File, traceLabel: string): Promise<string> {
+async function extractPdfText(
+  file: File,
+  traceLabel: string,
+): Promise<{ text: string; pagesWithText: number; rawChars: number }> {
   const pdfjsLib = await import("pdfjs-dist");
 
   const workerSrc = await resolvePdfjsWorkerSrc();
@@ -222,6 +229,7 @@ async function extractPdfText(file: File, traceLabel: string): Promise<string> {
   }
 
   const joined = textParts.join("\n\n");
+  const pagesWithText = textParts.length;
 
   // Log per-page extraction result — critical for diagnosing image-only vs text PDFs
   if (joined.length === 0) {
@@ -234,14 +242,19 @@ async function extractPdfText(file: File, traceLabel: string): Promise<string> {
   } else {
     console.log(
       `[pdfjs-raw] ${traceLabel}: rawChars=${joined.length} ` +
-      `pagesWithText=${textParts.length}/${maxPages} emptyPages=${emptyPages}`,
+      `pagesWithText=${pagesWithText}/${maxPages} emptyPages=${emptyPages}`,
     );
   }
 
-  return joined;
+  return { text: joined, pagesWithText, rawChars: joined.length };
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
+
+// Threshold for hard assert: if pdf.js extracted this many chars from at least 1
+// page, it is provably a text PDF — skip quality gate and force the fast path.
+// Prevents scanned-PDF noise gates from incorrectly routing text PDFs to OCR.
+const HARD_ASSERT_MIN_CHARS = 2000;
 
 export async function fastExtractText(
   file: File,
@@ -258,33 +271,70 @@ export async function fastExtractText(
 
   try {
     let rawText: string;
+    let pagesWithText = 1; // default for text files (single "page")
+    let rawChars: number;
 
     if (mode === "fast_text") {
       rawText = await extractTextFile(file);
+      rawChars = rawText.length;
     } else {
-      rawText = await extractPdfText(file, traceLabel);
+      // extractPdfText now returns {text, pagesWithText, rawChars}
+      const pdfResult = await extractPdfText(file, traceLabel);
+      rawText      = pdfResult.text;
+      pagesWithText = pdfResult.pagesWithText;
+      rawChars      = pdfResult.rawChars;
     }
+
+    const workerSrc = pdfjsWorkerSrcCached ?? "";
 
     const gate = checkTextUsability(rawText);
 
+    let gateForced = false;
     if (!gate.passed) {
-      console.log(`[fast-extract] ${traceLabel}: GATE_REJECTED — ${gate.reason} nonWs=${gate.nonWsChars} words=${gate.wordCount} alpha=${gate.alphaRatio.toFixed(2)}`);
-      return null;
+      // ── HARD ASSERT: if pdf.js extracted ≥2000 chars from ≥1 page, it is
+      //    provably a text PDF. The quality gate may reject due to alpha-ratio
+      //    or word-count thresholds that are sensitive to formatting artifacts.
+      //    Override: bypass gate, use extracted text, force fast path.
+      if (rawChars >= HARD_ASSERT_MIN_CHARS && pagesWithText > 0) {
+        gateForced = true;
+        console.warn(
+          `[LIVE-ASSERT] ${traceLabel}: GATE_BYPASS — rawChars=${rawChars} pagesWithText=${pagesWithText}` +
+          ` gate_reason="${gate.reason}"` +
+          ` → forcing ALL_FAST, skipping OCR fallback (hard assert active)`,
+        );
+      } else {
+        console.log(
+          `[fast-extract] ${traceLabel}: GATE_REJECTED — ${gate.reason}` +
+          ` nonWs=${gate.nonWsChars} words=${gate.wordCount} alpha=${gate.alphaRatio.toFixed(2)}` +
+          ` rawChars=${rawChars} pagesWithText=${pagesWithText}`,
+        );
+        return null;
+      }
     }
 
     const capped = rawText.trim().slice(0, MAX_EXTRACTED_CHARS);
     const durationMs = Math.round(performance.now() - t0);
+    const source: AnswerSource = mode === "fast_text" ? "client_fast_text" : "client_fast_pdf";
 
-    console.log(`[fast-extract] ${traceLabel}: OK nonWs=${gate.nonWsChars} words=${gate.wordCount} alpha=${gate.alphaRatio.toFixed(2)} chars=${capped.length} duration=${durationMs}ms source=${mode === "fast_text" ? "client_fast_text" : "client_fast_pdf"}`);
+    console.log(
+      `[fast-extract] ${traceLabel}: OK` +
+      ` nonWs=${gate.nonWsChars} words=${gate.wordCount} alpha=${gate.alphaRatio.toFixed(2)}` +
+      ` chars=${capped.length} rawChars=${rawChars} pagesWithText=${pagesWithText}` +
+      ` gateForced=${gateForced} duration=${durationMs}ms source=${source}`,
+    );
 
     return {
-      text:        capped,
-      charCount:   capped.length,
-      wordCount:   gate.wordCount,
-      alphaRatio:  gate.alphaRatio,
-      source:      mode === "fast_text" ? "client_fast_text" : "client_fast_pdf",
+      text:         capped,
+      charCount:    capped.length,
+      wordCount:    gate.wordCount,
+      alphaRatio:   gate.alphaRatio,
+      source,
       mode,
       durationMs,
+      rawChars,
+      pagesWithText,
+      workerSrc,
+      gateForced,
     };
   } catch (err: any) {
     const durationMs = Math.round(performance.now() - t0);

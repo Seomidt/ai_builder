@@ -315,8 +315,15 @@ async function streamOpenAI(
   userContent: string,
   sendEvent: (data: object) => void,
   t0Request: number,
+  liveId: string = "?",
 ): Promise<{ text: string; promptTokens: number; completionTokens: number; latencyMs: number }> {
   const t0Call = Date.now();
+
+  console.log(
+    `[LIVE][${liveId}] OPENAI_START model=${model}` +
+    ` systemChars=${systemPrompt.length} contentChars=${userContent.length}` +
+    ` +${Date.now() - t0Request}ms_since_T0`,
+  );
 
   perf("T7_openai_call_start", t0Request, {
     model,
@@ -383,6 +390,8 @@ async function streamOpenAI(
             sendEvent({ type: "delta", text: delta });
             if (!firstChunkFlushed) {
               firstChunkFlushed = true;
+              const firstTokenMs = Date.now() - t0Request;
+              console.log(`[LIVE][${liveId}] FIRST_TOKEN_MS=${firstTokenMs} delta_len=${delta.length}`);
               perf("T10_first_chunk_forwarded", t0Request, { delta_len: delta.length });
             }
           }
@@ -398,6 +407,11 @@ async function streamOpenAI(
   }
 
   const callMs = Date.now() - t0Call;
+  const responseDoneMs = Date.now() - t0Request;
+  console.log(
+    `[LIVE][${liveId}] RESPONSE_DONE_MS=${responseDoneMs}` +
+    ` output_chars=${fullText.length} prompt_tokens=${promptTokens} completion_tokens=${completionTokens}`,
+  );
   perf("T11_stream_complete", t0Request, {
     call_ms: callMs, output_chars: fullText.length,
     prompt_tokens: promptTokens, completion_tokens: completionTokens,
@@ -454,11 +468,19 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     // ── T2: Body parsed ───────────────────────────────────────────────────────
     const body = await readBody<ChatStreamRequest>(req);
     const message = (body.message ?? "").trim();
+    // Correlation ID — client sends traceId as idempotency_key so server logs match browser logs
+    const liveId = (body.idempotency_key ?? "?").slice(0, 16);
     perf("T2_body_parsed", T0, {
       message_len:       message.length,
       doc_context_count: body.document_context?.length ?? 0,
       use_case:          body.context?.use_case ?? "grounded_chat",
     });
+    console.log(
+      `[LIVE][${liveId}] CHAT_STREAM_REQUEST_RECEIVED` +
+      ` docCtxEntries=${body.document_context?.length ?? 0}` +
+      ` msgLen=${message.length}` +
+      ` +${Date.now() - T0}ms_since_T0`,
+    );
 
     if (!message) {
       sendEvent({ type: "error", errorCode: "MISSING_MESSAGE", message: "Besked mangler" });
@@ -608,7 +630,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
       sendEvent({ type: "status", text: "Analyserer dokument...", routeType });
 
-      const result = await streamOpenAI("gpt-4.1-mini", docSystemPrompt, userContent, sendEvent, T0);
+      const result = await streamOpenAI("gpt-4.1-mini", docSystemPrompt, userContent, sendEvent, T0, liveId);
       totalPromptTokens     = result.promptTokens;
       totalCompletionTokens = result.completionTokens;
       totalLatencyMs        = result.latencyMs;
@@ -620,7 +642,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       // ════════════════════════════════════════════════════════════════════════
       sendEvent({ type: "status", text: "Genererer svar...", routeType });
 
-      const result = await streamOpenAI("gpt-4.1-mini", normalSystemPrompt, message, sendEvent, T0);
+      const result = await streamOpenAI("gpt-4.1-mini", normalSystemPrompt, message, sendEvent, T0, liveId);
       totalPromptTokens     = result.promptTokens;
       totalCompletionTokens = result.completionTokens;
       totalLatencyMs        = result.latencyMs;

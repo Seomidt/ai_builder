@@ -888,9 +888,10 @@ export default function AiChatPage() {
       const docFiles = payload.attachments.filter(a => a.type === "document");
       const imgFiles = payload.attachments.filter(a => a.type === "image");
       console.log(
-        `[TIMING][${traceId}] T0_UPLOAD_RECEIVED t=${T0} ` +
-        `doc_files=${docFiles.length} img_files=${imgFiles.length} ` +
-        `names=[${docFiles.map(a => a.file.name).join(",")}]`,
+        `[LIVE][${traceId}] T0_UPLOAD_RECEIVED t=${T0}` +
+        ` doc_files=${docFiles.length} img_files=${imgFiles.length}` +
+        ` names=[${docFiles.map(a => a.file.name).join(",")}]` +
+        ` env=${import.meta.env.MODE} isProd=${import.meta.env.PROD}`,
       );
       console.log(`[TRACE-1][${traceId}] use_case="${payload.useCase ?? "grounded_chat"}" attachments_total=${payload.attachments.length} doc_files=${docFiles.length} img_files=${imgFiles.length} names=[${docFiles.map(a=>a.file.name).join(",")}]`);
 
@@ -916,8 +917,8 @@ export default function AiChatPage() {
 
             const T1 = Date.now();
             console.log(
-              `[TIMING][${traceId}] T1_CLASSIFY_DONE t=${T1} +${T1 - T0}ms ` +
-              `file="${file.name}" classify=${mode} size=${file.size} mime="${file.type}"`,
+              `[LIVE][${traceId}] T1_CLASSIFY_DONE t=${T1} +${T1 - T0}ms` +
+              ` file="${file.name}" classify=${mode} size=${file.size} mime="${file.type}"`,
             );
             console.log(`[FAST-PATH][${traceId}] CLASSIFY ${file.name}: mode=${mode} size=${file.size} mime="${file.type}"`);
 
@@ -930,8 +931,8 @@ export default function AiChatPage() {
 
             const T2 = Date.now();
             console.log(
-              `[TIMING][${traceId}] T2_EXTRACT_START t=${T2} +${T2 - T0}ms ` +
-              `file="${file.name}" mode=${mode}`,
+              `[LIVE][${traceId}] T2_EXTRACT_START t=${T2} +${T2 - T0}ms` +
+              ` file="${file.name}" mode=${mode}`,
             );
 
             const extractResult = await fastExtractText(file, `[${traceId}]${file.name}`);
@@ -941,9 +942,12 @@ export default function AiChatPage() {
 
             if (extractResult && extractResult.charCount > 0) {
               console.log(
-                `[TIMING][${traceId}] T3_EXTRACT_DONE t=${T3} +${T3 - T0}ms ` +
-                `extractMs=${extractMs}ms file="${file.name}" ` +
-                `chars=${extractResult.charCount} src=${extractResult.source} → FAST_PATH`,
+                `[LIVE][${traceId}] T3_EXTRACT_DONE t=${T3} +${T3 - T0}ms` +
+                ` extractMs=${extractMs}ms file="${file.name}"` +
+                ` rawChars=${extractResult.rawChars} pagesWithText=${extractResult.pagesWithText}` +
+                ` chars=${extractResult.charCount} gateForced=${extractResult.gateForced}` +
+                ` workerSrc=${extractResult.workerSrc.slice(0, 60)}` +
+                ` src=${extractResult.source} → FAST_PATH`,
               );
               console.log(`[FAST-PATH][${traceId}] OK ${file.name}: chars=${extractResult.charCount} words=${extractResult.wordCount} alpha=${extractResult.alphaRatio.toFixed(2)} dur=${extractResult.durationMs}ms src=${extractResult.source}`);
               fastResults.push({
@@ -957,9 +961,10 @@ export default function AiChatPage() {
             } else {
               const reason = extractResult === null ? "gate_rejected_or_error" : "zero_chars";
               console.log(
-                `[TIMING][${traceId}] T3_EXTRACT_DONE t=${T3} +${T3 - T0}ms ` +
-                `extractMs=${extractMs}ms file="${file.name}" ` +
-                `result=REJECTED reason=${reason} → slowFiles (OCR path)`,
+                `[LIVE][${traceId}] T3_EXTRACT_DONE t=${T3} +${T3 - T0}ms` +
+                ` extractMs=${extractMs}ms file="${file.name}"` +
+                ` result=REJECTED reason=${reason} slowFiles=${slowFiles.length + 1}` +
+                ` → OCR fallback path`,
               );
               console.log(`[FAST-PATH][${traceId}] REJECTED ${file.name}: ${reason} — slow fallback`);
               slowFiles.push({ af, reason });
@@ -974,8 +979,10 @@ export default function AiChatPage() {
             documentContext = fastResults;
             const tDecision = Date.now();
             console.log(
-              `[TIMING][${traceId}] DECISION=ALL_FAST t=${tDecision} +${tDecision - T0}ms_since_T0 ` +
-              `fast=${fastResults.length} slow=0 → T4_AI_START fires next (no OCR/R2 wait)`,
+              `[LIVE][${traceId}] DECISION=ALL_FAST t=${tDecision} +${tDecision - T0}ms` +
+              ` fast=${fastResults.length} slow=0` +
+              ` sources=[${fastResults.map((r:any)=>r.source).join(",")}]` +
+              ` → T4_AI_START fires next — NO OCR/R2 wait`,
             );
             console.log(`[FAST-PATH][${traceId}] DECISION=ALL_FAST → skipping server path, AI starts now at t=${tDecision}`);
 
@@ -1014,9 +1021,10 @@ export default function AiChatPage() {
             const tDecisionSlow = Date.now();
             const decisionLabel = fastResults.length > 0 ? "MIXED" : "ALL_SLOW";
             console.log(
-              `[TIMING][${traceId}] DECISION=${decisionLabel} t=${tDecisionSlow} +${tDecisionSlow - T0}ms_since_T0 ` +
-              `slow=${slowFiles.length} fast=${fastResults.length} ` +
-              `→ T4_AI_START blocked by OCR/R2 upload + finalize`,
+              `[LIVE][${traceId}] DECISION=${decisionLabel} t=${tDecisionSlow} +${tDecisionSlow - T0}ms` +
+              ` slow=${slowFiles.length} fast=${fastResults.length}` +
+              ` slowReasons=[${slowFiles.map(s=>s.reason).join(",")}]` +
+              ` → T4_AI_START BLOCKED — awaiting R2 upload + OCR finalize`,
             );
             console.log(`[FAST-PATH][${traceId}] DECISION=${decisionLabel}: slow=${slowFiles.length} fast_preloaded=${fastResults.length} — server path starts at t=${tDecisionSlow}`);
 
@@ -1364,10 +1372,11 @@ export default function AiChatPage() {
       // ── TRACE STAGE 3: CHAT REQUEST (streaming) ───────────────────────────
       const T4 = Date.now();
       console.log(
-        `[TIMING][${traceId}] T4_AI_START t=${T4} +${T4 - T0}ms_since_T0 ` +
-        `context_entries=${documentContext.length} ` +
-        `sources=[${documentContext.map((r: any) => r.source).join(",")}] ` +
-        `— /api/chat-stream fires NOW`,
+        `[LIVE][${traceId}] T4_AI_START t=${T4} +${T4 - T0}ms` +
+        ` context_entries=${documentContext.length}` +
+        ` sources=[${documentContext.map((r: any) => r.source).join(",")}]` +
+        ` totalDocChars=${documentContext.reduce((s:number,r:any)=>s+(r.char_count??r.extracted_text?.length??0),0)}` +
+        ` — /api/chat-stream fires NOW`,
       );
       console.log(`[FAST-PATH][${traceId}] AI_START: context_entries=${documentContext.length} sources=[${documentContext.map((r:any)=>r.source).join(",")}] t=${T4} — sending to /api/chat-stream now`);
 
@@ -1390,7 +1399,10 @@ export default function AiChatPage() {
             document_ids: payload.documentIds ?? [],
             preferred_expert_id: null,
           },
-          ...(payload.triggerKey ? { idempotency_key: `${payload.triggerKey}:${fullMessage.slice(0, 64)}` } : {}),
+          // Always include trace_id so server-side [LIVE] logs use the same correlation ID
+          idempotency_key: payload.triggerKey
+            ? `${payload.triggerKey}:${fullMessage.slice(0, 64)}`
+            : traceId,
         });
 
         const reader  = res.body!.getReader();
