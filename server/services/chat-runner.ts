@@ -186,6 +186,16 @@ export async function runChatMessage(params: {
   // Must be checked BEFORE docCtx filter (vision docs have empty extracted_text).
   const MAX_VISION_IMAGES   = 5;
   const MAX_VISION_IMG_BYTES = 2_000_000;
+
+  // Diagnostic: log rawDocCtx shape entering chat-runner
+  const _rcFirst = rawDocCtx[0] as any;
+  console.log(
+    `[chat-runner-ENTRY] rawDocCtx_len=${rawDocCtx.length}` +
+    ` first_keys=${_rcFirst ? Object.keys(_rcFirst).join(",") : "none"}` +
+    ` vision_images=${_rcFirst ? (Array.isArray(_rcFirst.vision_images) ? "VISION_IMAGES_PRESENT len=" + _rcFirst.vision_images.length : "VISION_IMAGES_MISSING") : "no_first_item"}` +
+    ` has_onToken=${!!params.onToken}`,
+  );
+
   const visionDocs = rawDocCtx.filter((d: any) => {
     if (d.status !== "ok" || !d.vision_images || d.vision_images.length === 0) return false;
     d.vision_images = (d.vision_images as string[])
@@ -193,6 +203,8 @@ export async function runChatMessage(params: {
       .filter((img: string) => typeof img === "string" && img.length <= MAX_VISION_IMG_BYTES);
     return d.vision_images.length > 0;
   });
+
+  console.log(`[chat-runner-VISION-FILTER] visionDocs_len=${visionDocs.length} has_onToken=${!!params.onToken}`);
 
   if (visionDocs.length > 0 && params.onToken) {
     const allImages   = visionDocs.flatMap((d: any) => d.vision_images as string[]);

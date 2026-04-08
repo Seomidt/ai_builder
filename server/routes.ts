@@ -1989,9 +1989,35 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
 
     try {
       const t0handler = Date.now();
+
+      // ── BEFORE_PARSE: raw req.body shape before Zod ──────────────────────
+      const _rawCtx = Array.isArray(req.body?.document_context) ? req.body.document_context : [];
+      const _rawFirst = _rawCtx[0];
+      console.log(
+        `[BEFORE_PARSE_DOC_CTX] count=${_rawCtx.length}` +
+        ` keys=${_rawFirst ? Object.keys(_rawFirst).join(",") : "none"}` +
+        ` vision_images=${_rawFirst ? (Array.isArray(_rawFirst.vision_images) ? "PRESENT len=" + _rawFirst.vision_images.length : "VISION_IMAGES_MISSING") : "no_first_item"}` +
+        ` extracted_text_len=${_rawFirst?.extracted_text?.length ?? 0}` +
+        ` status=${_rawFirst?.status ?? "none"}` +
+        ` source=${_rawFirst?.source ?? "none"}` +
+        ` mime=${_rawFirst?.mime_type ?? "none"}`,
+      );
+
       const body   = chatBodySchema.parse(req.body);
       const orgId  = getOrgId(req);
       const userId = getUserId(req);
+
+      // ── AFTER_PARSE: parsed body shape after Zod ─────────────────────────
+      const _parsedCtx = body.document_context ?? [];
+      const _parsedFirst = _parsedCtx[0] as any;
+      console.log(
+        `[AFTER_PARSE_DOC_CTX] count=${_parsedCtx.length}` +
+        ` keys=${_parsedFirst ? Object.keys(_parsedFirst).join(",") : "none"}` +
+        ` vision_images=${_parsedFirst ? (Array.isArray(_parsedFirst.vision_images) ? "PRESENT len=" + _parsedFirst.vision_images.length : "VISION_IMAGES_MISSING") : "no_first_item"}` +
+        ` extracted_text_len=${_parsedFirst?.extracted_text?.length ?? 0}` +
+        ` status=${_parsedFirst?.status ?? "none"}` +
+        ` source=${_parsedFirst?.source ?? "none"}`,
+      );
 
       const { resolveRouteDecision }    = await import("./lib/chat/route-decision");
       const { getRoutingStatusMessage } = await import("./lib/chat/hybrid-context-builder");
@@ -2061,6 +2087,19 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       const isVisionPreview = visionPreviewDocs.length > 0;
       const effectiveDocContext = isVisionPreview ? visionPreviewDocs : decision.documentContext;
       console.log(`[chat-stream] scanned_preview_branch_hit=${isVisionPreview} vision_docs=${visionPreviewDocs.length} decision_docs=${decision.documentContext.length}`);
+
+      // ── BEFORE_RUN_CHAT_MESSAGE: final context shape ──────────────────────
+      const _effFirst = effectiveDocContext[0] as any;
+      console.log(
+        `[BEFORE_RUN_CHAT_MESSAGE] effectiveDocContext_len=${effectiveDocContext.length}` +
+        ` scanned_preview_branch_hit=${isVisionPreview}` +
+        ` vision_docs_count=${visionPreviewDocs.length}` +
+        ` text_docs_count=${decision.documentContext.length}` +
+        ` first_item_vision_images=${_effFirst ? (Array.isArray(_effFirst.vision_images) ? "VISION_IMAGES_PRESENT len=" + _effFirst.vision_images.length : "VISION_IMAGES_MISSING") : "no_first_item"}` +
+        ` first_item_source=${_effFirst?.source ?? "none"}` +
+        ` preview_prompt_type=${isVisionPreview ? "vision_pdf_preview" : "text_doc"}` +
+        ` preview_answer_mode=${isVisionPreview ? "document_only" : "normal"}`,
+      );
 
       // ── Execute AI call with streaming ───────────────────────────────────
       const result = await runChatMessage({
