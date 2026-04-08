@@ -1590,14 +1590,17 @@ export default function AiChatPage() {
         streamAbort.abort();
       }, 90_000);
 
-      // 5-second "no first chunk" safety — fail fast if server accepts but never sends data
+      // "no first chunk" safety — vision (Gemini) gets 45s, all other paths get 10s
+      // Gemini multimodal processes images before first token → needs more headroom
+      const hasVisionRequest = documentContext.some((r: any) => Array.isArray(r.vision_images) && r.vision_images.length > 0);
+      const firstChunkDeadlineMs = hasVisionRequest ? 45_000 : 10_000;
       let firstChunkReceived = false;
       const firstChunkTimeout = setTimeout(() => {
         if (!firstChunkReceived) {
-          console.warn(`[LIVE][${traceId}] STREAM_NO_FIRST_CHUNK_5S — aborting`);
+          console.warn(`[LIVE][${traceId}] STREAM_NO_FIRST_CHUNK_${firstChunkDeadlineMs}MS — aborting hasVision=${hasVisionRequest}`);
           streamAbort.abort();
         }
-      }, 5_000);
+      }, firstChunkDeadlineMs);
 
       try {
         const tFetchStart = Date.now();
