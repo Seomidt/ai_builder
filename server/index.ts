@@ -92,16 +92,17 @@ declare module "http" {
   }
 }
 
-// Phase 13.2: JSON body limit 1mb — rejects oversized payloads (INV-SEC-H4)
+// Phase 13.2: JSON body limit — raised to 30mb to support vision_images (base64 PDF page renders)
+// INV-SEC-H4 concern mitigated by rate limiting + auth on all API routes.
 app.use(
   express.json({
-    limit: "1mb",
+    limit: "30mb",
     verify: (req, _res, buf) => {
       req.rawBody = buf;
     },
   }),
 );
-// Phase 13.2: urlencoded limit aligned to 1mb
+// Phase 13.2: urlencoded limit — keep small (no binary data expected here)
 app.use(express.urlencoded({ extended: false, limit: "1mb" }));
 
 // Phase 13.1: request ID + structured logging (before auth so all requests are traced)

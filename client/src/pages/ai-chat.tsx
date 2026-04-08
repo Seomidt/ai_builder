@@ -1022,7 +1022,7 @@ export default function AiChatPage() {
           if (isScannedPdfCandidate) {
             const tVisionStart = Date.now();
             console.log(`[TIMING] SCANNED_PREVIEW_RENDER_START t=${tVisionStart} +${tVisionStart - tClick}ms_since_CLICK file="${slowFiles[0].af.file.name}"`);
-            const renderResult = await renderPdfPagesToImages(slowFiles[0].af.file, 3);
+            const renderResult = await renderPdfPagesToImages(slowFiles[0].af.file, 2, 800, 0.65);
             if (renderResult && renderResult.images.length > 0) {
               scannedVisionImages = renderResult.images;
               console.log(`[TIMING] SCANNED_PREVIEW_RENDER_DONE t=${Date.now()} +${Date.now() - tClick}ms_since_CLICK images=${renderResult.images.length} pageCount=${renderResult.pageCount}`);
