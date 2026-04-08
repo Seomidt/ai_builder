@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
 import { getSessionToken } from "@/lib/supabase";
-import { fastExtractText, classifyForFastExtract } from "@/lib/document-extractor";
+import { fastExtractText, classifyForFastExtract, renderPdfPagesToImages } from "@/lib/document-extractor";
 import { pollForCompletedOcr } from "@shared/upgrade-chain";
 import { useToast } from "@/hooks/use-toast";
 import { useReadinessStream, type ReadinessSnapshot, type ReadinessUxState } from "@/hooks/use-readiness-stream";
@@ -99,6 +99,40 @@ function fileIcon(type: AttachedFile["type"]) {
   if (type === "image") return <Image className="w-3.5 h-3.5 text-blue-400" />;
   if (type === "video") return <Video className="w-3.5 h-3.5 text-purple-400" />;
   return <FileText className="w-3.5 h-3.5 text-primary" />;
+}
+
+async function resizeImageToBase64(
+  file: File,
+  maxWidth = 1200,
+  quality = 0.7,
+): Promise<string | null> {
+  try {
+    const url = URL.createObjectURL(file);
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const el = document.createElement("img");
+      el.onload  = () => resolve(el);
+      el.onerror = reject;
+      el.src     = url;
+    });
+    URL.revokeObjectURL(url);
+
+    const scale  = Math.min(1, maxWidth / img.naturalWidth);
+    const canvas = document.createElement("canvas");
+    canvas.width  = Math.floor(img.naturalWidth  * scale);
+    canvas.height = Math.floor(img.naturalHeight * scale);
+    const ctx = canvas.getContext("2d")!;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+    const dataUrl = canvas.toDataURL("image/jpeg", quality);
+    const base64  = dataUrl.split(",")[1] ?? null;
+
+    canvas.width = 0;
+    canvas.height = 0;
+    return base64;
+  } catch (e: any) {
+    console.warn(`[IMG] resizeImageToBase64 failed for "${file.name}": ${e?.message}`);
+    return null;
+  }
 }
 
 function formatBytes(bytes: number) {
@@ -807,7 +841,7 @@ export default function AiChatPage() {
 
   const autoTriggeredKeysRef = useRef<Set<string>>(new Set());
   // chatMutateRef holds a stable reference to chatMutation.mutate (set after hook declaration)
-  const chatMutateRef = useRef<((payload: { text: string; attachments: AttachedFile[]; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[] }) => void) | null>(null);
+  const chatMutateRef = useRef<((payload: { text: string; attachments: AttachedFile[]; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[]; _upgradeStreamMsgId?: string }) => void) | null>(null);
   // Upgrade ref: set when partial_ready break → onSuccess starts upgrade SSE subscription
   const pendingOcrUpgradeRef = useRef<{ taskId: string; filename: string; mime: string } | null>(null);
   // Set to true while an upgrade mutation is in flight — suppresses error toast in onError
@@ -1011,6 +1045,46 @@ export default function AiChatPage() {
             ` fast=${fastResults.length} slow=${slowFiles.length} decision=${slowFiles.length === 0 && fastResults.length > 0 ? "ALL_FAST" : fastResults.length > 0 ? "MIXED" : "ALL_SLOW_or_SCANNED"}`,
           );
 
+          // ── SCANNED_PREVIEW detektion: PDFs med nul tekst → render sideforhåndsvisning ──
+          // Kør FØR if/else-beslutning så vi ved om vision-rendering lykkes.
+          // Kun for ALL_SLOW tilfælde (ingen fastResults) og kun PDF-filer med zero_chars/gate_rejected.
+          let _scannedVisionEntries: any[] | null = null;
+          const _isScannedPdfCandidate =
+            fastResults.length === 0 &&
+            slowFiles.length > 0 &&
+            slowFiles.every(({ af, reason }) => {
+              const mime = af.file.type || "";
+              return mime === "application/pdf" &&
+                     (reason === "gate_rejected_or_error" || reason === "zero_chars");
+            });
+
+          if (_isScannedPdfCandidate) {
+            const tRender = Date.now();
+            console.log(`[SCANNED][${traceId}] CANDIDATE_DETECTED files=${slowFiles.length} — rendering PDF pages for vision preview`);
+            _scannedVisionEntries = [];
+            for (const { af } of slowFiles) {
+              const rendered = await renderPdfPagesToImages(af.file, 3);
+              if (rendered && rendered.images.length > 0) {
+                _scannedVisionEntries.push({
+                  filename:       af.file.name,
+                  mime_type:      af.file.type || "application/pdf",
+                  char_count:     0,
+                  extracted_text: "",
+                  status:         "ok",
+                  source:         "vision_preview_pdf",
+                  vision_images:  rendered.images,
+                });
+                console.log(`[SCANNED][${traceId}] RENDER_OK file="${af.file.name}" pages=${rendered.images.length}/${rendered.pageCount} durMs=${Date.now() - tRender}`);
+              } else {
+                console.warn(`[SCANNED][${traceId}] RENDER_FAIL file="${af.file.name}" — fallback til ALL_SLOW OCR`);
+              }
+            }
+            if (_scannedVisionEntries.length === 0) {
+              _scannedVisionEntries = null;
+              console.warn(`[SCANNED][${traceId}] NO_VISION_ENTRIES — alle renderinger fejlede, falder tilbage til ALL_SLOW`);
+            }
+          }
+
           // ── ALL FAST: every file extracted client-side ──────────────────────
           if (slowFiles.length === 0 && fastResults.length > 0) {
             documentContext = fastResults;
@@ -1057,6 +1131,174 @@ export default function AiChatPage() {
                 } catch (e: any) {
                   console.warn(`[DURABLE][${traceId}] error for ${file.name}: ${e?.message}`);
                 }
+              }
+            })().catch(() => {});
+
+          } else if (_scannedVisionEntries && _scannedVisionEntries.length > 0) {
+            // ══════════════════════════════════════════════════════════════════════
+            // SCANNED_PREVIEW: gpt-4o-mini vision forhåndsvisning (~8s)
+            //   + baggrundsopgave: R2 upload → OCR (~40s) → opgradér SAMME besked
+            // ══════════════════════════════════════════════════════════════════════
+            const tScanned = Date.now();
+            const totalPreviewPages = _scannedVisionEntries.reduce(
+              (s: number, e: any) => s + (e.vision_images?.length ?? 0), 0,
+            );
+            console.log(
+              `[SCANNED][${traceId}] DECISION=SCANNED_PREVIEW t=${tScanned} +${tScanned - T0}ms` +
+              ` files=${slowFiles.length} previewPages=${totalPreviewPages}`,
+            );
+
+            // Vision context → sender til backend → hasVision=true → gpt-4o-mini vision path
+            documentContext = _scannedVisionEntries;
+            setIsFastPath(true); // Skjul OCR-statuskort — vi styrer vores eget messaging
+            createStreamBubble("SCANNED_PREVIEW");
+
+            // ── Baggrundsopgave: R2 upload → OCR → same-message upgrade ──────────
+            // self-contained IIFE — ingen pendingOcrUpgradeRef race
+            const _capturedMsgId  = streamMsgId;
+            const _capturedText   = payload.text;
+            const _capturedFiles  = slowFiles.map(s => s.af);
+
+            ;(async () => {
+              const upgradeId = crypto.randomUUID().slice(0, 8);
+              console.log(`[SCANNED-UPGRADE-${upgradeId}] Starting background OCR upgrade for ${_capturedFiles.length} file(s) capturedMsgId=${_capturedMsgId}`);
+
+              try {
+                const token = await getSessionToken().catch(() => null);
+
+                // Collect OCR results for all files before triggering upgrade
+                const ocrEntries: Array<{ filename: string; mime_type: string; text: string }> = [];
+
+                for (const af of _capturedFiles) {
+                  const file = af.file;
+                  console.log(`[SCANNED-UPGRADE-${upgradeId}] Processing file="${file.name}" size=${file.size}`);
+
+                  // Step 1: Presigned upload URL
+                  const urlRes = await apiRequest("POST", "/api/upload/url", {
+                    filename:    file.name,
+                    contentType: file.type || "application/octet-stream",
+                    size:        file.size,
+                    context:     "chat",
+                  });
+                  if (!urlRes.ok) {
+                    console.warn(`[SCANNED-UPGRADE-${upgradeId}] presign failed HTTP ${urlRes.status} for "${file.name}" — skipping`);
+                    continue;
+                  }
+                  const { uploadUrl, objectKey } = await urlRes.json() as { uploadUrl: string; objectKey: string };
+
+                  // Step 2: R2 PUT (direkte browser → R2)
+                  const r2Res = await fetch(uploadUrl, {
+                    method:  "PUT",
+                    body:    file,
+                    headers: { "Content-Type": file.type || "application/octet-stream" },
+                  });
+                  if (!r2Res.ok) {
+                    console.warn(`[SCANNED-UPGRADE-${upgradeId}] R2 PUT failed HTTP ${r2Res.status} for "${file.name}" — skipping`);
+                    continue;
+                  }
+
+                  // Step 3: Finalize → OCR task
+                  const finalRes = await apiRequest("POST", "/api/upload/finalize", {
+                    objectKey,
+                    filename:    file.name,
+                    contentType: file.type || "application/octet-stream",
+                    size:        file.size,
+                    context:     "chat",
+                    fileCount:   _capturedFiles.length,
+                    questionText: _capturedText?.trim() || undefined,
+                  });
+                  if (!finalRes.ok) {
+                    console.warn(`[SCANNED-UPGRADE-${upgradeId}] finalize failed HTTP ${finalRes.status} for "${file.name}" — skipping`);
+                    continue;
+                  }
+                  const finalData = await finalRes.json() as any;
+                  if (finalData.mode === "B_FALLBACK") {
+                    console.warn(`[SCANNED-UPGRADE-${upgradeId}] B_FALLBACK for "${file.name}" — OCR unavailable`);
+                    continue;
+                  }
+
+                  const taskId = finalData.taskId as string | undefined;
+                  if (!taskId) {
+                    console.warn(`[SCANNED-UPGRADE-${upgradeId}] no taskId in finalData for "${file.name}" — skipping`);
+                    continue;
+                  }
+                  console.log(`[SCANNED-UPGRADE-${upgradeId}] OCR task started taskId=${taskId} file="${file.name}" — polling...`);
+
+                  // Step 4: Poll /api/ocr-status til completion
+                  const POLL_INTERVAL = 5_000;
+                  const POLL_TIMEOUT  = 360_000;
+                  const pollStart     = Date.now();
+                  let ocrText         = "";
+                  let ocrDone         = false;
+
+                  while (Date.now() - pollStart < POLL_TIMEOUT) {
+                    await new Promise<void>(r => setTimeout(r, POLL_INTERVAL));
+                    try {
+                      const h: Record<string, string> = {};
+                      if (token) h["Authorization"] = `Bearer ${token}`;
+                      const sr = await fetch(
+                        `/api/ocr-status?id=${encodeURIComponent(taskId)}`,
+                        { headers: h, credentials: "include" },
+                      );
+                      if (!sr.ok) {
+                        if (sr.status === 401 || sr.status === 403) {
+                          console.warn(`[SCANNED-UPGRADE-${upgradeId}] poll auth error ${sr.status} — aborting`);
+                          break;
+                        }
+                        continue;
+                      }
+                      const sj = await sr.json() as any;
+                      console.log(`[SCANNED-UPGRADE-${upgradeId}] poll taskId=${taskId} status=${sj.status} chars=${sj.text?.length ?? 0}`);
+                      if (sj.status === "DONE" || sj.status === "COMPLETED") {
+                        ocrText = sj.text ?? "";
+                        ocrDone = true;
+                        break;
+                      }
+                      if (sj.status === "FAILED" || sj.status === "ERROR") {
+                        console.warn(`[SCANNED-UPGRADE-${upgradeId}] OCR failed status=${sj.status}`);
+                        break;
+                      }
+                    } catch (pollErr: any) {
+                      console.warn(`[SCANNED-UPGRADE-${upgradeId}] poll error: ${pollErr?.message}`);
+                    }
+                  }
+
+                  if (ocrDone && ocrText.trim()) {
+                    console.log(`[SCANNED-UPGRADE-${upgradeId}] OCR DONE file="${file.name}" chars=${ocrText.length}`);
+                    ocrEntries.push({ filename: file.name, mime_type: file.type || "application/pdf", text: ocrText });
+                  } else {
+                    console.warn(`[SCANNED-UPGRADE-${upgradeId}] OCR incomplete for "${file.name}" ocrDone=${ocrDone} chars=${ocrText.length} — skipping`);
+                  }
+                }
+
+                if (ocrEntries.length === 0) {
+                  console.warn(`[SCANNED-UPGRADE-${upgradeId}] No OCR results — skipping upgrade`);
+                  return;
+                }
+
+                // Step 5: Opgradér SAMME besked-boble med OCR-tekst
+                console.log(`[SCANNED-UPGRADE-${upgradeId}] Firing upgrade msgId=${_capturedMsgId} files=${ocrEntries.length}`);
+                if (!chatMutateRef.current) {
+                  console.error(`[SCANNED-UPGRADE-${upgradeId}] chatMutateRef.current is null — cannot upgrade`);
+                  return;
+                }
+                chatMutateRef.current({
+                  text:        _capturedText,
+                  attachments: [],
+                  _documentContextOverride: ocrEntries.map(e => ({
+                    filename:       e.filename,
+                    mime_type:      e.mime_type,
+                    char_count:     e.text.length,
+                    extracted_text: e.text.slice(0, 80_000),
+                    status:         "ok",
+                    source:         "r2_ocr_async",
+                  })),
+                  _upgradeStreamMsgId: _capturedMsgId,
+                });
+
+              } catch (upgradeErr: any) {
+                // Guard: don't remove the message bubble on upgrade failure
+                console.warn(`[SCANNED-UPGRADE-${upgradeId}] upgrade IIFE error: ${upgradeErr?.message}`);
               }
             })().catch(() => {});
 
@@ -1431,6 +1673,54 @@ export default function AiChatPage() {
         }
       } else {
         console.log(`[TRACE-2-SKIP][${traceId}] no doc files — skipping upload`);
+      }
+
+      // ── Step A2: Billeder → base64 vision context ─────────────────────────
+      // Bypasses grounded_chat gate (hasVision=true) + uses existing gpt-4o-mini vision path.
+      // No OCR, no R2 upload — inline base64 via canvas resize (max 1200px, 0.7 quality).
+      if (imgFiles.length > 0) {
+        const tImgStart = Date.now();
+        console.log(`[IMG][${traceId}] ATTACH_IMAGE_RECEIVED files=${imgFiles.length} names=[${imgFiles.map(a=>a.file.name).join(",")}]`);
+        for (const af of imgFiles) {
+          const file = af.file;
+          console.log(`[IMG][${traceId}] ATTACHMENT_RECEIVED name="${file.name}" MIME_TYPE="${file.type}" FILE_SIZE=${file.size} CLASSIFIED_AS=image ROUTE_SELECTED=vision_base64`);
+          const base64 = await resizeImageToBase64(file);
+          if (base64) {
+            console.log(`[IMG][${traceId}] UPLOAD_DONE name="${file.name}" base64_bytes=${base64.length} VALIDATION_PASSED=true PROCESSING_STARTED=vision`);
+            documentContext.push({
+              filename:       file.name,
+              mime_type:      file.type || "image/jpeg",
+              char_count:     0,
+              extracted_text: "",
+              status:         "ok",
+              source:         "vision_image",
+              vision_images:  [base64],
+            });
+          } else {
+            console.warn(`[IMG][${traceId}] PROCESSING_FAILED name="${file.name}" VALIDATION_FAILED=resize_error`);
+          }
+        }
+        console.log(`[IMG][${traceId}] IMAGE_CONTEXT_BUILT entries=${documentContext.filter((d:any)=>d.source==="vision_image").length} +${Date.now()-tImgStart}ms`);
+      }
+
+      // ── Step A3: Videoer → syntetisk tekst-context ────────────────────────
+      // Backend kan ikke afspille video — inkluderer filnavn som tekst-entry.
+      // Bypasses grounded_chat gate (docCtx.length > 0) så AI kan svare.
+      const videoFiles = payload.attachments.filter(a => a.type === "video");
+      if (videoFiles.length > 0) {
+        for (const af of videoFiles) {
+          const file = af.file;
+          console.log(`[VID][${traceId}] ATTACHMENT_RECEIVED name="${file.name}" MIME_TYPE="${file.type}" FILE_SIZE=${file.size} CLASSIFIED_AS=video ROUTE_SELECTED=text_description`);
+          documentContext.push({
+            filename:       file.name,
+            mime_type:      file.type || "video/mp4",
+            char_count:     file.name.length,
+            extracted_text: `[Video vedhæftet: ${file.name}]`,
+            status:         "ok",
+            source:         "video_attachment",
+          });
+          console.log(`[VID][${traceId}] UPLOAD_DONE name="${file.name}" VALIDATION_PASSED=true PROCESSING_STARTED=text_proxy`);
+        }
       }
 
       // ── Step B: Byg besked-tekst ───────────────────────────────────────────
