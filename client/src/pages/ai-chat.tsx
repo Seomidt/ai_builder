@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { apiRequest } from "@/lib/queryClient";
 import { getSessionToken } from "@/lib/supabase";
-import { fastExtractText, classifyForFastExtract, renderPdfPagesToImages } from "@/lib/document-extractor";
+import { fastExtractText, classifyForFastExtract } from "@/lib/document-extractor";
 import { pollForCompletedOcr } from "@shared/upgrade-chain";
 import { useToast } from "@/hooks/use-toast";
 import { useReadinessStream, type ReadinessSnapshot, type ReadinessUxState } from "@/hooks/use-readiness-stream";
@@ -1011,26 +1011,6 @@ export default function AiChatPage() {
             ` fast=${fastResults.length} slow=${slowFiles.length} decision=${slowFiles.length === 0 && fastResults.length > 0 ? "ALL_FAST" : fastResults.length > 0 ? "MIXED" : "ALL_SLOW_or_SCANNED"}`,
           );
 
-          const isScannedPdfCandidate = fastResults.length === 0 &&
-            slowFiles.length > 0 &&
-            slowFiles.every(s =>
-              (s.af.file.type === "application/pdf" || s.af.file.name.toLowerCase().endsWith(".pdf")) &&
-              (s.reason === "zero_chars" || s.reason === "gate_rejected_or_error")
-            );
-
-          let scannedVisionImages: string[] | null = null;
-          if (isScannedPdfCandidate) {
-            const tVisionStart = Date.now();
-            console.log(`[TIMING] SCANNED_PREVIEW_RENDER_START t=${tVisionStart} +${tVisionStart - tClick}ms_since_CLICK file="${slowFiles[0].af.file.name}"`);
-            const renderResult = await renderPdfPagesToImages(slowFiles[0].af.file, 2, 800, 0.65);
-            if (renderResult && renderResult.images.length > 0) {
-              scannedVisionImages = renderResult.images;
-              console.log(`[TIMING] SCANNED_PREVIEW_RENDER_DONE t=${Date.now()} +${Date.now() - tClick}ms_since_CLICK images=${renderResult.images.length} pageCount=${renderResult.pageCount}`);
-            } else {
-              console.log(`[TIMING] SCANNED_PREVIEW_RENDER_FAILED t=${Date.now()} — falling back to ALL_SLOW`);
-            }
-          }
-
           // ── ALL FAST: every file extracted client-side ──────────────────────
           if (slowFiles.length === 0 && fastResults.length > 0) {
             documentContext = fastResults;
@@ -1080,151 +1060,11 @@ export default function AiChatPage() {
               }
             })().catch(() => {});
 
-          } else if (scannedVisionImages) {
-            const scannedFile = slowFiles[0].af.file;
-            const visionImages = scannedVisionImages;
-            const tDecisionVision = Date.now();
-            console.log(
-              `[LIVE][${traceId}] DECISION=SCANNED_PREVIEW t=${tDecisionVision} +${tDecisionVision - T0}ms` +
-              ` file="${scannedFile.name}" visionImages=${visionImages.length}` +
-              ` → Vision preview fires NOW, OCR runs in background`,
-            );
-            console.log(`[UI] UI_PROCESSING_CARD_SKIPPED reason=SCANNED_PREVIEW t=${tDecisionVision} traceId=${traceId}`);
-
-            setIsFastPath(true);
-            createStreamBubble("SCANNED_PREVIEW");
-
-            documentContext = [{
-              filename: scannedFile.name,
-              mime_type: scannedFile.type || "application/pdf",
-              char_count: 0,
-              extracted_text: "",
-              status: "ok",
-              source: "vision_preview",
-              vision_images: visionImages,
-            }];
-
-            const previewMsgId = streamMsgId;
-            (async () => {
-              try {
-                for (const { af } of slowFiles) {
-                  const file = af.file;
-                  const urlRes = await apiRequest("POST", "/api/upload/url", {
-                    filename: file.name,
-                    contentType: file.type || "application/octet-stream",
-                    size: file.size,
-                    context: "chat",
-                  });
-                  if (!urlRes.ok) { console.warn(`[SCANNED_BG][${traceId}] presign failed for ${file.name}`); continue; }
-                  const { uploadUrl, objectKey } = await urlRes.json() as any;
-                  const r2Res = await fetch(uploadUrl, {
-                    method: "PUT", body: file,
-                    headers: { "Content-Type": file.type || "application/octet-stream" },
-                  });
-                  if (!r2Res.ok) { console.warn(`[SCANNED_BG][${traceId}] R2 PUT failed for ${file.name}`); continue; }
-                  const finRes = await apiRequest("POST", "/api/upload/finalize", {
-                    objectKey,
-                    filename: file.name,
-                    contentType: file.type || "application/octet-stream",
-                    size: file.size,
-                    context: "chat",
-                    fileCount: slowFiles.length,
-                  });
-                  if (!finRes.ok) { console.warn(`[SCANNED_BG][${traceId}] finalize failed for ${file.name}`); continue; }
-                  const finData = await finRes.json() as any;
-                  console.log(`[SCANNED_BG][${traceId}] finalize OK for ${file.name} mode=${finData.mode} taskId=${finData.taskId ?? "none"}`);
-
-                  if (finData.mode === "OCR_PENDING" && finData.taskId) {
-                    const taskId = finData.taskId;
-                    console.log(`[SCANNED_BG][${traceId}] OCR started taskId=${taskId} — SSE stream for upgrade to msgId=${previewMsgId}`);
-
-                    // Show OCR-in-progress indicator in the preview message immediately
-                    const progressSuffix = "\n\n⏳ Analyserer hele dokumentet i baggrunden (1–3 min)...";
-                    setMessages(prev => prev.map(m =>
-                      m.id === previewMsgId ? { ...m, text: m.text + progressSuffix } : m,
-                    ));
-
-                    // Use SSE stream instead of polling — Railway pushes event when OCR is done
-                    const upgradeWithText = (ocrText: string) => {
-                      console.log(`[SCANNED_BG][${traceId}] OCR ready chars=${ocrText.length} — triggering upgrade msgId=${previewMsgId}`);
-                      // Remove progress indicator before upgrade fires
-                      setMessages(prev => prev.map(m =>
-                        m.id === previewMsgId ? { ...m, text: m.text.replace(progressSuffix, "") } : m,
-                      ));
-                      isUpgradeAttemptRef.current = true;
-                      // Pass original user question so server can give direct factual answer
-                      (chatMutateRef.current as any)?.({
-                        text: payload.text,
-                        attachments: [],
-                        _documentContextOverride: [{
-                          filename: file.name,
-                          mime_type: file.type || "application/pdf",
-                          char_count: ocrText.length,
-                          extracted_text: ocrText.slice(0, 80_000),
-                          status: "ok",
-                          source: "r2_ocr_async",
-                        }],
-                        _upgradeStreamMsgId: previewMsgId,
-                      });
-                    };
-
-                    await new Promise<void>((resolve) => {
-                      const MAX_MS = 10 * 60 * 1000; // 10 min safety cap
-                      const timer = setTimeout(() => {
-                        console.warn(`[SCANNED_BG][${traceId}] OCR SSE timed out after 10min`);
-                        es.close();
-                        resolve();
-                      }, MAX_MS);
-
-                      const sseUrl = `/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`;
-                      const es = new EventSource(sseUrl, { withCredentials: true });
-
-                      // Also pass auth header via fetch fallback not needed — cookies handle auth
-                      // If token available, use manual fetch/ReadableStream approach
-                      // (EventSource doesn't support custom headers, but cookies+credentials works)
-
-                      es.onmessage = (ev) => {
-                        try {
-                          const d = JSON.parse(ev.data) as { type: string; data?: any };
-                          console.log(`[SCANNED_BG][${traceId}] SSE event type=${d.type}`);
-                          if (d.type === "completed" || d.type === "partial_ready") {
-                            const ocrText: string = d.data?.ocrText ?? "";
-                            if (ocrText.trim()) {
-                              clearTimeout(timer);
-                              es.close();
-                              upgradeWithText(ocrText);
-                              resolve();
-                            }
-                          } else if (d.type === "error") {
-                            console.warn(`[SCANNED_BG][${traceId}] OCR SSE error: ${d.data?.message}`);
-                            clearTimeout(timer);
-                            es.close();
-                            setMessages(prev => prev.map(m =>
-                              m.id === previewMsgId ? { ...m, text: m.text.replace(progressSuffix, "\n\n⚠️ Dokumentet kunne ikke behandles fuldt ud.") } : m,
-                            ));
-                            resolve();
-                          }
-                        } catch { /* ignore parse errors */ }
-                      };
-
-                      es.onerror = (err) => {
-                        console.warn(`[SCANNED_BG][${traceId}] OCR SSE connection error`, err);
-                        // Don't close — EventSource auto-reconnects; Railway will push if already done
-                      };
-                    });
-                  } else {
-                    console.warn(`[SCANNED_BG][${traceId}] finalize returned mode=${finData.mode} (not OCR_PENDING) — no upgrade possible`);
-                  }
-                }
-              } catch (bgErr: any) {
-                console.warn(`[SCANNED_BG][${traceId}] background OCR error: ${bgErr?.message}`);
-              }
-            })().catch(() => {});
-
           } else {
             // SLOW (or mixed): run server path for slow files; merge fast results in
             const tDecisionSlow = Date.now();
             const decisionLabel = fastResults.length > 0 ? "MIXED" : "ALL_SLOW";
+            console.log(`[TIMING] T1_UPLOAD_RECEIVED t=${tDecisionSlow} +${tDecisionSlow - tClick}ms_since_CLICK files=${slowFiles.length}`);
             console.log(
               `[LIVE][${traceId}] DECISION=${decisionLabel} t=${tDecisionSlow} +${tDecisionSlow - T0}ms` +
               ` slow=${slowFiles.length} fast=${fastResults.length}` +
@@ -1301,6 +1141,7 @@ export default function AiChatPage() {
                 };
 
                 const tOcrStart = Date.now();
+                console.log(`[TIMING] T2_OCR_START t=${tOcrStart} +${tOcrStart - tClick}ms_since_CLICK taskId=${taskId} file="${file.name}"`);
                 console.log(`[TIMING] OCR_STATUS_POLL_START t=${tOcrStart} +${tOcrStart - tClick}ms_since_CLICK taskId=${taskId} file="${file.name}"`);
                 console.log(`[UI] UI_PROCESSING_CARD_CREATED t=${tOcrStart} +${tOcrStart - tClick}ms_since_CLICK file="${file.name}" traceId=${traceId}`);
                 setOcrStatusLabel(`Behandler scannet PDF: ${file.name}`);
@@ -1500,6 +1341,7 @@ export default function AiChatPage() {
               }
 
               const tOcrDone = Date.now();
+              console.log(`[TIMING] T3_OCR_DONE t=${tOcrDone} +${tOcrDone - tClick}ms_since_CLICK +${tOcrDone - tOcrStart}ms_ocr_elapsed`);
               console.log(
                 `[TIMING] OCR_STATUS_POLL_DONE t=${tOcrDone} +${tOcrDone - tClick}ms_since_CLICK` +
                 ` +${tOcrDone - tOcrStart}ms_since_POLL_START sseResolved=${sseResolved} ocrStatus=${ocrResult?.status ?? "null"}`,
@@ -1604,6 +1446,7 @@ export default function AiChatPage() {
         ` — /api/chat-stream fires NOW`,
       );
       console.log(`[FAST-PATH][${traceId}] AI_START: context_entries=${documentContext.length} sources=[${documentContext.map((r:any)=>r.source).join(",")}] t=${T4} — sending to /api/chat-stream now`);
+      console.log(`[TIMING] T4_MODEL_START t=${T4} +${T4 - tClick}ms_since_CLICK`);
 
       // ── Step C: SSE-streaming til /api/chat-stream ──────────────────────────
       // For ALL_SLOW: bubble created here (after OCR) — no empty "Skriver..." during OCR.
@@ -1723,6 +1566,7 @@ export default function AiChatPage() {
             if (!firstChunkLogged) {
               firstChunkLogged = true;
               const tFirstChunk = Date.now();
+              console.log(`[TIMING] T5_FIRST_TOKEN t=${tFirstChunk} +${tFirstChunk - tClick}ms_since_CLICK +${tFirstChunk - tFetchStart}ms_since_MODEL_START`);
               console.log(`[TIMING] FIRST_CHUNK t=${tFirstChunk} +${tFirstChunk - tClick}ms_since_CLICK +${tFirstChunk - tFetchStart}ms_since_FETCH_START`);
               console.log(
                 `[LIVE][${traceId}] FIRST_CHUNK t=${tFirstChunk}` +
@@ -1790,6 +1634,7 @@ export default function AiChatPage() {
               } else if (event.type === "done") {
                 doneData = event as ChatResponse & { _trace?: any };
                 const tDoneReceived = Date.now();
+                console.log(`[TIMING] T6_RESPONSE_DONE t=${tDoneReceived} +${tDoneReceived - tClick}ms_since_CLICK textLen=${streamText.length}`);
                 console.log(`[TIMING] DONE_EVENT_RECEIVED t=${tDoneReceived} +${tDoneReceived - tClick}ms_since_CLICK textLen=${streamText.length}`);
                 console.log(
                   `[LIVE][${traceId}] DONE_EVENT_RECEIVED t=${tDoneReceived}` +
