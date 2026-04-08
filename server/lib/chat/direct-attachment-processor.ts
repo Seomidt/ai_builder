@@ -110,14 +110,18 @@ export async function processDirectAttachment(
     try {
       const result = await extractWithGemini(mediaBuf, filename, contentType);
       console.log(`[direct-processor] gemini ${mediaLabel} ok chars=${result.charCount} model=${result.model}`);
-      // Fallback: tom transskription (stille/tom video) → placeholder så gate ikke blokerer
-      const finalText = result.text.trim()
+      // Fallback: tom transskription (stille/tom video) → placeholder så gate ikke blokerer.
+      // source="video_fallback" bruges så chat-stream.ts kan detektere og svare venligt
+      // i stedet for at lade grounded-AI sige "Jeg kan ikke finde det i dokumentet".
+      const hasContent = result.text.trim().length > 0;
+      const finalText = hasContent
         ? result.text
-        : `[${mediaLabel === "lyd" ? "Lydfil" : "Video"}: "${filename}" — indeholder muligvis ingen tale eller synlig tekst. Besvar brugerens spørgsmål så godt du kan baseret på filnavnet og konteksten.]`;
+        : `[${mediaLabel === "lyd" ? "Lydfil" : "Video"}: "${filename}" — indeholder muligvis ingen tale eller synlig tekst.]`;
       return {
         filename, mime_type: contentType,
         char_count: finalText.length, extracted_text: finalText,
-        status: "ok", source: "r2_direct",
+        status: "ok",
+        source: hasContent ? "r2_direct" : "video_fallback",
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
