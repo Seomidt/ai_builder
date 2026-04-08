@@ -1152,8 +1152,9 @@ export default function AiChatPage() {
                         m.id === previewMsgId ? { ...m, text: m.text.replace(progressSuffix, "") } : m,
                       ));
                       isUpgradeAttemptRef.current = true;
+                      // Pass original user question so server can give direct factual answer
                       (chatMutateRef.current as any)?.({
-                        text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
+                        text: payload.text,
                         attachments: [],
                         _documentContextOverride: [{
                           filename: file.name,
@@ -1949,7 +1950,7 @@ export default function AiChatPage() {
               }
               isUpgradeAttemptRef.current = true;
               chatMutateRef.current({
-                text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
+                text: payload.text,
                 attachments: [],
                 _documentContextOverride: [{
                   filename, mime_type: mime,

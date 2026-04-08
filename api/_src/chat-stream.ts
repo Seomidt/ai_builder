@@ -29,6 +29,47 @@ export const config = {
   maxDuration: 120,
 };
 
+// ── Question classification ───────────────────────────────────────────────────
+type QuestionType = "narrow_fact_lookup" | "broad_document_analysis";
+
+function classifyQuestion(q: string): QuestionType {
+  const s = q.toLowerCase().trim();
+  const broadPatterns = [
+    /hvad skal jeg (være |)opmærksom/,
+    /opsummer|opsummér/,
+    /hvilke risici/,
+    /analyser dokument/,
+    /gennemgå dokument/,
+    /hvad (er |)indholdet/,
+    /giv en (komplet|fuld|samlet|opdateret)/,
+    /komplet analyse/,
+    /det komplette dokument/,
+  ];
+  if (broadPatterns.some(p => p.test(s))) return "broad_document_analysis";
+  // Narrow: short questions seeking a specific named entity/value
+  const narrowPatterns = [
+    /hvem (er|bygger|leverer|udfører|har|udsteder|ejer|repræsenterer)/,
+    /hvad (er|koster|udgør) (pris|prisen|beløb|beløbet|summen|total|ydelsen)/,
+    /hvad (er|koster)/,
+    /hvilken dato/,
+    /hvilket (navn|beløb|nummer|cpr|cvr|tlf|telefon)/,
+    /hvornår (sker|er|udløber|starter|begynder|slutter)/,
+    /hvad er (selvrisiko|entreprisesummen|kontraktsum|garantisum|forsikring)/,
+    /hvem (bygger|leverer)/,
+    /pris\b/,
+    /selvrisiko/,
+    /entreprisesum/,
+    /kontraktsum/,
+  ];
+  if (narrowPatterns.some(p => p.test(s))) return "narrow_fact_lookup";
+  // Short questions (< 8 words) with "hvad", "hvem", "hvilken", "hvornår" → narrow
+  const words = s.split(/\s+/).filter(Boolean).length;
+  if (words <= 10 && /^(hvad|hvem|hvilken|hvilke|hvornår|hvor meget|hvad koster)/i.test(s)) {
+    return "narrow_fact_lookup";
+  }
+  return "broad_document_analysis";
+}
+
 // ── Environment ──────────────────────────────────────────────────────────────
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY ?? "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? "";
@@ -341,7 +382,7 @@ async function streamOpenAIVision(
   // Build multimodal user content: images first, then text question
   const userContent: Array<Record<string, unknown>> = images.map(b64 => ({
     type: "image_url",
-    image_url: { url: `data:image/jpeg;base64,${b64}`, detail: "high" },
+    image_url: { url: `data:image/jpeg;base64,${b64}`, detail: "low" },
   }));
   userContent.push({ type: "text", text: userText });
 
@@ -351,7 +392,7 @@ async function streamOpenAIVision(
     body: JSON.stringify({
       model,
       temperature: 0.2,
-      max_tokens: 2000,
+      max_tokens: 600,
       stream: true,
       stream_options: { include_usage: true },
       messages: [
@@ -823,15 +864,45 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       const docText = totalDocChars > MAX_DOC_CHARS
         ? docTextFull.slice(0, MAX_DOC_CHARS) + "\n\n[... dokument afkortet ...]"
         : docTextFull;
+
+      // Classify question and choose appropriate system prompt
+      const _isUpgradeCall = (body.document_context ?? []).some((d: any) => d.source === "r2_ocr_async");
+      const qType = classifyQuestion(message);
+      perf("T5_QUESTION_CLASSIFIED", T0, { qType, isUpgradeCall: _isUpgradeCall, msgLen: message.length });
+      console.log(`[LIVE][${liveId}] T5_QUESTION_CLASSIFIED qType=${qType} isUpgrade=${_isUpgradeCall} msg="${message.slice(0, 80)}"`);
+
+      let activeSystemPrompt = docSystemPrompt;
+      if (_isUpgradeCall && qType === "narrow_fact_lookup") {
+        // Dedicated prompt: direct factual extraction — NEVER clarify
+        activeSystemPrompt = [
+          `Du er en dokumentanalytiker. Du modtager det fulde tekstindhold fra et OCR-scannet PDF-dokument.`,
+          ``,
+          `=== ABSOLUTTE REGLER FOR FAKTAOPSLAG ===`,
+          `REGEL 1: Brugeren søger et SPECIFIKT faktum. Find det direkte i dokumentet og svar præcist.`,
+          `REGEL 2: Svar ALDRIG med "Hvad ønsker du analyseret?" eller lignende spørgsmål. Det er forbudt.`,
+          `REGEL 3: Svar ALDRIG med et modspørgsmål, en præcisering eller en anmodning om uddybning.`,
+          `REGEL 4: Hvis faktum IKKE fremgår af dokumentet, svar: "Det fremgår ikke af dokumentet: [specifikt faktum]."`,
+          `REGEL 5: Citér den præcise sætning eller det tal der besvarer spørgsmålet.`,
+          `REGEL 6: Svar kort og direkte — maksimalt 3-4 sætninger. Ingen lange forklaringer.`,
+          `REGEL 7: Du MÅ ALDRIG hallucere tal, navne, datoer eller beløb der ikke er i dokumentet.`,
+          `=== SLUT REGLER ===`,
+          ``,
+          `Svar altid på dansk.`,
+        ].join("\n");
+        console.log(`[LIVE][${liveId}] T5_USING_NARROW_FACT_PROMPT`);
+      }
+
       const userContent = `DOKUMENT:\n\n${docText}\n\n---\n\n${message}`;
 
+      perf("T5_MODEL_START", T0, { model: "gpt-4.1-mini", docChars: docText.length });
       sendEvent({ type: "status", text: "Analyserer dokument...", routeType });
 
-      const result = await streamOpenAI("gpt-4.1-mini", docSystemPrompt, userContent, sendEvent, T0, liveId);
+      const result = await streamOpenAI("gpt-4.1-mini", activeSystemPrompt, userContent, sendEvent, T0, liveId);
       totalPromptTokens     = result.promptTokens;
       totalCompletionTokens = result.completionTokens;
       totalLatencyMs        = result.latencyMs;
       fullAnswer            = result.text;
+      perf("T7_RESPONSE_DONE", T0, { chars: fullAnswer.length, latencyMs: totalLatencyMs });
 
     } else {
       // ════════════════════════════════════════════════════════════════════════
