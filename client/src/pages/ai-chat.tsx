@@ -947,7 +947,8 @@ export default function AiChatPage() {
       };
 
       // ── TRACE STAGE 1: FRONTEND SEND ─────────────────────────────────────
-      const docFiles = payload.attachments.filter(a => a.type === "document");
+      // Video-filer behandles som dokumenter: R2 upload → finalize → Gemini 2.5 Flash video-analyse
+      const docFiles = payload.attachments.filter(a => a.type === "document" || a.type === "video");
       const imgFiles = payload.attachments.filter(a => a.type === "image");
       console.log(
         `[TIMING] FILES_SELECTED t=${T0} docFiles=${docFiles.length} imgFiles=${imgFiles.length}` +
@@ -1344,6 +1345,8 @@ export default function AiChatPage() {
 
               const tFinalizeStart = Date.now();
               console.log(`[TIMING] FINALIZE_START t=${tFinalizeStart} +${tFinalizeStart - tClick}ms_since_CLICK file="${file.name}"`);
+              const isVideoMime = (file.type || "").startsWith("video/");
+              if (isVideoMime) setOcrStatusLabel(`Analyserer video: ${file.name}`);
               const finalRes = await apiRequest("POST", "/api/upload/finalize", {
                 objectKey,
                 filename:    file.name,
@@ -1353,6 +1356,7 @@ export default function AiChatPage() {
                 fileCount:   slowFiles.length,
                 questionText: payload.text?.trim() || undefined,
               });
+              if (isVideoMime) setOcrStatusLabel(null);
               if (!finalRes.ok) {
                 const errBody = await finalRes.json().catch(() => ({})) as any;
                 throw Object.assign(new Error(errBody?.message ?? "Dokument kunne ikke behandles."), { errorCode: "FINALIZE_FAILED" });
@@ -1361,8 +1365,21 @@ export default function AiChatPage() {
               const tFinalizeDone = Date.now();
               console.log(`[TIMING] FINALIZE_DONE t=${tFinalizeDone} +${tFinalizeDone - tClick}ms_since_CLICK mode=${finalData.mode} file="${file.name}"`);
 
+              // B_FALLBACK for video = Gemini fejlede — tillad fortsat med tom context i stedet for hård fejl
               if (finalData.mode === "B_FALLBACK") {
-                throw Object.assign(new Error(finalData.message ?? "OCR-systemet er ikke tilgængeligt."), { errorCode: "DOCUMENT_UNREADABLE" });
+                if (isVideoMime) {
+                  console.warn(`[VID][${traceId}] Gemini video-analyse fejlede for "${file.name}": ${finalData.message}`);
+                  finalizeResults.push({
+                    filename:       file.name,
+                    mime_type:      file.type || "video/mp4",
+                    char_count:     0,
+                    extracted_text: `[Video-fil: ${file.name} — kunne ikke analyseres automatisk. Beskriv venligst hvad du ser i videoen, eller stil et generelt spørgsmål.]`,
+                    status:         "ok",
+                    source:         "video_fallback",
+                  });
+                } else {
+                  throw Object.assign(new Error(finalData.message ?? "OCR-systemet er ikke tilgængeligt."), { errorCode: "DOCUMENT_UNREADABLE" });
+                }
               }
 
               if (finalData.mode === "OCR_PENDING" && finalData.taskId) {
@@ -1705,25 +1722,9 @@ export default function AiChatPage() {
         console.log(`[IMG][${traceId}] IMAGE_CONTEXT_BUILT entries=${documentContext.filter((d:any)=>d.source==="vision_image").length} +${Date.now()-tImgStart}ms`);
       }
 
-      // ── Step A3: Videoer → syntetisk tekst-context ────────────────────────
-      // Backend kan ikke afspille video — inkluderer filnavn som tekst-entry.
-      // Bypasses grounded_chat gate (docCtx.length > 0) så AI kan svare.
-      const videoFiles = payload.attachments.filter(a => a.type === "video");
-      if (videoFiles.length > 0) {
-        for (const af of videoFiles) {
-          const file = af.file;
-          console.log(`[VID][${traceId}] ATTACHMENT_RECEIVED name="${file.name}" MIME_TYPE="${file.type}" FILE_SIZE=${file.size} CLASSIFIED_AS=video ROUTE_SELECTED=text_description`);
-          documentContext.push({
-            filename:       file.name,
-            mime_type:      file.type || "video/mp4",
-            char_count:     file.name.length,
-            extracted_text: `[Video vedhæftet: ${file.name}]`,
-            status:         "ok",
-            source:         "video_attachment",
-          });
-          console.log(`[VID][${traceId}] UPLOAD_DONE name="${file.name}" VALIDATION_PASSED=true PROCESSING_STARTED=text_proxy`);
-        }
-      }
+      // Video-filer håndteres nu via docFiles (a.type === "video" inkluderet i docFiles filter)
+      // → classifyForFastExtract returnerer "unsupported" → slowFiles → R2 upload → finalize
+      // → server/lib/chat/direct-attachment-processor.ts → extractWithGemini (Gemini 2.5 Flash video-analyse)
 
       // ── Step B: Byg besked-tekst ───────────────────────────────────────────
       const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";
