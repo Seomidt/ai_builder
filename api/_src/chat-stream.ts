@@ -320,6 +320,99 @@ async function streamGemini(
   return { text: fullText, promptTokens, completionTokens, latencyMs: callMs };
 }
 
+// ── OpenAI vision streaming (scanned PDFs — base64 JPEG images) ──────────────
+async function streamOpenAIVision(
+  model: string,
+  systemPrompt: string,
+  userText: string,
+  images: string[],
+  sendEvent: (data: object) => void,
+  t0Request: number,
+  liveId: string = "?",
+): Promise<{ text: string; promptTokens: number; completionTokens: number; latencyMs: number }> {
+  const t0Call = Date.now();
+
+  console.log(
+    `[LIVE][${liveId}] OPENAI_VISION_START model=${model}` +
+    ` images=${images.length} systemChars=${systemPrompt.length} textChars=${userText.length}` +
+    ` +${Date.now() - t0Request}ms_since_T0`,
+  );
+
+  // Build multimodal user content: images first, then text question
+  const userContent: Array<Record<string, unknown>> = images.map(b64 => ({
+    type: "image_url",
+    image_url: { url: `data:image/jpeg;base64,${b64}`, detail: "high" },
+  }));
+  userContent.push({ type: "text", text: userText });
+
+  const streamRes = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({
+      model,
+      temperature: 0.2,
+      max_tokens: 2000,
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user",   content: userContent },
+      ],
+    }),
+  });
+
+  if (!streamRes.ok) {
+    const txt = await streamRes.text().catch(() => streamRes.statusText);
+    throw new Error(`OpenAI vision ${streamRes.status}: ${txt}`);
+  }
+
+  let fullText = "";
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let firstChunkFlushed = false;
+
+  const reader = streamRes.body!.getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseBuffer += decoder.decode(value, { stream: true });
+      const lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop()!;
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const raw = line.slice(6).trim();
+        if (raw === "[DONE]") continue;
+        try {
+          const parsed = JSON.parse(raw);
+          const delta = parsed.choices?.[0]?.delta?.content ?? "";
+          if (delta) {
+            fullText += delta;
+            sendEvent({ type: "delta", text: delta });
+            if (!firstChunkFlushed) {
+              firstChunkFlushed = true;
+              console.log(`[LIVE][${liveId}] OPENAI_VISION_FIRST_TOKEN +${Date.now() - t0Request}ms`);
+            }
+          }
+          if (parsed.usage) {
+            promptTokens = parsed.usage.prompt_tokens ?? 0;
+            completionTokens = parsed.usage.completion_tokens ?? 0;
+          }
+        } catch { /* skip malformed */ }
+      }
+    }
+  } finally {
+    reader.cancel().catch(() => {});
+  }
+
+  const callMs = Date.now() - t0Call;
+  console.log(`[LIVE][${liveId}] OPENAI_VISION_DONE +${Date.now() - t0Request}ms chars=${fullText.length}`);
+  return { text: fullText, promptTokens, completionTokens, latencyMs: callMs };
+}
+
 // ── OpenAI streaming (for normal chat without documents) ─────────────────────
 async function streamOpenAI(
   model: string,
@@ -664,13 +757,14 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
     if (hasVision) {
       // ════════════════════════════════════════════════════════════════════════
-      // VISION DOCUMENT CHAT: Gemini 2.0 Flash multimodal (scanned PDFs)
+      // VISION DOCUMENT CHAT: OpenAI gpt-4o-mini vision (scanned PDFs)
       // Dedicated prompt — answers ONLY from visible page images
       // ════════════════════════════════════════════════════════════════════════
       const allVisionImages = visionDocs.flatMap(d => d.vision_images ?? []);
       const visionFilename = visionDocs[0]?.filename ?? "dokument";
-      modelUsed    = GEMINI_MODEL;
-      providerUsed = "google";
+      const VISION_MODEL = "gpt-4o-mini";
+      modelUsed    = VISION_MODEL;
+      providerUsed = "openai";
 
       perf("T6b_vision_route", T0, {
         image_count: allVisionImages.length,
@@ -678,7 +772,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         model: modelUsed,
       });
 
-      console.log(`[VISION][${liveId}] SCANNED_PREVIEW_START preview_pages_used=${allVisionImages.length} preview_prompt_type=vision_pdf_preview preview_answer_mode=document_only`);
+      console.log(`[VISION][${liveId}] SCANNED_PREVIEW_START preview_pages_used=${allVisionImages.length} model=${VISION_MODEL} preview_prompt_type=vision_pdf_preview preview_answer_mode=document_only`);
 
       const visionSystemPrompt = [
         `Du er en dokumentanalytiker. Du modtager billeder af sider fra en PDF-fil.`,
@@ -698,7 +792,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
         `Svar altid på dansk.`,
       ].join("\n");
 
-      const visionUserContent = [
+      const visionUserText = [
         `Herunder ser du ${allVisionImages.length} side${allVisionImages.length > 1 ? "r" : ""} fra PDF-filen "${visionFilename}".`,
         `Kig grundigt på alle sidebilleder og besvar følgende spørgsmål:`,
         ``,
@@ -707,7 +801,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
       sendEvent({ type: "status", text: "Analyserer dokument...", routeType });
 
-      const result = await streamGemini(visionSystemPrompt, visionUserContent, sendEvent, T0, liveId, allVisionImages);
+      const result = await streamOpenAIVision(VISION_MODEL, visionSystemPrompt, visionUserText, allVisionImages, sendEvent, T0, liveId);
       totalPromptTokens     = result.promptTokens;
       totalCompletionTokens = result.completionTokens;
       totalLatencyMs        = result.latencyMs;
