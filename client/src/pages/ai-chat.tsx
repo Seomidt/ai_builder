@@ -1136,63 +1136,81 @@ export default function AiChatPage() {
 
                   if (finData.mode === "OCR_PENDING" && finData.taskId) {
                     const taskId = finData.taskId;
-                    console.log(`[SCANNED_BG][${traceId}] OCR started taskId=${taskId} — polling for upgrade to msgId=${previewMsgId}`);
+                    console.log(`[SCANNED_BG][${traceId}] OCR started taskId=${taskId} — SSE stream for upgrade to msgId=${previewMsgId}`);
 
-                    // Show OCR-in-progress indicator in the preview message
-                    const previewBase = "Jeg analyserer det fulde dokument i baggrunden — dette kan tage 1-3 minutter for store filer...";
+                    // Show OCR-in-progress indicator in the preview message immediately
+                    const progressSuffix = "\n\n⏳ Analyserer hele dokumentet i baggrunden (1–3 min)...";
                     setMessages(prev => prev.map(m =>
-                      m.id === previewMsgId ? { ...m, text: m.text + `\n\n⏳ ${previewBase}` } : m,
+                      m.id === previewMsgId ? { ...m, text: m.text + progressSuffix } : m,
                     ));
 
-                    const token = await getSessionToken().catch(() => null);
-                    const MAX_POLL_MS = 8 * 60 * 1000;
-                    const tPollStart = Date.now();
-                    let pollN = 0;
+                    // Use SSE stream instead of polling — Railway pushes event when OCR is done
+                    const upgradeWithText = (ocrText: string) => {
+                      console.log(`[SCANNED_BG][${traceId}] OCR ready chars=${ocrText.length} — triggering upgrade msgId=${previewMsgId}`);
+                      // Remove progress indicator before upgrade fires
+                      setMessages(prev => prev.map(m =>
+                        m.id === previewMsgId ? { ...m, text: m.text.replace(progressSuffix, "") } : m,
+                      ));
+                      isUpgradeAttemptRef.current = true;
+                      (chatMutateRef.current as any)?.({
+                        text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
+                        attachments: [],
+                        _documentContextOverride: [{
+                          filename: file.name,
+                          mime_type: file.type || "application/pdf",
+                          char_count: ocrText.length,
+                          extracted_text: ocrText.slice(0, 80_000),
+                          status: "ok",
+                          source: "r2_ocr_async",
+                        }],
+                        _upgradeStreamMsgId: previewMsgId,
+                      });
+                    };
 
-                    while (Date.now() - tPollStart < MAX_POLL_MS) {
-                      await new Promise(r => setTimeout(r, 5_000));
-                      pollN++;
-                      try {
-                        const h: Record<string, string> = {};
-                        if (token) h["Authorization"] = `Bearer ${token}`;
-                        const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: h, credentials: "include" });
-                        if (!sr.ok) { console.warn(`[SCANNED_BG][${traceId}] poll HTTP ${sr.status}`); continue; }
-                        const sd = await sr.json() as any;
-                        const elapsedS = Math.round((Date.now() - tPollStart) / 1000);
-                        console.log(`[SCANNED_BG][${traceId}] poll #${pollN} status=${sd.status} chars=${(sd.ocrText ?? "").length} elapsed=${elapsedS}s`);
+                    await new Promise<void>((resolve) => {
+                      const MAX_MS = 10 * 60 * 1000; // 10 min safety cap
+                      const timer = setTimeout(() => {
+                        console.warn(`[SCANNED_BG][${traceId}] OCR SSE timed out after 10min`);
+                        es.close();
+                        resolve();
+                      }, MAX_MS);
 
-                        const isComplete = (sd.status === "completed" || sd.status === "done") && sd.ocrText?.trim();
-                        if (isComplete) {
-                          console.log(`[SCANNED_BG][${traceId}] OCR completed chars=${sd.ocrText.length} — triggering upgrade to msgId=${previewMsgId}`);
-                          isUpgradeAttemptRef.current = true;
-                          (chatMutateRef.current as any)?.({
-                            text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
-                            attachments: [],
-                            _documentContextOverride: [{
-                              filename: file.name,
-                              mime_type: file.type || "application/pdf",
-                              char_count: sd.ocrText.length,
-                              extracted_text: sd.ocrText.slice(0, 80_000),
-                              status: "ok",
-                              source: "r2_ocr_async",
-                            }],
-                            _upgradeStreamMsgId: previewMsgId,
-                          });
-                          break;
-                        }
-                        if (sd.status === "failed" || sd.status === "dead_letter" || sd.status === "error") {
-                          console.warn(`[SCANNED_BG][${traceId}] OCR ${sd.status} — keeping preview answer`);
-                          setMessages(prev => prev.map(m =>
-                            m.id === previewMsgId
-                              ? { ...m, text: m.text.replace(`\n\n⏳ ${previewBase}`, "\n\n⚠️ Dokumentet kunne ikke behandles fuldt ud.") }
-                              : m,
-                          ));
-                          break;
-                        }
-                      } catch (pollErr: any) {
-                        console.warn(`[SCANNED_BG][${traceId}] poll error: ${pollErr?.message}`);
-                      }
-                    }
+                      const sseUrl = `/api/ocr-task-stream?taskId=${encodeURIComponent(taskId)}`;
+                      const es = new EventSource(sseUrl, { withCredentials: true });
+
+                      // Also pass auth header via fetch fallback not needed — cookies handle auth
+                      // If token available, use manual fetch/ReadableStream approach
+                      // (EventSource doesn't support custom headers, but cookies+credentials works)
+
+                      es.onmessage = (ev) => {
+                        try {
+                          const d = JSON.parse(ev.data) as { type: string; data?: any };
+                          console.log(`[SCANNED_BG][${traceId}] SSE event type=${d.type}`);
+                          if (d.type === "completed" || d.type === "partial_ready") {
+                            const ocrText: string = d.data?.ocrText ?? "";
+                            if (ocrText.trim()) {
+                              clearTimeout(timer);
+                              es.close();
+                              upgradeWithText(ocrText);
+                              resolve();
+                            }
+                          } else if (d.type === "error") {
+                            console.warn(`[SCANNED_BG][${traceId}] OCR SSE error: ${d.data?.message}`);
+                            clearTimeout(timer);
+                            es.close();
+                            setMessages(prev => prev.map(m =>
+                              m.id === previewMsgId ? { ...m, text: m.text.replace(progressSuffix, "\n\n⚠️ Dokumentet kunne ikke behandles fuldt ud.") } : m,
+                            ));
+                            resolve();
+                          }
+                        } catch { /* ignore parse errors */ }
+                      };
+
+                      es.onerror = (err) => {
+                        console.warn(`[SCANNED_BG][${traceId}] OCR SSE connection error`, err);
+                        // Don't close — EventSource auto-reconnects; Railway will push if already done
+                      };
+                    });
                   } else {
                     console.warn(`[SCANNED_BG][${traceId}] finalize returned mode=${finData.mode} (not OCR_PENDING) — no upgrade possible`);
                   }
