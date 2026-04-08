@@ -1065,11 +1065,12 @@ export default function AiChatPage() {
             for (const { af } of slowFiles) {
               const rendered = await renderPdfPagesToImages(af.file, 3);
               if (rendered && rendered.images.length > 0) {
+                const _scannedPlaceholder = `[scanned_pdf_vision_preview: ${af.file.name}]`;
                 _scannedVisionEntries.push({
                   filename:       af.file.name,
                   mime_type:      af.file.type || "application/pdf",
-                  char_count:     0,
-                  extracted_text: "",
+                  char_count:     _scannedPlaceholder.length,
+                  extracted_text: _scannedPlaceholder,
                   status:         "ok",
                   source:         "vision_preview_pdf",
                   vision_images:  rendered.images,
@@ -1687,11 +1688,12 @@ export default function AiChatPage() {
           const base64 = await resizeImageToBase64(file);
           if (base64) {
             console.log(`[IMG][${traceId}] UPLOAD_DONE name="${file.name}" base64_bytes=${base64.length} VALIDATION_PASSED=true PROCESSING_STARTED=vision`);
+            const _imgPlaceholder = `[vision_image: ${file.name}]`;
             documentContext.push({
               filename:       file.name,
               mime_type:      file.type || "image/jpeg",
-              char_count:     0,
-              extracted_text: "",
+              char_count:     _imgPlaceholder.length,
+              extracted_text: _imgPlaceholder,
               status:         "ok",
               source:         "vision_image",
               vision_images:  [base64],
