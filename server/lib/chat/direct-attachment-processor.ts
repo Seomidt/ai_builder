@@ -110,9 +110,13 @@ export async function processDirectAttachment(
     try {
       const result = await extractWithGemini(mediaBuf, filename, contentType);
       console.log(`[direct-processor] gemini ${mediaLabel} ok chars=${result.charCount} model=${result.model}`);
+      // Fallback: tom transskription (stille/tom video) → placeholder så gate ikke blokerer
+      const finalText = result.text.trim()
+        ? result.text
+        : `[${mediaLabel === "lyd" ? "Lydfil" : "Video"}: "${filename}" — indeholder muligvis ingen tale eller synlig tekst. Besvar brugerens spørgsmål så godt du kan baseret på filnavnet og konteksten.]`;
       return {
         filename, mime_type: contentType,
-        char_count: result.charCount, extracted_text: result.text,
+        char_count: finalText.length, extracted_text: finalText,
         status: "ok", source: "r2_direct",
       };
     } catch (e) {
