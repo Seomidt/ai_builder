@@ -616,7 +616,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       sendEvent({ type: "gated", routeType: "no_context", message: "Du skal uploade et dokument for at kunne validere." });
       return safeEnd();
     }
-    if (isGroundedUseCase(useCase) && docCtx.length === 0) {
+    if (isGroundedUseCase(useCase) && docCtx.length === 0 && !hasVision) {
       sendEvent({ type: "gated", routeType: "no_context", message: "Jeg kan ikke finde det i jeres interne data." });
       return safeEnd();
     }
