@@ -1705,23 +1705,25 @@ export default function AiChatPage() {
         console.log(`[IMG][${traceId}] IMAGE_CONTEXT_BUILT entries=${documentContext.filter((d:any)=>d.source==="vision_image").length} +${Date.now()-tImgStart}ms`);
       }
 
-      // ── Step A3: Videoer → syntetisk tekst-context ────────────────────────
-      // Backend kan ikke afspille video — inkluderer filnavn som tekst-entry.
-      // Bypasses grounded_chat gate (docCtx.length > 0) så AI kan svare.
+      // ── Step A3: Videoer → informationsentry om manglende videostøtte ────────
+      // Video-indhold kan ikke analyseres — giver AI eksplicit besked om at
+      // fortælle brugeren dette og foreslå alternativer (billede/dokument).
+      // Bypasser grounded_chat gate (docCtx.length > 0, non-empty extracted_text).
       const videoFiles = payload.attachments.filter(a => a.type === "video");
       if (videoFiles.length > 0) {
         for (const af of videoFiles) {
           const file = af.file;
-          console.log(`[VID][${traceId}] ATTACHMENT_RECEIVED name="${file.name}" MIME_TYPE="${file.type}" FILE_SIZE=${file.size} CLASSIFIED_AS=video ROUTE_SELECTED=text_description`);
+          console.log(`[VID][${traceId}] ATTACHMENT_RECEIVED name="${file.name}" MIME_TYPE="${file.type}" FILE_SIZE=${file.size} CLASSIFIED_AS=video ROUTE_SELECTED=unsupported_notice`);
+          const _vidText = `[Video-fil vedhæftet: "${file.name}". VIGTIG INSTRUKTION TIL AI: Du KAN IKKE analysere video-indhold. Svar venligst på dansk at videoanalyse ikke understøttes, og foreslå brugeren at uploade et billede (JPEG/PNG/WebP) eller et dokument (PDF/tekst) i stedet, hvis de ønsker indholdsanalyse.]`;
           documentContext.push({
             filename:       file.name,
             mime_type:      file.type || "video/mp4",
-            char_count:     file.name.length,
-            extracted_text: `[Video vedhæftet: ${file.name}]`,
+            char_count:     _vidText.length,
+            extracted_text: _vidText,
             status:         "ok",
             source:         "video_attachment",
           });
-          console.log(`[VID][${traceId}] UPLOAD_DONE name="${file.name}" VALIDATION_PASSED=true PROCESSING_STARTED=text_proxy`);
+          console.log(`[VID][${traceId}] UPLOAD_DONE name="${file.name}" VALIDATION_PASSED=true PROCESSING_STARTED=unsupported_notice`);
         }
       }
 
