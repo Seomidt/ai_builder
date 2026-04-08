@@ -1990,13 +1990,40 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     try {
       const t0handler = Date.now();
 
-      // ── BEFORE_PARSE: raw req.body shape before Zod ──────────────────────
-      const _rawCtx = Array.isArray(req.body?.document_context) ? req.body.document_context : [];
+      // ── PRODUCTION TRACE BLOCK — every field the user requested ──────────
+      const _DEPLOY_COMMIT   = process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT ?? process.env.COMMIT_SHA ?? "unknown";
+      const _SERVICE_NAME    = process.env.RAILWAY_SERVICE_NAME ?? process.env.SERVICE_NAME ?? "railway-express";
+      const _REQUEST_ID      = (req.headers["x-request-id"] as string) ?? (req.headers["x-railway-request-id"] as string) ?? `req-${Date.now()}`;
+      const _CONTENT_LENGTH  = req.headers["content-length"] ?? "unknown";
+      const _BODY_IS_EMPTY   = !req.body || Object.keys(req.body).length === 0;
+      const _ACTUAL_BODY_LEN = (() => { try { return JSON.stringify(req.body).length; } catch { return -1; } })();
+
+      // Raw document_context before Zod
+      const _rawCtx   = Array.isArray(req.body?.document_context) ? req.body.document_context : [];
       const _rawFirst = _rawCtx[0];
+      const _rawFirstKeys         = _rawFirst ? Object.keys(_rawFirst).join(",") : "none";
+      const _rawVisionPresent     = _rawFirst ? Array.isArray(_rawFirst.vision_images) && _rawFirst.vision_images.length > 0 : false;
+      const _rawVisionCount       = _rawVisionPresent ? (_rawFirst.vision_images as string[]).length : 0;
+
       console.log(
-        `[BEFORE_PARSE_DOC_CTX] count=${_rawCtx.length}` +
-        ` keys=${_rawFirst ? Object.keys(_rawFirst).join(",") : "none"}` +
-        ` vision_images=${_rawFirst ? (Array.isArray(_rawFirst.vision_images) ? "PRESENT len=" + _rawFirst.vision_images.length : "VISION_IMAGES_MISSING") : "no_first_item"}` +
+        `[TRACE_ENTRY]` +
+        ` REQUEST_ID=${_REQUEST_ID}` +
+        ` SERVICE_NAME=${_SERVICE_NAME}` +
+        ` DEPLOYED_COMMIT=${_DEPLOY_COMMIT}` +
+        ` BODY_SIZE_BYTES_CONTENT_LENGTH=${_CONTENT_LENGTH}` +
+        ` BODY_SIZE_BYTES_ACTUAL=${_ACTUAL_BODY_LEN}` +
+        ` BODY_IS_EMPTY=${_BODY_IS_EMPTY}` +
+        ` DOC_CONTEXT_COUNT=${_rawCtx.length}` +
+        ` VISION_IMAGES_PRESENT=${_rawVisionPresent}` +
+        ` VISION_IMAGES_COUNT=${_rawVisionCount}`,
+      );
+      console.log(
+        `[BEFORE_PARSE_DOC_CTX]` +
+        ` REQUEST_ID=${_REQUEST_ID}` +
+        ` count=${_rawCtx.length}` +
+        ` keys_of_first_item=${_rawFirstKeys}` +
+        ` VISION_IMAGES_PRESENT=${_rawVisionPresent}` +
+        ` VISION_IMAGES_COUNT=${_rawVisionCount}` +
         ` extracted_text_len=${_rawFirst?.extracted_text?.length ?? 0}` +
         ` status=${_rawFirst?.status ?? "none"}` +
         ` source=${_rawFirst?.source ?? "none"}` +
@@ -2008,12 +2035,17 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       const userId = getUserId(req);
 
       // ── AFTER_PARSE: parsed body shape after Zod ─────────────────────────
-      const _parsedCtx = body.document_context ?? [];
+      const _parsedCtx   = body.document_context ?? [];
       const _parsedFirst = _parsedCtx[0] as any;
+      const _parsedVisionPresent = _parsedFirst ? Array.isArray(_parsedFirst.vision_images) && _parsedFirst.vision_images.length > 0 : false;
+      const _parsedVisionCount   = _parsedVisionPresent ? (_parsedFirst.vision_images as string[]).length : 0;
       console.log(
-        `[AFTER_PARSE_DOC_CTX] count=${_parsedCtx.length}` +
-        ` keys=${_parsedFirst ? Object.keys(_parsedFirst).join(",") : "none"}` +
-        ` vision_images=${_parsedFirst ? (Array.isArray(_parsedFirst.vision_images) ? "PRESENT len=" + _parsedFirst.vision_images.length : "VISION_IMAGES_MISSING") : "no_first_item"}` +
+        `[AFTER_PARSE_DOC_CTX]` +
+        ` REQUEST_ID=${_REQUEST_ID}` +
+        ` count=${_parsedCtx.length}` +
+        ` keys_of_parsed_first_item=${_parsedFirst ? Object.keys(_parsedFirst).join(",") : "none"}` +
+        ` VISION_IMAGES_PRESENT=${_parsedVisionPresent}` +
+        ` VISION_IMAGES_COUNT=${_parsedVisionCount}` +
         ` extracted_text_len=${_parsedFirst?.extracted_text?.length ?? 0}` +
         ` status=${_parsedFirst?.status ?? "none"}` +
         ` source=${_parsedFirst?.source ?? "none"}`,
@@ -2086,20 +2118,40 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       });
       const isVisionPreview = visionPreviewDocs.length > 0;
       const effectiveDocContext = isVisionPreview ? visionPreviewDocs : decision.documentContext;
-      console.log(`[chat-stream] scanned_preview_branch_hit=${isVisionPreview} vision_docs=${visionPreviewDocs.length} decision_docs=${decision.documentContext.length}`);
 
-      // ── BEFORE_RUN_CHAT_MESSAGE: final context shape ──────────────────────
+      // ── SCANNED_PDF_WRONG_PATH assert: raw body had vision_images but rescue failed ──
+      if (_rawVisionPresent && !isVisionPreview) {
+        console.error(
+          `[SCANNED_PDF_WRONG_PATH]` +
+          ` REQUEST_ID=${_REQUEST_ID}` +
+          ` DEPLOYED_COMMIT=${_DEPLOY_COMMIT}` +
+          ` raw_vision_count=${_rawVisionCount}` +
+          ` parsed_vision_count=${_parsedVisionCount}` +
+          ` vision_preview_docs_after_rescue=${visionPreviewDocs.length}` +
+          ` raw_first_status=${_rawFirst?.status ?? "none"}` +
+          ` parsed_first_status=${_parsedFirst?.status ?? "none"}` +
+          ` REASON=vision_images_was_in_body_but_did_not_survive_rescue_filter`,
+        );
+      }
+
+      // ── BEFORE_RUN_CHAT_MESSAGE: final context shape with all required fields ────
       const _effFirst = effectiveDocContext[0] as any;
+      const _effVisionPresent = _effFirst ? Array.isArray(_effFirst.vision_images) && _effFirst.vision_images.length > 0 : false;
       console.log(
-        `[BEFORE_RUN_CHAT_MESSAGE] effectiveDocContext_len=${effectiveDocContext.length}` +
-        ` scanned_preview_branch_hit=${isVisionPreview}` +
+        `[BEFORE_RUN_CHAT_MESSAGE]` +
+        ` REQUEST_ID=${_REQUEST_ID}` +
+        ` DEPLOYED_COMMIT=${_DEPLOY_COMMIT}` +
+        ` effectiveDocContext_len=${effectiveDocContext.length}` +
+        ` SCANNED_PREVIEW_BRANCH_HIT=${isVisionPreview}` +
+        ` VISION_IMAGES_PRESENT=${_effVisionPresent}` +
+        ` VISION_IMAGES_COUNT=${_effVisionPresent ? (_effFirst.vision_images as string[]).length : 0}` +
         ` vision_docs_count=${visionPreviewDocs.length}` +
         ` text_docs_count=${decision.documentContext.length}` +
-        ` first_item_vision_images=${_effFirst ? (Array.isArray(_effFirst.vision_images) ? "VISION_IMAGES_PRESENT len=" + _effFirst.vision_images.length : "VISION_IMAGES_MISSING") : "no_first_item"}` +
         ` first_item_source=${_effFirst?.source ?? "none"}` +
-        ` preview_prompt_type=${isVisionPreview ? "vision_pdf_preview" : "text_doc"}` +
-        ` preview_answer_mode=${isVisionPreview ? "document_only" : "normal"}`,
+        ` PREVIEW_PROMPT_TYPE=${isVisionPreview ? "vision_pdf_preview" : "text_doc"}` +
+        ` PREVIEW_ANSWER_MODE=${isVisionPreview ? "document_only" : "normal"}`,
       );
+      console.log(`[chat-stream] scanned_preview_branch_hit=${isVisionPreview} vision_docs=${visionPreviewDocs.length} decision_docs=${decision.documentContext.length}`);
 
       // ── Execute AI call with streaming ───────────────────────────────────
       const result = await runChatMessage({

@@ -204,7 +204,25 @@ export async function runChatMessage(params: {
     return d.vision_images.length > 0;
   });
 
-  console.log(`[chat-runner-VISION-FILTER] visionDocs_len=${visionDocs.length} has_onToken=${!!params.onToken}`);
+  const _runnerRawHadVision = rawDocCtx.some((d: any) => Array.isArray(d.vision_images) && d.vision_images.length > 0);
+  console.log(
+    `[chat-runner-VISION-FILTER]` +
+    ` visionDocs_len=${visionDocs.length}` +
+    ` raw_had_vision_images=${_runnerRawHadVision}` +
+    ` has_onToken=${!!params.onToken}` +
+    ` HARD_GATE_TRIGGERED=false_not_yet`,
+  );
+  if (_runnerRawHadVision && visionDocs.length === 0) {
+    console.error(
+      `[SCANNED_PDF_WRONG_PATH]` +
+      ` LOCATION=chat-runner.ts:visionDocs_filter` +
+      ` raw_had_vision_images=true` +
+      ` visionDocs_after_filter=0` +
+      ` first_status=${rawDocCtx[0]?.status ?? "none"}` +
+      ` first_vision_images_len=${rawDocCtx[0]?.vision_images?.length ?? 0}` +
+      ` REASON=filter_requires_status=ok+vision_images.length>0_check_first_status`,
+    );
+  }
 
   if (visionDocs.length > 0 && params.onToken) {
     const allImages   = visionDocs.flatMap((d: any) => d.vision_images as string[]);

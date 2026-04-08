@@ -155,7 +155,13 @@ export async function runAiCall(
   // CASE A: grounded use case + no documentContext → block before provider call
   if (isGroundedUseCase(context.useCase) &&
       (!context.documentContext || context.documentContext.length === 0)) {
-    console.log(`[HARD-GATE] BLOCKED: useCase=${context.useCase} requires documentContext — no provider call`);
+    console.error(
+      `[HARD-GATE] BLOCKED HARD_GATE_TRIGGERED=true` +
+      ` useCase=${context.useCase}` +
+      ` documentContext_len=${context.documentContext?.length ?? 0}` +
+      ` SOURCE=server/lib/ai/runner.ts:CASE_A` +
+      ` — this is the line that generates "Jeg kan ikke finde det i jeres interne data."`,
+    );
     return {
       blocked: true,
       reason: "NO_INTERNAL_DATA",
