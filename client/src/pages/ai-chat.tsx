@@ -1138,13 +1138,19 @@ export default function AiChatPage() {
                     const taskId = finData.taskId;
                     console.log(`[SCANNED_BG][${traceId}] OCR started taskId=${taskId} — polling for upgrade to msgId=${previewMsgId}`);
 
+                    // Show OCR-in-progress indicator in the preview message
+                    const previewBase = "Jeg analyserer det fulde dokument i baggrunden — dette kan tage 1-3 minutter for store filer...";
+                    setMessages(prev => prev.map(m =>
+                      m.id === previewMsgId ? { ...m, text: m.text + `\n\n⏳ ${previewBase}` } : m,
+                    ));
+
                     const token = await getSessionToken().catch(() => null);
-                    const MAX_POLL_MS = 5 * 60 * 1000;
+                    const MAX_POLL_MS = 8 * 60 * 1000;
                     const tPollStart = Date.now();
                     let pollN = 0;
 
                     while (Date.now() - tPollStart < MAX_POLL_MS) {
-                      await new Promise(r => setTimeout(r, 3_000));
+                      await new Promise(r => setTimeout(r, 5_000));
                       pollN++;
                       try {
                         const h: Record<string, string> = {};
@@ -1152,12 +1158,14 @@ export default function AiChatPage() {
                         const sr = await fetch(`/api/ocr-status?id=${encodeURIComponent(taskId)}`, { headers: h, credentials: "include" });
                         if (!sr.ok) { console.warn(`[SCANNED_BG][${traceId}] poll HTTP ${sr.status}`); continue; }
                         const sd = await sr.json() as any;
-                        console.log(`[SCANNED_BG][${traceId}] poll #${pollN} status=${sd.status} chars=${(sd.ocrText ?? "").length}`);
+                        const elapsedS = Math.round((Date.now() - tPollStart) / 1000);
+                        console.log(`[SCANNED_BG][${traceId}] poll #${pollN} status=${sd.status} chars=${(sd.ocrText ?? "").length} elapsed=${elapsedS}s`);
 
-                        if (sd.status === "completed" && sd.ocrText?.trim()) {
-                          console.log(`[SCANNED_BG][${traceId}] OCR completed — triggering upgrade to same msgId=${previewMsgId}`);
+                        const isComplete = (sd.status === "completed" || sd.status === "done") && sd.ocrText?.trim();
+                        if (isComplete) {
+                          console.log(`[SCANNED_BG][${traceId}] OCR completed chars=${sd.ocrText.length} — triggering upgrade to msgId=${previewMsgId}`);
                           isUpgradeAttemptRef.current = true;
-                          chatMutateRef.current?.({
+                          (chatMutateRef.current as any)?.({
                             text: "Det komplette dokument er nu klar. Giv en opdateret og komplet analyse.",
                             attachments: [],
                             _documentContextOverride: [{
@@ -1172,14 +1180,21 @@ export default function AiChatPage() {
                           });
                           break;
                         }
-                        if (sd.status === "failed" || sd.status === "dead_letter") {
+                        if (sd.status === "failed" || sd.status === "dead_letter" || sd.status === "error") {
                           console.warn(`[SCANNED_BG][${traceId}] OCR ${sd.status} — keeping preview answer`);
+                          setMessages(prev => prev.map(m =>
+                            m.id === previewMsgId
+                              ? { ...m, text: m.text.replace(`\n\n⏳ ${previewBase}`, "\n\n⚠️ Dokumentet kunne ikke behandles fuldt ud.") }
+                              : m,
+                          ));
                           break;
                         }
                       } catch (pollErr: any) {
                         console.warn(`[SCANNED_BG][${traceId}] poll error: ${pollErr?.message}`);
                       }
                     }
+                  } else {
+                    console.warn(`[SCANNED_BG][${traceId}] finalize returned mode=${finData.mode} (not OCR_PENDING) — no upgrade possible`);
                   }
                 }
               } catch (bgErr: any) {
