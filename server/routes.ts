@@ -1735,6 +1735,7 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     status:         z.enum(["ok", "unsupported", "error"]),
     message:        z.string().optional(),
     source:         z.string().optional(),
+    vision_images:  z.array(z.string().max(2_000_000)).max(5).optional(),
   });
 
   const chatBodySchema = z.object({
@@ -2044,6 +2045,23 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
 
       console.log(`[chat-stream] T2_AI_START total_so_far=${t2 - t0handler}ms`);
 
+      // ── Vision preview: pass raw vision docs from body (bypasses resolveRouteDecision filter) ──
+      // resolveRouteDecision.getValidRequestAttachments filters out docs with empty extracted_text,
+      // which removes vision_images docs entirely. We rescue them here from body.document_context.
+      const MAX_VI = 5;
+      const MAX_VB = 2_000_000;
+      const rawBodyCtx = (body.document_context ?? []) as any[];
+      const visionPreviewDocs = rawBodyCtx.filter((d: any) => {
+        if (d.status !== "ok" || !Array.isArray(d.vision_images) || d.vision_images.length === 0) return false;
+        d.vision_images = (d.vision_images as string[]).slice(0, MAX_VI).filter(
+          (img: string) => typeof img === "string" && img.length <= MAX_VB,
+        );
+        return d.vision_images.length > 0;
+      });
+      const isVisionPreview = visionPreviewDocs.length > 0;
+      const effectiveDocContext = isVisionPreview ? visionPreviewDocs : decision.documentContext;
+      console.log(`[chat-stream] scanned_preview_branch_hit=${isVisionPreview} vision_docs=${visionPreviewDocs.length} decision_docs=${decision.documentContext.length}`);
+
       // ── Execute AI call with streaming ───────────────────────────────────
       const result = await runChatMessage({
         message:         body.message,
@@ -2052,7 +2070,7 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         userId,
         conversationId:  body.conversation_id ?? null,
         routingExplanation: decision.routingExplanation,
-        documentContext: decision.documentContext,
+        documentContext: effectiveDocContext,
         routeType:       decision.routeType,
         onToken: (delta) => sendEvent({ type: "delta", text: delta }),
         onSafeguardReplace: (text) => sendEvent({ type: "replace", text }),
