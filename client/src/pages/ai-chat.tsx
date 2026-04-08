@@ -1144,7 +1144,7 @@ export default function AiChatPage() {
                 console.log(`[TIMING] T2_OCR_START t=${tOcrStart} +${tOcrStart - tClick}ms_since_CLICK taskId=${taskId} file="${file.name}"`);
                 console.log(`[TIMING] OCR_STATUS_POLL_START t=${tOcrStart} +${tOcrStart - tClick}ms_since_CLICK taskId=${taskId} file="${file.name}"`);
                 console.log(`[UI] UI_PROCESSING_CARD_CREATED t=${tOcrStart} +${tOcrStart - tClick}ms_since_CLICK file="${file.name}" traceId=${traceId}`);
-                setOcrStatusLabel(`Behandler scannet PDF: ${file.name}`);
+                setOcrStatusLabel("Behandler dokument…");
 
                 let sseResolved = false;
                 let sseError: Error | null = null;
@@ -1330,10 +1330,10 @@ export default function AiChatPage() {
                   }
                   if (pollData.status === "failed") {
                     if (pollData.nextRetryAt) {
-                      setOcrStatusLabel(`Prøver igen: ${file.name} (forsøg ${(pollData.attemptCount ?? 0) + 1}/${pollData.maxAttempts ?? 3})`);
+                      setOcrStatusLabel("Behandler dokument…");
                       continue;
                     }
-                    setOcrStatusLabel(null);
+                    setOcrStatusLabel("Skriver svar…");
                     console.error(`[OCR-FAIL][${traceId}] PATH=failed_no_retry reason="${pollData.errorReason}"`);
                     throw Object.assign(new Error(pollData.errorReason ?? "PDF OCR fejlede"), { errorCode: "DOCUMENT_UNREADABLE" });
                   }
@@ -1568,6 +1568,7 @@ export default function AiChatPage() {
               const tFirstChunk = Date.now();
               console.log(`[TIMING] T5_FIRST_TOKEN t=${tFirstChunk} +${tFirstChunk - tClick}ms_since_CLICK +${tFirstChunk - tFetchStart}ms_since_MODEL_START`);
               console.log(`[TIMING] FIRST_CHUNK t=${tFirstChunk} +${tFirstChunk - tClick}ms_since_CLICK +${tFirstChunk - tFetchStart}ms_since_FETCH_START`);
+              setOcrStatusLabel(null);
               console.log(
                 `[LIVE][${traceId}] FIRST_CHUNK t=${tFirstChunk}` +
                 ` +${tFirstChunk - tFetchStart}ms_since_FETCH_START` +
@@ -1635,6 +1636,7 @@ export default function AiChatPage() {
                 doneData = event as ChatResponse & { _trace?: any };
                 const tDoneReceived = Date.now();
                 console.log(`[TIMING] T6_RESPONSE_DONE t=${tDoneReceived} +${tDoneReceived - tClick}ms_since_CLICK textLen=${streamText.length}`);
+                setOcrStatusLabel(null);
                 console.log(`[TIMING] DONE_EVENT_RECEIVED t=${tDoneReceived} +${tDoneReceived - tClick}ms_since_CLICK textLen=${streamText.length}`);
                 console.log(
                   `[LIVE][${traceId}] DONE_EVENT_RECEIVED t=${tDoneReceived}` +
@@ -1952,6 +1954,7 @@ export default function AiChatPage() {
       attachments: [...attachments],
       timestamp: new Date(),
     }]);
+    setOcrStatusLabel("Uploader dokument…");
     chatMutation.mutate({ text: text || "Analysér venligst det uploadede dokument.", attachments, useCase, submitAt: tClick });
     setInput("");
     setAttachments([]);
