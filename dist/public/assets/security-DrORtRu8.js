@@ -1,1 +1,0 @@
-import{j as t}from"./index-DqZ6noaa.js";function s(){return t.jsxs("div",{className:"p-6",children:[t.jsx("h1",{className:"text-2xl font-bold","data-testid":"text-settings-security-title",children:"Security Settings"}),t.jsx("p",{className:"text-muted-foreground mt-2",children:"Manage your account security."})]})}export{s as default};
