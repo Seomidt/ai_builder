@@ -210,6 +210,11 @@ app.use((req, res, next) => {
   // Storage 1.4: Run pgvector migration (idempotent, safe to run on every boot)
   runPgvectorMigration().catch((err) => log(`[pgvector] migration failed: ${String(err)}`));
 
+  // SEARCH-INDEX Phase 1: Create knowledge_asset_search table + indexes (idempotent)
+  import("./lib/knowledge/migrate-asset-search.ts")
+    .then(({ runAssetSearchMigration }) => runAssetSearchMigration())
+    .catch((err) => log(`[asset-search-migration] failed: ${String(err)}`));
+
   // ALWAYS serve the app on the port specified in the environment variable PORT
   // Other ports are firewalled. Default to 5000 if not specified.
   // this serves both the API and the client.
@@ -251,6 +256,15 @@ app.use((req, res, next) => {
             startRetentionCleanupScheduler();
           })
           .catch((err) => log(`[retention-cleanup] failed to start scheduler: ${String(err)}`));
+      }
+      // SEARCH-INDEX Phase 6: Background indexing worker for knowledge_asset_search
+      // Processes pending rows every 30s; disabled with ASSET_SEARCH_WORKER=false
+      if (process.env.ASSET_SEARCH_WORKER !== "false") {
+        import("./lib/jobs/asset-search-index-worker.ts")
+          .then(({ startAssetSearchIndexWorker }) => {
+            startAssetSearchIndexWorker();
+          })
+          .catch((err) => log(`[asset-search-worker] failed to start: ${String(err)}`));
       }
     },
   );

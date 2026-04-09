@@ -1714,6 +1714,61 @@ export const insertAssetStorageObjectSchema = createInsertSchema(assetStorageObj
 export type InsertAssetStorageObject = z.infer<typeof insertAssetStorageObjectSchema>;
 export type AssetStorageObject = typeof assetStorageObjects.$inferSelect;
 
+// ─── knowledge_asset_search ────────────────────────────────────────────────────
+// SEARCH-INDEX Phase 1 — Dedicated materialized search index per asset version.
+// One row per knowledge_document_version (chunk_id=null for asset-level indexing;
+// reserved non-null for future chunk-level fan-out).
+//
+// text_content is the authoritative input — sourced from
+//   knowledge_document_versions.extracted_text (post-extract-migration).
+//
+// Two GENERATED ALWAYS AS STORED columns are created by migrate-asset-search.ts
+// (Drizzle does not support generated columns natively):
+//   • char_count  integer  GENERATED ALWAYS AS (char_length(text_content)) STORED
+//   • search_tsvector  tsvector  GENERATED ALWAYS AS (to_tsvector('english',text_content)) STORED
+//
+// Idempotent upserts: two partial unique indexes (kas_asset_version_asset_level_uniq /
+//   kas_asset_version_chunk_level_uniq) — see migrate-asset-search.ts.
+
+export const knowledgeAssetSearch = pgTable(
+  "knowledge_asset_search",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId:        text("tenant_id").notNull(),
+    assetId:         text("asset_id").notNull(),
+    assetVersionId:  text("asset_version_id").notNull(),
+    chunkId:         text("chunk_id"),
+    documentType:    text("document_type"),
+    assetScope:      text("asset_scope"),
+    knowledgeBaseId: text("knowledge_base_id"),
+    lifecycleState:  text("lifecycle_state").notNull().default("active"),
+    textContent:     text("text_content").notNull(),
+    language:        text("language").default("english"),
+    indexingStatus:  text("indexing_status").notNull().default("pending"),
+    indexedAt:       timestamp("indexed_at"),
+    createdAt:       timestamp("created_at").notNull().defaultNow(),
+    updatedAt:       timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    sql`CONSTRAINT kas_lifecycle_check CHECK (${t.lifecycleState} IN ('active','archived','deleted','purged'))`,
+    sql`CONSTRAINT kas_indexing_status_check CHECK (${t.indexingStatus} IN ('pending','indexing','indexed','failed','superseded'))`,
+    index("kas_tenant_lifecycle_status_idx").on(t.tenantId, t.lifecycleState, t.indexingStatus),
+    index("kas_tenant_kb_idx").on(t.tenantId, t.knowledgeBaseId),
+    index("kas_asset_version_idx").on(t.assetId, t.assetVersionId),
+    index("kas_tenant_indexing_status_created_idx").on(t.tenantId, t.indexingStatus, t.createdAt),
+  ],
+);
+
+export const insertKnowledgeAssetSearchSchema = createInsertSchema(knowledgeAssetSearch).omit({
+  id: true,
+  createdAt: true,
+  updatedAt: true,
+});
+export type InsertKnowledgeAssetSearch = z.infer<typeof insertKnowledgeAssetSearchSchema>;
+export type KnowledgeAssetSearch = typeof knowledgeAssetSearch.$inferSelect;
+
 // ─── knowledge_asset_processing_jobs ──────────────────────────────────────────
 // Phase 5G — Async job queue for multimodal asset processing. One row per
 // discrete processing step. Append-only operational log.

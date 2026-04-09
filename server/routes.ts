@@ -4280,6 +4280,129 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     }
   });
 
+  /**
+   * POST /api/kb/asset-search
+   * SEARCH-INDEX Phase 7 — multi-tenant asset search against knowledge_asset_search.
+   * Authoritative source: knowledge_document_versions.extracted_text (normalized).
+   * Never reads legacy metadata jsonb.
+   *
+   * Body: { query, knowledgeBaseId?, assetTypes?, assetScope?, limit?, mode? }
+   *   mode: 'lexical' | 'semantic' | 'hybrid' (default 'hybrid')
+   *
+   * Returns: { results: AssetSearchResult[], total, latencyMs, mode }
+   */
+  app.post("/api/kb/asset-search", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const {
+        query,
+        knowledgeBaseId,
+        assetTypes,
+        assetScope,
+        limit,
+        mode,
+        weights,
+      } = req.body as Record<string, unknown>;
+
+      if (!query || typeof query !== "string" || !query.trim()) {
+        return res.status(400).json({ error: "query is required" });
+      }
+
+      const t0 = Date.now();
+      const { searchKnowledgeAssets } = await import("./lib/knowledge/asset-search.ts");
+      const results = await searchKnowledgeAssets({
+        tenantId:       orgId,
+        query:          query.trim(),
+        knowledgeBaseId: typeof knowledgeBaseId === "string" ? knowledgeBaseId : undefined,
+        assetTypes:     Array.isArray(assetTypes) ? (assetTypes as string[]) : undefined,
+        assetScope:     typeof assetScope === "string" ? assetScope as "temporary_chat" | "persistent_storage" : undefined,
+        limit:          typeof limit === "number" ? limit : 10,
+        mode:           (["lexical", "semantic", "hybrid"].includes(mode as string) ? mode : "hybrid") as "lexical" | "semantic" | "hybrid",
+        weights:        weights && typeof weights === "object" ? weights as { lexical: number; semantic: number } : undefined,
+      });
+
+      return res.json({ results, total: results.length, latencyMs: Date.now() - t0, mode: mode ?? "hybrid" });
+    } catch (err) {
+      return handleError(res, err);
+    }
+  });
+
+  /**
+   * POST /api/admin/asset-search/backfill
+   * SEARCH-INDEX Phase 6 — run one resumable backfill batch.
+   * Body: { batchSize?, cursorId?, dryRun?, tenantId? }
+   * Returns: { ok, result: BackfillResult }
+   */
+  app.post("/api/admin/asset-search/backfill", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { batchSize, cursorId, dryRun = false, tenantId } = req.body as Record<string, unknown>;
+      const { runAssetSearchBackfill } = await import("./lib/knowledge/asset-search-indexer.ts");
+
+      const result = await runAssetSearchBackfill({
+        batchSize:  typeof batchSize === "number" ? batchSize : 500,
+        cursorId:   typeof cursorId  === "string" ? cursorId  : null,
+        dryRun:     dryRun === true,
+        tenantId:   typeof tenantId  === "string" ? tenantId  : undefined,
+      });
+
+      return res.json({ ok: true, result });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  /**
+   * POST /api/admin/asset-search/index-pending
+   * SEARCH-INDEX Phase 6 — process one pending batch immediately (on-demand worker tick).
+   * Body: { batchSize?, tenantId? }
+   * Returns: { ok, summary: { processed, indexed, failed } }
+   */
+  app.post("/api/admin/asset-search/index-pending", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { batchSize, tenantId } = req.body as Record<string, unknown>;
+      const { processPendingBatch } = await import("./lib/jobs/asset-search-index-worker.ts");
+
+      const summary = await processPendingBatch({
+        batchSize: typeof batchSize === "number" ? batchSize : 50,
+        tenantId:  typeof tenantId  === "string" ? tenantId  : undefined,
+      });
+
+      return res.json({ ok: true, summary });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  /**
+   * POST /api/admin/asset-search/reset-failed
+   * Re-queue failed search index rows for retry.
+   * Body: { tenantId?, limit? }
+   */
+  app.post("/api/admin/asset-search/reset-failed", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { tenantId, limit } = req.body as Record<string, unknown>;
+      const { resetFailedRows } = await import("./lib/jobs/asset-search-index-worker.ts");
+
+      const result = await resetFailedRows({
+        tenantId: typeof tenantId === "string" ? tenantId : undefined,
+        limit:    typeof limit    === "number" ? limit    : 500,
+      });
+
+      return res.json({ ok: true, ...result });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
   // GET /api/kb/document-debug?id=<knowledgeDocumentId>
   // Returns partial-readiness + timing metrics for a knowledge document.
   // Phase 5Z.2 observability endpoint.
