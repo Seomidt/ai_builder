@@ -173,7 +173,7 @@ async function createChatAssetForFile(
       const hashRes = await apiRequest("GET", `/api/knowledge/assets/by-hash?fileHash=${encodeURIComponent(fileHash)}`);
       if (hashRes.ok) {
         const { asset } = await hashRes.json() as {
-          asset: { id: string; documentStatus: string; r2Key: string | null }
+          asset: { id: string; documentStatus: string; r2Key: string | null; extractedText?: string | null; extractedTextStatus?: string | null } | null
         };
         if (asset?.id) {
           const ocrReady        = asset.documentStatus === "ready";
@@ -233,6 +233,28 @@ async function patchAssetR2KeyFF(
     });
   } catch {
     // Non-critical — asset still exists, just without r2Key
+  }
+}
+
+/**
+ * NEXT-A+: Shared transcript persistence — fire-and-forget.
+ * Used for ALL file types: PDF OCR, audio, video, images, text files.
+ * Non-critical: failure is logged, never throws.
+ */
+async function patchAssetTranscriptFF(
+  assetId: string,
+  extractedText: string,
+  charCount: number,
+  extractionSource: string,
+): Promise<void> {
+  try {
+    await apiRequest("POST", `/api/knowledge/assets/${assetId}/transcript`, {
+      extractedText,
+      charCount,
+      extractionSource,
+    });
+  } catch {
+    // Non-critical — transcript persist failure never blocks the user
   }
 }
 
@@ -1052,7 +1074,8 @@ export default function AiChatPage() {
   // chatMutateRef holds a stable reference to chatMutation.mutate (set after hook declaration)
   const chatMutateRef = useRef<((payload: { text: string; attachments: AttachedFile[]; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[]; _upgradeStreamMsgId?: string; _userMsgId?: string }) => void) | null>(null);
   // Upgrade ref: set when partial_ready break → onSuccess starts upgrade SSE subscription
-  const pendingOcrUpgradeRef = useRef<{ taskId: string; filename: string; mime: string } | null>(null);
+  // assetId included for transcript persistence after full OCR text arrives (NEXT-A+)
+  const pendingOcrUpgradeRef = useRef<{ taskId: string; filename: string; mime: string; assetId?: string } | null>(null);
   // Set to true while an upgrade mutation is in flight — suppresses error toast in onError
   const isUpgradeAttemptRef = useRef(false);
 
@@ -1644,9 +1667,11 @@ export default function AiChatPage() {
               const isVideoMime = (file.type || "").startsWith("video/");
               const isAudioMime = (file.type || "").startsWith("audio/");
 
-              // NEXT-A: HASH_HIT transcript reuse — skip Gemini re-extraction entirely
-              // Condition: file is audio/video + we have a persisted transcript from a prior session
-              if ((isAudioMime || isVideoMime) && _slowAssetRef?.skipUpload && _slowAssetRef.extractedText) {
+              // NEXT-A+: HASH_HIT transcript reuse — skip extraction entirely for ALL file types
+              // Condition: asset already in R2 (skipUpload) + extractedText persisted from prior session
+              // Covers: audio, video, images (SLOW path), text files, native PDFs
+              // OCR PDFs: if extractedText exists from prior OCR, also reused here
+              if (_slowAssetRef?.skipUpload && _slowAssetRef.extractedText) {
                 const reusedText = _slowAssetRef.extractedText;
                 console.log(
                   `[ASSETS][TRANSCRIPT_REUSE] file="${file.name}" assetId=${_slowAssetRef.assetId}` +
@@ -1789,7 +1814,8 @@ export default function AiChatPage() {
                         });
                         ocrHandled = true;
                         ocrResult = { status: "running", stage: "partial_ready" }; // sentinel: passes !ocrResult check
-                        pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
+                        // NEXT-A+: include assetId so upgrade flow can persist full text
+                        pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf", assetId: _slowAssetRef?.assetId };
                         setOcrStatusLabel(null);
                         console.log(`[OCR:partial_ready] taskId=${taskId} chars=${data.charCount} — provisional queued, upgrade ref set`);
                         sseResolved = true;
@@ -1899,7 +1925,8 @@ export default function AiChatPage() {
                   if (pollData.status === "running" && pollData.stage === "partial_ready" && pollData.ocrText?.trim()) {
                     ocrResult = pollData;
                     // Set upgrade ref so onSuccess starts completed-upgrade SSE (same as SSE path)
-                    pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf" };
+                    // NEXT-A+: include assetId so upgrade flow can persist full text
+                    pendingOcrUpgradeRef.current = { taskId, filename: file.name, mime: file.type || "application/pdf", assetId: _slowAssetRef?.assetId };
                     setOcrStatusLabel(null);
                     console.log(`[TRACE-2ocr][${traceId}] poll partial_ready chars=${pollData.charCount} — early trigger, upgrade ref set`);
                     break;
@@ -1962,6 +1989,7 @@ export default function AiChatPage() {
                   throw Object.assign(new Error("OCR fandt ingen læsbar tekst i dokumentet. Tjek at PDF-filen ikke er krypteret."), { errorCode: "DOCUMENT_UNREADABLE" });
                 }
 
+                const ocrSource = ocrResult.stage === "partial_ready" ? "ocr_partial" : "r2_ocr_async";
                 finalizeResults.push({
                   filename:       file.name,
                   mime_type:      file.type || "application/pdf",
@@ -1969,8 +1997,19 @@ export default function AiChatPage() {
                   extracted_text: ocrText,
                   status:         "ok",
                   // Preserve partial marker so server-side safeguard detects partial mode correctly
-                  source:         ocrResult.stage === "partial_ready" ? "ocr_partial" : "r2_ocr_async",
+                  source:         ocrSource,
                 });
+
+                // NEXT-A+: persist OCR text so same PDF reuses it on next upload (HASH_HIT)
+                if (_slowAssetRef?.assetId) {
+                  patchAssetTranscriptFF(
+                    _slowAssetRef.assetId,
+                    ocrText,
+                    ocrResult.charCount ?? ocrText.length,
+                    ocrSource,
+                  ).catch(() => {});
+                  console.log(`[ASSETS][OCR_PERSIST] assetId=${_slowAssetRef.assetId} chars=${ocrText.length} source=${ocrSource}`);
+                }
               }
               console.log(`[TRACE-2ocr][${traceId}] OCR complete chars=${ocrResult.charCount ?? 0} quality=${ocrResult.qualityScore ?? "-"}`);
             } else if (finalData.results && finalData.results.length > 0) {
@@ -2509,6 +2548,13 @@ export default function AiChatPage() {
                   source: "r2_ocr_async",
                 }],
               });
+              // NEXT-A+: persist full OCR text from upgrade so future HASH_HIT can reuse it
+              const upgradeAssetId = upgrade.assetId;
+              if (upgradeAssetId && fullText.trim()) {
+                patchAssetTranscriptFF(upgradeAssetId, fullText.slice(0, 80_000), fullText.length, "r2_ocr_async")
+                  .catch(() => {});
+                console.log(`[ASSETS][UPGRADE_PERSIST] assetId=${upgradeAssetId} chars=${fullText.length}`);
+              }
             };
 
             // ── Helper: poll /api/ocr-status ──

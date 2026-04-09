@@ -561,14 +561,22 @@ export async function patchAssetR2Key(params: {
 
 /**
  * Persists extracted text (transcript/OCR) into knowledge_documents.metadata.
- * Called after Gemini processes audio, video, or image files.
- * Sets document_status='ready' so HASH_HIT queries know text is available.
+ * Shared persistence model for ALL file types:
+ *   - TXT/CSV/MD → extractionSource = "direct"
+ *   - PDF (native) → extractionSource = "r2_pdf_parse"
+ *   - PDF (OCR)    → extractionSource = "r2_ocr_async" | "ocr_partial"
+ *   - Images       → extractionSource = "gemini_vision"
+ *   - Audio        → extractionSource = "gemini_audio"
+ *   - Video        → extractionSource = "gemini_video"
  *
  * Fields written into metadata jsonb (merged via ||):
- *   extractedText        — full transcript or extracted text
+ *   extractedText        — full transcript or extracted text (capped at 80 000 chars)
  *   extractedTextStatus  — 'ready' | 'failed'
  *   extractedAt          — ISO timestamp of extraction
+ *   charCount            — total character count
+ *   extractionSource     — pipeline engine identifier
  *
+ * Sets document_status='ready' so HASH_HIT queries know reusable text exists.
  * Idempotent: safe to call multiple times — JSONB merge overwrites keys.
  */
 export async function patchAssetTranscript(params: {
@@ -576,9 +584,10 @@ export async function patchAssetTranscript(params: {
   tenantId:  string;
   extractedText:       string;
   extractedTextStatus: "ready" | "failed";
-  charCount?:  number;
+  charCount?:          number;
+  extractionSource?:   string;
 }): Promise<void> {
-  const { assetId, tenantId, extractedText, extractedTextStatus, charCount } = params;
+  const { assetId, tenantId, extractedText, extractedTextStatus, charCount, extractionSource } = params;
 
   const client = getClient();
   try {
@@ -590,7 +599,8 @@ export async function patchAssetTranscript(params: {
                                   'extractedText',       $3::text,
                                   'extractedTextStatus', $4::text,
                                   'extractedAt',         NOW()::text,
-                                  'charCount',           $5::int
+                                  'charCount',           $5::int,
+                                  'extractionSource',    $6::text
                                 ),
              document_status = CASE
                WHEN $4 = 'ready' THEN 'ready'
@@ -604,6 +614,7 @@ export async function patchAssetTranscript(params: {
         extractedText,
         extractedTextStatus,
         charCount ?? extractedText.length,
+        extractionSource ?? "unknown",
       ],
     );
   } finally {

@@ -1456,6 +1456,20 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         const nonWsChars = embeddedText.replace(/\s+/g, "").length;
         if (nonWsChars >= 120) {
           console.log(`[upload/finalize] PDF native tekst ok — ${embeddedText.length} chars (${nonWsChars} non-ws). Returnerer direkte.`);
+          const slicedText = embeddedText.slice(0, 80_000);
+          // NEXT-A+: persist native PDF text — fire-and-forget
+          if (assetId) {
+            const { patchAssetTranscript } = await import("./lib/knowledge/chat-assets.ts");
+            patchAssetTranscript({
+              assetId, tenantId: orgId,
+              extractedText:       slicedText,
+              extractedTextStatus: "ready",
+              charCount:           embeddedText.length,
+              extractionSource:    "r2_pdf_parse",
+            }).catch(err =>
+              console.warn(`[finalize/pdf-native] patchAssetTranscript failed assetId=${assetId}: ${(err as Error).message}`),
+            );
+          }
           return res.json({
             mode:    "direct",
             routing: "native_pdf_text",
@@ -1463,7 +1477,7 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
               filename,
               mime_type:      contentType,
               char_count:     embeddedText.length,
-              extracted_text: embeddedText.slice(0, 80_000),
+              extracted_text: slicedText,
               status:         "ok",
               source:         "r2_pdf_parse",
             }],
@@ -1517,31 +1531,27 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       const result = await processDirectAttachment({ objectKey, filename, contentType, sizeBytes: size });
 
       if (result.status === "ok") {
-        // NEXT-A: persist transcript server-side when assetId is provided
-        // Covers audio, video, and image files — all go through Gemini extraction
+        // NEXT-A+: universal transcript persistence — all file types with reusable text
+        // Covers: text (TXT/CSV/MD), images, audio, video
+        // Condition: assetId provided + extraction produced non-empty text
         if (assetId && result.extracted_text) {
-          const isMediaOrImage =
-            contentType.startsWith("audio/") ||
-            contentType.startsWith("video/") ||
-            contentType.startsWith("image/");
-          if (isMediaOrImage) {
-            const { patchAssetTranscript } = await import("./lib/knowledge/chat-assets.ts");
-            patchAssetTranscript({
-              assetId,
-              tenantId: orgId,
-              extractedText:       result.extracted_text,
-              extractedTextStatus: "ready",
-              charCount:           result.char_count,
-            }).catch(err =>
-              console.warn(`[finalize] patchAssetTranscript failed assetId=${assetId}: ${(err as Error).message}`),
-            );
-          }
+          const { patchAssetTranscript } = await import("./lib/knowledge/chat-assets.ts");
+          patchAssetTranscript({
+            assetId,
+            tenantId:            orgId,
+            extractedText:       result.extracted_text,
+            extractedTextStatus: "ready",
+            charCount:           result.char_count,
+            extractionSource:    result.source ?? "direct",
+          }).catch(err =>
+            console.warn(`[finalize] patchAssetTranscript failed assetId=${assetId}: ${(err as Error).message}`),
+          );
         }
         return res.json({ mode: routing.mode, routing: routing.reason, results: [result] });
       }
 
       // Persist failed status so HASH_HIT doesn't retry Gemini infinitely
-      if (assetId && result.code === "GEMINI_ERROR") {
+      if (assetId && (result.code === "GEMINI_ERROR" || result.code === "R2_ERROR")) {
         const { patchAssetTranscript } = await import("./lib/knowledge/chat-assets.ts");
         patchAssetTranscript({
           assetId, tenantId: orgId,
@@ -5152,6 +5162,42 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       return res.json({ asset });
     } catch (err: any) {
       if (err.code === "ASSET_NOT_FOUND") return res.status(404).json({ error: err.message });
+      handleError(res, err);
+    }
+  });
+
+  /**
+   * POST /api/knowledge/assets/:assetId/transcript
+   * Client-side transcript push — used after async OCR completes.
+   * Shared persistence model: same endpoint for ALL file types.
+   * Fire-and-forget friendly: always returns 200 (or 204 if no row matched).
+   */
+  app.post("/api/knowledge/assets/:assetId/transcript", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { assetId } = req.params;
+      const { extractedText, charCount, extractionSource } = req.body as Record<string, unknown>;
+
+      if (!extractedText || typeof extractedText !== "string" || !extractedText.trim()) {
+        return res.status(400).json({ error: "extractedText is required and must be non-empty" });
+      }
+
+      const { patchAssetTranscript } = await import("./lib/knowledge/chat-assets.ts");
+      await patchAssetTranscript({
+        assetId,
+        tenantId:            orgId,
+        extractedText:       extractedText.slice(0, 80_000),
+        extractedTextStatus: "ready",
+        charCount:           typeof charCount === "number" ? charCount : extractedText.length,
+        extractionSource:    typeof extractionSource === "string" ? extractionSource : "client_push",
+      });
+
+      console.log(`[transcript] assetId=${assetId} tenant=${orgId} source=${extractionSource ?? "client_push"} chars=${(extractedText as string).length}`);
+      return res.json({ ok: true, assetId });
+    } catch (err: any) {
+      console.error(`[transcript] POST error assetId=${req.params.assetId}:`, err?.message);
       handleError(res, err);
     }
   });
