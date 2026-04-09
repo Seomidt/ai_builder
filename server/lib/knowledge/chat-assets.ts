@@ -36,6 +36,8 @@ export interface ChatAsset {
   assetOrigin: AssetOrigin;
   chatThreadId: string | null;
   fileHash: string | null;
+  /** Phase 5: r2Key parsed from metadata jsonb — null if not yet uploaded to R2 */
+  r2Key: string | null;
   isPinned: boolean;
   promotedToStorageAt: Date | null;
   retentionMode: RetentionMode | null;
@@ -46,6 +48,8 @@ export interface ChatAsset {
 }
 
 function rowToAsset(r: Record<string, unknown>): ChatAsset {
+  // metadata is jsonb — pg driver returns it as a parsed JS object
+  const meta = r["metadata"] as Record<string, unknown> | null;
   return {
     id: r["id"] as string,
     tenantId: r["tenant_id"] as string,
@@ -57,6 +61,7 @@ function rowToAsset(r: Record<string, unknown>): ChatAsset {
     assetOrigin: (r["asset_origin"] as AssetOrigin) ?? "storage_upload",
     chatThreadId: (r["chat_thread_id"] as string) ?? null,
     fileHash: (r["file_hash"] as string) ?? null,
+    r2Key: (meta?.["r2Key"] as string) ?? null,
     isPinned: (r["is_pinned"] as boolean) ?? false,
     promotedToStorageAt: r["promoted_to_storage_at"]
       ? new Date(r["promoted_to_storage_at"] as string)

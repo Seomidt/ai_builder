@@ -88,6 +88,22 @@ interface AssetRef {
   assetId: string;
   filename: string;
   scope: "temporary_chat" | "persistent_storage";
+  /** Phase 5: true = existing asset row reused — no new row created */
+  isDeduped?: boolean;
+  /** Phase 5: true = R2 upload can be skipped (asset already has r2Key) */
+  skipUpload?: boolean;
+  /** Phase 5: existing r2Key if asset already uploaded — used to skip R2 in SLOW path */
+  existingR2Key?: string | null;
+}
+
+/** Phase 5: return value from createChatAssetForFile including dedup flags */
+interface AssetCreateResult {
+  assetId: string;
+  isDeduped: boolean;
+  skipUpload: boolean;
+  ocrReady: boolean;
+  /** Phase 5: r2Key from the existing asset row, if already uploaded */
+  existingR2Key: string | null;
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -126,16 +142,51 @@ async function computeFileHash(file: File): Promise<string> {
 }
 
 /**
- * Creates a temporary_chat knowledge_document for a single file.
- * Returns the assetId on success, or null on failure (non-blocking).
+ * Phase 5: Creates or reuses a temporary_chat knowledge_document for a single file.
+ *
+ * Flow:
+ *  1. Compute SHA-256 hash
+ *  2. GET /api/knowledge/assets/by-hash?fileHash=... (HASH_HIT / HASH_MISS)
+ *  3a. HASH_HIT  → reuse existing assetId; skip R2 upload if asset already uploaded
+ *  3b. HASH_MISS → POST /api/knowledge/assets to create new row
+ *
+ * Returns AssetCreateResult on success, or null on failure (non-blocking).
+ * INV: Tenant isolation enforced server-side — by-hash scoped to orgId.
  */
 async function createChatAssetForFile(
   file: File,
   afType: AttachedFile["type"],
   chatSessionId: string,
-): Promise<string | null> {
+): Promise<AssetCreateResult | null> {
   try {
     const fileHash = await computeFileHash(file);
+
+    // ── Phase 5: deduplication check ──────────────────────────────────────────
+    if (fileHash) {
+      const hashRes = await apiRequest("GET", `/api/knowledge/assets/by-hash?fileHash=${encodeURIComponent(fileHash)}`);
+      if (hashRes.ok) {
+        const { asset } = await hashRes.json() as {
+          asset: { id: string; documentStatus: string; r2Key: string | null }
+        };
+        if (asset?.id) {
+          const ocrReady       = asset.documentStatus === "ready";
+          const existingR2Key  = asset.r2Key ?? null;
+          const skipUpload     = existingR2Key !== null; // already has r2Key in R2
+          console.log(
+            `[ASSETS][DEDUP] HASH_HIT file="${file.name}" hash=${fileHash.slice(0,16)}…` +
+            ` assetId=${asset.id} status=${asset.documentStatus}` +
+            (skipUpload ? " SKIP_R2_UPLOAD" : "") +
+            (ocrReady   ? " OCR_REUSED EMBEDDINGS_REUSED" : ""),
+          );
+          return { assetId: asset.id, isDeduped: true, skipUpload, ocrReady, existingR2Key };
+        }
+      }
+      // 404 or error → fall through to create
+    }
+
+    console.log(`[ASSETS][DEDUP] HASH_MISS file="${file.name}" hash=${fileHash ? fileHash.slice(0,16)+"…" : "(no-hash)"} → creating new asset`);
+
+    // ── HASH_MISS: create new row ─────────────────────────────────────────────
     const res = await apiRequest("POST", "/api/knowledge/assets", {
       title:         file.name,
       fileHash:      fileHash || undefined,
@@ -147,7 +198,9 @@ async function createChatAssetForFile(
     });
     if (!res.ok) return null;
     const data = await res.json() as { asset: { id: string } };
-    return data.asset?.id ?? null;
+    const assetId = data.asset?.id;
+    if (!assetId) return null;
+    return { assetId, isDeduped: false, skipUpload: false, ocrReady: false, existingR2Key: null };
   } catch {
     return null;
   }
@@ -1122,8 +1175,8 @@ export default function AiChatPage() {
           const fastResults: any[] = [];
           const slowFiles: { af: typeof docFiles[0]; reason: string }[] = [];
 
-          // Phase 2+3: start asset creation in parallel with extraction
-          const _assetPromises: Array<{ filename: string; af: typeof docFiles[0]; promise: Promise<string | null> }> = [];
+          // Phase 2+3 + Phase 5: start asset creation/dedup-check in parallel with extraction
+          const _assetPromises: Array<{ filename: string; af: typeof docFiles[0]; promise: Promise<AssetCreateResult | null> }> = [];
 
           for (const af of docFiles) {
             const file = af.file;
@@ -1192,11 +1245,19 @@ export default function AiChatPage() {
             }
           }
 
-          // Phase 2+3: resolve all asset creation promises and update user message
+          // Phase 2+3 + Phase 5: resolve all asset creation promises and update user message
           const _assetRefs: AssetRef[] = (await Promise.all(
             _assetPromises.map(async p => {
-              const assetId = await p.promise;
-              return assetId ? { assetId, filename: p.filename, scope: "temporary_chat" as const } : null;
+              const result = await p.promise;
+              if (!result) return null;
+              return {
+                assetId:       result.assetId,
+                filename:      p.filename,
+                scope:         "temporary_chat" as const,
+                isDeduped:     result.isDeduped,
+                skipUpload:    result.skipUpload,
+                existingR2Key: result.existingR2Key,
+              };
             }),
           )).filter((r): r is AssetRef => r !== null);
 
@@ -1275,11 +1336,17 @@ export default function AiChatPage() {
             createStreamBubble("ALL_FAST");
 
             // Fire-and-forget durable R2 upload for persistence — does NOT block AI answer
-            // Phase 2+3: capture _assetRefs so patch can find the right assetId per file
+            // Phase 2+3 + Phase 5: capture _assetRefs so patch can find the right assetId per file
             const _capturedAssetRefs = _assetRefs;
             ;(async () => {
               for (const af of docFiles) {
                 const file = af.file;
+                // Phase 5: skip R2 upload if asset is deduped and already has r2Key
+                const _ref = _capturedAssetRefs.find(r => r.filename === file.name);
+                if (_ref?.skipUpload) {
+                  console.log(`[ASSETS][DEDUP] ALL_FAST SKIP_R2 file="${file.name}" assetId=${_ref.assetId} isDeduped=true`);
+                  continue;
+                }
                 try {
                   const urlRes = await apiRequest("POST", "/api/upload/url", {
                     filename:    file.name,
@@ -1350,6 +1417,13 @@ export default function AiChatPage() {
                   const file = af.file;
                   console.log(`[SCANNED-UPGRADE-${upgradeId}] Processing file="${file.name}" size=${file.size}`);
 
+                  // Phase 5: skip R2 upload entirely if this asset is deduped (already in R2)
+                  const _scannedAssetRef = _assetRefs.find(r => r.filename === file.name);
+                  if (_scannedAssetRef?.skipUpload) {
+                    console.log(`[ASSETS][DEDUP] SCANNED SKIP_R2 file="${file.name}" assetId=${_scannedAssetRef.assetId} isDeduped=true`);
+                    continue;
+                  }
+
                   // Step 1: Presigned upload URL
                   const urlRes = await apiRequest("POST", "/api/upload/url", {
                     filename:    file.name,
@@ -1373,8 +1447,6 @@ export default function AiChatPage() {
                     console.warn(`[SCANNED-UPGRADE-${upgradeId}] R2 PUT failed HTTP ${r2Res.status} for "${file.name}" — skipping`);
                     continue;
                   }
-                  // Phase 2+3: patch asset row with r2Key
-                  const _scannedAssetRef = _assetRefs.find(r => r.filename === file.name);
                   if (_scannedAssetRef) {
                     patchAssetR2KeyFF(_scannedAssetRef.assetId, objectKey, file).catch(() => {});
                   }
@@ -1500,32 +1572,40 @@ export default function AiChatPage() {
             const finalizeResults: any[] = [];
             for (const { af } of slowFiles) {
               const file = af.file;
-
-              console.log(`[TRACE-2e][${traceId}] requesting presigned URL for ${file.name} (${file.size}b)`);
-              const urlRes = await apiRequest("POST", "/api/upload/url", {
-                filename:    file.name,
-                contentType: file.type || "application/octet-stream",
-                size:        file.size,
-                context:     "chat",
-              });
-              if (!urlRes.ok) {
-                const errBody = await urlRes.json().catch(() => ({})) as any;
-                throw Object.assign(new Error(errBody?.message ?? "Fil kunne ikke klargøres til upload."), { errorCode: "PRESIGN_FAILED" });
-              }
-              const { uploadUrl, objectKey } = await urlRes.json() as { uploadUrl: string; objectKey: string; expiresIn: number };
-
-              const r2Res = await fetch(uploadUrl, {
-                method:  "PUT",
-                body:    file,
-                headers: { "Content-Type": file.type || "application/octet-stream" },
-              });
-              if (!r2Res.ok) {
-                throw Object.assign(new Error("Fil upload fejlede. Prøv igen."), { errorCode: "R2_UPLOAD_FAILED" });
-              }
-              // Phase 2+3: patch asset row med r2Key efter vellykket R2 upload
               const _slowAssetRef = _assetRefs.find(r => r.filename === file.name);
-              if (_slowAssetRef) {
-                patchAssetR2KeyFF(_slowAssetRef.assetId, objectKey, file).catch(() => {});
+
+              // Phase 5: if asset has r2Key already, skip presign + R2 PUT (reuse existing objectKey)
+              let objectKey: string;
+              if (_slowAssetRef?.skipUpload && _slowAssetRef.existingR2Key) {
+                objectKey = _slowAssetRef.existingR2Key;
+                console.log(`[ASSETS][DEDUP] SLOW SKIP_R2 file="${file.name}" assetId=${_slowAssetRef.assetId} existingR2Key=${objectKey}`);
+              } else {
+                console.log(`[TRACE-2e][${traceId}] requesting presigned URL for ${file.name} (${file.size}b)`);
+                const urlRes = await apiRequest("POST", "/api/upload/url", {
+                  filename:    file.name,
+                  contentType: file.type || "application/octet-stream",
+                  size:        file.size,
+                  context:     "chat",
+                });
+                if (!urlRes.ok) {
+                  const errBody = await urlRes.json().catch(() => ({})) as any;
+                  throw Object.assign(new Error(errBody?.message ?? "Fil kunne ikke klargøres til upload."), { errorCode: "PRESIGN_FAILED" });
+                }
+                const presignData = await urlRes.json() as { uploadUrl: string; objectKey: string; expiresIn: number };
+                objectKey = presignData.objectKey;
+
+                const r2Res = await fetch(presignData.uploadUrl, {
+                  method:  "PUT",
+                  body:    file,
+                  headers: { "Content-Type": file.type || "application/octet-stream" },
+                });
+                if (!r2Res.ok) {
+                  throw Object.assign(new Error("Fil upload fejlede. Prøv igen."), { errorCode: "R2_UPLOAD_FAILED" });
+                }
+                // Phase 2+3: patch asset row med r2Key efter vellykket R2 upload
+                if (_slowAssetRef) {
+                  patchAssetR2KeyFF(_slowAssetRef.assetId, objectKey, file).catch(() => {});
+                }
               }
 
               const tFinalizeStart = Date.now();

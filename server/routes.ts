@@ -4959,10 +4959,21 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       const { fileHash } = req.query as Record<string, string>;
       if (!fileHash) return res.status(400).json({ error: "fileHash is required" });
 
-      const { findAssetByFileHash } = await import("./lib/knowledge/chat-assets.ts");
+      const { findAssetByFileHash, touchAsset } = await import("./lib/knowledge/chat-assets.ts");
       const asset = await findAssetByFileHash({ tenantId: orgId, fileHash });
 
       if (!asset) return res.status(404).json({ error: "No asset found for this hash" });
+
+      // Phase 5: update last_accessed_at on hash hit — fire-and-forget
+      touchAsset({ assetId: asset.id, tenantId: orgId }).catch(() => {});
+
+      console.log(
+        `[DEDUP] HASH_HIT tenant=${orgId} hash=${fileHash.slice(0,16)}…` +
+        ` assetId=${asset.id} status=${asset.documentStatus}` +
+        (asset.r2Key ? " HAS_R2KEY" : " NO_R2KEY") +
+        (asset.documentStatus === "ready" ? " OCR_REUSED EMBEDDINGS_REUSED" : ""),
+      );
+
       return res.json({ asset });
     } catch (err) {
       handleError(res, err);
