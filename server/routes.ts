@@ -5290,6 +5290,45 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     }
   });
 
+  /**
+   * POST /api/admin/extract-backfill
+   * EXTRACT-MIGRATION Phase 3: run one resumable backfill batch.
+   *
+   * Body: { batchSize?, cursorId?, dryRun?, tenantId? }
+   *   batchSize — rows per batch (default 500)
+   *   cursorId  — start cursor from previous run (pass nextCursor from prior result)
+   *   dryRun    — true = read-only, logs would-upsert, no DB writes
+   *   tenantId  — scope to one tenant (optional)
+   *
+   * Returns: { ok, result: BackfillResult }
+   * Call repeatedly with cursorId=result.nextCursor until result.nextCursor is null.
+   */
+  app.post("/api/admin/extract-backfill", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const {
+        batchSize,
+        cursorId,
+        dryRun    = false,
+        tenantId,
+      } = req.body as Record<string, unknown>;
+
+      const { runExtractBackfillBatch } = await import("./lib/knowledge/extract-backfill.ts");
+      const result = await runExtractBackfillBatch({
+        batchSize:  typeof batchSize === "number"  ? batchSize  : 500,
+        cursorId:   typeof cursorId  === "string"  ? cursorId   : null,
+        dryRun:     dryRun === true,
+        tenantId:   typeof tenantId  === "string"  ? tenantId   : undefined,
+      });
+
+      return res.json({ ok: true, result });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
   return httpServer;
 }
 

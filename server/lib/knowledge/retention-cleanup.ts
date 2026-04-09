@@ -198,6 +198,22 @@ export async function runRetentionCleanupBatch(
              WHERE id = $1 AND tenant_id = $2 AND lifecycle_state = 'active'`,
             [row.id, row.tenantId],
           );
+
+          // EXTRACT-MIGRATION Phase 7: purge extracted_text from normalized version row
+          // Keeps lifecycle state consistent — archived asset must not retain reusable content.
+          // Sets extracted_text_status='failed' so HASH_HIT does not attempt to reuse.
+          await client.query(
+            `UPDATE knowledge_document_versions
+               SET extracted_text        = NULL,
+                   extracted_text_status = 'failed',
+                   version_status        = 'superseded'
+             WHERE knowledge_document_id = $1
+               AND extracted_text IS NOT NULL`,
+            [row.id],
+          ).catch(err =>
+            console.warn(`[retention-cleanup] version purge failed id=${row.id}: ${(err as Error).message}`),
+          );
+
           result.dbArchived++;
 
           // ── 2c. Audit event ────────────────────────────────────────────────

@@ -759,6 +759,14 @@ export const knowledgeDocumentVersions = pgTable(
     importLinkCount: integer("import_link_count"),
     importFailureReason: text("import_failure_reason"),
     sourceLanguageCode: text("source_language_code"),
+    // ── EXTRACT-MIGRATION Phase 1 — normalized extracted text ─────────────────
+    // Migrated from knowledge_documents.metadata jsonb fields.
+    // Populated by patchAssetTranscript() dual-write + backfill job.
+    // extractedText is the canonical reusable text for HASH_HIT dedup.
+    extractedText:       text("extracted_text"),
+    extractedTextStatus: text("extracted_text_status"),
+    extractedAt:         timestamp("extracted_at"),
+    extractionSource:    text("extraction_source"),
   },
   (t) => [
     sql`CONSTRAINT kdv_version_number_check CHECK (${t.versionNumber} > 0)`,
@@ -794,6 +802,10 @@ export const knowledgeDocumentVersions = pgTable(
     sql`CONSTRAINT kdv_import_section_count_check CHECK (${t.importSectionCount} IS NULL OR ${t.importSectionCount} >= 0)`,
     sql`CONSTRAINT kdv_import_link_count_check CHECK (${t.importLinkCount} IS NULL OR ${t.importLinkCount} >= 0)`,
     index("kdv_tenant_import_parse_status_idx").on(t.tenantId, t.importParseStatus, t.createdAt),
+    // EXTRACT-MIGRATION Phase 1 — constraint + indexes for extracted_text fields
+    sql`CONSTRAINT kdv_extracted_text_status_check CHECK (${t.extractedTextStatus} IS NULL OR ${t.extractedTextStatus} IN ('ready','failed'))`,
+    index("kdv_doc_extracted_status_idx").on(t.knowledgeDocumentId, t.extractedTextStatus),
+    index("kdv_tenant_extracted_status_idx").on(t.tenantId, t.extractedTextStatus),
   ],
 );
 

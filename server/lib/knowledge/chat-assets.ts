@@ -403,23 +403,91 @@ export async function findAssetByFileHash(params: {
 }): Promise<ChatAsset | null> {
   const { tenantId, fileHash } = params;
 
+  const shadowRead   = process.env.EXTRACT_SHADOW_READ   !== "false"; // default ON during migration
+  const readCutover  = process.env.EXTRACT_READ_CUTOVER  === "true";  // default OFF until backfill verified
+
   const client = getClient();
   try {
     await client.connect();
 
+    // ── EXTRACT-MIGRATION Phase 4/5: joined query ──────────────────────────
+    // Always LEFT JOIN knowledge_document_versions v1 (version_number=1) to support:
+    //   Phase 4 shadow mode: compare jsonb vs version row, log mismatches
+    //   Phase 5 cutover mode: primary read from version row, fallback to jsonb
     const result = await client.query<Record<string, unknown>>(
-      `SELECT * FROM knowledge_documents
-       WHERE tenant_id = $1
-         AND file_hash = $2
-         AND lifecycle_state = 'active'
-       ORDER BY created_at DESC
-       LIMIT 1`,
+      `SELECT kd.*,
+              v.extracted_text        AS v_extracted_text,
+              v.extracted_text_status AS v_extracted_text_status,
+              v.extracted_at          AS v_extracted_at,
+              v.extraction_source     AS v_extraction_source
+       FROM   knowledge_documents kd
+       LEFT   JOIN knowledge_document_versions v
+              ON  v.knowledge_document_id = kd.id
+              AND v.version_number = 1
+       WHERE  kd.tenant_id = $1
+         AND  kd.file_hash = $2
+         AND  kd.lifecycle_state = 'active'
+       ORDER  BY kd.created_at DESC
+       LIMIT  1`,
       [tenantId, fileHash],
     );
 
-    return result.rowCount && result.rowCount > 0
-      ? rowToAsset(result.rows[0])
-      : null;
+    if (!result.rowCount || result.rowCount === 0) return null;
+
+    const row = result.rows[0];
+
+    // ── Build base asset from jsonb (legacy source — always available) ────
+    const asset = rowToAsset(row);
+
+    // ── Shadow read comparison (Phase 4) ─────────────────────────────────
+    if (shadowRead) {
+      const jsonbHasText    = !!asset.extractedText;
+      const versionHasText  = !!(row.v_extracted_text as string | null);
+      const jsonbStatus     = asset.extractedTextStatus;
+      const versionStatus   = (row.v_extracted_text_status as string | null) ?? null;
+
+      if (jsonbHasText && versionHasText) {
+        const jsonbLen   = (asset.extractedText as string).length;
+        const versionLen = (row.v_extracted_text as string).length;
+        const match      = jsonbLen === versionLen && jsonbStatus === versionStatus;
+        if (match) {
+          console.log(`[extract-migration] EXTRACT_READ_MATCH assetId=${asset.id} chars=${jsonbLen} status=${jsonbStatus}`);
+        } else {
+          console.warn(
+            `[extract-migration] EXTRACT_READ_MISMATCH assetId=${asset.id}` +
+            ` jsonbChars=${jsonbLen} versionChars=${versionLen}` +
+            ` jsonbStatus=${jsonbStatus} versionStatus=${versionStatus}`,
+          );
+        }
+      } else if (jsonbHasText && !versionHasText) {
+        console.log(`[extract-migration] EXTRACT_READ_JSONB_ONLY assetId=${asset.id} chars=${asset.extractedText?.length} — version row missing or not yet backfilled`);
+      } else if (!jsonbHasText && versionHasText) {
+        console.log(`[extract-migration] EXTRACT_READ_VERSION_ONLY assetId=${asset.id} chars=${(row.v_extracted_text as string).length} — jsonb missing (ahead of dual-write?)`);
+      }
+    }
+
+    // ── Cutover read (Phase 5): primary = version row, fallback = jsonb ───
+    if (readCutover) {
+      const versionExtractedText   = (row.v_extracted_text        as string | null) ?? null;
+      const versionExtractedStatus = (row.v_extracted_text_status as "ready" | "failed" | null) ?? null;
+      const versionExtractedAt     = (row.v_extracted_at          as string | null) ?? null;
+
+      if (versionExtractedText !== null) {
+        // Primary: normalized version row
+        return {
+          ...asset,
+          extractedText:       versionExtractedText,
+          extractedTextStatus: versionExtractedStatus,
+          extractedAt:         versionExtractedAt,
+        };
+      }
+      // Fallback: jsonb (log so we can monitor backfill lag)
+      if (asset.extractedText) {
+        console.log(`[extract-migration] EXTRACT_FALLBACK assetId=${asset.id} — version row missing, using jsonb`);
+      }
+    }
+
+    return asset; // Phase 2/3/4: always return jsonb-sourced asset
   } finally {
     await client.end();
   }
@@ -588,10 +656,17 @@ export async function patchAssetTranscript(params: {
   extractionSource?:   string;
 }): Promise<void> {
   const { assetId, tenantId, extractedText, extractedTextStatus, charCount, extractionSource } = params;
+  const finalCharCount  = charCount ?? extractedText.length;
+  const finalSource     = extractionSource ?? "unknown";
+  const versionStatus   = extractedTextStatus === "ready" ? "indexed" : "failed";
 
   const client = getClient();
   try {
     await client.connect();
+
+    // ── WRITE 1 (legacy): jsonb metadata on knowledge_documents ──────────────
+    // EXTRACT-MIGRATION Phase 2: kept unchanged during dual-write window.
+    // Do NOT remove until Phase 6 (post-cutover stabilization) confirms zero mismatches.
     await client.query(
       `UPDATE knowledge_documents
          SET metadata       = COALESCE(metadata, '{}'::jsonb)
@@ -608,15 +683,41 @@ export async function patchAssetTranscript(params: {
              END,
              updated_at     = NOW()
        WHERE id = $1 AND tenant_id = $2`,
-      [
-        assetId,
-        tenantId,
-        extractedText,
-        extractedTextStatus,
-        charCount ?? extractedText.length,
-        extractionSource ?? "unknown",
-      ],
+      [assetId, tenantId, extractedText, extractedTextStatus, finalCharCount, finalSource],
     );
+
+    // ── WRITE 2 (normalized): knowledge_document_versions row ────────────────
+    // EXTRACT-MIGRATION Phase 2: dual-write to normalized version table.
+    // Convention for chat assets: version_number=1, is_current=true.
+    // Idempotency: ON CONFLICT DO UPDATE only replaces if incoming extracted_at is newer
+    // (or if no extracted_at exists yet), preventing stale backfill from overwriting fresher data.
+    if (process.env.EXTRACT_DUAL_WRITE !== "false") {
+      await client.query(
+        `INSERT INTO knowledge_document_versions
+           (id, tenant_id, knowledge_document_id, version_number,
+            is_current, version_status, character_count,
+            extracted_text, extracted_text_status, extracted_at, extraction_source,
+            processing_completed_at, created_by)
+         VALUES
+           (gen_random_uuid(), $1, $2, 1,
+            TRUE, $3, $4,
+            $5, $6, NOW(), $7,
+            CASE WHEN $6 = 'ready' THEN NOW() ELSE NULL END,
+            'system:extract-migration')
+         ON CONFLICT (knowledge_document_id, version_number) DO UPDATE
+           SET extracted_text        = EXCLUDED.extracted_text,
+               extracted_text_status = EXCLUDED.extracted_text_status,
+               extracted_at          = EXCLUDED.extracted_at,
+               extraction_source     = EXCLUDED.extraction_source,
+               character_count       = COALESCE(EXCLUDED.character_count, knowledge_document_versions.character_count),
+               version_status        = EXCLUDED.version_status,
+               processing_completed_at = COALESCE(EXCLUDED.processing_completed_at, knowledge_document_versions.processing_completed_at)
+           WHERE knowledge_document_versions.extracted_at IS NULL
+              OR EXCLUDED.extracted_at > knowledge_document_versions.extracted_at`,
+        [tenantId, assetId, versionStatus, finalCharCount, extractedText, extractedTextStatus, finalSource],
+      );
+      console.log(`[extract-migration] DUAL_WRITE assetId=${assetId} status=${extractedTextStatus} source=${finalSource} chars=${finalCharCount}`);
+    }
   } finally {
     await client.end();
   }
