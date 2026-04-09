@@ -243,6 +243,15 @@ app.use((req, res, next) => {
           })
           .catch((err) => log(`[chat-ocr-worker] failed to start: ${String(err)}`));
       }
+      // NEXT-B: Retention cleanup scheduler — purges expired knowledge_documents + R2 objects
+      // Runs every 6h; first run delayed 5 min after server start to let DB connections warm up
+      if (process.env.RETENTION_CLEANUP !== "false") {
+        import("./lib/knowledge/retention-cleanup")
+          .then(({ startRetentionCleanupScheduler }) => {
+            startRetentionCleanupScheduler();
+          })
+          .catch((err) => log(`[retention-cleanup] failed to start scheduler: ${String(err)}`));
+      }
     },
   );
 })();

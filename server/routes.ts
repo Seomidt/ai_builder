@@ -1386,9 +1386,14 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     try {
       const orgId  = getOrgId(req);
       const userId = getUserId(req);
-      const { objectKey, filename, contentType, size, context = "chat", fileCount = 1, questionText } = req.body as {
+      const {
+        objectKey, filename, contentType, size,
+        context = "chat", fileCount = 1, questionText,
+        assetId,   // NEXT-A: optional — when provided, transcript is persisted server-side
+      } = req.body as {
         objectKey: string; filename: string; contentType: string; size: number;
         context?: string; fileCount?: number; sourceId?: string; questionText?: string;
+        assetId?: string;
       };
 
       if (!objectKey || !filename || !contentType || typeof size !== "number") {
@@ -1512,8 +1517,38 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       const result = await processDirectAttachment({ objectKey, filename, contentType, sizeBytes: size });
 
       if (result.status === "ok") {
+        // NEXT-A: persist transcript server-side when assetId is provided
+        // Covers audio, video, and image files — all go through Gemini extraction
+        if (assetId && result.extracted_text) {
+          const isMediaOrImage =
+            contentType.startsWith("audio/") ||
+            contentType.startsWith("video/") ||
+            contentType.startsWith("image/");
+          if (isMediaOrImage) {
+            const { patchAssetTranscript } = await import("./lib/knowledge/chat-assets.ts");
+            patchAssetTranscript({
+              assetId,
+              tenantId: orgId,
+              extractedText:       result.extracted_text,
+              extractedTextStatus: "ready",
+              charCount:           result.char_count,
+            }).catch(err =>
+              console.warn(`[finalize] patchAssetTranscript failed assetId=${assetId}: ${(err as Error).message}`),
+            );
+          }
+        }
         return res.json({ mode: routing.mode, routing: routing.reason, results: [result] });
       }
+
+      // Persist failed status so HASH_HIT doesn't retry Gemini infinitely
+      if (assetId && result.code === "GEMINI_ERROR") {
+        const { patchAssetTranscript } = await import("./lib/knowledge/chat-assets.ts");
+        patchAssetTranscript({
+          assetId, tenantId: orgId,
+          extractedText: "", extractedTextStatus: "failed", charCount: 0,
+        }).catch(() => {});
+      }
+
       return res.json({ mode: "B_FALLBACK", routing: routing.reason, message: result.message, results: [] });
     } catch (e) {
       console.error("[upload/finalize] error:", e);
@@ -5022,9 +5057,11 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         `[DEDUP] HASH_HIT tenant=${orgId} hash=${fileHash.slice(0,16)}…` +
         ` assetId=${asset.id} status=${asset.documentStatus}` +
         (asset.r2Key ? " HAS_R2KEY" : " NO_R2KEY") +
-        (asset.documentStatus === "ready" ? " OCR_REUSED EMBEDDINGS_REUSED" : ""),
+        (asset.extractedText ? ` HAS_TRANSCRIPT chars=${asset.extractedText.length}` : "") +
+        (asset.documentStatus === "ready" ? " TRANSCRIPT_REUSED" : ""),
       );
 
+      // NEXT-A: extractedText + extractedTextStatus are now part of ChatAsset (parsed from metadata)
       return res.json({ asset });
     } catch (err) {
       handleError(res, err);
@@ -5171,6 +5208,38 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     } catch (err: any) {
       if (err.code === "ASSET_NOT_FOUND") return res.status(404).json({ error: err.message });
       if (err.code === "ALREADY_PROMOTED") return res.status(409).json({ error: err.message });
+      handleError(res, err);
+    }
+  });
+
+  /**
+   * POST /api/admin/retention/cleanup
+   * Manual trigger for the retention cleanup engine.
+   * Runs one batch synchronously and returns the result.
+   * Accepts optional: batchSize (default 50), dryRun (default false), tenantId.
+   * Requires admin auth — protected by the same orgId guard as all /api/* routes.
+   */
+  app.post("/api/admin/retention/cleanup", async (req: Request, res: Response) => {
+    try {
+      const orgId = getOrgId(req);
+      const {
+        batchSize = 50,
+        dryRun    = false,
+        tenantId,
+      } = req.body as { batchSize?: number; dryRun?: boolean; tenantId?: string };
+
+      // tenantId filter: if provided, must match the caller's own tenant (safety guard)
+      const safeTenantId = tenantId && tenantId === orgId ? tenantId : orgId;
+
+      const { runRetentionCleanupBatch } = await import("./lib/knowledge/retention-cleanup.ts");
+      const result = await runRetentionCleanupBatch({
+        batchSize: Math.min(Number(batchSize) || 50, 500),
+        dryRun:    Boolean(dryRun),
+        tenantId:  safeTenantId,
+      });
+
+      return res.json({ ok: true, result });
+    } catch (err) {
       handleError(res, err);
     }
   });

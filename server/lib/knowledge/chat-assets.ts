@@ -136,6 +136,12 @@ export interface ChatAsset {
   lastAccessedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
+  /** NEXT-A: persisted transcript/OCR text — null if not yet extracted */
+  extractedText: string | null;
+  /** NEXT-A: 'ready' | 'failed' | null (null = not yet processed) */
+  extractedTextStatus: "ready" | "failed" | null;
+  /** NEXT-A: ISO timestamp of last extraction — null if not yet processed */
+  extractedAt: string | null;
 }
 
 function rowToAsset(r: Record<string, unknown>): ChatAsset {
@@ -166,6 +172,10 @@ function rowToAsset(r: Record<string, unknown>): ChatAsset {
       : null,
     createdAt: new Date(r["created_at"] as string),
     updatedAt: new Date(r["updated_at"] as string),
+    // NEXT-A: transcript fields from metadata jsonb
+    extractedText:       (meta?.["extractedText"] as string)       ?? null,
+    extractedTextStatus: (meta?.["extractedTextStatus"] as "ready" | "failed") ?? null,
+    extractedAt:         (meta?.["extractedAt"] as string)         ?? null,
   };
 }
 
@@ -542,6 +552,60 @@ export async function patchAssetR2Key(params: {
     }
 
     return rowToAsset(result.rows[0]);
+  } finally {
+    await client.end();
+  }
+}
+
+// ─── patchAssetTranscript ─────────────────────────────────────────────────────
+
+/**
+ * Persists extracted text (transcript/OCR) into knowledge_documents.metadata.
+ * Called after Gemini processes audio, video, or image files.
+ * Sets document_status='ready' so HASH_HIT queries know text is available.
+ *
+ * Fields written into metadata jsonb (merged via ||):
+ *   extractedText        — full transcript or extracted text
+ *   extractedTextStatus  — 'ready' | 'failed'
+ *   extractedAt          — ISO timestamp of extraction
+ *
+ * Idempotent: safe to call multiple times — JSONB merge overwrites keys.
+ */
+export async function patchAssetTranscript(params: {
+  assetId:   string;
+  tenantId:  string;
+  extractedText:       string;
+  extractedTextStatus: "ready" | "failed";
+  charCount?:  number;
+}): Promise<void> {
+  const { assetId, tenantId, extractedText, extractedTextStatus, charCount } = params;
+
+  const client = getClient();
+  try {
+    await client.connect();
+    await client.query(
+      `UPDATE knowledge_documents
+         SET metadata       = COALESCE(metadata, '{}'::jsonb)
+                             || jsonb_build_object(
+                                  'extractedText',       $3::text,
+                                  'extractedTextStatus', $4::text,
+                                  'extractedAt',         NOW()::text,
+                                  'charCount',           $5::int
+                                ),
+             document_status = CASE
+               WHEN $4 = 'ready' THEN 'ready'
+               ELSE document_status
+             END,
+             updated_at     = NOW()
+       WHERE id = $1 AND tenant_id = $2`,
+      [
+        assetId,
+        tenantId,
+        extractedText,
+        extractedTextStatus,
+        charCount ?? extractedText.length,
+      ],
+    );
   } finally {
     await client.end();
   }

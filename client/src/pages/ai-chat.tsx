@@ -94,6 +94,8 @@ interface AssetRef {
   skipUpload?: boolean;
   /** Phase 5: existing r2Key if asset already uploaded — used to skip R2 in SLOW path */
   existingR2Key?: string | null;
+  /** NEXT-A: persisted transcript from previous extraction — enables skip-finalize on HASH_HIT */
+  extractedText?: string | null;
 }
 
 /** Phase 5: return value from createChatAssetForFile including dedup flags */
@@ -104,6 +106,8 @@ interface AssetCreateResult {
   ocrReady: boolean;
   /** Phase 5: r2Key from the existing asset row, if already uploaded */
   existingR2Key: string | null;
+  /** NEXT-A: persisted transcript from previous Gemini extraction */
+  extractedText: string | null;
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -172,16 +176,18 @@ async function createChatAssetForFile(
           asset: { id: string; documentStatus: string; r2Key: string | null }
         };
         if (asset?.id) {
-          const ocrReady       = asset.documentStatus === "ready";
-          const existingR2Key  = asset.r2Key ?? null;
-          const skipUpload     = existingR2Key !== null; // already has r2Key in R2
+          const ocrReady        = asset.documentStatus === "ready";
+          const existingR2Key   = asset.r2Key ?? null;
+          const skipUpload      = existingR2Key !== null;
+          const extractedText   = (asset.extractedText as string | null | undefined) ?? null;
           console.log(
             `[ASSETS][DEDUP] HASH_HIT file="${file.name}" hash=${fileHash.slice(0,16)}…` +
             ` assetId=${asset.id} status=${asset.documentStatus}` +
-            (skipUpload ? " SKIP_R2_UPLOAD" : "") +
-            (ocrReady   ? " OCR_REUSED EMBEDDINGS_REUSED" : ""),
+            (skipUpload    ? " SKIP_R2_UPLOAD"      : "") +
+            (extractedText ? ` HAS_TRANSCRIPT chars=${extractedText.length}` : "") +
+            (ocrReady      ? " TRANSCRIPT_REUSED"   : ""),
           );
-          return { assetId: asset.id, isDeduped: true, skipUpload, ocrReady, existingR2Key };
+          return { assetId: asset.id, isDeduped: true, skipUpload, ocrReady, existingR2Key, extractedText };
         }
       }
       // 404 or error → fall through to create
@@ -203,7 +209,7 @@ async function createChatAssetForFile(
     const data = await res.json() as { asset: { id: string } };
     const assetId = data.asset?.id;
     if (!assetId) return null;
-    return { assetId, isDeduped: false, skipUpload: false, ocrReady: false, existingR2Key: null };
+    return { assetId, isDeduped: false, skipUpload: false, ocrReady: false, existingR2Key: null, extractedText: null };
   } catch {
     return null;
   }
@@ -1280,6 +1286,8 @@ export default function AiChatPage() {
                 isDeduped:     result.isDeduped,
                 skipUpload:    result.skipUpload,
                 existingR2Key: result.existingR2Key,
+                // NEXT-A: carry persisted transcript for HASH_HIT reuse in SLOW path
+                extractedText: result.extractedText,
               };
             }),
           )).filter((r): r is AssetRef => r !== null);
@@ -1635,6 +1643,26 @@ export default function AiChatPage() {
               console.log(`[TIMING] FINALIZE_START t=${tFinalizeStart} +${tFinalizeStart - tClick}ms_since_CLICK file="${file.name}"`);
               const isVideoMime = (file.type || "").startsWith("video/");
               const isAudioMime = (file.type || "").startsWith("audio/");
+
+              // NEXT-A: HASH_HIT transcript reuse — skip Gemini re-extraction entirely
+              // Condition: file is audio/video + we have a persisted transcript from a prior session
+              if ((isAudioMime || isVideoMime) && _slowAssetRef?.skipUpload && _slowAssetRef.extractedText) {
+                const reusedText = _slowAssetRef.extractedText;
+                console.log(
+                  `[ASSETS][TRANSCRIPT_REUSE] file="${file.name}" assetId=${_slowAssetRef.assetId}` +
+                  ` chars=${reusedText.length} SKIP_FINALIZE=true`,
+                );
+                finalizeResults.push({
+                  filename:       file.name,
+                  mime_type:      file.type || (isAudioMime ? "audio/mpeg" : "video/mp4"),
+                  char_count:     reusedText.length,
+                  extracted_text: reusedText,
+                  status:         "ok",
+                  source:         "transcript_cache",
+                });
+                continue;
+              }
+
               if (isVideoMime) setOcrStatusLabel(`Analyserer video: ${file.name}`);
               if (isAudioMime) setOcrStatusLabel(`Transskriberer lyd: ${file.name}`);
               const finalRes = await apiRequest("POST", "/api/upload/finalize", {
@@ -1645,6 +1673,8 @@ export default function AiChatPage() {
                 context:     "chat",
                 fileCount:   slowFiles.length,
                 questionText: payload.text?.trim() || undefined,
+                // NEXT-A: pass assetId so server can persist transcript server-side
+                assetId:     _slowAssetRef?.assetId || undefined,
               });
               if (isVideoMime || isAudioMime) setOcrStatusLabel(null);
               if (!finalRes.ok) {
