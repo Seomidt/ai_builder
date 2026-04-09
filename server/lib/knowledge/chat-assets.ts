@@ -402,6 +402,55 @@ export async function listChatAssets(params: {
   }
 }
 
+// ─── patchAssetR2Key ──────────────────────────────────────────────────────────
+
+/**
+ * Updates an asset with the R2 object key after background upload completes.
+ * Also persists mime_type / size_bytes into the metadata JSON field.
+ * Idempotent: safe to call multiple times with the same r2Key.
+ */
+export async function patchAssetR2Key(params: {
+  assetId: string;
+  tenantId: string;
+  r2Key: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  documentStatus?: "draft" | "processing" | "ready" | "failed";
+}): Promise<ChatAsset> {
+  const { assetId, tenantId, r2Key, mimeType, sizeBytes, documentStatus = "processing" } = params;
+
+  const client = getClient();
+  try {
+    await client.connect();
+
+    const result = await client.query<Record<string, unknown>>(
+      `UPDATE knowledge_documents
+         SET metadata     = COALESCE(metadata, '{}'::jsonb)
+                           || jsonb_build_object(
+                                'r2Key',      $3,
+                                'mimeType',   $4::text,
+                                'sizeBytes',  $5::bigint
+                              ),
+             document_status = $6,
+             updated_at      = NOW()
+       WHERE id = $1 AND tenant_id = $2
+       RETURNING *`,
+      [assetId, tenantId, r2Key, mimeType ?? null, sizeBytes ?? null, documentStatus],
+    );
+
+    if (!result.rowCount) {
+      throw Object.assign(
+        new Error(`Asset ${assetId} not found for tenant ${tenantId}`),
+        { code: "ASSET_NOT_FOUND" },
+      );
+    }
+
+    return rowToAsset(result.rows[0]);
+  } finally {
+    await client.end();
+  }
+}
+
 // ─── touchAsset ───────────────────────────────────────────────────────────────
 
 /** Updates last_accessed_at — call whenever an asset is used in a chat answer. */

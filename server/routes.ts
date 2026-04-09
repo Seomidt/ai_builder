@@ -5023,6 +5023,41 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
   });
 
   /**
+   * PATCH /api/knowledge/assets/:assetId
+   * Update asset after R2 upload completes (r2Key + documentStatus).
+   * Called fire-and-forget from the frontend after successful R2 PUT.
+   */
+  app.patch("/api/knowledge/assets/:assetId", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { assetId } = req.params;
+      const { r2Key, mimeType, sizeBytes, documentStatus } = req.body as Record<string, unknown>;
+
+      if (!r2Key || typeof r2Key !== "string") {
+        return res.status(400).json({ error: "r2Key is required" });
+      }
+
+      const { patchAssetR2Key } = await import("./lib/knowledge/chat-assets.ts");
+
+      const asset = await patchAssetR2Key({
+        assetId,
+        tenantId: orgId,
+        r2Key,
+        mimeType: typeof mimeType === "string" ? mimeType : undefined,
+        sizeBytes: typeof sizeBytes === "number" ? sizeBytes : undefined,
+        documentStatus: typeof documentStatus === "string" ? (documentStatus as any) : "processing",
+      });
+
+      return res.json({ asset });
+    } catch (err: any) {
+      if (err.code === "ASSET_NOT_FOUND") return res.status(404).json({ error: err.message });
+      handleError(res, err);
+    }
+  });
+
+  /**
    * POST /api/knowledge/assets/:assetId/promote
    * Promote a temporary_chat asset to persistent_storage in a KB.
    * The SAME asset row changes scope — no duplicate blob, no double billing.

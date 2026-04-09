@@ -1,11 +1,11 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import {
   Send, Bot, User, ChevronDown, ChevronUp, ShieldAlert, BookOpen,
   AlertTriangle, CheckCircle2, HelpCircle, Paperclip, X,
   FileText, Image, Video, Sparkles, Zap, RefreshCw, Clock, WifiOff,
-  TrendingUp, Hourglass,
+  TrendingUp, Hourglass, Save, Database, ChevronRight,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import { Badge } from "@/components/ui/badge";
@@ -79,6 +79,15 @@ interface ChatMessage {
   isSuperseded?: boolean;
   /** OCR partial mode marker (used for upgrade flow metadata). */
   isProcessingPlaceholder?: boolean;
+  /** Phase 2+3 — tracked chat assets for "Gem til vidensbase" */
+  assetRefs?: AssetRef[];
+}
+
+/** Phase 2+3 — reference to a knowledge_document created for a chat upload. */
+interface AssetRef {
+  assetId: string;
+  filename: string;
+  scope: "temporary_chat" | "persistent_storage";
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -99,6 +108,70 @@ function fileIcon(type: AttachedFile["type"]) {
   if (type === "image") return <Image className="w-3.5 h-3.5 text-blue-400" />;
   if (type === "video") return <Video className="w-3.5 h-3.5 text-purple-400" />;
   return <FileText className="w-3.5 h-3.5 text-primary" />;
+}
+
+// ─── Phase 2+3 helpers ────────────────────────────────────────────────────────
+
+/** SHA-256 file hash using WebCrypto — used for Phase 5 deduplication. */
+async function computeFileHash(file: File): Promise<string> {
+  try {
+    const buf = await file.arrayBuffer();
+    const digest = await crypto.subtle.digest("SHA-256", buf);
+    return Array.from(new Uint8Array(digest))
+      .map(b => b.toString(16).padStart(2, "0"))
+      .join("");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Creates a temporary_chat knowledge_document for a single file.
+ * Returns the assetId on success, or null on failure (non-blocking).
+ */
+async function createChatAssetForFile(
+  file: File,
+  afType: AttachedFile["type"],
+  chatSessionId: string,
+): Promise<string | null> {
+  try {
+    const fileHash = await computeFileHash(file);
+    const res = await apiRequest("POST", "/api/knowledge/assets", {
+      title:         file.name,
+      fileHash:      fileHash || undefined,
+      mimeType:      file.type || "application/octet-stream",
+      sizeBytes:     file.size,
+      chatThreadId:  chatSessionId,
+      retentionMode: "session",
+      documentType:  afType,
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as { asset: { id: string } };
+    return data.asset?.id ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Patches an asset with the R2 key after a successful upload.
+ * Fire-and-forget — never throws.
+ */
+async function patchAssetR2KeyFF(
+  assetId: string,
+  r2Key: string,
+  file: File,
+): Promise<void> {
+  try {
+    await apiRequest("PATCH", `/api/knowledge/assets/${assetId}`, {
+      r2Key,
+      mimeType:   file.type || "application/octet-stream",
+      sizeBytes:  file.size,
+      documentStatus: "processing",
+    });
+  } catch {
+    // Non-critical — asset still exists, just without r2Key
+  }
 }
 
 async function resizeImageToBase64(
@@ -601,8 +674,23 @@ function OcrProcessingCard() {
   );
 }
 // ─── Message Bubble ───────────────────────────────────────────────────────────────────────────────
-function MessageBubble({ msg }: { msg: ChatMessage }) {
+function MessageBubble({
+  msg,
+  kbList,
+  onPromote,
+  promotingAssetId,
+}: {
+  msg: ChatMessage;
+  kbList?: Array<{ id: string; name: string }>;
+  onPromote?: (assetId: string, targetKbId: string, userMsgId: string) => void;
+  promotingAssetId?: string | null;
+}) {
   if (msg.role === "user") {
+    const pendingAssetRefs = (msg.assetRefs ?? []).filter(r => r.scope === "temporary_chat");
+    const savedAssetRefs  = (msg.assetRefs ?? []).filter(r => r.scope === "persistent_storage");
+    const hasSaveUI = pendingAssetRefs.length > 0 && kbList && kbList.length > 0 && onPromote;
+    const hasSavedBadge = savedAssetRefs.length > 0;
+
     return (
       <div className="mb-6 last:mb-0 flex justify-end" data-testid={`msg-user-${msg.id}`}>
         <div className="flex items-end gap-2 max-w-[80%]">
@@ -615,6 +703,49 @@ function MessageBubble({ msg }: { msg: ChatMessage }) {
             <div className="bg-primary/15 border border-primary/20 rounded-2xl rounded-br-sm px-4 py-2.5 text-sm text-foreground">
               {msg.text}
             </div>
+            {/* "Gem til vidensbase" — ét knap pr. pending asset */}
+            {hasSaveUI && pendingAssetRefs.map(ref => (
+              <div key={ref.assetId} className="flex justify-end">
+                {kbList!.length === 1 ? (
+                  <button
+                    data-testid={`btn-save-asset-${ref.assetId}`}
+                    onClick={() => onPromote!(ref.assetId, kbList![0].id, msg.id)}
+                    disabled={promotingAssetId === ref.assetId}
+                    className="flex items-center gap-1.5 text-xs text-primary/80 hover:text-primary border border-primary/20 hover:border-primary/40 rounded-lg px-2.5 py-1 bg-primary/5 hover:bg-primary/10 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {promotingAssetId === ref.assetId
+                      ? <><span className="w-3 h-3 border border-primary/50 border-t-primary rounded-full animate-spin" />Gemmer…</>
+                      : <><Save className="w-3 h-3" />Gem til vidensbase</>}
+                  </button>
+                ) : (
+                  <select
+                    data-testid={`select-save-asset-${ref.assetId}`}
+                    disabled={promotingAssetId === ref.assetId}
+                    defaultValue=""
+                    onChange={e => { if (e.target.value) onPromote!(ref.assetId, e.target.value, msg.id); }}
+                    className="text-xs border border-primary/20 rounded-lg px-2 py-1 bg-background text-primary/80 cursor-pointer disabled:opacity-50"
+                  >
+                    <option value="" disabled>
+                      {promotingAssetId === ref.assetId ? "Gemmer…" : `Gem "${ref.filename}" i…`}
+                    </option>
+                    {kbList!.map(kb => (
+                      <option key={kb.id} value={kb.id}>{kb.name}</option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            ))}
+            {/* Allerede gemt-badges */}
+            {hasSavedBadge && savedAssetRefs.map(ref => (
+              <div key={ref.assetId} className="flex justify-end">
+                <span
+                  data-testid={`badge-saved-asset-${ref.assetId}`}
+                  className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400"
+                >
+                  <Database className="w-3 h-3" />Gemt i vidensbase
+                </span>
+              </div>
+            ))}
           </div>
           <div className="shrink-0 w-7 h-7 rounded-full bg-primary/20 flex items-center justify-center mb-0.5">
             <User className="w-3.5 h-3.5 text-primary" />
@@ -839,9 +970,21 @@ export default function AiChatPage() {
     typeof window !== "undefined" ? window.location.search : "",
   ).get("monitorDocumentId");
 
+  // Phase 2+3 — stable session ID used as chatThreadId for all asset rows in this session
+  const chatSessionIdRef = useRef<string>(crypto.randomUUID());
+
+  // Phase 2+3 — promote mutation for "Gem til vidensbase"
+  const [promotingAssetId, setPromotingAssetId] = useState<string | null>(null);
+
+  // Phase 2+3 — fetch user's knowledge bases for the KB picker
+  const { data: kbListData } = useQuery<{ kbs: Array<{ id: string; name: string }> }>({
+    queryKey: ["/api/kb"],
+  });
+  const kbList = kbListData?.kbs ?? [];
+
   const autoTriggeredKeysRef = useRef<Set<string>>(new Set());
   // chatMutateRef holds a stable reference to chatMutation.mutate (set after hook declaration)
-  const chatMutateRef = useRef<((payload: { text: string; attachments: AttachedFile[]; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[]; _upgradeStreamMsgId?: string }) => void) | null>(null);
+  const chatMutateRef = useRef<((payload: { text: string; attachments: AttachedFile[]; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[]; _upgradeStreamMsgId?: string; _userMsgId?: string }) => void) | null>(null);
   // Upgrade ref: set when partial_ready break → onSuccess starts upgrade SSE subscription
   const pendingOcrUpgradeRef = useRef<{ taskId: string; filename: string; mime: string } | null>(null);
   // Set to true while an upgrade mutation is in flight — suppresses error toast in onError
@@ -917,7 +1060,7 @@ export default function AiChatPage() {
   // ── Send ─────────────────────────────────────────────────────────────────────
 
   const chatMutation = useMutation({
-    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[]; submitAt?: number; _upgradeStreamMsgId?: string }) => {
+    mutationFn: async (payload: { text: string; attachments: AttachedFile[]; useCase?: string; documentIds?: string[]; triggerKey?: string; _documentContextOverride?: any[]; submitAt?: number; _upgradeStreamMsgId?: string; _userMsgId?: string }) => {
       const traceId = crypto.randomUUID().slice(0, 8);
       const T0 = Date.now();
       const tClick = payload.submitAt ?? T0;
@@ -979,9 +1122,19 @@ export default function AiChatPage() {
           const fastResults: any[] = [];
           const slowFiles: { af: typeof docFiles[0]; reason: string }[] = [];
 
+          // Phase 2+3: start asset creation in parallel with extraction
+          const _assetPromises: Array<{ filename: string; af: typeof docFiles[0]; promise: Promise<string | null> }> = [];
+
           for (const af of docFiles) {
             const file = af.file;
             const mode = classifyForFastExtract(file);
+
+            // Start asset creation immediately — runs in parallel with extraction
+            _assetPromises.push({
+              filename: file.name,
+              af,
+              promise: createChatAssetForFile(file, af.type, chatSessionIdRef.current),
+            });
 
             const T1 = Date.now();
             console.log(
@@ -1037,6 +1190,21 @@ export default function AiChatPage() {
               console.log(`[FAST-PATH][${traceId}] REJECTED ${file.name}: ${reason} — slow fallback`);
               slowFiles.push({ af, reason });
             }
+          }
+
+          // Phase 2+3: resolve all asset creation promises and update user message
+          const _assetRefs: AssetRef[] = (await Promise.all(
+            _assetPromises.map(async p => {
+              const assetId = await p.promise;
+              return assetId ? { assetId, filename: p.filename, scope: "temporary_chat" as const } : null;
+            }),
+          )).filter((r): r is AssetRef => r !== null);
+
+          if (payload._userMsgId && _assetRefs.length > 0) {
+            setMessages(prev => prev.map(m =>
+              m.id === payload._userMsgId ? { ...m, assetRefs: _assetRefs } : m,
+            ));
+            console.log(`[ASSETS][${traceId}] Created ${_assetRefs.length} chat asset(s): ${_assetRefs.map(r => r.assetId).join(",")}`);
           }
 
           const fastMs = Math.round(performance.now() - t2a);
@@ -1107,7 +1275,9 @@ export default function AiChatPage() {
             createStreamBubble("ALL_FAST");
 
             // Fire-and-forget durable R2 upload for persistence — does NOT block AI answer
-            (async () => {
+            // Phase 2+3: capture _assetRefs so patch can find the right assetId per file
+            const _capturedAssetRefs = _assetRefs;
+            ;(async () => {
               for (const af of docFiles) {
                 const file = af.file;
                 try {
@@ -1130,6 +1300,11 @@ export default function AiChatPage() {
                     fileCount:   docFiles.length,
                   });
                   console.log(`[DURABLE][${traceId}] R2+finalize ${finRes.ok ? "OK" : `FAIL HTTP ${finRes.status}`} for ${file.name}`);
+                  // Phase 2+3: patch asset row with r2Key
+                  const assetRef = _capturedAssetRefs.find(r => r.filename === file.name);
+                  if (assetRef) {
+                    patchAssetR2KeyFF(assetRef.assetId, objectKey, file).catch(() => {});
+                  }
                 } catch (e: any) {
                   console.warn(`[DURABLE][${traceId}] error for ${file.name}: ${e?.message}`);
                 }
@@ -1197,6 +1372,11 @@ export default function AiChatPage() {
                   if (!r2Res.ok) {
                     console.warn(`[SCANNED-UPGRADE-${upgradeId}] R2 PUT failed HTTP ${r2Res.status} for "${file.name}" — skipping`);
                     continue;
+                  }
+                  // Phase 2+3: patch asset row with r2Key
+                  const _scannedAssetRef = _assetRefs.find(r => r.filename === file.name);
+                  if (_scannedAssetRef) {
+                    patchAssetR2KeyFF(_scannedAssetRef.assetId, objectKey, file).catch(() => {});
                   }
 
                   // Step 3: Finalize → OCR task
@@ -1341,6 +1521,11 @@ export default function AiChatPage() {
               });
               if (!r2Res.ok) {
                 throw Object.assign(new Error("Fil upload fejlede. Prøv igen."), { errorCode: "R2_UPLOAD_FAILED" });
+              }
+              // Phase 2+3: patch asset row med r2Key efter vellykket R2 upload
+              const _slowAssetRef = _assetRefs.find(r => r.filename === file.name);
+              if (_slowAssetRef) {
+                patchAssetR2KeyFF(_slowAssetRef.assetId, objectKey, file).catch(() => {});
               }
 
               const tFinalizeStart = Date.now();
@@ -2227,6 +2412,38 @@ export default function AiChatPage() {
   // Set chatMutateRef so handleAutoTrigger (declared before chatMutation) can use it
   chatMutateRef.current = chatMutation.mutate as typeof chatMutateRef.current;
 
+  // ── Phase 2+3 — promote handler ───────────────────────────────────────────────
+  const handlePromoteAsset = useCallback(async (assetId: string, targetKbId: string, userMsgId: string) => {
+    setPromotingAssetId(assetId);
+    try {
+      const res = await apiRequest("POST", `/api/knowledge/assets/${assetId}/promote`, {
+        targetKbId,
+        retentionMode: "days",
+        retentionDays: 365,
+        isPinned: false,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({})) as any;
+        if (res.status === 409) {
+          toast({ title: "Allerede gemt", description: "Dette dokument er allerede i vidensbasen.", variant: "default" });
+        } else {
+          toast({ title: "Fejl", description: err.error ?? "Kunne ikke gemme til vidensbase.", variant: "destructive" });
+        }
+        return;
+      }
+      // Update assetRef scope to persistent_storage in the message
+      setMessages(prev => prev.map(m => {
+        if (m.id !== userMsgId || !m.assetRefs) return m;
+        return { ...m, assetRefs: m.assetRefs.map(r => r.assetId === assetId ? { ...r, scope: "persistent_storage" as const } : r) };
+      }));
+      toast({ title: "Gemt til vidensbase", description: "Dokumentet er nu tilgængeligt i din vidensbase.", variant: "default" });
+    } catch {
+      toast({ title: "Fejl", description: "Kunne ikke gemme til vidensbase.", variant: "destructive" });
+    } finally {
+      setPromotingAssetId(null);
+    }
+  }, [toast]);
+
   const handleSend = () => {
     const tClick = Date.now();
     const text = input.trim();
@@ -2240,15 +2457,16 @@ export default function AiChatPage() {
       ` docFiles=${attachments.filter(a => a.type === "document").length}` +
       ` text_len=${text.length}`,
     );
+    const userMsgId = crypto.randomUUID();
     setMessages(prev => [...prev, {
-      id: crypto.randomUUID(),
+      id: userMsgId,
       role: "user",
       text: displayText,
       attachments: [...attachments],
       timestamp: new Date(),
     }]);
     setOcrStatusLabel("Uploader dokument…");
-    chatMutation.mutate({ text: text || "Analysér venligst det uploadede dokument.", attachments, useCase, submitAt: tClick });
+    chatMutation.mutate({ text: text || "Analysér venligst det uploadede dokument.", attachments, useCase, submitAt: tClick, _userMsgId: userMsgId });
     setInput("");
     setAttachments([]);
   };
@@ -2311,7 +2529,15 @@ export default function AiChatPage() {
             </div>
           ) : (
             <div className="pt-6">
-              {messages.map(msg => <MessageBubble key={msg.id} msg={msg} />)}
+              {messages.map(msg => (
+                <MessageBubble
+                  key={msg.id}
+                  msg={msg}
+                  kbList={kbList}
+                  onPromote={handlePromoteAsset}
+                  promotingAssetId={promotingAssetId}
+                />
+              ))}
               {chatMutation.isPending && !ocrStatusLabel && !hasStreamingMessage && <TypingIndicator />}
               {ocrStatusLabel && !isFastPath && (
                 <div className="flex gap-3 px-4 py-3" data-testid="status-ocr-pending">
