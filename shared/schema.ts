@@ -621,8 +621,8 @@ export const knowledgeDocuments = pgTable(
       .primaryKey()
       .default(sql`gen_random_uuid()`),
     tenantId: varchar("tenant_id").notNull(),
+    // Nullable: temporary_chat assets have no KB until promoted
     knowledgeBaseId: varchar("knowledge_base_id")
-      .notNull()
       .references(() => knowledgeBases.id),
     externalReference: text("external_reference"),
     title: text("title").notNull(),
@@ -641,14 +641,32 @@ export const knowledgeDocuments = pgTable(
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
     deletedAt: timestamp("deleted_at"),
+    // ── Chat Asset / Dual-path fields (Phase 1) ───────────────────────────────
+    // temporary_chat = chat-upload not yet saved; persistent_storage = saved to KB
+    assetScope: text("asset_scope").notNull().default("persistent_storage"),
+    // chat_upload | storage_upload | imported
+    assetOrigin: text("asset_origin").notNull().default("storage_upload"),
+    chatThreadId: text("chat_thread_id"),
+    fileHash: text("file_hash"),
+    isPinned: boolean("is_pinned").notNull().default(false),
+    promotedToStorageAt: timestamp("promoted_to_storage_at"),
+    // forever | days | session
+    retentionMode: text("retention_mode"),
+    retentionExpiresAt: timestamp("retention_expires_at"),
+    lastAccessedAt: timestamp("last_accessed_at"),
   },
   (t) => [
     sql`CONSTRAINT kd_lifecycle_check CHECK (${t.lifecycleState} IN ('active','archived','deleted'))`,
     sql`CONSTRAINT kd_status_check CHECK (${t.documentStatus} IN ('draft','processing','ready','failed','superseded'))`,
     sql`CONSTRAINT kd_version_number_check CHECK (${t.latestVersionNumber} >= 0)`,
+    sql`CONSTRAINT kd_asset_scope_check CHECK (${t.assetScope} IN ('temporary_chat','persistent_storage'))`,
+    sql`CONSTRAINT kd_asset_origin_check CHECK (${t.assetOrigin} IN ('chat_upload','storage_upload','imported'))`,
     index("kd_tenant_kb_created_idx").on(t.tenantId, t.knowledgeBaseId, t.createdAt),
     index("kd_tenant_lifecycle_status_idx").on(t.tenantId, t.lifecycleState, t.documentStatus, t.createdAt),
     index("kd_tenant_kb_title_idx").on(t.tenantId, t.knowledgeBaseId, t.title),
+    index("kd_tenant_scope_idx").on(t.tenantId, t.assetScope, t.createdAt),
+    index("kd_tenant_file_hash_idx").on(t.tenantId, t.fileHash),
+    index("kd_chat_thread_idx").on(t.chatThreadId),
   ],
 );
 
@@ -7052,3 +7070,29 @@ export const chatAnswerRequests = pgTable(
 export const insertChatAnswerRequestSchema = createInsertSchema(chatAnswerRequests).omit({ id: true, createdAt: true });
 export type InsertChatAnswerRequest = z.infer<typeof insertChatAnswerRequestSchema>;
 export type ChatAnswerRequest = typeof chatAnswerRequests.$inferSelect;
+
+// ─── tenant_storage_settings (Phase 1 / Phase 6) ─────────────────────────────
+// Per-tenant defaults for asset retention and storage behaviour.
+
+export const tenantStorageSettings = pgTable(
+  "tenant_storage_settings",
+  {
+    id: varchar("id")
+      .primaryKey()
+      .default(sql`gen_random_uuid()`),
+    tenantId: varchar("tenant_id").notNull().unique(),
+    // Default retention for temporary_chat assets (session | days | forever)
+    defaultRetentionMode: text("default_retention_mode").notNull().default("days"),
+    defaultRetentionDays: integer("default_retention_days").default(30),
+    allowForeverStorage: boolean("allow_forever_storage").notNull().default(false),
+    maxStorageBytes: bigint("max_storage_bytes", { mode: "number" }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    check("tss_retention_mode_check", sql`${t.defaultRetentionMode} IN ('session','days','forever')`),
+  ],
+);
+export const insertTenantStorageSettingsSchema = createInsertSchema(tenantStorageSettings).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertTenantStorageSettings = z.infer<typeof insertTenantStorageSettingsSchema>;
+export type TenantStorageSettings = typeof tenantStorageSettings.$inferSelect;

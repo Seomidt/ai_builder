@@ -4897,6 +4897,173 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     } catch (err) { handleError(res, err); }
   });
 
+  // ─── Chat Asset API — Phase 1 + Phase 4 ────────────────────────────────────
+
+  /**
+   * POST /api/knowledge/assets
+   * Create a temporary_chat asset when a file is uploaded in chat.
+   */
+  app.post("/api/knowledge/assets", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const {
+        title,
+        documentType,
+        fileHash,
+        mimeType,
+        sizeBytes,
+        chatThreadId,
+        r2Key,
+        retentionMode,
+        retentionDays,
+      } = req.body as Record<string, unknown>;
+
+      if (!title || typeof title !== "string") {
+        return res.status(400).json({ error: "title is required" });
+      }
+
+      const { createChatAsset } = await import("./lib/knowledge/chat-assets.ts");
+
+      const asset = await createChatAsset({
+        tenantId: orgId,
+        title,
+        documentType: typeof documentType === "string" ? documentType : undefined,
+        fileHash: typeof fileHash === "string" ? fileHash : undefined,
+        mimeType: typeof mimeType === "string" ? mimeType : undefined,
+        sizeBytes: typeof sizeBytes === "number" ? sizeBytes : undefined,
+        chatThreadId: typeof chatThreadId === "string" ? chatThreadId : undefined,
+        r2Key: typeof r2Key === "string" ? r2Key : undefined,
+        retentionMode: typeof retentionMode === "string" ? (retentionMode as any) : "session",
+        retentionDays: typeof retentionDays === "number" ? retentionDays : undefined,
+        actorId: (req as any).userId ?? undefined,
+      });
+
+      return res.status(201).json({ asset });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  /**
+   * GET /api/knowledge/assets/by-hash
+   * Tenant-scoped deduplication lookup by file hash.
+   * MUST be before /:assetId to avoid route shadowing.
+   */
+  app.get("/api/knowledge/assets/by-hash", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { fileHash } = req.query as Record<string, string>;
+      if (!fileHash) return res.status(400).json({ error: "fileHash is required" });
+
+      const { findAssetByFileHash } = await import("./lib/knowledge/chat-assets.ts");
+      const asset = await findAssetByFileHash({ tenantId: orgId, fileHash });
+
+      if (!asset) return res.status(404).json({ error: "No asset found for this hash" });
+      return res.json({ asset });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  /**
+   * GET /api/knowledge/assets/:assetId
+   * Get a single asset by ID (tenant-scoped).
+   */
+  app.get("/api/knowledge/assets/:assetId", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { assetId } = req.params;
+      const { getAssetById } = await import("./lib/knowledge/chat-assets.ts");
+
+      const asset = await getAssetById({ assetId, tenantId: orgId });
+      if (!asset) return res.status(404).json({ error: "Asset not found" });
+
+      return res.json({ asset });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  /**
+   * GET /api/knowledge/assets
+   * List assets for the current tenant, optionally filtered by chatThreadId or scope.
+   */
+  app.get("/api/knowledge/assets", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const {
+        chatThreadId,
+        scope,
+        limit = "50",
+        offset = "0",
+      } = req.query as Record<string, string>;
+
+      const { listChatAssets } = await import("./lib/knowledge/chat-assets.ts");
+
+      const assets = await listChatAssets({
+        tenantId: orgId,
+        chatThreadId: chatThreadId ?? undefined,
+        scope: scope as any ?? undefined,
+        limit: Math.min(parseInt(limit, 10) || 50, 200),
+        offset: parseInt(offset, 10) || 0,
+      });
+
+      return res.json({ assets });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  /**
+   * POST /api/knowledge/assets/:assetId/promote
+   * Promote a temporary_chat asset to persistent_storage in a KB.
+   * The SAME asset row changes scope — no duplicate blob, no double billing.
+   */
+  app.post("/api/knowledge/assets/:assetId/promote", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { assetId } = req.params;
+      const {
+        targetKbId,
+        retentionMode,
+        retentionDays,
+        isPinned,
+      } = req.body as Record<string, unknown>;
+
+      if (!targetKbId || typeof targetKbId !== "string") {
+        return res.status(400).json({ error: "targetKbId is required" });
+      }
+
+      const { promoteAssetToStorage } = await import("./lib/knowledge/chat-assets.ts");
+
+      const asset = await promoteAssetToStorage({
+        assetId,
+        tenantId: orgId,
+        targetKbId,
+        retentionMode: typeof retentionMode === "string" ? (retentionMode as any) : "days",
+        retentionDays: typeof retentionDays === "number" ? retentionDays : 365,
+        isPinned: typeof isPinned === "boolean" ? isPinned : false,
+        actorId: (req as any).userId ?? undefined,
+      });
+
+      return res.json({ asset });
+    } catch (err: any) {
+      if (err.code === "ASSET_NOT_FOUND") return res.status(404).json({ error: err.message });
+      if (err.code === "ALREADY_PROMOTED") return res.status(409).json({ error: err.message });
+      handleError(res, err);
+    }
+  });
+
   return httpServer;
 }
 
