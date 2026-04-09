@@ -745,3 +745,25 @@ export async function touchAsset(params: {
     await client.end();
   }
 }
+
+// ─── Asset Reuse State ────────────────────────────────────────────────────────
+
+export type AssetReuseState = "ASSET_HIT_READY" | "ASSET_HIT_INCOMPLETE";
+
+/**
+ * Determines whether an existing asset is fully reuse-ready or not.
+ *
+ * ASSET_HIT_READY   — lifecycle=active, document_status=ready, r2Key present.
+ *   Safe to reuse: skip upload, skip OCR, reuse extractedText if available.
+ *
+ * ASSET_HIT_INCOMPLETE — asset row exists but r2Key is missing OR status ≠ ready.
+ *   DO NOT trigger blind re-upload. Let caller fall back to direct vision answer.
+ *
+ * INV: Only call after findAssetByFileHash returns non-null (lifecycle_state='active' guaranteed).
+ */
+export function getAssetReuseState(asset: ChatAsset): AssetReuseState {
+  const ready =
+    asset.documentStatus === "ready" &&
+    asset.r2Key !== null;
+  return ready ? "ASSET_HIT_READY" : "ASSET_HIT_INCOMPLETE";
+}

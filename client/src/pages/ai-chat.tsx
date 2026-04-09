@@ -96,6 +96,8 @@ interface AssetRef {
   existingR2Key?: string | null;
   /** NEXT-A: persisted transcript from previous extraction — enables skip-finalize on HASH_HIT */
   extractedText?: string | null;
+  /** Reuse safety state from server: READY=fully reusable, INCOMPLETE=exists but broken, MISS=new */
+  reuseState?: "ASSET_HIT_READY" | "ASSET_HIT_INCOMPLETE" | "ASSET_MISS";
 }
 
 /** Phase 5: return value from createChatAssetForFile including dedup flags */
@@ -108,6 +110,8 @@ interface AssetCreateResult {
   existingR2Key: string | null;
   /** NEXT-A: persisted transcript from previous Gemini extraction */
   extractedText: string | null;
+  /** Server-authoritative reuse safety state — never infer locally from r2Key alone */
+  reuseState: "ASSET_HIT_READY" | "ASSET_HIT_INCOMPLETE" | "ASSET_MISS";
 }
 
 // ─── File helpers ─────────────────────────────────────────────────────────────
@@ -172,22 +176,26 @@ async function createChatAssetForFile(
     if (fileHash) {
       const hashRes = await apiRequest("GET", `/api/knowledge/assets/by-hash?fileHash=${encodeURIComponent(fileHash)}`);
       if (hashRes.ok) {
-        const { asset } = await hashRes.json() as {
-          asset: { id: string; documentStatus: string; r2Key: string | null; extractedText?: string | null; extractedTextStatus?: string | null } | null
+        const { asset, reuseState: serverReuseState } = await hashRes.json() as {
+          asset: { id: string; documentStatus: string; r2Key: string | null; extractedText?: string | null; extractedTextStatus?: string | null } | null;
+          reuseState?: "ASSET_HIT_READY" | "ASSET_HIT_INCOMPLETE";
         };
         if (asset?.id) {
-          const ocrReady        = asset.documentStatus === "ready";
-          const existingR2Key   = asset.r2Key ?? null;
-          const skipUpload      = existingR2Key !== null;
-          const extractedText   = (asset.extractedText as string | null | undefined) ?? null;
+          const reuseState    = serverReuseState ?? (asset.r2Key && asset.documentStatus === "ready" ? "ASSET_HIT_READY" : "ASSET_HIT_INCOMPLETE");
+          // CRITICAL: skipUpload is authoritative from server reuseState, NOT inferred from r2Key alone.
+          // ASSET_HIT_INCOMPLETE → skipUpload=true to prevent blind re-upload of existing asset rows.
+          const skipUpload    = reuseState === "ASSET_HIT_READY" || reuseState === "ASSET_HIT_INCOMPLETE";
+          const ocrReady      = reuseState === "ASSET_HIT_READY";
+          const existingR2Key = asset.r2Key ?? null;
+          const extractedText = (asset.extractedText as string | null | undefined) ?? null;
           console.log(
-            `[ASSETS][DEDUP] HASH_HIT file="${file.name}" hash=${fileHash.slice(0,16)}…` +
-            ` assetId=${asset.id} status=${asset.documentStatus}` +
+            `[SCANNED_REUSE_DECISION] state=${reuseState} file="${file.name}" hash=${fileHash.slice(0,16)}…` +
+            ` assetId=${asset.id} documentStatus=${asset.documentStatus}` +
             (skipUpload    ? " SKIP_R2_UPLOAD"      : "") +
             (extractedText ? ` HAS_TRANSCRIPT chars=${extractedText.length}` : "") +
             (ocrReady      ? " TRANSCRIPT_REUSED"   : ""),
           );
-          return { assetId: asset.id, isDeduped: true, skipUpload, ocrReady, existingR2Key, extractedText };
+          return { assetId: asset.id, isDeduped: true, skipUpload, ocrReady, existingR2Key, extractedText, reuseState };
         }
       }
       // 404 or error → fall through to create
@@ -209,7 +217,7 @@ async function createChatAssetForFile(
     const data = await res.json() as { asset: { id: string } };
     const assetId = data.asset?.id;
     if (!assetId) return null;
-    return { assetId, isDeduped: false, skipUpload: false, ocrReady: false, existingR2Key: null, extractedText: null };
+    return { assetId, isDeduped: false, skipUpload: false, ocrReady: false, existingR2Key: null, extractedText: null, reuseState: "ASSET_MISS" };
   } catch {
     return null;
   }
@@ -1311,6 +1319,7 @@ export default function AiChatPage() {
                 existingR2Key: result.existingR2Key,
                 // NEXT-A: carry persisted transcript for HASH_HIT reuse in SLOW path
                 extractedText: result.extractedText,
+                reuseState:    result.reuseState,
               };
             }),
           )).filter((r): r is AssetRef => r !== null);
@@ -1507,10 +1516,18 @@ export default function AiChatPage() {
                   const file = af.file;
                   console.log(`[SCANNED-UPGRADE-${upgradeId}] Processing file="${file.name}" size=${file.size}`);
 
-                  // Phase 5: skip R2 upload entirely if this asset is deduped (already in R2)
+                  // Phase 5: skip R2 upload if already uploaded (READY) OR if asset exists but incomplete.
+                  // INV: NEVER re-upload an existing asset row — only true MISS assets may upload.
                   const _scannedAssetRef = _assetRefs.find(r => r.filename === file.name);
                   if (_scannedAssetRef?.skipUpload) {
-                    console.log(`[ASSETS][DEDUP] SCANNED SKIP_R2 file="${file.name}" assetId=${_scannedAssetRef.assetId} isDeduped=true`);
+                    if (_scannedAssetRef.reuseState === "ASSET_HIT_INCOMPLETE") {
+                      console.log(
+                        `[SCANNED_DIRECT_FALLBACK_USED] assetId=${_scannedAssetRef.assetId}` +
+                        ` file="${file.name}" reuseState=ASSET_HIT_INCOMPLETE — skipping re-upload, direct vision fallback used`,
+                      );
+                    } else {
+                      console.log(`[ASSETS][DEDUP] SCANNED SKIP_R2 file="${file.name}" assetId=${_scannedAssetRef.assetId} reuseState=${_scannedAssetRef.reuseState}`);
+                    }
                     continue;
                   }
 
@@ -1664,9 +1681,16 @@ export default function AiChatPage() {
               const file = af.file;
               const _slowAssetRef = _assetRefs.find(r => r.filename === file.name);
 
-              // Phase 5: if asset has r2Key already, skip presign + R2 PUT (reuse existing objectKey)
+              // Phase 5: if asset has r2Key already, skip presign + R2 PUT (reuse existing objectKey).
+              // INV: INCOMPLETE assets → skip upload entirely; fallback with no document context.
               let objectKey: string;
-              if (_slowAssetRef?.skipUpload && _slowAssetRef.existingR2Key) {
+              if (_slowAssetRef?.reuseState === "ASSET_HIT_INCOMPLETE") {
+                console.log(
+                  `[SCANNED_DIRECT_FALLBACK_USED] assetId=${_slowAssetRef.assetId}` +
+                  ` file="${file.name}" reuseState=ASSET_HIT_INCOMPLETE slow-path — skipping upload + finalize`,
+                );
+                continue;
+              } else if (_slowAssetRef?.skipUpload && _slowAssetRef.existingR2Key) {
                 objectKey = _slowAssetRef.existingR2Key;
                 console.log(`[ASSETS][DEDUP] SLOW SKIP_R2 file="${file.name}" assetId=${_slowAssetRef.assetId} existingR2Key=${objectKey}`);
               } else {
@@ -2139,6 +2163,7 @@ export default function AiChatPage() {
               isDeduped:     result.isDeduped,
               skipUpload:    result.skipUpload,
               existingR2Key: result.existingR2Key,
+              reuseState:    result.reuseState,
             };
           }),
         )).filter((r): r is AssetRef => r !== null);
@@ -2296,12 +2321,16 @@ export default function AiChatPage() {
 
         if (!res.ok) {
           let errorCode = "UNKNOWN_ERROR";
-          let message   = res.statusText;
+          // TASK 4: parse JSON body FIRST — HTTP/2 always has empty statusText.
+          // Precedence: structured JSON message → statusText → HTTP status code → generic fallback.
+          let message = "";
           try {
             const body = await res.json() as { error_code?: string; message?: string };
             if (body.error_code) errorCode = body.error_code;
             if (body.message)    message   = body.message;
           } catch { /* non-JSON */ }
+          if (!message) message = res.statusText || `HTTP ${res.status}`;
+          console.warn(`[FINALIZE_HTTP_ERROR] status=${res.status} errorCode=${errorCode} message=${message}`);
           throw Object.assign(new Error(message), { errorCode });
         }
 

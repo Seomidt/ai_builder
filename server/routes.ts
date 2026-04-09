@@ -1561,8 +1561,9 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
 
       return res.json({ mode: "B_FALLBACK", routing: routing.reason, message: result.message, results: [] });
     } catch (e) {
-      console.error("[upload/finalize] error:", e);
-      return res.status(500).json({ error_code: "INTERNAL_ERROR", message: "Finalisering fejlede" });
+      const _finMsg = e instanceof Error ? e.message : String(e);
+      console.error(`[FINALIZE_FAILED] assetId=${req.body?.assetId ?? "unknown"} error=${_finMsg}`);
+      return res.status(500).json({ error_code: "FINALIZE_FAILED", message: "Finalisering fejlede. Prøv igen." });
     }
   });
 
@@ -5183,7 +5184,7 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       const { fileHash } = req.query as Record<string, string>;
       if (!fileHash) return res.status(400).json({ error: "fileHash is required" });
 
-      const { findAssetByFileHash, touchAsset } = await import("./lib/knowledge/chat-assets.ts");
+      const { findAssetByFileHash, touchAsset, getAssetReuseState } = await import("./lib/knowledge/chat-assets.ts");
       const asset = await findAssetByFileHash({ tenantId: orgId, fileHash });
 
       if (!asset) return res.status(404).json({ error: "No asset found for this hash" });
@@ -5191,16 +5192,26 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       // Phase 5: update last_accessed_at on hash hit — fire-and-forget
       touchAsset({ assetId: asset.id, tenantId: orgId }).catch(() => {});
 
+      const reuseState = getAssetReuseState(asset);
+
       console.log(
-        `[DEDUP] HASH_HIT tenant=${orgId} hash=${fileHash.slice(0,16)}…` +
-        ` assetId=${asset.id} status=${asset.documentStatus}` +
+        `[ASSET_REUSE_STATE] tenantId=${orgId} hash=${fileHash.slice(0,16)}…` +
+        ` state=${reuseState} assetId=${asset.id}` +
+        ` documentStatus=${asset.documentStatus}` +
         (asset.r2Key ? " HAS_R2KEY" : " NO_R2KEY") +
-        (asset.extractedText ? ` HAS_TRANSCRIPT chars=${asset.extractedText.length}` : "") +
-        (asset.documentStatus === "ready" ? " TRANSCRIPT_REUSED" : ""),
+        (asset.extractedText ? ` HAS_TRANSCRIPT chars=${asset.extractedText.length}` : ""),
       );
 
+      if (reuseState === "ASSET_HIT_INCOMPLETE") {
+        console.log(
+          `[SCANNED_ASSET_INCOMPLETE_FALLBACK] assetId=${asset.id}` +
+          ` reason=${!asset.r2Key ? "missing_r2Key" : "status_not_ready"}` +
+          ` documentStatus=${asset.documentStatus}`,
+        );
+      }
+
       // NEXT-A: extractedText + extractedTextStatus are now part of ChatAsset (parsed from metadata)
-      return res.json({ asset });
+      return res.json({ asset, reuseState });
     } catch (err) {
       handleError(res, err);
     }
