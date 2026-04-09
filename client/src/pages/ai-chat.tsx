@@ -4,7 +4,7 @@ import { useLocation } from "wouter";
 import {
   Send, Bot, User, ChevronDown, ChevronUp, ShieldAlert, BookOpen,
   AlertTriangle, CheckCircle2, HelpCircle, Paperclip, X,
-  FileText, Image, Video, Sparkles, Zap, RefreshCw, Clock, WifiOff,
+  FileText, Image, Video, Music, Sparkles, Zap, RefreshCw, Clock, WifiOff,
   TrendingUp, Hourglass, Save, Database, ChevronRight,
 } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
@@ -61,7 +61,7 @@ interface ChatResponse {
 interface AttachedFile {
   id: string;
   file: File;
-  type: "document" | "image" | "video";
+  type: "document" | "image" | "video" | "audio";
   status: "ready" | "uploading" | "processing" | "done" | "failed";
   previewUrl?: string;
 }
@@ -112,10 +112,12 @@ const MAX_SIZE_MB = 25;
 const ACCEPT_DOCS  = ".pdf,.doc,.docx,.txt,.csv,.xlsx,.xls";
 const ACCEPT_IMG   = "image/jpeg,image/png,image/gif,image/webp";
 const ACCEPT_VIDEO = "video/mp4,video/quicktime,video/x-msvideo";
-const ACCEPT_ALL   = `${ACCEPT_DOCS},${ACCEPT_IMG},${ACCEPT_VIDEO}`;
+const ACCEPT_AUDIO = "audio/mpeg,audio/wav,audio/mp4,audio/aac,audio/ogg,audio/flac,audio/webm,audio/x-wav,.mp3,.wav,.m4a,.aac,.ogg,.flac";
+const ACCEPT_ALL   = `${ACCEPT_DOCS},${ACCEPT_IMG},${ACCEPT_VIDEO},${ACCEPT_AUDIO}`;
 
 function fileType(f: File): AttachedFile["type"] {
   if (f.type.startsWith("image/")) return "image";
+  if (f.type.startsWith("audio/")) return "audio";
   if (f.type.startsWith("video/")) return "video";
   return "document";
 }
@@ -123,6 +125,7 @@ function fileType(f: File): AttachedFile["type"] {
 function fileIcon(type: AttachedFile["type"]) {
   if (type === "image") return <Image className="w-3.5 h-3.5 text-blue-400" />;
   if (type === "video") return <Video className="w-3.5 h-3.5 text-purple-400" />;
+  if (type === "audio") return <Music className="w-3.5 h-3.5 text-green-400" />;
   return <FileText className="w-3.5 h-3.5 text-primary" />;
 }
 
@@ -1147,8 +1150,8 @@ export default function AiChatPage() {
       };
 
       // ── TRACE STAGE 1: FRONTEND SEND ─────────────────────────────────────
-      // Video-filer behandles som dokumenter: R2 upload → finalize → Gemini 2.5 Flash video-analyse
-      const docFiles = payload.attachments.filter(a => a.type === "document" || a.type === "video");
+      // Video + Audio behandles som dokumenter: R2 upload → finalize → Gemini multimodal analyse
+      const docFiles = payload.attachments.filter(a => a.type === "document" || a.type === "video" || a.type === "audio");
       const imgFiles = payload.attachments.filter(a => a.type === "image");
       console.log(
         `[TIMING] FILES_SELECTED t=${T0} docFiles=${docFiles.length} imgFiles=${imgFiles.length}` +
@@ -1631,7 +1634,9 @@ export default function AiChatPage() {
               const tFinalizeStart = Date.now();
               console.log(`[TIMING] FINALIZE_START t=${tFinalizeStart} +${tFinalizeStart - tClick}ms_since_CLICK file="${file.name}"`);
               const isVideoMime = (file.type || "").startsWith("video/");
+              const isAudioMime = (file.type || "").startsWith("audio/");
               if (isVideoMime) setOcrStatusLabel(`Analyserer video: ${file.name}`);
+              if (isAudioMime) setOcrStatusLabel(`Transskriberer lyd: ${file.name}`);
               const finalRes = await apiRequest("POST", "/api/upload/finalize", {
                 objectKey,
                 filename:    file.name,
@@ -1641,7 +1646,7 @@ export default function AiChatPage() {
                 fileCount:   slowFiles.length,
                 questionText: payload.text?.trim() || undefined,
               });
-              if (isVideoMime) setOcrStatusLabel(null);
+              if (isVideoMime || isAudioMime) setOcrStatusLabel(null);
               if (!finalRes.ok) {
                 const errBody = await finalRes.json().catch(() => ({})) as any;
                 throw Object.assign(new Error(errBody?.message ?? "Dokument kunne ikke behandles."), { errorCode: "FINALIZE_FAILED" });
@@ -1650,17 +1655,19 @@ export default function AiChatPage() {
               const tFinalizeDone = Date.now();
               console.log(`[TIMING] FINALIZE_DONE t=${tFinalizeDone} +${tFinalizeDone - tClick}ms_since_CLICK mode=${finalData.mode} file="${file.name}"`);
 
-              // B_FALLBACK for video = Gemini fejlede — tillad fortsat med tom context i stedet for hård fejl
+              // B_FALLBACK for video/audio = Gemini fejlede — tillad fortsat med tom context i stedet for hård fejl
               if (finalData.mode === "B_FALLBACK") {
-                if (isVideoMime) {
-                  console.warn(`[VID][${traceId}] Gemini video-analyse fejlede for "${file.name}": ${finalData.message}`);
+                if (isVideoMime || isAudioMime) {
+                  console.warn(`[${isAudioMime ? "AUD" : "VID"}][${traceId}] Gemini ${isAudioMime ? "lyd" : "video"}-analyse fejlede for "${file.name}": ${finalData.message}`);
                   finalizeResults.push({
                     filename:       file.name,
-                    mime_type:      file.type || "video/mp4",
+                    mime_type:      file.type || (isAudioMime ? "audio/mpeg" : "video/mp4"),
                     char_count:     0,
-                    extracted_text: `[Video-fil: ${file.name} — kunne ikke analyseres automatisk. Beskriv venligst hvad du ser i videoen, eller stil et generelt spørgsmål.]`,
+                    extracted_text: isAudioMime
+                      ? `[Lydfil: ${file.name} — transskription mislykkedes. Beskriv venligst hvad lydfilen indeholder, eller stil et generelt spørgsmål.]`
+                      : `[Video-fil: ${file.name} — kunne ikke analyseres automatisk. Beskriv venligst hvad du ser i videoen, eller stil et generelt spørgsmål.]`,
                     status:         "ok",
-                    source:         "video_fallback",
+                    source:         isAudioMime ? "audio_fallback" : "video_fallback",
                   });
                 } else {
                   throw Object.assign(new Error(finalData.message ?? "OCR-systemet er ikke tilgængeligt."), { errorCode: "DOCUMENT_UNREADABLE" });
@@ -1978,12 +1985,21 @@ export default function AiChatPage() {
         console.log(`[TRACE-2-SKIP][${traceId}] no doc files — skipping upload`);
       }
 
-      // ── Step A2: Billeder → base64 vision context ─────────────────────────
-      // Bypasses grounded_chat gate (hasVision=true) + uses existing gpt-4o-mini vision path.
-      // No OCR, no R2 upload — inline base64 via canvas resize (max 1200px, 0.7 quality).
+      // ── Step A2: Billeder → base64 vision context + asset lifecycle ──────────
+      // Vision path unchanged: inline base64 for GPT-4o-mini.
+      // Phase 6: asset row + R2 fire-and-forget for durable storage,
+      //   hash dedup, retention, and promote-to-storage support.
       if (imgFiles.length > 0) {
         const tImgStart = Date.now();
         console.log(`[IMG][${traceId}] ATTACH_IMAGE_RECEIVED files=${imgFiles.length} names=[${imgFiles.map(a=>a.file.name).join(",")}]`);
+
+        // Start asset creation in parallel with vision processing (non-blocking)
+        const _imgAssetPromises = imgFiles.map(af => ({
+          filename: af.file.name,
+          af,
+          promise: createChatAssetForFile(af.file, af.type, chatSessionIdRef.current),
+        }));
+
         for (const af of imgFiles) {
           const file = af.file;
           console.log(`[IMG][${traceId}] ATTACHMENT_RECEIVED name="${file.name}" MIME_TYPE="${file.type}" FILE_SIZE=${file.size} CLASSIFIED_AS=image ROUTE_SELECTED=vision_base64`);
@@ -2005,11 +2021,67 @@ export default function AiChatPage() {
           }
         }
         console.log(`[IMG][${traceId}] IMAGE_CONTEXT_BUILT entries=${documentContext.filter((d:any)=>d.source==="vision_image").length} +${Date.now()-tImgStart}ms`);
+
+        // Resolve asset refs (ran in parallel — typically done by now)
+        const _imgAssetRefs: AssetRef[] = (await Promise.all(
+          _imgAssetPromises.map(async p => {
+            const result = await p.promise;
+            if (!result) return null;
+            return {
+              assetId:       result.assetId,
+              filename:      p.filename,
+              scope:         "temporary_chat" as const,
+              isDeduped:     result.isDeduped,
+              skipUpload:    result.skipUpload,
+              existingR2Key: result.existingR2Key,
+            };
+          }),
+        )).filter((r): r is AssetRef => r !== null);
+
+        // Attach image asset refs to user message (enables promote-to-storage)
+        if (payload._userMsgId && _imgAssetRefs.length > 0) {
+          setMessages(prev => prev.map(m =>
+            m.id === payload._userMsgId
+              ? { ...m, assetRefs: [...(m.assetRefs ?? []), ..._imgAssetRefs] }
+              : m,
+          ));
+        }
+
+        // Fire-and-forget: upload original image to R2 for durable storage + retention lifecycle
+        const _capturedImgRefs = _imgAssetRefs;
+        ;(async () => {
+          for (const af of imgFiles) {
+            const file = af.file;
+            const _ref = _capturedImgRefs.find(r => r.filename === file.name);
+            if (_ref?.skipUpload) {
+              console.log(`[ASSETS][DEDUP] IMG SKIP_R2 file="${file.name}" assetId=${_ref.assetId} isDeduped=true`);
+              continue;
+            }
+            try {
+              const urlRes = await apiRequest("POST", "/api/upload/url", {
+                filename:    file.name,
+                contentType: file.type || "image/jpeg",
+                size:        file.size,
+                context:     "chat",
+              });
+              if (!urlRes.ok) { console.warn(`[IMG-ASSET] presign failed for "${file.name}" HTTP ${urlRes.status}`); continue; }
+              const { uploadUrl, objectKey } = await urlRes.json() as any;
+              const r2Res = await fetch(uploadUrl, { method: "PUT", body: file, headers: { "Content-Type": file.type || "image/jpeg" } });
+              if (!r2Res.ok) { console.warn(`[IMG-ASSET] R2 PUT failed for "${file.name}" HTTP ${r2Res.status}`); continue; }
+              if (_ref) {
+                patchAssetR2KeyFF(_ref.assetId, objectKey, file).catch(() => {});
+              }
+              console.log(`[IMG-ASSET] R2_STORED file="${file.name}" key=${objectKey} assetId=${_ref?.assetId ?? "no-asset"}`);
+            } catch (e: any) {
+              console.warn(`[IMG-ASSET] upload error for "${file.name}": ${e?.message}`);
+            }
+          }
+        })().catch(() => {});
       }
 
-      // Video-filer håndteres nu via docFiles (a.type === "video" inkluderet i docFiles filter)
+      // Video + Audio håndteres via docFiles (a.type === "video" | "audio" inkluderet i docFiles filter)
       // → classifyForFastExtract returnerer "unsupported" → slowFiles → R2 upload → finalize
-      // → server/lib/chat/direct-attachment-processor.ts → extractWithGemini (Gemini 2.5 Flash video-analyse)
+      // → server/lib/chat/direct-attachment-processor.ts → extractWithGemini (Gemini 2.5 Flash multimodal)
 
       // ── Step B: Byg besked-tekst ───────────────────────────────────────────
       const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";

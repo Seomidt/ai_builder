@@ -1,25 +1,20 @@
 # Objective
-Tenant admin retention settings: days_30 / days_90 / forever
+Image + Audio lifecycle parity with document pipeline
 
 # Tasks
 
-### T001: Schema + migration
-- shared/schema.ts: ændre defaultRetentionMode til days_30|days_90|forever
-- script/migrate-retention-settings.ts: ny migration
-- Status: PENDING
+### T001: Image lifecycle — frontend asset creation + R2 (fire-and-forget)
+- AttachedFile type: "image" allerede korrekt
+- Start createChatAssetForFile() for imgFiles i parallel med vision processing
+- Fire-and-forget R2 upload af original bil efter vision loop
+- Patch r2Key + track assetRefs på user message
+- Ingen ændring til vision/base64 flow (UX bevaret)
+- Files: client/src/pages/ai-chat.tsx
 
-### T002: Backend service (chat-assets.ts)
-- TenantRetentionMode type
-- getTenantRetentionSettings() + upsertTenantRetentionSettings()
-- resolveRetentionFromTenantMode() helper
-- Status: PENDING
-
-### T003: Backend routes (routes.ts)
-- GET/PATCH /api/knowledge/settings/retention
-- createChatAsset route: arv tenant default
-- promoteAssetToStorage route: arv tenant default
-- Status: PENDING
-
-### T004: Frontend UI (tenant/settings.tsx)
-- Opbevaringsperiode card: 30 dage / 90 dage / Slet aldrig
-- Status: PENDING
+### T002: Audio lifecycle — filtype + pipeline
+- Tilføj "audio" til AttachedFile["type"]
+- ACCEPT_AUDIO konstant + opdater ACCEPT_ALL
+- fileType() genkender audio/* → "audio"
+- docFiles filter inkluderer audio (→ SLOW path → R2 → Gemini transcript)
+- Server: upload/url + processDirectAttachment håndterer allerede audio
+- Files: client/src/pages/ai-chat.tsx
