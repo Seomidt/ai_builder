@@ -1374,9 +1374,8 @@ export default function AiChatPage() {
                   extracted_text:        _scannedPlaceholder,
                   status:                "ok",
                   source:                "vision_preview_pdf",
-                  vision_images:         rendered.images,
                   is_partial_document:   _isTruncated,
-                  pages_sent:            rendered.images.length,
+                  pages_sent:            rendered.pageCount,
                   total_pages:           rendered.pageCount,
                 });
                 console.log(`[SCANNED][${traceId}] RENDER_OK file="${af.file.name}" pages=${rendered.images.length}/${rendered.pageCount} truncated=${_isTruncated} durMs=${Date.now() - tRender}`);
@@ -2308,6 +2307,8 @@ export default function AiChatPage() {
           },
         };
         const chatBodyString = JSON.stringify(chatBody);
+        console.log(`CHAT_STREAM_FINAL_KEYS keys=${Object.keys(chatBody).join(",")}`);
+        console.log(`CHAT_STREAM_HAS_INLINE_IMAGES=${chatBodyString.includes("vision_images") || chatBodyString.includes("rendered.images")}`);
         console.log(`CLIENT_LOG_CHAT_PAYLOAD_SIZE bytes=${chatBodyString.length} assetIds=${assetIds.length} documentIds=${(payload.documentIds ?? []).length}`);
 
         const res = await fetch("/api/chat-stream", {
