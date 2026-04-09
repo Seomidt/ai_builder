@@ -1026,6 +1026,10 @@ export default function AiChatPage() {
   // Phase 2+3 — stable session ID used as chatThreadId for all asset rows in this session
   const chatSessionIdRef = useRef<string>(crypto.randomUUID());
 
+  // Phase 5.5 — persists the last built text document context for follow-up continuity.
+  // Cleared when thread is reset (component remount / new chat). Text-only — never vision images.
+  const activeDocumentContextRef = useRef<any[]>([]);
+
   // Phase 2+3 — promote mutation for "Gem til vidensbase"
   const [promotingAssetId, setPromotingAssetId] = useState<string | null>(null);
 
@@ -1163,6 +1167,22 @@ export default function AiChatPage() {
       // Vercel modtager kun lille JSON (presign-request + finalize-request).
       // _documentContextOverride: bruges til upgrade-chat (partial→complete) — springer upload over.
       let documentContext: any[] = payload._documentContextOverride ?? [];
+
+      // ── Phase 5.5: follow-up asset continuity ─────────────────────────────
+      // If no new files attached and no override, reuse the last active thread context.
+      // This ensures follow-up questions are grounded in previously uploaded documents.
+      if (documentContext.length === 0 && docFiles.length === 0 && imgFiles.length === 0) {
+        if (activeDocumentContextRef.current.length > 0) {
+          documentContext = activeDocumentContextRef.current;
+          console.log(
+            `[ASSETS] FOLLOWUP_ASSET_REFS_ATTACHED thread=${chatSessionIdRef.current.slice(0,8)}` +
+            ` count=${documentContext.length}` +
+            ` sources=[${documentContext.map((r:any)=>r.source).join(",")}]`,
+          );
+        } else {
+          console.log(`[ASSETS] FOLLOWUP_ASSET_REFS_MISSING thread=${chatSessionIdRef.current.slice(0,8)} — no active thread context`);
+        }
+      }
 
       if (docFiles.length > 0) {
         try {
@@ -1994,6 +2014,22 @@ export default function AiChatPage() {
       // ── Step B: Byg besked-tekst ───────────────────────────────────────────
       const fullMessage = payload.text || "Analysér venligst det uploadede dokument.";
 
+      // ── Phase 5.5: persist text-based context for follow-up continuity ────────
+      // Only update when new files were just processed (docFiles > 0).
+      // Vision images are excluded — text only, safe to resend across turns.
+      if (docFiles.length > 0) {
+        const _textCtx = documentContext.filter((r: any) =>
+          typeof r.extracted_text === "string" && r.extracted_text.length > 0 && !Array.isArray(r.vision_images),
+        );
+        if (_textCtx.length > 0) {
+          activeDocumentContextRef.current = _textCtx;
+          console.log(
+            `[ASSETS] THREAD_ACTIVE_ASSETS_FOUND thread=${chatSessionIdRef.current.slice(0,8)}` +
+            ` count=${_textCtx.length} sources=[${_textCtx.map((r:any)=>r.source).join(",")}]`,
+          );
+        }
+      }
+
       // ── TRACE STAGE 3: CHAT REQUEST (streaming) ───────────────────────────
       const T4 = Date.now();
       console.log(
@@ -2005,6 +2041,12 @@ export default function AiChatPage() {
       );
       console.log(`[FAST-PATH][${traceId}] AI_START: context_entries=${documentContext.length} sources=[${documentContext.map((r:any)=>r.source).join(",")}] t=${T4} — sending to /api/chat-stream now`);
       console.log(`[TIMING] T4_MODEL_START t=${T4} +${T4 - tClick}ms_since_CLICK`);
+      // Phase 5.5: grounding telemetry
+      if (documentContext.length > 0 && docFiles.length === 0) {
+        console.log(`[ASSETS] GROUNDED_CONTEXT_FROM_THREAD thread=${chatSessionIdRef.current.slice(0,8)} count=${documentContext.length}`);
+      } else if (documentContext.length === 0 && docFiles.length === 0) {
+        console.log(`[ASSETS] HARD_GATE_WITHOUT_THREAD_ASSETS thread=${chatSessionIdRef.current.slice(0,8)} — no document context`);
+      }
 
       // ── Step C: SSE-streaming til /api/chat-stream ──────────────────────────
       // For ALL_SLOW: bubble created here (after OCR) — no empty "Skriver..." during OCR.
