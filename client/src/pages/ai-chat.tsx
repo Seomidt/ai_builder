@@ -171,6 +171,7 @@ async function createChatAssetForFile(
 ): Promise<AssetCreateResult | null> {
   try {
     const fileHash = await computeFileHash(file);
+    console.log(`CLIENT_FILE_HASH=${fileHash}`);
 
     // ── Phase 5: deduplication check ──────────────────────────────────────────
     if (fileHash) {
@@ -180,6 +181,7 @@ async function createChatAssetForFile(
           asset: { id: string; documentStatus: string; r2Key: string | null; extractedText?: string | null; extractedTextStatus?: string | null } | null;
           reuseState?: "ASSET_HIT_READY" | "ASSET_HIT_INCOMPLETE";
         };
+        console.log(`CLIENT_BY_HASH_RESULT=${asset?.id ? (serverReuseState === "ASSET_HIT_READY" ? "HIT" : "INCOMPLETE") : "MISS"}`);
         if (asset?.id) {
           const reuseState    = serverReuseState ?? (asset.r2Key && asset.documentStatus === "ready" ? "ASSET_HIT_READY" : "ASSET_HIT_INCOMPLETE");
           // CRITICAL: skipUpload is authoritative from server reuseState, NOT inferred from r2Key alone.
