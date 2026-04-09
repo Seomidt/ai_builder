@@ -4897,11 +4897,54 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     } catch (err) { handleError(res, err); }
   });
 
-  // ─── Chat Asset API — Phase 1 + Phase 4 ────────────────────────────────────
+  // ─── Chat Asset API — Phase 1 + Phase 4 + Phase 6 (tenant retention) ─────────
+
+  /**
+   * GET /api/knowledge/settings/retention
+   * Returns the tenant's current default retention mode.
+   */
+  app.get("/api/knowledge/settings/retention", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { getTenantRetentionSettings } = await import("./lib/knowledge/chat-assets.ts");
+      const settings = await getTenantRetentionSettings(orgId);
+      return res.json({ defaultRetentionMode: settings.defaultRetentionMode });
+    } catch (err) {
+      handleError(res, err);
+    }
+  });
+
+  /**
+   * PATCH /api/knowledge/settings/retention
+   * Updates the tenant's default retention mode.
+   * Body: { defaultRetentionMode: "days_30" | "days_90" | "forever" }
+   */
+  app.patch("/api/knowledge/settings/retention", async (req: Request, res: Response) => {
+    try {
+      const orgId = (req as any).orgId as string | undefined;
+      if (!orgId) return res.status(401).json({ error: "Unauthorized" });
+
+      const { defaultRetentionMode } = req.body as Record<string, unknown>;
+      const valid = ["days_30", "days_90", "forever"];
+      if (!defaultRetentionMode || !valid.includes(defaultRetentionMode as string)) {
+        return res.status(400).json({ error: "defaultRetentionMode must be days_30 | days_90 | forever" });
+      }
+
+      const { upsertTenantRetentionSettings } = await import("./lib/knowledge/chat-assets.ts");
+      const settings = await upsertTenantRetentionSettings(orgId, defaultRetentionMode as any);
+      return res.json({ defaultRetentionMode: settings.defaultRetentionMode });
+    } catch (err: any) {
+      if (err.code === "INVALID_RETENTION_MODE") return res.status(400).json({ error: err.message });
+      handleError(res, err);
+    }
+  });
 
   /**
    * POST /api/knowledge/assets
    * Create a temporary_chat asset when a file is uploaded in chat.
+   * Retention is inherited from the tenant's default (days_30/days_90/forever).
    */
   app.post("/api/knowledge/assets", async (req: Request, res: Response) => {
     try {
@@ -4916,15 +4959,23 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         sizeBytes,
         chatThreadId,
         r2Key,
-        retentionMode,
-        retentionDays,
       } = req.body as Record<string, unknown>;
 
       if (!title || typeof title !== "string") {
         return res.status(400).json({ error: "title is required" });
       }
 
-      const { createChatAsset } = await import("./lib/knowledge/chat-assets.ts");
+      const {
+        createChatAsset,
+        getTenantRetentionSettings,
+        resolveRetentionFromTenantMode,
+      } = await import("./lib/knowledge/chat-assets.ts");
+
+      // Inherit tenant default retention — asset_scope and retention are independent
+      const tenantSettings = await getTenantRetentionSettings(orgId);
+      const { retentionMode, retentionDays } = resolveRetentionFromTenantMode(
+        tenantSettings.defaultRetentionMode,
+      );
 
       const asset = await createChatAsset({
         tenantId: orgId,
@@ -4935,8 +4986,8 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         sizeBytes: typeof sizeBytes === "number" ? sizeBytes : undefined,
         chatThreadId: typeof chatThreadId === "string" ? chatThreadId : undefined,
         r2Key: typeof r2Key === "string" ? r2Key : undefined,
-        retentionMode: typeof retentionMode === "string" ? (retentionMode as any) : "session",
-        retentionDays: typeof retentionDays === "number" ? retentionDays : undefined,
+        retentionMode,
+        retentionDays,
         actorId: (req as any).userId ?? undefined,
       });
 
@@ -5090,14 +5141,28 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         return res.status(400).json({ error: "targetKbId is required" });
       }
 
-      const { promoteAssetToStorage } = await import("./lib/knowledge/chat-assets.ts");
+      const {
+        promoteAssetToStorage,
+        getTenantRetentionSettings,
+        resolveRetentionFromTenantMode,
+      } = await import("./lib/knowledge/chat-assets.ts");
+
+      // Inherit tenant default retention unless caller explicitly overrides
+      let resolvedRetentionMode: any = typeof retentionMode === "string" ? retentionMode : undefined;
+      let resolvedRetentionDays: number | undefined = typeof retentionDays === "number" ? retentionDays : undefined;
+      if (!resolvedRetentionMode) {
+        const tenantSettings = await getTenantRetentionSettings(orgId);
+        const resolved = resolveRetentionFromTenantMode(tenantSettings.defaultRetentionMode);
+        resolvedRetentionMode = resolved.retentionMode;
+        resolvedRetentionDays = resolved.retentionDays;
+      }
 
       const asset = await promoteAssetToStorage({
         assetId,
         tenantId: orgId,
         targetKbId,
-        retentionMode: typeof retentionMode === "string" ? (retentionMode as any) : "days",
-        retentionDays: typeof retentionDays === "number" ? retentionDays : 365,
+        retentionMode: resolvedRetentionMode,
+        retentionDays: resolvedRetentionDays,
         isPinned: typeof isPinned === "boolean" ? isPinned : false,
         actorId: (req as any).userId ?? undefined,
       });

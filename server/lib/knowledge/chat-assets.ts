@@ -1,5 +1,5 @@
 /**
- * Chat Asset Service — Phase 1 + Phase 4
+ * Chat Asset Service — Phase 1 + Phase 4 + Phase 6 (tenant retention)
  *
  * Manages the lifecycle of chat-uploaded files as knowledge_documents:
  *   temporary_chat  → asset created on chat upload, not yet in KB
@@ -7,6 +7,8 @@
  *
  * INV: All operations are tenant-scoped. No cross-tenant access.
  * INV: promoteAssetToStorage only changes scope; it never duplicates blobs or rows.
+ * INV: asset_scope and retention are independent concerns.
+ *      A temporary_chat asset may still be physically stored for 30/90/forever.
  */
 
 import pg from "pg";
@@ -24,6 +26,95 @@ function getClient(): pg.Client {
 export type AssetScope = "temporary_chat" | "persistent_storage";
 export type AssetOrigin = "chat_upload" | "storage_upload" | "imported";
 export type RetentionMode = "session" | "days" | "forever";
+
+/** Tenant-level retention choices exposed in the admin UI */
+export type TenantRetentionMode = "days_30" | "days_90" | "forever";
+
+export interface TenantRetentionSettings {
+  tenantId: string;
+  defaultRetentionMode: TenantRetentionMode;
+}
+
+/**
+ * Translates a TenantRetentionMode into the concrete retention_mode + days
+ * values used when writing a knowledge_document row.
+ */
+export function resolveRetentionFromTenantMode(mode: TenantRetentionMode): {
+  retentionMode: RetentionMode;
+  retentionDays: number | undefined;
+} {
+  switch (mode) {
+    case "days_30":  return { retentionMode: "days", retentionDays: 30 };
+    case "days_90":  return { retentionMode: "days", retentionDays: 90 };
+    case "forever":  return { retentionMode: "forever", retentionDays: undefined };
+  }
+}
+
+// ─── getTenantRetentionSettings ───────────────────────────────────────────────
+
+/**
+ * Reads the tenant's default retention setting from tenant_storage_settings.
+ * Returns { defaultRetentionMode: "days_30" } if no row exists (safe default).
+ */
+export async function getTenantRetentionSettings(
+  tenantId: string,
+): Promise<TenantRetentionSettings> {
+  const client = getClient();
+  try {
+    await client.connect();
+    const result = await client.query<Record<string, unknown>>(
+      `SELECT tenant_id, default_retention_mode
+         FROM tenant_storage_settings
+        WHERE tenant_id = $1
+        LIMIT 1`,
+      [tenantId],
+    );
+    if (result.rowCount && result.rowCount > 0) {
+      return {
+        tenantId,
+        defaultRetentionMode: (result.rows[0]["default_retention_mode"] as TenantRetentionMode) ?? "days_30",
+      };
+    }
+    return { tenantId, defaultRetentionMode: "days_30" };
+  } finally {
+    await client.end();
+  }
+}
+
+// ─── upsertTenantRetentionSettings ────────────────────────────────────────────
+
+/**
+ * Creates or updates the tenant's default retention mode.
+ * Validates mode is one of days_30 | days_90 | forever before writing.
+ */
+export async function upsertTenantRetentionSettings(
+  tenantId: string,
+  defaultRetentionMode: TenantRetentionMode,
+): Promise<TenantRetentionSettings> {
+  const valid: TenantRetentionMode[] = ["days_30", "days_90", "forever"];
+  if (!valid.includes(defaultRetentionMode)) {
+    throw Object.assign(
+      new Error(`Invalid defaultRetentionMode: ${defaultRetentionMode}`),
+      { code: "INVALID_RETENTION_MODE" },
+    );
+  }
+
+  const client = getClient();
+  try {
+    await client.connect();
+    await client.query(
+      `INSERT INTO tenant_storage_settings (tenant_id, default_retention_mode, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (tenant_id) DO UPDATE
+         SET default_retention_mode = EXCLUDED.default_retention_mode,
+             updated_at             = NOW()`,
+      [tenantId, defaultRetentionMode],
+    );
+    return { tenantId, defaultRetentionMode };
+  } finally {
+    await client.end();
+  }
+}
 
 export interface ChatAsset {
   id: string;

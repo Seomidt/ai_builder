@@ -7081,16 +7081,15 @@ export const tenantStorageSettings = pgTable(
       .primaryKey()
       .default(sql`gen_random_uuid()`),
     tenantId: varchar("tenant_id").notNull().unique(),
-    // Default retention for temporary_chat assets (session | days | forever)
-    defaultRetentionMode: text("default_retention_mode").notNull().default("days"),
-    defaultRetentionDays: integer("default_retention_days").default(30),
-    allowForeverStorage: boolean("allow_forever_storage").notNull().default(false),
+    // Default retention for all assets: days_30 | days_90 | forever
+    defaultRetentionMode: text("default_retention_mode").notNull().default("days_30"),
+    allowForeverStorage: boolean("allow_forever_storage").notNull().default(true),
     maxStorageBytes: bigint("max_storage_bytes", { mode: "number" }),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
   (t) => [
-    check("tss_retention_mode_check", sql`${t.defaultRetentionMode} IN ('session','days','forever')`),
+    check("tss_retention_mode_check", sql`${t.defaultRetentionMode} IN ('days_30','days_90','forever')`),
   ],
 );
 export const insertTenantStorageSettingsSchema = createInsertSchema(tenantStorageSettings).omit({ id: true, createdAt: true, updatedAt: true });
