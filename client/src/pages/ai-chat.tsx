@@ -1392,6 +1392,8 @@ export default function AiChatPage() {
             // Fire-and-forget durable R2 upload for persistence — does NOT block AI answer
             // Phase 2+3 + Phase 5: capture _assetRefs so patch can find the right assetId per file
             const _capturedAssetRefs = _assetRefs;
+            // FIX-2: capture fast-extracted text so we can persist transcript for future HASH_HIT reuse
+            const _capturedFastResults = fastResults;
             ;(async () => {
               for (const af of docFiles) {
                 const file = af.file;
@@ -1425,6 +1427,18 @@ export default function AiChatPage() {
                   const assetRef = _capturedAssetRefs.find(r => r.filename === file.name);
                   if (assetRef) {
                     patchAssetR2KeyFF(assetRef.assetId, objectKey, file).catch(() => {});
+                    // FIX-2: persist client-side extracted transcript so re-upload (HASH_HIT) skips extraction.
+                    // Without this, findAssetByFileHash returns extractedText=null → re-upload re-extracts.
+                    const _fastCtx = _capturedFastResults.find((r: any) => r.filename === file.name);
+                    if (_fastCtx?.extracted_text) {
+                      patchAssetTranscriptFF(
+                        assetRef.assetId,
+                        _fastCtx.extracted_text,
+                        _fastCtx.char_count ?? (_fastCtx.extracted_text as string).length,
+                        _fastCtx.source ?? "client_fast_extract",
+                      ).catch(() => {});
+                      console.log(`[ASSETS][DEDUP] ALL_FAST_TRANSCRIPT_PERSISTED file="${file.name}" assetId=${assetRef.assetId} chars=${(_fastCtx.extracted_text as string).length} FIX2`);
+                    }
                   }
                 } catch (e: any) {
                   console.warn(`[DURABLE][${traceId}] error for ${file.name}: ${e?.message}`);
@@ -2536,6 +2550,28 @@ export default function AiChatPage() {
                 clearProcessingPlaceholder();
                 return;
               }
+
+              // FIX-1: persist OCR text to thread context ref so follow-up questions
+              // are grounded. SCANNED_PREVIEW path previously left ref=[] because the
+              // initial documentContext contained only vision_images (no extracted_text).
+              // The upgrade IIFE has the full OCR text — capture it here before firing
+              // chatMutateRef (which runs a new mutation with _documentContextOverride
+              // and does NOT update activeDocumentContextRef itself).
+              if (fullText.trim()) {
+                activeDocumentContextRef.current = [{
+                  filename,
+                  mime_type:      mime,
+                  char_count:     fullText.length,
+                  extracted_text: fullText.slice(0, 80_000),
+                  status:         "ok",
+                  source:         "r2_ocr_async",
+                }];
+                console.log(
+                  `[ASSETS] THREAD_ACTIVE_ASSETS_FOUND thread=${chatSessionIdRef.current.slice(0,8)}` +
+                  ` count=1 sources=[r2_ocr_async] chars=${fullText.length} FIX1_SCANNED_UPGRADE`,
+                );
+              }
+
               isUpgradeAttemptRef.current = true;
               chatMutateRef.current({
                 text: payload.text,
