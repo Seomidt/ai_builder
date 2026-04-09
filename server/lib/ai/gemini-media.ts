@@ -246,6 +246,93 @@ export async function* streamGeminiVisionChat(
   }
 }
 
+// ── PDF vision chat: native PDF inline data (no page rendering required) ──────
+
+/**
+ * Stream a Gemini chat response from a raw PDF buffer.
+ * Sends the PDF as application/pdf inlineData — Gemini reads all pages natively.
+ * Used server-side for scanned PDFs when vision_images are not in the request body.
+ *
+ * @param systemPrompt System instruction for the model.
+ * @param userMessage  User's question.
+ * @param pdfBuffer    Raw PDF bytes fetched from R2.
+ * @yields             Text deltas streamed from Gemini.
+ */
+export async function* streamGeminiVisionChatFromPdf(
+  systemPrompt: string,
+  userMessage:  string,
+  pdfBuffer:    Buffer,
+): AsyncGenerator<string> {
+  const key = getGeminiKey();
+  if (!key) {
+    throw new Error("GEMINI_API_KEY is not configured — cannot run Gemini PDF vision chat");
+  }
+
+  const base64data = pdfBuffer.toString("base64");
+
+  const requestBody = {
+    system_instruction: {
+      parts: [{ text: systemPrompt }],
+    },
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { inlineData: { data: base64data, mimeType: "application/pdf" } },
+          { text: userMessage },
+        ],
+      },
+    ],
+    generationConfig: {
+      temperature:     0.2,
+      maxOutputTokens: 2048,
+      thinkingConfig: { thinkingBudget: 0 },
+    },
+  };
+
+  const VISION_MODEL = "gemini-2.0-flash";
+  const url = `${GEMINI_REST_BASE}/${VISION_MODEL}:streamGenerateContent?alt=sse`;
+
+  const res = await fetch(url, {
+    method:  "POST",
+    headers: {
+      "Content-Type":   "application/json",
+      "x-goog-api-key": key,
+    },
+    body: JSON.stringify(requestBody),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => res.statusText);
+    throw new Error(`Gemini PDF vision REST ${res.status}: ${errText}`);
+  }
+
+  const reader  = (res.body as ReadableStream<Uint8Array>).getReader();
+  const decoder = new TextDecoder();
+  let sseBuffer = "";
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      sseBuffer += decoder.decode(value, { stream: true });
+      const lines = sseBuffer.split("\n");
+      sseBuffer = lines.pop()!;
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const raw   = trimmed.slice(5).trim();
+        const delta = parseGeminiSseLine(raw);
+        if (delta) yield delta;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 // ── Main export: non-streaming (collects full text) ───────────────────────────
 
 /**

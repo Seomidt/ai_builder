@@ -1069,6 +1069,10 @@ export default function AiChatPage() {
   // Cleared when thread is reset (component remount / new chat). Text-only — never vision images.
   const activeDocumentContextRef = useRef<any[]>([]);
 
+  // Phase 5.5 — persists assetIds from the upload turn so follow-up requests can include them.
+  // Backend uses these to resolve the original asset (e.g. R2 key for scanned PDFs).
+  const activeAssetIdsRef = useRef<string[]>([]);
+
   // Phase 2+3 — promote mutation for "Gem til vidensbase"
   const [promotingAssetId, setPromotingAssetId] = useState<string | null>(null);
 
@@ -1329,6 +1333,15 @@ export default function AiChatPage() {
               m.id === payload._userMsgId ? { ...m, assetRefs: _assetRefs } : m,
             ));
             console.log(`[ASSETS][${traceId}] Created ${_assetRefs.length} chat asset(s): ${_assetRefs.map(r => r.assetId).join(",")}`);
+          }
+
+          // Phase 5.5: persist assetIds for follow-up requests (same thread)
+          if (_assetRefs.length > 0) {
+            activeAssetIdsRef.current = _assetRefs.map(r => r.assetId).filter(Boolean);
+            console.log(
+              `[ASSETS] ACTIVE_ASSET_IDS_STORED thread=${chatSessionIdRef.current.slice(0, 8)}` +
+              ` assetIds=[${activeAssetIdsRef.current.join(",")}]`,
+            );
           }
 
           const fastMs = Math.round(performance.now() - t2a);
@@ -2272,7 +2285,9 @@ export default function AiChatPage() {
       // Gemini multimodal processes images before first token → needs more headroom
       const hasVisionRequest = documentContext.some((r: any) => Array.isArray(r.vision_images) && r.vision_images.length > 0);
       const firstChunkDeadlineMs = hasVisionRequest ? 45_000 : 10_000;
-      const assetIds = (payload.assetRefs ?? []).map((r: any) => r.assetId).filter(Boolean);
+      // Use assetIds from the current upload turn (_assetRefs stored in activeAssetIdsRef),
+      // or from previous turns (ref retains value across follow-up calls in same thread).
+      const assetIds = activeAssetIdsRef.current.slice();
       let firstChunkReceived = false;
       const firstChunkTimeout = setTimeout(() => {
         if (!firstChunkReceived) {
@@ -2300,6 +2315,12 @@ export default function AiChatPage() {
         const chatBody = {
           message: fullMessage,
           conversationId: conversationId ?? null,
+          // Restore document_context for backend routing — vision_images stripped to prevent 413.
+          // source=vision_preview_pdf entries carry assetId so backend resolves from R2 instead.
+          document_context: documentContext.map((d: any) => {
+            const { vision_images: _vi, ...safe } = d;
+            return safe;
+          }),
           assetIds,
           metadata: {
             documentIds: payload.documentIds ?? [],

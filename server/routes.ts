@@ -2118,6 +2118,77 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         ` source=${_parsedFirst?.source ?? "none"}`,
       );
 
+      // ── Server-side scanned PDF resolution ───────────────────────────────────
+      // When client sends source=vision_preview_pdf (scanned PDF without vision_images)
+      // + assetIds, we fetch the PDF from R2 and answer via Gemini native PDF vision.
+      // This replaces the old vision_images base64 path that caused 413 errors.
+      {
+        const _rawAssetIds: string[] = Array.isArray(req.body?.assetIds) ? req.body.assetIds : [];
+        const _docCtxEntries: any[]  = body.document_context ?? [];
+        const _isScannedPreview      = _docCtxEntries.some((d: any) => d.source === "vision_preview_pdf");
+
+        if (_isScannedPreview && _rawAssetIds.length > 0) {
+          const assetId = _rawAssetIds[0];
+          console.log(`[SCANNED_PDF_RESOLVE] assetId=${assetId} — fetching from R2 for Gemini PDF vision`);
+          try {
+            const { getAssetById }                         = await import("./lib/knowledge/chat-assets");
+            const asset                                    = await getAssetById({ assetId, tenantId: orgId });
+
+            if (asset?.r2Key) {
+              const { r2Client, R2_BUCKET, R2_CONFIGURED } = await import("./lib/r2/r2-client");
+              if (R2_CONFIGURED) {
+                const { GetObjectCommand }                 = await import("@aws-sdk/client-s3");
+                const r2resp = await r2Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: asset.r2Key }));
+                if (r2resp.Body) {
+                  const chunks: Uint8Array[] = [];
+                  for await (const chunk of r2resp.Body as AsyncIterable<Uint8Array>) {
+                    chunks.push(chunk);
+                  }
+                  const pdfBuf = Buffer.concat(chunks);
+                  console.log(`[SCANNED_PDF_RESOLVE] r2Key=${asset.r2Key} bytes=${pdfBuf.length} — streaming Gemini PDF vision`);
+
+                  const { streamGeminiVisionChatFromPdf } = await import("./lib/ai/gemini-media");
+
+                  const visionSystemPrompt = [
+                    "Du er en dokumentanalytiker. Du modtager en PDF-fil og besvarer spørgsmål UDELUKKENDE baseret på dokumentets indhold.",
+                    "REGEL 1: Kig grundigt på ALLE sider i dokumentet.",
+                    "REGEL 2: Citér præcist og direkte fra dokumentet.",
+                    "REGEL 3: Hvis svaret ikke fremgår, sig: \"Svaret fremgår ikke af dokumentet.\"",
+                    "REGEL 4: Nævn ALDRIG 'interne data', 'vidensbase' eller lignende.",
+                    "Svar altid på dansk.",
+                  ].join("\n");
+
+                  const visionUserMessage =
+                    `Dokumentet er "${asset.title || "dokument"}".\n\nBesvar dette:\n\n${body.message}`;
+
+                  sendEvent({ type: "status", text: "Analyserer dokument..." });
+
+                  let fullAnswer = "";
+                  for await (const delta of streamGeminiVisionChatFromPdf(visionSystemPrompt, visionUserMessage, pdfBuf)) {
+                    fullAnswer += delta;
+                    sendEvent({ type: "delta", text: delta });
+                  }
+
+                  sendEvent({
+                    type:       "done",
+                    answer:     fullAnswer,
+                    route_type: "document_chat",
+                    expert:     { id: "__pdf_vision_r2__", name: "PDF Vision", category: "document" },
+                  });
+                  return res.end();
+                }
+              } else {
+                console.log(`[SCANNED_PDF_RESOLVE] R2 not configured — falling through`);
+              }
+            } else {
+              console.log(`[SCANNED_PDF_RESOLVE] assetId=${assetId} has no r2Key — falling through`);
+            }
+          } catch (resolveErr) {
+            console.error(`[SCANNED_PDF_RESOLVE] assetId=${_rawAssetIds[0]} error=${(resolveErr as Error).message} — falling through`);
+          }
+        }
+      }
+
       const { resolveRouteDecision }    = await import("./lib/chat/route-decision");
       const { getRoutingStatusMessage } = await import("./lib/chat/hybrid-context-builder");
       const { runChatMessage }          = await import("./services/chat-runner");
