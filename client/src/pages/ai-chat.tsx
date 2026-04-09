@@ -1347,7 +1347,7 @@ export default function AiChatPage() {
             console.log(`[SCANNED][${traceId}] CANDIDATE_DETECTED files=${slowFiles.length} — rendering PDF pages for vision preview`);
             _scannedVisionEntries = [];
             for (const { af } of slowFiles) {
-              const rendered = await renderPdfPagesToImages(af.file, 3);
+              const rendered = await renderPdfPagesToImages(af.file, 50);
               if (rendered && rendered.images.length > 0) {
                 const _scannedPlaceholder = `[scanned_pdf_vision_preview: ${af.file.name}]`;
                 _scannedVisionEntries.push({

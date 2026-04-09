@@ -1780,7 +1780,7 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     status:         z.enum(["ok", "unsupported", "error"]),
     message:        z.string().optional(),
     source:         z.string().optional(),
-    vision_images:  z.array(z.string().max(2_000_000)).max(5).optional(),
+    vision_images:  z.array(z.string().max(2_000_000)).max(50).optional(),
   });
 
   const chatBodySchema = z.object({
@@ -2151,7 +2151,7 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       // ── Vision preview: pass raw vision docs from body (bypasses resolveRouteDecision filter) ──
       // resolveRouteDecision.getValidRequestAttachments filters out docs with empty extracted_text,
       // which removes vision_images docs entirely. We rescue them here from body.document_context.
-      const MAX_VI = 5;
+      const MAX_VI = 50;
       const MAX_VB = 2_000_000;
       const rawBodyCtx = (body.document_context ?? []) as any[];
       const visionPreviewDocs = rawBodyCtx.filter((d: any) => {
