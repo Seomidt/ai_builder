@@ -667,9 +667,14 @@ export async function runChatMessage(params: {
   });
 
   // ── Persist document context for follow-up questions ──────────────────────
-  // Only save when this request carried fresh document context (not from DB store).
-  if (docCtx.length > 0 && !params.conversationId) {
-    // New conversation: save all valid attachments for future turns.
+  // Save when:
+  //   (a) New conversation — no conversationId yet (first message with attachment)
+  //   (b) OCR upgrade call — conversationId exists but attachment was never saved
+  //       because the initial SCANNED_PREVIEW had empty docCtx (vision-only entries).
+  //       Detected by source=r2_ocr_async in the document_context.
+  // PATH A — SCANNED_PREVIEW follow-up persistence fix.
+  const _isOcrUpgrade = docCtx.some((d: any) => (d as any).source === "r2_ocr_async");
+  if (docCtx.length > 0 && (!params.conversationId || _isOcrUpgrade)) {
     const { saveConversationAttachment } = await import("../lib/chat/attachment-state");
     await Promise.allSettled(
       docCtx.map((d) =>
@@ -683,7 +688,10 @@ export async function runChatMessage(params: {
         }),
       ),
     );
-    console.log(`[chat-runner] Saved ${docCtx.length} attachment(s) to conversation ${conversationId}`);
+    console.log(
+      `[chat-runner] PATH_A Saved ${docCtx.length} attachment(s) to conversation ${conversationId}` +
+      ` isOcrUpgrade=${_isOcrUpgrade}`,
+    );
   }
 
   // ── Storage 1.7: Similar Cases — intent-based, cached, rate-limited ─────────

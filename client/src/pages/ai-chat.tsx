@@ -1462,6 +1462,17 @@ export default function AiChatPage() {
 
             // Vision context → sender til backend → hasVision=true → gpt-4o-mini vision path
             documentContext = _scannedVisionEntries;
+
+            // PATH C — Populate ref immediately so follow-up questions before OCR completes
+            // can resend vision entries. Backend rescues vision docs from rawBodyCtx even when
+            // route-decision filters them out (isVisionPreview path in routes.ts).
+            // FIX1 (triggerUpgrade) will overwrite this ref with full OCR text once OCR is done.
+            activeDocumentContextRef.current = _scannedVisionEntries;
+            console.log(
+              `[ASSETS] PATH_C_VISION_REF_SET thread=${chatSessionIdRef.current.slice(0, 8)}` +
+              ` count=${_scannedVisionEntries.length} — immediate vision context for follow-ups`,
+            );
+
             setIsFastPath(true); // Skjul OCR-statuskort — vi styrer vores eget messaging
             createStreamBubble("SCANNED_PREVIEW");
 
