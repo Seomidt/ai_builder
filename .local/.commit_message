@@ -1,0 +1,33 @@
+feat: tenant admin retention settings (days_30 / days_90 / forever)
+
+Schema changes:
+- shared/schema.ts: tenant_storage_settings.default_retention_mode
+  now accepts days_30 | days_90 | forever (removed session/days enum)
+  Column default changed from "days" → "days_30"
+  Removed defaultRetentionDays column (baked into mode)
+  allowForeverStorage default → true
+
+Migration:
+- script/migrate-retention-settings.ts: drops old tss_retention_mode_check,
+  migrates session/days rows → days_30, adds new check constraint
+
+Backend service (server/lib/knowledge/chat-assets.ts):
+- TenantRetentionMode type: "days_30" | "days_90" | "forever"
+- resolveRetentionFromTenantMode(): days_30→30d, days_90→90d, forever→null expiry
+- getTenantRetentionSettings(): reads tenant_storage_settings, safe default days_30
+- upsertTenantRetentionSettings(): INSERT ON CONFLICT DO UPDATE
+
+Backend routes (server/routes.ts):
+- GET  /api/knowledge/settings/retention → current tenant mode
+- PATCH /api/knowledge/settings/retention → update tenant mode
+- POST /api/knowledge/assets: inherits tenant default (no longer hardcoded "session")
+- POST /api/knowledge/assets/:id/promote: inherits tenant default
+
+Frontend (client/src/pages/tenant/settings.tsx):
+- New "Opbevaringsperiode" card: 3 radio-style buttons
+  30 dage | 90 dage | Slet aldrig
+- Auto-saves on click via PATCH /api/knowledge/settings/retention
+- Loading skeleton + disabled state during mutation
+
+No regression: hash reuse/dedup, chat upload pipeline, promote flow unchanged.
+Migration run successfully against dev DB.
