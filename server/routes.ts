@@ -1780,7 +1780,10 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
     status:         z.enum(["ok", "unsupported", "error"]),
     message:        z.string().optional(),
     source:         z.string().optional(),
-    vision_images:  z.array(z.string().max(2_000_000)).max(50).optional(),
+    vision_images:          z.array(z.string().max(2_000_000)).max(50).optional(),
+    is_partial_document:    z.boolean().optional(),
+    pages_sent:             z.number().int().positive().optional(),
+    total_pages:            z.number().int().positive().optional(),
   });
 
   const chatBodySchema = z.object({
@@ -2290,6 +2293,8 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         answer_generation:          { partial: _sComplt === "partial", generation: _sRefGen },
         cache_source:               "miss",
         refinement_trigger_reason:  "new_answer",
+        // Partial document metadata — set for scanned PDFs >50 pages (vision inline limit)
+        partial_document:           (result as any).partial_document ?? null,
         // Readiness fields spread flat + nested
         ...(streamReadiness ? { partial_readiness: streamReadiness, ...streamReadiness } : {}),
       });

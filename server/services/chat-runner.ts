@@ -141,11 +141,14 @@ interface DocumentContextItem {
   filename:       string;
   mime_type:      string;
   char_count:     number;
-  extracted_text: string;
-  status:         "ok" | "unsupported" | "error";
-  message?:       string;
-  source?:        string;
-  vision_images?: string[];
+  extracted_text:       string;
+  status:               "ok" | "unsupported" | "error";
+  message?:             string;
+  source?:              string;
+  vision_images?:       string[];
+  is_partial_document?: boolean;
+  pages_sent?:          number;
+  total_pages?:         number;
 }
 
 // Virtual expert used when routing is attachment_first with no available experts.
@@ -230,32 +233,68 @@ export async function runChatMessage(params: {
     const onToken     = params.onToken;
     const startVision = Date.now();
 
-    console.log(`[chat-runner] SCANNED_VISION_START pages_sent=${allImages.length} prompt_type=vision_pdf_full file="${filename}"`);
+    // Partial document detection: any vision doc flagged is_partial_document
+    const _isPartial   = visionDocs.some((d: any) => d.is_partial_document === true);
+    const _pagesSent   = visionDocs.reduce((s: number, d: any) => s + (d.pages_sent ?? d.vision_images?.length ?? 0), 0);
+    const _totalPages  = visionDocs.reduce((s: number, d: any) => s + (d.total_pages ?? d.vision_images?.length ?? 0), 0);
+
+    console.log(
+      `[chat-runner] SCANNED_VISION_START pages_sent=${allImages.length}` +
+      ` is_partial=${_isPartial} total_pages=${_totalPages}` +
+      ` prompt_type=${_isPartial ? "vision_pdf_partial" : "vision_pdf_full"} file="${filename}"`,
+    );
+
+    const _partialContext = _isPartial
+      ? [
+          ``,
+          `=== VIGTIGT: DELVIST DOKUMENT ===`,
+          `Du modtager KUN side 1-${_pagesSent} af i alt ${_totalPages} sider i dette dokument.`,
+          `Side ${_pagesSent + 1}-${_totalPages} er IKKE tilgængelige for dig i denne analyse.`,
+          `REGEL PARTIAL-1: Basér dit svar KUN på de sider du kan se (side 1-${_pagesSent}).`,
+          `REGEL PARTIAL-2: Afslut dit svar med denne nøjagtige advarsel på en ny linje:`,
+          `  ⚠️ **Delvist dokument:** Analysen dækker side 1-${_pagesSent} af ${_totalPages}. Side ${_pagesSent + 1}-${_totalPages} er ikke analyseret — konklusioner kan være ufuldstændige.`,
+          `REGEL PARTIAL-3: Hallucinér IKKE indhold fra sider du ikke kan se.`,
+          `=== SLUT VIGTIGT ===`,
+        ].join("\n")
+      : "";
 
     const visionSystemPrompt = [
-      `Du er en dokumentanalytiker. Du modtager billeder af samtlige sider fra en PDF-fil.`,
+      _isPartial
+        ? `Du er en dokumentanalytiker. Du modtager billeder af de første ${_pagesSent} sider (ud af ${_totalPages}) fra en PDF-fil.`
+        : `Du er en dokumentanalytiker. Du modtager billeder af samtlige sider fra en PDF-fil.`,
       ``,
       `=== ABSOLUTTE REGLER FOR VISUEL DOKUMENTANALYSE ===`,
       `REGEL 1: Du MÅ KUN besvare spørgsmål baseret på det du kan SE i de vedhæftede sidebilleder.`,
       `REGEL 2: Kig grundigt på ALLE vedhæftede sidebilleder før du svarer.`,
       `REGEL 3: Hvis svaret er synligt i billederne, citér det direkte og præcist.`,
       `REGEL 4: Hvis kun DELE af spørgsmålet kan besvares fra de vedhæftede sider, besvar den del du kan se og angiv hvilke sider svaret fremgår af.`,
-      `REGEL 5: Hvis INTET i billederne besvarer spørgsmålet, sig: "Svaret fremgår ikke af dokumentet."`,
+      `REGEL 5: Hvis INTET i billederne besvarer spørgsmålet, sig: "Svaret fremgår ikke af de analyserede sider."`,
       `REGEL 6: Du MÅ ALDRIG nævne "interne data", "vidensbase", "knowledge base", "virksomhedens data" eller lignende. Du kigger KUN på sidebilleder.`,
       `REGEL 7: Du MÅ ALDRIG hallucere tal, navne, datoer, priser eller klausuler der ikke er synlige i billederne.`,
       `REGEL 8: Start dit svar med den direkte konklusion fra billederne. Ingen indledende forklaringer.`,
-      `REGEL 9: Du har det FULDE dokument foran dig. Skriv ALDRIG at "resten behandles" eller at "det fulde svar kommer" — du HAR allerede hele dokumentet.`,
+      _isPartial
+        ? `REGEL 9: Du har KUN sider 1-${_pagesSent} tilgængeligt. Afslut ALTID med den præcise advarselsblok fra REGEL PARTIAL-2.`
+        : `REGEL 9: Du har det FULDE dokument foran dig. Skriv ALDRIG at "resten behandles" eller at "det fulde svar kommer" — du HAR allerede hele dokumentet.`,
       `=== SLUT REGLER ===`,
+      _partialContext,
       ``,
       `Svar altid på dansk.`,
     ].join("\n");
 
-    const visionUserMessage = [
-      `Herunder ser du ${allImages.length} side${allImages.length > 1 ? "r" : ""} fra PDF-filen "${filename}" — dette er det komplette dokument.`,
-      `Kig grundigt på alle sidebilleder og besvar følgende spørgsmål:`,
-      ``,
-      message,
-    ].join("\n");
+    const visionUserMessage = _isPartial
+      ? [
+          `Herunder ser du side 1-${_pagesSent} (ud af i alt ${_totalPages} sider) fra PDF-filen "${filename}".`,
+          `Kig grundigt på alle tilgængelige sidebilleder og besvar følgende spørgsmål.`,
+          `Husk at tilføje advarselsblokken om det delvise dokument i slutningen af dit svar.`,
+          ``,
+          message,
+        ].join("\n")
+      : [
+          `Herunder ser du ${allImages.length} side${allImages.length > 1 ? "r" : ""} fra PDF-filen "${filename}" — dette er det komplette dokument.`,
+          `Kig grundigt på alle sidebilleder og besvar følgende spørgsmål:`,
+          ``,
+          message,
+        ].join("\n");
 
     let fullVisionAnswer = "";
     try {
@@ -269,11 +308,14 @@ export async function runChatMessage(params: {
       const LEAK_PHRASES = ["interne data", "vidensbase", "knowledge base", "virksomhedens data"];
       const lower = fullVisionAnswer.toLowerCase();
       const leaked = LEAK_PHRASES.find(p => lower.includes(p));
-      const isPartial = lower.includes("viste sider") || lower.includes("hele dokumentet");
       if (leaked) {
         console.error(`[chat-runner] PREVIEW_PROMPT_LEAK detected="${leaked}" answer_len=${fullVisionAnswer.length}`);
       }
-      console.log(`[chat-runner] SCANNED_PREVIEW_DONE preview_partial_answer=${isPartial} answer_len=${fullVisionAnswer.length} latencyMs=${latencyMs} model=gemini-2.0-flash`);
+      console.log(
+        `[chat-runner] SCANNED_VISION_DONE is_partial=${_isPartial}` +
+        ` pages_sent=${_pagesSent} total_pages=${_totalPages}` +
+        ` answer_len=${fullVisionAnswer.length} latencyMs=${latencyMs} model=gemini-2.0-flash`,
+      );
       return {
         answer:        fullVisionAnswer,
         answerSource:  "vision_preview_pdf",
@@ -282,9 +324,12 @@ export async function runChatMessage(params: {
         provider:      "google",
         routeType:     params.routeType ?? "document_chat",
         refinementGeneration: 1,
-        answerCompleteness:   "partial",
-        coveragePercent:      0,
+        answerCompleteness:   _isPartial ? "partial" : "complete",
+        coveragePercent:      _isPartial ? Math.round((_pagesSent / _totalPages) * 100) : 100,
         conversationId:       params.conversationId ?? null,
+        partial_document:     _isPartial
+          ? { is_partial: true, pages_sent: _pagesSent, total_pages: _totalPages }
+          : undefined,
       } as any;
     } catch (visionErr: any) {
       console.error(`[chat-runner] VISION_CALL_FAILED: ${visionErr?.message} — falling through to normal path`);

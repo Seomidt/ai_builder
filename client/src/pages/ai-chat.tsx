@@ -1350,16 +1350,27 @@ export default function AiChatPage() {
               const rendered = await renderPdfPagesToImages(af.file, 50);
               if (rendered && rendered.images.length > 0) {
                 const _scannedPlaceholder = `[scanned_pdf_vision_preview: ${af.file.name}]`;
+                const _isTruncated = rendered.pageCount > rendered.images.length;
+                if (_isTruncated) {
+                  console.warn(
+                    `[SCANNED][${traceId}] TRUNCATED file="${af.file.name}"` +
+                    ` pages_sent=${rendered.images.length} total_pages=${rendered.pageCount}` +
+                    ` — document exceeds 50-page inline limit, partial analysis only`,
+                  );
+                }
                 _scannedVisionEntries.push({
-                  filename:       af.file.name,
-                  mime_type:      af.file.type || "application/pdf",
-                  char_count:     _scannedPlaceholder.length,
-                  extracted_text: _scannedPlaceholder,
-                  status:         "ok",
-                  source:         "vision_preview_pdf",
-                  vision_images:  rendered.images,
+                  filename:              af.file.name,
+                  mime_type:             af.file.type || "application/pdf",
+                  char_count:            _scannedPlaceholder.length,
+                  extracted_text:        _scannedPlaceholder,
+                  status:                "ok",
+                  source:                "vision_preview_pdf",
+                  vision_images:         rendered.images,
+                  is_partial_document:   _isTruncated,
+                  pages_sent:            rendered.images.length,
+                  total_pages:           rendered.pageCount,
                 });
-                console.log(`[SCANNED][${traceId}] RENDER_OK file="${af.file.name}" pages=${rendered.images.length}/${rendered.pageCount} durMs=${Date.now() - tRender}`);
+                console.log(`[SCANNED][${traceId}] RENDER_OK file="${af.file.name}" pages=${rendered.images.length}/${rendered.pageCount} truncated=${_isTruncated} durMs=${Date.now() - tRender}`);
               } else {
                 console.warn(`[SCANNED][${traceId}] RENDER_FAIL file="${af.file.name}" — fallback til ALL_SLOW OCR`);
               }
