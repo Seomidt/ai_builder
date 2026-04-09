@@ -2023,6 +2023,21 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
   // Events: {"type":"status","text":"..."} | {"type":"delta","text":"..."} | {"type":"done",...} | {"type":"error",...}
   // Both paths registered: /api/chat/stream (legacy) + /api/chat-stream (Vercel-safe flat path)
   const chatStreamHandler = async (req: Request, res: Response) => {
+    // ── ABSOLUTE FIRST LINE — logged before ANY response headers ─────────────
+    // If this line never appears in prod logs → request is NOT reaching this handler.
+    console.log(
+      `[TRACE_ENTRY_ACTIVE_RUNTIME]` +
+      ` provider=express` +
+      ` runtime=${process.env.RAILWAY_SERVICE_NAME ? "railway" : process.env.VERCEL ? "vercel" : "unknown"}` +
+      ` path=${req.path}` +
+      ` method=${req.method}` +
+      ` commit=${process.env.RAILWAY_GIT_COMMIT_SHA ?? process.env.GIT_COMMIT ?? process.env.COMMIT_SHA ?? "unknown"}` +
+      ` service=${process.env.RAILWAY_SERVICE_NAME ?? "unknown"}` +
+      ` env=${process.env.NODE_ENV ?? "unknown"}` +
+      ` host=${req.headers["host"] ?? "unknown"}` +
+      ` origin=${req.headers["origin"] ?? "none"}`,
+    );
+
     res.setHeader("Content-Type",      "text/event-stream");
     res.setHeader("Cache-Control",     "no-cache");
     res.setHeader("Connection",        "keep-alive");
