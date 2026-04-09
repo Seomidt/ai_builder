@@ -2273,6 +2273,7 @@ export default function AiChatPage() {
       // Gemini multimodal processes images before first token → needs more headroom
       const hasVisionRequest = documentContext.some((r: any) => Array.isArray(r.vision_images) && r.vision_images.length > 0);
       const firstChunkDeadlineMs = hasVisionRequest ? 45_000 : 10_000;
+      const assetIds = (payload.assetRefs ?? []).map((r: any) => r.assetId).filter(Boolean);
       let firstChunkReceived = false;
       const firstChunkTimeout = setTimeout(() => {
         if (!firstChunkReceived) {
@@ -2297,6 +2298,18 @@ export default function AiChatPage() {
         // and the streaming placeholder stays stuck as isStreaming: true forever.
         const sessionToken = await getSessionToken().catch(() => null);
 
+        const chatBody = {
+          message: fullMessage,
+          conversationId: conversationId ?? null,
+          assetIds,
+          metadata: {
+            documentIds: payload.documentIds ?? [],
+            preferredExpertId: null,
+          },
+        };
+        const chatBodyString = JSON.stringify(chatBody);
+        console.log(`CLIENT_LOG_CHAT_PAYLOAD_SIZE bytes=${chatBodyString.length} assetIds=${assetIds.length} documentIds=${(payload.documentIds ?? []).length}`);
+
         const res = await fetch("/api/chat-stream", {
           method:  "POST",
           headers: {
@@ -2305,18 +2318,7 @@ export default function AiChatPage() {
           },
           credentials: "include",
           signal: streamAbort.signal,
-          body: JSON.stringify({
-            message: fullMessage,
-            conversation_id: conversationId ?? null,
-            document_context: documentContext,
-            context: {
-              document_ids: payload.documentIds ?? [],
-              preferred_expert_id: null,
-            },
-            idempotency_key: payload.triggerKey
-              ? `${payload.triggerKey}:${fullMessage.slice(0, 64)}`
-              : traceId,
-          }),
+          body: chatBodyString,
         });
 
         if (!res.ok) {

@@ -2062,12 +2062,13 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
       const _BODY_IS_EMPTY   = !req.body || Object.keys(req.body).length === 0;
       const _ACTUAL_BODY_LEN = (() => { try { return JSON.stringify(req.body).length; } catch { return -1; } })();
 
-      // Raw document_context before Zod
       const _rawCtx   = Array.isArray(req.body?.document_context) ? req.body.document_context : [];
       const _rawFirst = _rawCtx[0];
       const _rawFirstKeys         = _rawFirst ? Object.keys(_rawFirst).join(",") : "none";
       const _rawVisionPresent     = _rawFirst ? Array.isArray(_rawFirst.vision_images) && _rawFirst.vision_images.length > 0 : false;
       const _rawVisionCount       = _rawVisionPresent ? (_rawFirst.vision_images as string[]).length : 0;
+      const _rawAssetIds          = Array.isArray(req.body?.assetIds) ? req.body.assetIds : [];
+      const _rawMetadata          = req.body?.metadata ?? null;
 
       console.log(
         `[TRACE_ENTRY]` +
@@ -2078,8 +2079,10 @@ Generate names and content in ${langNote}. Adapt to the specific domain the user
         ` BODY_SIZE_BYTES_ACTUAL=${_ACTUAL_BODY_LEN}` +
         ` BODY_IS_EMPTY=${_BODY_IS_EMPTY}` +
         ` DOC_CONTEXT_COUNT=${_rawCtx.length}` +
+        ` ASSET_IDS_COUNT=${_rawAssetIds.length}` +
         ` VISION_IMAGES_PRESENT=${_rawVisionPresent}` +
-        ` VISION_IMAGES_COUNT=${_rawVisionCount}`,
+        ` VISION_IMAGES_COUNT=${_rawVisionCount}` +
+        ` SERVER_LOG_CHAT_REQUEST_BYTES=${_ACTUAL_BODY_LEN}`,
       );
       console.log(
         `[BEFORE_PARSE_DOC_CTX]` +
