@@ -1389,6 +1389,7 @@ export default function AiChatPage() {
                   extracted_text:        _scannedPlaceholder,
                   status:                "ok",
                   source:                "vision_preview_pdf",
+                  vision_images:         rendered.images,
                   is_partial_document:   _isTruncated,
                   pages_sent:            rendered.pageCount,
                   total_pages:           rendered.pageCount,
@@ -2215,7 +2216,16 @@ export default function AiChatPage() {
               if (_ref) {
                 patchAssetR2KeyFF(_ref.assetId, objectKey, file).catch(() => {});
               }
-              console.log(`[IMG-ASSET] R2_STORED file="${file.name}" key=${objectKey} assetId=${_ref?.assetId ?? "no-asset"}`);
+              // Finalize: trigger server-side Gemini vision extraction + markdown generation
+              const imgFinRes = await apiRequest("POST", "/api/upload/finalize", {
+                objectKey,
+                filename:    file.name,
+                contentType: file.type || "image/jpeg",
+                size:        file.size,
+                context:     "chat",
+                fileCount:   imgFiles.length,
+              });
+              console.log(`[IMG-ASSET] R2_STORED+FINALIZE file="${file.name}" key=${objectKey} assetId=${_ref?.assetId ?? "no-asset"} finalize=${imgFinRes.ok ? "OK" : `FAIL HTTP ${imgFinRes.status}`}`);
             } catch (e: any) {
               console.warn(`[IMG-ASSET] upload error for "${file.name}": ${e?.message}`);
             }

@@ -130,6 +130,42 @@ async function handleUrl(
   return json(res, response);
 }
 
+
+// ── Markdown upload helper ────────────────────────────────────────────────────
+// After extracting text from any file, also store a markdown version in R2.
+// The original file is kept; this adds a _extracted.md companion file.
+// Fire-and-forget — errors are logged but do not affect the response.
+async function uploadMarkdownToR2(
+  r2ClientInst: any,
+  bucket: string,
+  originalKey: string,
+  filename: string,
+  text: string,
+): Promise<string | null> {
+  try {
+    const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+    const markdownKey = originalKey + "_extracted.md";
+    const markdownContent = [
+      `# ${filename}`,
+      ``,
+      `> Automatisk ekstraheret indhold`,
+      ``,
+      text,
+    ].join("\n");
+    await r2ClientInst.send(new PutObjectCommand({
+      Bucket:      bucket,
+      Key:         markdownKey,
+      Body:        Buffer.from(markdownContent, "utf-8"),
+      ContentType: "text/markdown; charset=utf-8",
+    }));
+    log("upload.markdown.created", { originalKey, markdownKey, chars: markdownContent.length });
+    return markdownKey;
+  } catch (e) {
+    log("upload.markdown.error", { originalKey, error: String(e) });
+    return null;
+  }
+}
+
 // ── POST /api/upload/finalize ─────────────────────────────────────────────────
 // After browser uploads directly to R2, call this to:
 //   1. Verify object belongs to tenant (key prefix check)
@@ -196,9 +232,13 @@ async function handleFinalize(
 
       if (nonWsChars >= MIN_NATIVE_TEXT_CHARS) {
         log("upload.finalize.pdf_fast_path", { tenantId, objectKey, filename, chars: nativeText.length, nonWs: nonWsChars });
+        // Upload markdown version alongside the original — fire-and-forget
+        const { r2Client: r2Md, R2_BUCKET: bucketMd } = await import("../../server/lib/r2/r2-client");
+        const markdownKey = await uploadMarkdownToR2(r2Md, bucketMd, objectKey, filename, nativeText);
         return json(res, {
           mode: "A",
           routing: "PDF native text (fast path)",
+          markdownKey: markdownKey ?? undefined,
           results: [{
             filename,
             mime_type: contentType,
@@ -242,7 +282,10 @@ async function handleFinalize(
 
     if (result.status === "ok") {
       log("upload.finalize.mode_a.ok", { tenantId, objectKey, char_count: result.char_count });
-      return json(res, { mode: "A", routing: routing.reason, results: [result] });
+      // Upload markdown version alongside the original — fire-and-forget
+      const { r2Client: r2Md, R2_BUCKET: bucketMd } = await import("../../server/lib/r2/r2-client");
+      const markdownKey = await uploadMarkdownToR2(r2Md, bucketMd, objectKey, filename, result.extracted_text);
+      return json(res, { mode: "A", routing: routing.reason, markdownKey: markdownKey ?? undefined, results: [result] });
     }
   }
 
