@@ -1371,7 +1371,7 @@ export default function AiChatPage() {
             console.log(`[SCANNED][${traceId}] CANDIDATE_DETECTED files=${slowFiles.length} — rendering PDF pages for vision preview`);
             _scannedVisionEntries = [];
             for (const { af } of slowFiles) {
-              const rendered = await renderPdfPagesToImages(af.file, 50);
+              const rendered = await renderPdfPagesToImages(af.file, 5); // backend MAX_VISION_IMAGES=5
               if (rendered && rendered.images.length > 0) {
                 const _scannedPlaceholder = `[scanned_pdf_vision_preview: ${af.file.name}]`;
                 const _isTruncated = rendered.pageCount > rendered.images.length;
@@ -2330,6 +2330,11 @@ export default function AiChatPage() {
           // Restore document_context for backend routing — vision_images stripped to prevent 413.
           // source=vision_preview_pdf entries carry assetId so backend resolves from R2 instead.
           document_context: documentContext.map((d: any) => {
+            // Keep vision_images for scanned PDF preview and direct image uploads.
+            // Server enforces MAX_VISION_IMAGES=5 + MAX_VISION_IMAGE_BYTES=2MB per image.
+            // Strip for all other sources to prevent 413 on large document contexts.
+            const isVisionSource = d.source === "vision_preview_pdf" || d.source === "vision_image";
+            if (isVisionSource) return d;
             const { vision_images: _vi, ...safe } = d;
             return safe;
           }),
